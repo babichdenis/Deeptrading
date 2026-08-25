@@ -14,6 +14,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
+from app.engine.costs import CostModel
 from app.engine.exits import ExitPolicy, intrabar_exit
 from app.engine.models import Candle as EngineCandle, PositionState, Side
 from app.engine.policies import SignalPolicyConfig
@@ -428,6 +429,22 @@ def _oracle_coverage(oracle_swings_detail: list[dict], entries_raw: list[dict],
     }
 
 
+def _build_session_policy(req: dict) -> SessionPolicyConfig | None:
+    """Сессионная политика: фильтрует ТОЛЬКО новые входы (через can_enter движка),
+    уже открытая позиция управляется обычной exit-логикой (stop/target/сигнал).
+
+    entry_session: "all" — входы в любое время торгов; "main" — только основная сессия.
+    carry_overnight: переносить открытую позицию через ночь (не закрывать в конце дня).
+    force_flat_at_session_end: принудительно закрывать после окончания основной сессии.
+    """
+    entry_session = req.get("entry_session", "all")
+    carry = bool(req.get("carry_overnight", True))
+    force_flat = bool(req.get("force_flat_at_session_end", False))
+    if entry_session == "all":
+        return None
+    return SessionPolicyConfig(overnight=carry, force_flat_at_session_end=force_flat)
+
+
 def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   setups_cfg: list[dict], quorum_k: int, entry_window_min: int,
                   entry_lookback: int, exit_obj: ExitPolicy, qty_shares: float,
@@ -515,12 +532,16 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
 
     cfg_engine = EngineConfig(
         figi=str(req.get("figi", "")), qty=qty_shares, allow_short=True,
+        cost_model=CostModel(
+            commission_rate=float(req.get("commission_rate", 0.0005)),
+            slippage_bps=float(req.get("slippage_bps", 2.0)),
+        ),
         signal_policy=SignalPolicyConfig(min_hold_bars=int(req.get("min_hold_bars", 0)),
                                          same_side_reentry_cooldown_bars=int(req.get("same_side_reentry_cooldown_bars", 0)),
                                          exit_confirm_window_bars=int(req.get("exit_confirm_window_bars", 0)),
                                          opposite_hold=bool(req.get("opposite_hold", False)),
                                          confirm_flip=bool(req.get("confirm_flip", False))),
-        session_policy=SessionPolicyConfig(overnight=bool(req.get("session", {}).get("overnight", False))),
+        session_policy=_build_session_policy(req),
     )
     runner = EngineRunner(strategy=ReplayStrategy(
         [(a["ts"], a["side"]) for a in accepted],
@@ -796,6 +817,26 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             "gross_capture_pct": round(gross / max(oracle["gross"], 1e-9) * 100, 1),
             "net_capture_pct": round(net / max(oracle["gross"], 1e-9) * 100, 1),
         },
+        "session_stats": {
+            "positions_carried_overnight": sum(
+                1 for t in trades_out if t["entry_ts"][:10] != t["exit_ts"][:10]
+            ),
+            "session_close_forced": sum(
+                1 for t in trades_out if t["exit_reason"] == "session_close"
+            ),
+            "open_positions_at_eod": sum(
+                1 for t in trades_out if t["exit_reason"] == "end_of_data"
+            ),
+            "closed_by_signal": sum(
+                1 for t in trades_out if t["exit_reason"] == "signal_exit"
+            ),
+            "closed_by_stop": sum(
+                1 for t in trades_out if t["exit_reason"] == "stop_loss"
+            ),
+            "closed_by_target": sum(
+                1 for t in trades_out if t["exit_reason"] == "target"
+            ),
+        },
         "quality": quality,
         "useless_strategies": useless,
         "per_regime": {k: {"trades": v["trades"], "gross": round(v["gross"], 2),
@@ -964,5 +1005,32 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
             "adaptive_costs": adaptive["economic"]["costs"] if adaptive else None,
             "static_capture": static["capture_ratio"],
             "adaptive_capture": adaptive["capture_ratio"] if adaptive else None,
+        },
+        "config": {
+            "strategy_id": "ensemble_main_v1",
+            "config_hash": request_hash(req),
+            "rule_based": True,
+            "ml_enabled": False,
+            "selection_period": "2026-06",
+            "validation_period": "2026-07",
+            "universe": (req.get("figis") or [req.get("figi")]),
+            "params": {
+                "bias": bias_cfg,
+                "setups": [s["strategy_id"] for s in setups_cfg],
+                "setups_tf": "5min",
+                "quorum": quorum_k,
+                "entry_tf": entry_cfg.get("tf", "1min"),
+                "entry_lookback": entry_cfg.get("lookback", 1),
+                "bias_mode": req.get("bias_mode", "veto"),
+                "entry_session": req.get("entry_session", "all"),
+                "carry_overnight": req.get("carry_overnight", True),
+                "force_flat_at_session_end": req.get("force_flat_at_session_end", False),
+                "same_side_reentry_cooldown_bars": req.get("same_side_reentry_cooldown_bars", 0),
+                "exit_policy": exit_cfg,
+                "cost_model": {"commission_rate": 0.0005, "slippage_bps": 2.0},
+                "position_sizing": "capital_per_position",
+                "oracle_threshold_pct": oracle_cfg.get("threshold_pct", 0.5),
+            },
+            "warning": "Backtest only — не торговый сигнал",
         },
     }

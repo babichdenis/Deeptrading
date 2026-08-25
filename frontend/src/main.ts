@@ -32,6 +32,7 @@ import {
 import { initBot } from "./bot";
 import { initLab, refreshConfigs } from "./lab";
 import { initTest } from "./test";
+import { initEnsLab } from "./enslab";
 import { OracleZones } from "./test";
 
 declare global {
@@ -1349,3 +1350,4 @@ initNav();
 void initLab();
 void initBot();
 void initTest();
+void initEnsLab();

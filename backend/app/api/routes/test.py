@@ -115,7 +115,7 @@ async def max_profit(req: MaxProfitRequest, db: AsyncSession = Depends(get_db)) 
 
 class EnsembleRequest(BaseModel):
     figi: str = "BBG008F2T3T2"
-    days: int = Field(3, ge=1, le=30)
+    days: int = Field(3, ge=1, le=120)
     capital: float = Field(100_000, ge=1000, le=100_000_000)
     lot: int = Field(10, ge=1, le=1000)
     use_all_setups: bool = False
@@ -128,6 +128,9 @@ class EnsembleRequest(BaseModel):
     quorum: int = Field(2, ge=1, le=5)
     entry: dict = Field(default_factory=lambda: {"tf": "1min", "lookback": 1})
     entry_tf: str = Field("1min", pattern="^(1min|5min)$")
+    entry_session: str = Field("all", pattern="^(all|main)$")
+    carry_overnight: bool = True
+    force_flat_at_session_end: bool = False
     entry_window_min: int = Field(15, ge=1, le=240)
     min_hold_bars: int = Field(0, ge=0, le=100)
     same_side_reentry_cooldown_bars: int = Field(0, ge=0, le=1440)
@@ -143,6 +146,8 @@ class EnsembleRequest(BaseModel):
     session: dict = Field(default_factory=lambda: {"overnight": False})
     from_ts: str | None = Field(None, description="ISO начало периода")
     to_ts: str | None = Field(None, description="ISO конец периода")
+    commission_rate: float = Field(0.0005, ge=0.0, le=0.05)
+    slippage_bps: float = Field(2.0, ge=0.0, le=200.0)
 
 
 @router.post("/ensemble")

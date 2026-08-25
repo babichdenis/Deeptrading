@@ -215,12 +215,13 @@ async def lab_queue_list(db: AsyncSession = Depends(get_db)) -> dict:
 
 @router.post("/lab/queue/{run_id}/pause")
 async def lab_queue_pause(run_id: _UUID) -> dict:
+    from app.services.test_queue import queue_dispatcher
     async with SessionLocal() as _db:
         run = await _db.get(TestRun, run_id)
         if run is None:
             raise HTTPException(404, "run not found")
         if run.status == "RUNNING":
-            # прерываем текущий прогон → возвращаем в QUEUED (прогресс теряется)
+            queue_dispatcher.cancel_run(run_id)
             await set_status(run_id, "QUEUED")
         elif run.status == "QUEUED":
             await set_status(run_id, "PAUSED")
@@ -240,10 +241,12 @@ async def lab_queue_resume(run_id: _UUID) -> dict:
 
 @router.post("/lab/queue/{run_id}/stop")
 async def lab_queue_stop(run_id: _UUID) -> dict:
+    from app.services.test_queue import queue_dispatcher
     async with SessionLocal() as _db:
         run = await _db.get(TestRun, run_id)
         if run is None:
             raise HTTPException(404, "run not found")
+        queue_dispatcher.cancel_run(run_id)
         await _db.delete(run)
         cfg = await _db.get(Configuration, run.config_id)
         if cfg is not None and cfg.status not in ("DRAFT",):
@@ -291,3 +294,105 @@ async def lab_settings_put(body: SettingsBody) -> dict:
     if body.max_concurrent_tests is not None:
         await set_setting("max_concurrent_tests", str(max(1, body.max_concurrent_tests)))
     return {"max_concurrent_tests": await max_concurrent()}
+
+
+# ==================== Ансамблевые прогоны (Lab → Ансамбль) ====================
+
+class EnsembleRunBody(BaseModel):
+    figis: list[str] = Field(default_factory=list)
+    days: int = Field(30, ge=1, le=120)
+    bias_mode: str = Field("info", pattern="^(veto|info|strict_ct)$")
+    entry_tf: str = Field("5min", pattern="^(1min|5min)$")
+    entry_session: str = Field("main", pattern="^(all|main)$")
+    carry_overnight: bool = True
+    force_flat_at_session_end: bool = False
+    quorum: int = Field(2, ge=1, le=5)
+    same_side_reentry_cooldown_bars: int = Field(15, ge=0, le=1440)
+    capital: float = Field(100_000, ge=1000, le=100_000_000)
+    lot: int = Field(10, ge=1, le=1000)
+    use_all_setups: bool = True
+    drop_useless: bool = True
+    setups: list[dict] = Field(default_factory=list)  # [{strategy_id, tf, params}]
+    entry: dict = Field(default_factory=lambda: {"tf": "1min", "lookback": 1})
+    exit_policy: dict = Field(default_factory=lambda: {
+        "id": "atr_stop", "params": {"period": 14, "multiplier": 2.0, "risk_reward": 2}})
+    from_ts: str | None = None
+    to_ts: str | None = None
+    commission_rate: float = Field(0.0005, ge=0.0, le=0.05)
+    slippage_bps: float = Field(2.0, ge=0.0, le=200.0)
+
+
+@router.post("/lab/ensemble", status_code=201)
+async def ensemble_run_create(body: EnsembleRunBody) -> dict:
+    from app.models.ensemble_runs import EnsembleRun
+    from datetime import datetime, timezone
+
+    if not body.figis:
+        raise HTTPException(400, "figis пуст")
+    params = body.model_dump()
+    run = EnsembleRun(
+        status="QUEUED",
+        params=params,
+        progress={"done": 0, "total": len(body.figis), "current": "", "by_stock": {}},
+    )
+    async with SessionLocal() as db:
+        db.add(run)
+        await db.commit()
+        run_id = run.id
+    from app.services.ensemble_queue import queue_dispatcher
+    queue_dispatcher.start()
+    return {"run_id": str(run_id), "status": "QUEUED", "queued": True}
+
+
+@router.get("/lab/ensemble")
+async def ensemble_run_list(limit: int = 20) -> dict:
+    from app.models.ensemble_runs import EnsembleRun
+    from sqlalchemy import desc
+
+    async with SessionLocal() as db:
+        rows = (await db.execute(
+            select(EnsembleRun).order_by(desc(EnsembleRun.created_at)).limit(limit)
+        )).scalars().all()
+        return {
+            "count": len(rows),
+            "runs": [
+                {
+                    "run_id": str(r.id),
+                    "status": r.status,
+                    "params": r.params,
+                    "progress": r.progress,
+                    "result": r.result,
+                    "error": r.error,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in rows
+            ],
+        }
+
+
+@router.post("/lab/ensemble/{run_id}/cancel")
+async def ensemble_run_cancel(run_id: UUID) -> dict:
+    from app.models.ensemble_runs import EnsembleRun
+    from app.services.ensemble_queue import set_status
+
+    async with SessionLocal() as db:
+        run = await db.get(EnsembleRun, run_id)
+        if run is None:
+            raise HTTPException(404, "run not found")
+        if run.status in ("QUEUED", "RUNNING"):
+            await set_status(run_id, "CANCELLED")
+            return {"cancelled": True}
+        return {"cancelled": False, "status": run.status}
+
+
+@router.delete("/lab/ensemble/{run_id}")
+async def ensemble_run_delete(run_id: UUID) -> dict:
+    from app.models.ensemble_runs import EnsembleRun
+
+    async with SessionLocal() as db:
+        run = await db.get(EnsembleRun, run_id)
+        if run is None:
+            raise HTTPException(404, "run not found")
+        await db.delete(run)
+        await db.commit()
+        return {"deleted": True}

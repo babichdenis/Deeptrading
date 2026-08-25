@@ -94,6 +94,19 @@ class EngineRunner:
                             ledger,
                         )
                 current_session_date = sd
+                # принудительное закрытие в конце основной сессии (после close_time)
+                if position is not None and self.cfg.session_policy.force_flat_at_session_end:
+                    lt = self.session.local(bar.ts)
+                    ch, cm = (int(x) for x in self.session.config.close_time.split(":"))
+                    bar_min = lt.hour * 60 + lt.minute
+                    close_m = ch * 60 + cm
+                    if bar_min > close_m:
+                        last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
+                        last_exit_bar = i
+                        exit_candidate = None
+                        position = self._close(
+                            i, bar.ts, position, bar.open, ExitReason.SESSION_CLOSE.value, ledger,
+                        )
 
             if pending is not None:
                 if pending_kind == "entry":

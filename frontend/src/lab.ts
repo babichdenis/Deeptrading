@@ -68,14 +68,23 @@ function configDump(cfg: any): string {
       const ps = Object.entries(m.params ?? {})
         .map(([k, v]) => `${k}=${typeof v === "number" ? Math.round(v * 10000) / 100 : v}`)
         .join(", ");
-      return `${m.strategy_id}${ps ? ` (${ps})` : ""}`;
+      return `<span class="cfg-fn">${m.strategy_id}${ps ? `<span class="dim"> (${ps})</span>` : ""}</span>`;
     });
-    return [
-      `<b>${cfg.name}</b> · ${cfg.interval_name} · K=${cfg.quorum}`,
-      `функции: ${lines.join(" | ")}`,
-      `выходы: ${cfg.exit_policy?.id ?? "—"} ${JSON.stringify(cfg.exit_policy?.params ?? {})}`,
-      `min_hold: ${cfg.min_hold_bars ?? 0} · short: ${cfg.allow_short ? "да" : "нет"}`,
-    ].join("<br/>");
+    const exit = cfg.exit_policy?.id ?? "—";
+    const exitParams = JSON.stringify(cfg.exit_policy?.params ?? {});
+    const sess = cfg.session_policy ?? {};
+    const rows: Array<[string, string]> = [
+      ["ТФ", cfg.interval_name ?? "—"],
+      ["Функции", lines.join(", ")],
+      ["Кворум", `K=${cfg.quorum ?? "—"} (same-bar)`],
+      ["Выход", `${exit} ${exitParams}`],
+      ["Min hold", `${cfg.min_hold_bars ?? 0} бар`],
+      ["Short", cfg.allow_short ? "да" : "нет"],
+      ["Сессия", sess.overnight === false ? "закрытие в конце дня" : "перенос через ночь"],
+    ];
+    return `<div class="cfg-dump-table">${rows.map(([k, v]) =>
+      `<div class="cfg-dump-row"><span class="cfg-dump-key">${k}</span><span class="cfg-dump-val">${v}</span></div>`
+    ).join("")}</div>`;
   } catch {
     return cfg?.name ?? "";
   }
@@ -699,15 +708,20 @@ function renderLiveRun(panel: HTMLElement, r: TestRunDto) {
     const sp = stockProgress[t] ?? { done: 0, total: 1 };
     const spPct = sp.total > 0 ? Math.min(100, Math.round((sp.done / sp.total) * 100)) : 0;
     const wlFill = splitFillStyle(wTotal, lTotal);
-    const pnlFill = splitFillStyle(pos, Math.abs(neg));
+    const gross = (rec as any)?.gross ?? null;
+    const costs = (rec as any)?.costs ?? null;
+    const pf = (rec as any)?.pf ?? null;
     return `
       <tr>
         <td><b>${t}</b></td>
         <td class="num">${rec?.active_days ?? 0}</td>
-        <td class="lab-wl-cell" style="${wlFill ? `background-image:${wlFill}` : ""}">${wTotal} (L-${wL} / S-${wS}) / ${lTotal} (L-${lL} / S-${lS})</td>
         <td class="num">${trades}</td>
-        <td class="lab-pnl-cell num ${net >= 0 ? "pos" : "neg"}" style="${pnlFill ? `background-image:${pnlFill}` : ""}"><b>${money(net)}</b> <span class="mini-hint">( +${money(pos)} / ${money(neg)} )</span></td>
-        <td style="width:110px"><div class="progress-track sm"><div class="progress-fill" style="width:${spPct}%"></div></div></td>
+        <td class="num">${gross != null ? money(gross) : "—"}</td>
+        <td class="num">${costs != null ? money(costs) : "—"}</td>
+        <td class="num ${net >= 0 ? "pos" : "neg"}"><b>${money(net)}</b> <span class="mini-hint">(+${money(pos)} / ${money(neg)})</span></td>
+        <td class="num">${pf != null ? pf.toFixed(2) : "—"}</td>
+        <td class="lab-wl-cell" style="${wlFill ? `background-image:${wlFill}` : ""}">${wTotal} (L-${wL} / S-${wS}) / ${lTotal} (L-${lL} / S-${lS})</td>
+        <td style="width:100px"><div class="progress-track sm"><div class="progress-fill" style="width:${spPct}%"></div></div></td>
       </tr>`;
   }).join("");
   const liveSig = `${r.status}|${p.done}|${p.current}|${stockRows}`;
@@ -720,14 +734,22 @@ function renderLiveRun(panel: HTMLElement, r: TestRunDto) {
       <span class="mini-hint">${r.interval_name} · период: ${(r.date_from ?? "").slice(0, 10) || "?"} → ${(r.date_to ?? "").slice(0, 10) || "сейчас"}</span>
       <span class="status-badge st-in_lab">${r.status === "PAUSED" ? "пауза" : "тест идёт"}</span>
     </div>
-    <div class="mini-hint" style="margin-bottom:4px">Общий прогресс: ${p.done}/${p.total} акций обработано ${p.current ? `· ${p.current}` : ""}</div>
+    <div class="cfg-dump">${configDump({ name: r.config_name, interval_name: r.interval_name, quorum: r.quorum, members: r.members ?? [], exit_policy: r.exit_policy ?? {}, min_hold_bars: r.min_hold_bars ?? 0, allow_short: r.allow_short ?? false })}</div>
+    <div class="mini-hint" style="margin-top:4px">акции: ${r.tickers.join(", ")}</div>
+    <div class="mini-hint" style="margin-bottom:4px;margin-top:8px">Текущая акция: ${p.current ?? "—"}</div>
+    <div class="progress-track"><div class="progress-fill" style="width:${Math.max(3, totalPct)}%"></div></div>
+    <div class="mini-hint" style="margin-bottom:4px;margin-top:6px">Общий прогресс: ${p.done}/${p.total} акций</div>
     <div class="progress-track"><div class="progress-fill" style="width:${Math.max(3, totalPct)}%"></div></div>
     <table class="runs-table" style="margin-top:10px">
       <thead>
-        <tr><th>Тикер</th><th>Дней</th><th>W (L / S) / У (L / S)</th><th>Сделки</th><th>PnL (+ / −)</th><th>Прогресс</th></tr>
+        <tr><th>Акция</th><th>Дней</th><th>Сделок</th><th>Gross</th><th>Costs</th><th>Net</th><th>PF</th><th>W (L/S) / У</th><th>Прогресс</th></tr>
       </thead>
-      <tbody>${stockRows || `<tr><td colspan="7" class="mini-hint">ожидание данных прогона…</td></tr>`}</tbody>
-    </table>`;
+      <tbody>${stockRows || `<tr><td colspan="9" class="mini-hint">ожидание данных прогона…</td></tr>`}</tbody>
+    </table>
+    <div class="totals-line" style="margin-top:8px">
+      <span>Сводка (по готовым акциям)</span>
+      <span>акций готово: <b>${perStock.length}/${tickerList.length}</b></span>
+    </div>`;
 }
 
 function funnelBlock(funnel: Record<string, unknown>): string {

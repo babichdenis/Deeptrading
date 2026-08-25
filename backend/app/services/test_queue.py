@@ -87,12 +87,17 @@ class QueueDispatcher:
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
-        self._running_tasks: set[asyncio.Task] = set()
+        self._running_tasks: dict[uuid.UUID, asyncio.Task] = {}
 
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._recover())
             logger.info("QueueDispatcher started")
+
+    def cancel_run(self, run_id: uuid.UUID) -> None:
+        task = self._running_tasks.get(run_id)
+        if task and not task.done():
+            task.cancel()
 
     async def _recover(self) -> None:
         # после рестарта процесса зависшие RUNNING возвращаем в очередь
@@ -107,7 +112,7 @@ class QueueDispatcher:
     def stop(self) -> None:
         if self._task:
             self._task.cancel()
-        for t in self._running_tasks:
+        for t in self._running_tasks.values():
             t.cancel()
 
     async def _loop(self) -> None:
@@ -121,7 +126,7 @@ class QueueDispatcher:
             await asyncio.sleep(1.5)
 
     async def _tick(self) -> None:
-        self._running_tasks = {t for t in self._running_tasks if not t.done()}
+        self._running_tasks = {rid: t for rid, t in self._running_tasks.items() if not t.done()}
         await self._sync_progress()
         limit = await max_concurrent()
         active = len(self._running_tasks)
@@ -153,7 +158,7 @@ class QueueDispatcher:
                 entity_type="test_run", entity_id=str(run.id),
             )
             task = asyncio.create_task(self._execute(run.id))
-            self._running_tasks.add(task)
+            self._running_tasks[run.id] = task
 
     async def _sync_progress(self) -> None:
         from app.models.configurations import Configuration

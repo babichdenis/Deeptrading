@@ -14,12 +14,15 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     from app.services.test_queue import queue_dispatcher
+    from app.services.ensemble_queue import queue_dispatcher as ens_dispatcher
 
     queue_dispatcher.start()
+    ens_dispatcher.start()
     try:
         yield
     finally:
         queue_dispatcher.stop()
+        ens_dispatcher.stop()
         await engine.dispose()
 
 

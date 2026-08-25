@@ -14,6 +14,7 @@ class SessionPolicyConfig:
     close_time: str = "18:45"
     entry_cutoff_bars: int = 0
     overnight: bool = True
+    force_flat_at_session_end: bool = False
 
 
 class SessionPolicy:

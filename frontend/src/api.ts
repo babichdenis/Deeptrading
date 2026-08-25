@@ -865,3 +865,53 @@ export async function fetchDecisions(
   if (!res.ok) throw new Error(`decisions ${res.status}`);
   return res.json();
 }
+
+// ============ Очередь ансамблевых прогонов (Lab → Ансамбль) ============
+
+export interface EnsembleLabRun {
+  run_id: string;
+  status: string;
+  params: Record<string, unknown>;
+  progress: {
+    done: number;
+    total: number;
+    current: string;
+    by_stock: Record<string, { done: number; total: number }>;
+  };
+  result: {
+    total_net: number;
+    positive_stocks: number;
+    stocks: number;
+    by_stock: Array<{
+      ticker: string; figi: string; trades?: number; gross?: number; costs?: number;
+      net?: number; pf?: number; coverage_pct?: number; error?: string;
+    }>;
+  } | null;
+  error: string | null;
+  created_at: string | null;
+}
+
+export async function createEnsembleRun(body: Record<string, unknown>): Promise<{ run_id: string; status: string }> {
+  const res = await fetch("/api/v1/lab/ensemble", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text() || `enslab ${res.status}`);
+  return res.json();
+}
+
+export async function fetchEnsembleRuns(limit = 20): Promise<EnsembleLabRun[]> {
+  const res = await fetch(`/api/v1/lab/ensemble?limit=${limit}`);
+  if (!res.ok) throw new Error(`enslab list ${res.status}`);
+  const d = await res.json();
+  return d.runs as EnsembleLabRun[];
+}
+
+export async function cancelEnsembleRun(runId: string): Promise<void> {
+  await fetch(`/api/v1/lab/ensemble/${runId}/cancel`, { method: "POST" });
+}
+
+export async function deleteEnsembleRun(runId: string): Promise<void> {
+  await fetch(`/api/v1/lab/ensemble/${runId}`, { method: "DELETE" });
+}

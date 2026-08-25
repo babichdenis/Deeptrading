@@ -270,46 +270,77 @@
                 <div class="col-title">Ожидают <button class="btn-secondary btn-sm" id="btn-cfg-new" title="Собрать новую">＋</button>
                   <button class="btn-secondary btn-sm" id="btn-lab-settings" title="Настройки Lab">⚙️</button></div>
                 <div class="card hidden" id="cfg-editor">
-                  <label style="margin-bottom:8px;display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text-dim)">
-                    Название<input type="text" id="cfg-name" value="Новая конфигурация" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" />
-                  </label>
-                  <div class="row2">
-                    <label>Таймфрейм<select id="cfg-interval">
-                      <option value="1min">1 мин</option>
-                      <option value="5min">5 мин</option>
-                      <option value="15min">15 мин</option>
-                      <option value="hour">Час</option>
-                      <option value="4h">4 часа</option>
-                      <option value="day">День</option>
-                    </select></label>
-                    <label>Кворум K<select id="cfg-quorum"></select></label>
+                  <div class="cfg-modal-head">
+                    <b id="cfg-modal-title">Сборка конфигурации</b>
+                    <button class="btn-secondary btn-sm" id="btn-cfg-close" title="Закрыть">✕</button>
                   </div>
-                  <div class="mini-hint" style="margin-bottom:6px;margin-top:8px">Стратегии-голоса (с параметрами):</div>
-                  <div id="cfg-strategies" class="cards-single"></div>
-                  <div class="row2" style="margin-top:10px">
-                    <label>Выходы<select id="cfg-exit">
-                      <option value="fixed_sl_tp">Fixed SL/TP</option>
-                      <option value="atr_stop">ATR Stop</option>
-                      <option value="atr_trailing">ATR Trailing</option>
-                    </select></label>
+                  <div class="cfg-modal-body">
+                    <div class="cfg-modal-col">
+                      <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text-dim)">
+                        Название
+                        <div style="display:flex;gap:6px">
+                          <input type="text" id="cfg-name" value="Новая конфигурация" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" />
+                          <button type="button" class="btn-secondary btn-sm" id="btn-cfg-autoname" title="Сформировать из блоков">⟳ авто</button>
+                        </div>
+                      </label>
+                      <div class="enslab-block">
+                        <div class="mini-hint">BIAS · контекст (1h EMA направление)</div>
+                        <label>Режим<select id="el-bias-mode">
+                          <option value="info" selected>info (не veto)</option>
+                          <option value="veto">veto (жёсткий)</option>
+                          <option value="strict_ct">strict_ct</option>
+                        </select></label>
+                        <label>Период EMA<input type="number" id="el-bias-period" value="50" min="5" max="300" style="width:60px" /></label>
+                      </div>
+                      <div class="enslab-block">
+                        <div class="mini-hint">SETUPS · функции-голоса (5м)</div>
+                        <div id="el-setups"></div>
+                      </div>
+                      <div class="enslab-block">
+                        <div class="mini-hint">ENTRY · триггер (микро-брейкаут)</div>
+                        <label>Таймфрейм<select id="el-entry-tf">
+                          <option value="5min" selected>5 мин</option>
+                          <option value="1min">1 мин</option>
+                        </select></label>
+                        <label>Lookback<input type="number" id="el-entry-lookback" value="1" min="1" max="20" style="width:60px" /></label>
+                      </div>
+                    </div>
+                    <div class="cfg-modal-col">
+                      <div class="enslab-block">
+                        <div class="mini-hint">QUORUM · оркестрация</div>
+                        <label>Кворум K<select id="cfg-quorum"></select></label>
+                        <label>Входы<select id="el-session">
+                          <option value="main" selected>основная сессия</option>
+                          <option value="all">все сессии</option>
+                        </select></label>
+                        <label>Cooldown, бар<input type="number" id="el-cooldown" value="15" min="0" style="width:60px" /></label>
+                      </div>
+                      <div class="enslab-block">
+                        <div class="mini-hint">EXIT · выход</div>
+                        <label>Политика<select id="el-exit">
+                          <option value="atr_stop" selected>ATR Stop</option>
+                          <option value="fixed_sl_tp">Fixed SL/TP</option>
+                          <option value="atr_trailing">ATR Trailing</option>
+                        </select></label>
+                        <div id="el-exit-params" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+                      </div>
+                      <div class="enslab-block">
+                        <div class="mini-hint">ТЕСТ · акции (клик — выбрать) и период</div>
+                        <div id="el-figis" class="chips-row"></div>
+                        <div class="row2" style="margin-top:6px">
+                          <label>Дней<input type="number" id="el-days" value="30" min="1" max="120" style="width:70px" /></label>
+                          <label>Капитал<input type="number" id="el-capital" value="100000" style="width:90px" /></label>
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  <div class="params-line" id="cfg-exit-params"></div>
-                  <div class="row4">
-                    <label>Min hold<input type="number" id="cfg-minhold" value="0" min="0" /></label>
-                    <label>Short<input type="checkbox" id="cfg-short" /></label>
-                  </div>
-                  <hr style="border-color:var(--border);margin:12px 0" />
-                  <div class="mini-hint" style="margin-bottom:6px">🧪 Тест (акции — клик):</div>
-                  <div class="chips-row" id="cfg-test-chips"></div>
-                  <div class="row2" style="margin-top:10px">
-                    <label>Дата с<input type="date" id="cfg-test-from" /></label>
-                    <label>Дата по<input type="date" id="cfg-test-to" /></label>
-                  </div>
-                  <div class="btn-row" style="margin-top:12px">
+                  <div class="cfg-modal-foot">
                     <button class="btn-primary" id="btn-cfg-save">💾 Сохранить</button>
                     <button class="btn-primary" id="btn-cfg-save-run" style="background:#b388ff">🧪 Сохранить и Тестировать</button>
+                    <button class="btn-primary" id="btn-enslab-run" style="background:#26a69a">▶ В Lab (очередь ансамбля)</button>
                     <button class="btn-secondary" id="btn-cfg-cancel">Отмена</button>
                   </div>
+                  <div id="el-queue" class="el-queue-box"></div>
                 </div>
                 <div id="cfg-list"></div>
               </div>
@@ -322,7 +353,20 @@
                 <div id="cfg-tested"></div>
               </div>
             </div>
-            <div class="card hidden" id="lab-results-v2"></div>
+            <div class="card" id="lab-results-v2">
+              <div id="lr-progress" style="display:none">
+                <div class="mini-hint">Текущая акция</div>
+                <div class="progress-track"><div class="progress-fill" id="lr-progress-stock" style="width:0%"></div></div>
+                <div class="mini-hint" style="margin-top:6px">Общий прогресс</div>
+                <div class="progress-track"><div class="progress-fill" id="lr-progress-total" style="width:0%"></div></div>
+              </div>
+              <div id="lr-details"></div>
+              <table class="runs-table" id="lr-table">
+                <thead><tr><th>Акция</th><th>Дней</th><th>Сделок</th><th>Gross</th><th>Costs</th><th>Net</th><th>PF</th><th>W/L</th></tr></thead>
+                <tbody id="lr-tbody"></tbody>
+              </table>
+              <div id="lr-summary" class="mini-hint"></div>
+            </div>
           </section>
 
           <section class="page page-pad" id="page-bot">

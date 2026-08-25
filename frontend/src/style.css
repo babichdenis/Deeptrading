@@ -810,13 +810,7 @@ body {
 .arr-dn { color: var(--down); font-weight: 700; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 190; background: rgba(0,0,0,0.55); }
-#cfg-editor {
-  position: fixed !important;
-  top: 50%; left: 50%; transform: translate(-50%, -50%);
-  z-index: 200;
-  width: min(460px, 94vw); max-height: 84vh; overflow-y: auto;
-  box-shadow: 0 12px 48px rgba(0,0,0,0.6);
-}
+body.modal-open { overflow: hidden; }
 .btn-sm { padding: 3px 9px; font-size: 11px; }
 
 .modal-card {
@@ -970,3 +964,65 @@ body {
 #ens-chart:empty{display:none}
 
 #page-chart .panel-tabs{position:sticky;top:0;z-index:5}
+
+/* ===== Блок «Ансамбль» в Lab ===== */
+.enslab-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.enslab-block {
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-panel); padding: 8px 10px; margin-bottom: 8px;
+}
+.enslab-block label { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.enslab-block input[type="number"], .enslab-block select, .enslab-block input[type="text"] {
+  padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text); font-size: 12px;
+}
+.el-block { font-size: 12px; color: var(--text); }
+.el-run {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 8px; background: var(--bg-panel);
+}
+
+/* ===== Модалка сборки конфигурации (ансамбль) ===== */
+#cfg-editor {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(86vw, 1200px);
+  max-height: min(84vh, 800px);
+  z-index: 210;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  padding: 0;
+}
+#cfg-editor.hidden { display: none; }
+.cfg-modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+}
+.cfg-modal-body {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  padding: 12px 14px; overflow: auto; flex: 1;
+}
+.cfg-modal-col { display: flex; flex-direction: column; gap: 8px; }
+.cfg-modal-foot {
+  display: flex; gap: 8px; padding: 10px 14px;
+  border-top: 1px solid var(--border); flex-wrap: wrap;
+}
+.modal-backdrop.show { display: block; }
+.el-queue-box {
+  max-height: 180px; overflow: auto;
+  padding: 0 14px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+
+/* ===== Плашки конфигураций (Lab) ===== */
+.cfg-dump-table { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.cfg-dump-row { display: flex; gap: 8px; font-size: 11px; line-height: 1.4; }
+.cfg-dump-key { color: var(--text-dim); min-width: 70px; flex-shrink: 0; }
+.cfg-dump-val { color: var(--text); word-break: break-word; }
+.cfg-fn { color: #8ab4ff; }
