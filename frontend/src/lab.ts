@@ -99,6 +99,7 @@ export async function initLab() {
   $("btn-lab-settings")?.addEventListener("click", openSettingsDialog);
   $("btn-cfg-new").addEventListener("click", () => openEditor());
   $("btn-cfg-cancel").addEventListener("click", closeEditor);
+  $("btn-cfg-close")?.addEventListener("click", closeEditor);
   $("btn-cfg-save").addEventListener("click", () => void saveConfiguration(false));
   $("btn-cfg-save-run")?.addEventListener("click", () => void saveConfiguration(true));
   ($("cfg-exit") as HTMLSelectElement).addEventListener("change", renderExitParams);
@@ -539,6 +540,15 @@ async function editConfiguration(c: ConfigurationDto) {
   const nameInp = $("cfg-name") as HTMLInputElement;
   nameInp.value = full.name;
   delete nameInp.dataset.auto;
+  // чипы акций из конфигурации (universe) или последнего теста
+  const uni = (full.filters ?? []).find((f: any) => f.id === "universe") as any;
+  const tickers = (uni?.params?.tickers as string[] | undefined)
+    ?? (full.lab_result as any)?.test_params?.tickers as string[] | undefined
+    ?? [...(window.__selectedTestTickers ?? [])];
+  if (tickers.length) {
+    window.__selectedTestTickers = new Set(tickers);
+    initTestSection();
+  }
   for (const cb of document.querySelectorAll<HTMLInputElement>("#cfg-strategies input")) {
     const m = full.members.find((x) => x.strategy_id === cb.dataset.sid);
     cb.checked = !!m;
