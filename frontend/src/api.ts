@@ -604,17 +604,28 @@ export async function deleteRun(runId: string): Promise<void> {
 export async function recycleRun(runId: string): Promise<void> {
   await fetch(`/api/v1/lab/runs/${runId}/recycle`, { method: "POST" });
 }
-export async function fetchLabSettings(): Promise<{ max_concurrent_tests: number }> {
+export interface LabSettings {
+  max_concurrent_tests: number;
+  commission_rate: number;
+  slippage_bps: number;
+}
+
+export async function fetchLabSettings(): Promise<LabSettings> {
   const res = await fetch("/api/v1/lab/settings");
   if (!res.ok) throw new Error(`settings ${res.status}`);
   return res.json();
 }
-export async function saveLabSettings(maxConcurrent: number): Promise<void> {
-  await fetch("/api/v1/lab/settings", {
+export async function saveLabSettings(maxConcurrent: number, commissionRate?: number, slippageBps?: number): Promise<LabSettings> {
+  const body: Record<string, unknown> = { max_concurrent_tests: maxConcurrent };
+  if (commissionRate != null) body.commission_rate = commissionRate;
+  if (slippageBps != null) body.slippage_bps = slippageBps;
+  const res = await fetch("/api/v1/lab/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ max_concurrent_tests: maxConcurrent }),
+    body: JSON.stringify(body),
   });
+  if (!res.ok) throw new Error(`settings ${res.status}`);
+  return res.json();
 }
 
 export interface TestPredictRule {

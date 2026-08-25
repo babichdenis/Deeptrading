@@ -615,6 +615,14 @@ function openSettingsDialog() {
       Максимум тестов одновременно
       <input type="number" id="ls-max" value="1" min="1" max="8" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" />
     </label>
+    <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text-dim);margin-top:8px">
+      Комиссия (доля, напр. 0.0005 = 0.05%)
+      <input type="number" id="ls-comm" value="0.0005" min="0" max="0.05" step="0.00005" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" />
+    </label>
+    <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text-dim);margin-top:8px">
+      Проскальзывание (bps, 1 bps = 0.01%)
+      <input type="number" id="ls-slip" value="2" min="0" max="200" step="0.5" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" />
+    </label>
     <div class="btn-row" style="margin-top:14px">
       <button class="btn-primary" id="ls-save">💾 Сохранить</button>
       <button class="btn-secondary" id="ls-cancel">Отмена</button>
@@ -624,6 +632,8 @@ function openSettingsDialog() {
 
   void fetchLabSettings().then((s2) => {
     ($("ls-max") as HTMLInputElement).value = String(s2.max_concurrent_tests);
+    ($("ls-comm") as HTMLInputElement).value = String(s2.commission_rate);
+    ($("ls-slip") as HTMLInputElement).value = String(s2.slippage_bps);
   }).catch(() => {});
 
   const close = () => { backdrop.remove(); modal.remove(); };
@@ -631,7 +641,9 @@ function openSettingsDialog() {
   modal.querySelector("#ls-cancel")!.addEventListener("click", close);
   modal.querySelector("#ls-save")!.addEventListener("click", async () => {
     const v = Number(($("ls-max") as HTMLInputElement).value) || 1;
-    await saveLabSettings(v).catch((e) => alert(e.message));
+    const comm = Number(($("ls-comm") as HTMLInputElement).value);
+    const slip = Number(($("ls-slip") as HTMLInputElement).value);
+    await saveLabSettings(v, comm, slip).catch((e) => alert(e.message));
     close();
   });
 }

@@ -282,18 +282,32 @@ async def lab_run_recycle(run_id: _UUID) -> dict:
 
 class SettingsBody(BaseModel):
     max_concurrent_tests: int | None = None
+    commission_rate: float | None = Field(None, ge=0.0, le=0.05)
+    slippage_bps: float | None = Field(None, ge=0.0, le=200.0)
 
 
 @router.get("/lab/settings")
 async def lab_settings_get() -> dict:
-    return {"max_concurrent_tests": await max_concurrent()}
+    return {
+        "max_concurrent_tests": await max_concurrent(),
+        "commission_rate": float(await get_setting("commission_rate", "0.0005")),
+        "slippage_bps": float(await get_setting("slippage_bps", "2.0")),
+    }
 
 
 @router.put("/lab/settings")
 async def lab_settings_put(body: SettingsBody) -> dict:
     if body.max_concurrent_tests is not None:
         await set_setting("max_concurrent_tests", str(max(1, body.max_concurrent_tests)))
-    return {"max_concurrent_tests": await max_concurrent()}
+    if body.commission_rate is not None:
+        await set_setting("commission_rate", str(body.commission_rate))
+    if body.slippage_bps is not None:
+        await set_setting("slippage_bps", str(body.slippage_bps))
+    return {
+        "max_concurrent_tests": await max_concurrent(),
+        "commission_rate": float(await get_setting("commission_rate", "0.0005")),
+        "slippage_bps": float(await get_setting("slippage_bps", "2.0")),
+    }
 
 
 # ==================== Ансамблевые прогоны (Lab → Ансамбль) ====================
@@ -330,6 +344,10 @@ async def ensemble_run_create(body: EnsembleRunBody) -> dict:
     if not body.figis:
         raise HTTPException(400, "figis пуст")
     params = body.model_dump()
+    # настройки Lab по умолчанию (комиссия/слип), если не заданы явно
+    if body.commission_rate == 0.0005 and body.slippage_bps == 2.0:
+        params["commission_rate"] = float(await get_setting("commission_rate", "0.0005"))
+        params["slippage_bps"] = float(await get_setting("slippage_bps", "2.0"))
     run = EnsembleRun(
         status="QUEUED",
         params=params,
