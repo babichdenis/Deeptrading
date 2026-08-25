@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, time
+from zoneinfo import ZoneInfo
+
+
+@dataclass(frozen=True)
+class SessionPolicyConfig:
+    id: str = "moex_intraday_v1"
+    version: str = "1.0.0"
+    tz: str = "Europe/Moscow"
+    open_time: str = "10:00"
+    close_time: str = "18:45"
+    entry_cutoff_bars: int = 0
+    overnight: bool = True
+
+
+class SessionPolicy:
+    def __init__(self, config: SessionPolicyConfig | None = None):
+        self.config = config or SessionPolicyConfig()
+        self.tz = ZoneInfo(self.config.tz)
+        oh, om = self.config.open_time.split(":")
+        ch, cm = self.config.close_time.split(":")
+        self.open_t = time(int(oh), int(om))
+        self.close_t = time(int(ch), int(cm))
+
+    def local(self, ts: datetime) -> datetime:
+        return ts.astimezone(self.tz)
+
+    def session_date(self, ts: datetime) -> date:
+        return self.local(ts).date()
+
+    def minutes_to_close(self, ts: datetime) -> float | None:
+        lt = self.local(ts)
+        close_dt = datetime.combine(lt.date(), self.close_t, tzinfo=self.tz)
+        seconds = (close_dt - lt).total_seconds()
+        if seconds < 0:
+            return None
+        return seconds / 60
+
+    def can_enter(self, ts: datetime, tf_minutes: int) -> tuple[bool, str]:
+        lt = self.local(ts)
+        if lt.weekday() >= 5:
+            return False, f"weekend {lt.date()}"
+
+        if lt.time() < self.open_t or lt.time() > self.close_t:
+            return True, ""
+
+        cutoff_bars = self.config.entry_cutoff_bars
+        if cutoff_bars <= 0:
+            return True, ""
+
+        minutes_left = self.minutes_to_close(ts)
+        if minutes_left is None:
+            return True, ""
+        if minutes_left < cutoff_bars * tf_minutes:
+            return (
+                False,
+                f"late entry: {minutes_left:.0f}min left < {cutoff_bars} bars x {tf_minutes}min",
+            )
+        return True, ""

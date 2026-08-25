@@ -1,0 +1,867 @@
+export interface CandleDto {
+  ts: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface AnalysisDto {
+  figi: string;
+  ticker: string;
+  name: string;
+  interval: string;
+  candles: CandleDto[];
+  sma20: (number | null)[];
+  ema50: (number | null)[];
+  rsi: (number | null)[];
+  bb_upper: (number | null)[];
+  bb_lower: (number | null)[];
+  macd: { macd: (number | null)[]; signal: (number | null)[]; hist: (number | null)[] };
+}
+
+export async function fetchAnalysis(
+  figi: string,
+  intervalName: string,
+  limit = 2000,
+): Promise<AnalysisDto> {
+  const res = await fetch(`/api/analysis/${figi}?interval_name=${intervalName}&limit=${limit}`);
+  if (!res.ok) throw new Error(`Ошибка загрузки анализа (${res.status})`);
+  return res.json();
+}
+
+export interface SyncReport {
+  figi: string;
+  interval: string;
+  cached_bars: number;
+  downloaded: number;
+  requests: number;
+  coverage_from: string | null;
+  coverage_to: string | null;
+}
+
+export interface ParamSpec {
+  type: "int" | "float";
+  default: number;
+  min?: number;
+  max?: number;
+}
+
+export interface StrategyCardDto {
+  id: string;
+  name: string;
+  family: string;
+  wave: number;
+  status: string;
+  timeframes: string[];
+  long_rule: string;
+  short_rule: string;
+  params_schema: Record<string, ParamSpec>;
+}
+
+export interface SignalDto {
+  ts: string;
+  side: "BUY" | "SELL" | string;
+  status: string;
+  reason: string;
+  features: Record<string, number>;
+}
+
+export interface ComputeResponse {
+  run_id: string;
+  cached: boolean;
+  replaced_stale: boolean;
+  count: number;
+  signals: SignalDto[];
+}
+
+export interface RunRowDto {
+  run_id: string;
+  figi: string;
+  interval_name: string;
+  strategy_id: string;
+  engine_version: string;
+  params: Record<string, number>;
+  bars: number;
+  created_at: string | null;
+}
+
+export async function syncCandles(
+  figi: string,
+  intervalName: string,
+  days: number,
+  rangeFromSec?: number,
+  rangeToSec?: number,
+): Promise<SyncReport> {
+  let url = `/api/candles/${figi}/sync?interval_name=${intervalName}&days=${days}`;
+  if (rangeFromSec != null && rangeToSec != null) {
+    const iso = (sec: number) => new Date(sec * 1000).toISOString();
+    url += `&from_ts=${iso(rangeFromSec)}&to_ts=${iso(rangeToSec)}`;
+  }
+  const res = await fetch(url, { method: "POST" });
+  if (!res.ok) throw new Error(`Ошибка синхронизации (${res.status})`);
+  return res.json();
+}
+
+export async function fetchCatalog(): Promise<{ count: number; strategies: StrategyCardDto[] }> {
+  const res = await fetch("/api/v1/strategies/catalog");
+  if (!res.ok) throw new Error(`Каталог недоступен (${res.status})`);
+  return res.json();
+}
+
+export async function computeSignals(
+  figi: string,
+  intervalName: string,
+  strategyId: string,
+  params: Record<string, number>,
+  rangeFromSec?: number,
+  rangeToSec?: number,
+): Promise<ComputeResponse> {
+  const body: Record<string, unknown> = { figi, interval_name: intervalName, strategy_id: strategyId, params };
+  if (rangeFromSec != null && rangeToSec != null) {
+    const iso = (sec: number) => new Date(sec * 1000).toISOString();
+    body.from_ts = iso(rangeFromSec);
+    body.to_ts = iso(rangeToSec);
+  }
+  const res = await fetch("/api/v1/signals/compute", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`compute ${strategyId}: ${text || res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchRuns(figi: string): Promise<RunRowDto[]> {
+  const res = await fetch(`/api/v1/signals/runs?figi=${figi}`);
+  if (!res.ok) throw new Error(`runs ${res.status}`);
+  const data = await res.json();
+  return data.runs;
+}
+
+export interface QuorumResponse extends ComputeResponse {
+  run: unknown;
+}
+
+export async function computeQuorum(
+  memberRunIds: string[],
+  k: number,
+): Promise<QuorumResponse> {
+  const res = await fetch("/api/v1/quorum/compute", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ member_run_ids: memberRunIds, k }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`quorum: ${text || res.status}`);
+  }
+  return res.json();
+}
+
+export interface PolicySpec {
+  id: string;
+  label: string;
+  params_schema: Record<string, ParamSpec>;
+}
+
+export async function fetchPoliciesCatalog(): Promise<{
+  exit_policies: PolicySpec[];
+  signal_policies: PolicySpec[];
+}> {
+  const res = await fetch("/api/v1/policies/catalog");
+  if (!res.ok) throw new Error(`policies ${res.status}`);
+  return res.json();
+}
+
+export interface ExperimentResult {
+  experiment_id: string;
+  status: string;
+  figi: string;
+  ticker?: string;
+  interval_name: string;
+  strategy_id: string;
+  exit_policy: { id: string; params: Record<string, number> };
+  qty: number;
+  research_status: string | null;
+  error: string | null;
+  summary: {
+    summary: {
+      trades: number; net: number; profit_factor: number; win_rate: number;
+      expectancy: number; long_count: number; short_count: number;
+    };
+    max_drawdown_pct: number;
+    verdict: { trading_verdict: string; stable_halves: boolean };
+    halves: { h1: { net: number }; h2: { net: number } };
+    signals_total: number;
+    final_equity: number;
+  };
+  trades: Array<Record<string, unknown>>;
+}
+
+export async function runExperiment(body: Record<string, unknown>): Promise<ExperimentResult> {
+  const res = await fetch("/api/v1/experiments", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text() || `experiment ${res.status}`);
+  return res.json();
+}
+
+export interface SweepResult {
+  trials_done: number;
+  elapsed_sec: number;
+  plateau_detected: boolean;
+  ranked: Array<{ params: Record<string, number>; net: number | null; pf: number | null; trades: number | null; max_dd_pct?: number }>;
+  best: Record<string, unknown> | null;
+}
+
+export async function runSweep(body: Record<string, unknown>): Promise<SweepResult> {
+  const res = await fetch("/api/v1/lab/sweep", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text() || `sweep ${res.status}`);
+  return res.json();
+}
+
+export interface BatchResult {
+  summary: { stocks_done: number; stocks_total: number; positive_stocks: number; total_net: number; avg_net_per_stock: number; elapsed_sec: number };
+  per_stock: Array<{ figi: string; ticker: string; net: number | null; pf: number | null; trades: number | null; research_status: string | null }>;
+}
+
+export async function runBatch(body: Record<string, unknown>): Promise<BatchResult> {
+  const res = await fetch("/api/v1/lab/batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text() || `batch ${res.status}`);
+  return res.json();
+}
+
+export interface ExperimentListRow {
+  experiment_id: string;
+  figi: string;
+  interval_name: string;
+  strategy_id: string;
+  research_status: string | null;
+  summary_net: number | null;
+  summary_pf: number | null;
+  summary_trades: number | null;
+  created_at: string | null;
+}
+
+export async function fetchExperiments(limit = 30): Promise<ExperimentListRow[]> {
+  const res = await fetch(`/api/v1/experiments?limit=${limit}`);
+  if (!res.ok) throw new Error(`experiments ${res.status}`);
+  const d = await res.json();
+  return d.experiments;
+}
+
+export interface BotStatus {
+  running: boolean;
+  mode: string;
+  started_at: string | null;
+  error: string | null;
+  candles_seen: number;
+  signals_seen: number;
+  pending_orders?: number;
+  universe: Array<{ figi: string; ticker: string; atr_pct: number }>;
+  portfolio: { cash: number; initial_cash: number; equity: number; pnl: number; positions_open: number };
+  session?: string;
+  data?: { health: string; source: string; last_candle_ts: string | null };
+  risk?: { state: string; daily_pnl: number; daily_loss_limit: number; entries_paused: boolean };
+}
+
+export async function botStatus(): Promise<BotStatus> {
+  const res = await fetch("/api/v1/bot/status");
+  if (!res.ok) throw new Error(`bot ${res.status}`);
+  return res.json();
+}
+
+export async function botStart(body: Record<string, unknown>): Promise<unknown> {
+  const res = await fetch("/api/v1/bot/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text() || `bot start ${res.status}`);
+  return res.json();
+}
+
+export async function botStop(): Promise<void> {
+  const res = await fetch("/api/v1/bot/stop", { method: "POST" });
+  if (!res.ok) throw new Error(`bot stop ${res.status}`);
+}
+
+export async function botReset(cash: number): Promise<void> {
+  const res = await fetch(`/api/v1/bot/reset?initial_cash=${cash}`, { method: "POST" });
+  if (!res.ok) throw new Error(`bot reset ${res.status}`);
+}
+
+export interface BotPositionRow {
+  figi: string; ticker: string; side: string; qty: number;
+  entry_price: number; entry_time: string;
+  stop_loss: number | null; take_profit: number | null;
+}
+
+export async function botPositions(): Promise<BotPositionRow[]> {
+  const res = await fetch("/api/v1/bot/positions");
+  if (!res.ok) throw new Error(`positions ${res.status}`);
+  const d = await res.json();
+  return d.positions;
+}
+
+export interface BotTradeRow {
+  ticker: string; side: string; qty: number;
+  entry_price: number; exit_price: number;
+  entry_time: string; exit_time: string;
+  net_pnl: number; exit_reason: string;
+}
+
+export async function botTrades(limit = 50): Promise<BotTradeRow[]> {
+  const res = await fetch(`/api/v1/bot/trades?limit=${limit}`);
+  if (!res.ok) throw new Error(`trades ${res.status}`);
+  const d = await res.json();
+  return d.trades;
+}
+
+export interface BotOrderRow {
+  id: string;
+  figi: string;
+  ticker: string;
+  action: string;
+  side: string;
+  qty: number;
+  status: string;
+  created_at: string;
+  filled_at: string | null;
+  price: number | null;
+}
+
+export async function botOrders(limit = 50): Promise<BotOrderRow[]> {
+  const res = await fetch(`/api/v1/bot/orders?limit=${limit}`);
+  if (!res.ok) throw new Error(`orders ${res.status}`);
+  const d = await res.json();
+  return d.orders;
+}
+
+export interface BotEventRow {
+  ts: string;
+  type: string;
+  figi: string | null;
+  ticker: string | null;
+  reason: string | null;
+  payload: Record<string, unknown> | null;
+}
+
+export async function botEvents(limit = 100): Promise<BotEventRow[]> {
+  const res = await fetch(`/api/v1/bot/events?limit=${limit}`);
+  if (!res.ok) throw new Error(`events ${res.status}`);
+  const d = await res.json();
+  return d.events;
+}
+
+export async function botPause(paused: boolean): Promise<{ entries_paused: boolean }> {
+  const res = await fetch("/api/v1/bot/pause", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paused }),
+  });
+  if (!res.ok) throw new Error(`pause ${res.status}`);
+  return res.json();
+}
+
+export async function botCancelPending(): Promise<{ cancelled: number }> {
+  const res = await fetch("/api/v1/bot/orders/cancel-pending", { method: "POST" });
+  if (!res.ok) throw new Error(`cancel ${res.status}`);
+  return res.json();
+}
+
+export async function botCloseAll(): Promise<{ closed: number }> {
+  const res = await fetch("/api/v1/bot/positions/close-all", { method: "POST" });
+  if (!res.ok) throw new Error(`close-all ${res.status}`);
+  return res.json();
+}
+
+export interface ConfigurationDto {
+  configuration_id: string;
+  name: string;
+  status: string;
+  interval_name: string;
+  members: Array<{ strategy_id: string; params: Record<string, number> }>;
+  quorum: number;
+  exit_policy: { id: string; params: Record<string, number> };
+  allow_short: boolean;
+  min_hold_bars: number;
+  preview_figi: string | null;
+  preview_net?: number | null;
+  preview_trades?: number | null;
+  lab_totals?: { stocks: number; trades: number; positive_stocks: number; total_net: number } | null;
+  research_status?: string | null;
+  session_policy?: Record<string, unknown>;
+  source_runs?: Record<string, string>;
+  filters?: unknown[];
+  created_at?: string | null;
+  lab_result?: {
+    totals?: { stocks: number; trades: number; positive_stocks: number; total_net: number; wins: number; losses: number };
+    per_stock?: Array<{ ticker: string; mode: string; active_days: number; wl: string; trades: number; pnl: { total: number; pos: number; neg: number } }>;
+    trades?: Array<Record<string, unknown>>;
+    progress?: { done: number; total: number; current?: string };
+    status?: string;
+    error?: string;
+    elapsed_sec?: number;
+    funnel?: Record<string, unknown>;
+    config_snapshot?: {
+      name?: string; interval_name?: string; members?: unknown[];
+      quorum?: number; exit_policy?: unknown; min_hold_bars?: number;
+      allow_short?: boolean; session_policy?: unknown; engine_version?: string;
+    };
+    test_params?: { tickers?: string[]; periodDays?: number; date_from?: string | null; date_to?: string | null };
+    figi?: string;
+    days?: number;
+    summary?: Record<string, any>;
+    universe?: string[];
+    trades_preview?: Array<Record<string, unknown>>;
+    curve?: Array<{ time: string; equity: number }>;
+    by_day?: Array<{ date: string; trades: number; gross: number; commission: number; net: number }>;
+    consecutive_losses?: number;
+    top1_analysis?: { top1_figi: string | null; top1_net: number; net_without_top1: number; total_net: number; concentration_pct: number };
+  };
+}
+
+export async function fetchConfigurations(): Promise<ConfigurationDto[]> {
+  const res = await fetch("/api/v1/warehouse/configurations");
+  if (!res.ok) throw new Error(`configs ${res.status}`);
+  const d = await res.json();
+  return d.configurations;
+}
+
+export async function createConfiguration(body: Record<string, unknown>): Promise<ConfigurationDto> {
+  const res = await fetch("/api/v1/warehouse/configurations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text() || `config create ${res.status}`);
+  return res.json();
+}
+
+export interface PreviewResponse {
+  configuration_id: string;
+  figi: string;
+  interval_name: string;
+  funnel: Record<string, { BUY?: number; SELL?: number } | number>;
+  summary: Record<string, unknown> & { trades_preview?: Array<Record<string, unknown>> };
+  merged_signals_count: number;
+}
+
+export async function previewConfiguration(
+  configId: string,
+  figi: string,
+  days = 240
+): Promise<PreviewResponse> {
+  const res = await fetch(`/api/v1/warehouse/configurations/${configId}/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ figi, days }),
+  });
+  if (!res.ok) throw new Error(await res.text() || `preview ${res.status}`);
+  return res.json();
+}
+
+export interface LabRunResult {
+  configuration_id: string;
+  name: string;
+  status: string;
+  research_status: string;
+  totals: { stocks: number; trades: number; positive_stocks: number; total_net: number; wins: number; losses: number };
+  per_stock: Array<{ ticker: string; mode: string; active_days: number; wl: string; trades: number; pnl: { total: number; pos: number; neg: number } }>;
+  by_ticker: Record<string, unknown>;
+  trades: Array<Record<string, unknown>>;
+  errors: Array<{ ticker: string; error: string }>;
+}
+
+export async function sendToLab(
+  configId: string,
+  periodDays = 30,
+  topN = 10,
+): Promise<LabRunResult> {
+  const res = await fetch(`/api/v1/warehouse/configurations/${configId}/send-to-lab`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ period_days: periodDays, top_n: topN }),
+  });
+  if (!res.ok) throw new Error(await res.text() || `send-to-lab ${res.status}`);
+  return res.json();
+}
+
+export async function getConfiguration(configId: string): Promise<ConfigurationDto> {
+  const res = await fetch(`/api/v1/warehouse/configurations/${configId}`);
+  if (!res.ok) throw new Error(`config ${res.status}`);
+  return res.json();
+}
+
+export async function sendToLabAsync(
+  configId: string,
+  opts: { periodDays?: number; topN?: number; tickers?: string[]; dateFrom?: string; dateTo?: string },
+): Promise<void> {
+  const body: Record<string, unknown> = { period_days: opts.periodDays ?? 30, top_n: opts.topN ?? 10 };
+  if (opts.tickers?.length) body.tickers = opts.tickers;
+  if (opts.dateFrom) body.date_from = opts.dateFrom;
+  if (opts.dateTo) body.dateTo = undefined;
+  if (opts.dateTo) { delete body.dateTo; body.date_to = opts.dateTo; }
+  const res = await fetch(`/api/v1/warehouse/configurations/${configId}/send-to-lab-async`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text() || `send-to-lab ${res.status}`);
+}
+
+export async function updateConfiguration(configId: string, body: Record<string, unknown>): Promise<ConfigurationDto> {
+  const res = await fetch(`/api/v1/warehouse/configurations/${configId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text() || `update ${res.status}`);
+  return res.json();
+}
+
+export async function deleteConfiguration(configId: string): Promise<void> {
+  const res = await fetch(`/api/v1/warehouse/configurations/${configId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`delete ${res.status}`);
+}
+
+export interface TestRunDto {
+  run_id: string;
+  config_id: string;
+  config_name: string;
+  members: Array<{ strategy_id: string; params: Record<string, number> }>;
+  quorum: number;
+  min_hold_bars?: number;
+  allow_short?: boolean;
+  exit_policy: { id: string; params: Record<string, number> };
+  interval_name: string;
+  status: string;
+  tickers: string[];
+  date_from: string | null;
+  date_to: string | null;
+  period_days: number;
+  progress: { done: number; total: number; current?: string };
+  error: string | null;
+  lab_result: Record<string, any> | null;
+  created_at: string | null;
+}
+
+export interface LabQueueResponse {
+  max_concurrent: number;
+  count: number;
+  runs: TestRunDto[];
+}
+
+export async function fetchLabQueue(): Promise<LabQueueResponse> {
+  const res = await fetch("/api/v1/lab/queue");
+  if (!res.ok) throw new Error(`queue ${res.status}`);
+  return res.json();
+}
+
+export async function enqueueTest(
+  configId: string,
+  tickers: string[],
+  dateFrom: string | null,
+  dateTo: string | null,
+  periodDays: number,
+): Promise<void> {
+  const res = await fetch("/api/v1/lab/queue", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config_id: configId, tickers, date_from: dateFrom, date_to: dateTo, period_days: periodDays }),
+  });
+  if (!res.ok) throw new Error(await res.text() || `enqueue ${res.status}`);
+}
+
+export async function pauseRun(runId: string): Promise<void> {
+  await fetch(`/api/v1/lab/queue/${runId}/pause`, { method: "POST" });
+}
+export async function resumeRun(runId: string): Promise<void> {
+  await fetch(`/api/v1/lab/queue/${runId}/resume`, { method: "POST" });
+}
+export async function stopRun(runId: string): Promise<void> {
+  await fetch(`/api/v1/lab/queue/${runId}/stop`, { method: "POST" });
+}
+export async function deleteRun(runId: string): Promise<void> {
+  await fetch(`/api/v1/lab/runs/${runId}`, { method: "DELETE" });
+}
+export async function recycleRun(runId: string): Promise<void> {
+  await fetch(`/api/v1/lab/runs/${runId}/recycle`, { method: "POST" });
+}
+export async function fetchLabSettings(): Promise<{ max_concurrent_tests: number }> {
+  const res = await fetch("/api/v1/lab/settings");
+  if (!res.ok) throw new Error(`settings ${res.status}`);
+  return res.json();
+}
+export async function saveLabSettings(maxConcurrent: number): Promise<void> {
+  await fetch("/api/v1/lab/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_concurrent_tests: maxConcurrent }),
+  });
+}
+
+export interface TestPredictRule {
+  name: string;
+  signals: number;
+  precision: number;
+  coverage: number;
+  base: number;
+}
+
+export interface TestMaxProfitResponse {
+  ticker: string;
+  name: string;
+  figi: string;
+  interval: string;
+  bars: number;
+  lot: number;
+  from: string;
+  to: string;
+  params: {
+    threshold_pct: number;
+    fee_rate_pct: number;
+    capital: number;
+    slippage_tick: number;
+  };
+  candles: CandleDto[];
+  ceiling_1lot: { pnl: number; bars: number; profitable_bars: number };
+  perfect_intraday: { pnl: number; trades: number };
+  perfect_multiday: { pnl: number; trades: number };
+  buy_hold: { pnl: number; pct: number; lots: number };
+  trades: Array<{
+    entry_ts: string;
+    exit_ts: string;
+    entry_px: number;
+    exit_px: number;
+    pnl: number;
+    lots: number;
+    open?: boolean;
+  }>;
+  equity: Array<{ ts: string; equity: number }>;
+  predictability: {
+    swings: number;
+    lows: number;
+    highs: number;
+    confirm_lag_min_median: number;
+    confirm_lag_min_mean: number;
+    captured_median_pct: number;
+    rules: TestPredictRule[];
+    walkforward: {
+      entry: { precision: number | null; coverage: number | null; cut?: number; base: number };
+      exit: { precision: number | null; coverage: number | null; cut?: number; base: number };
+    };
+  };
+}
+
+export async function fetchMaxProfit(body: Record<string, unknown>): Promise<TestMaxProfitResponse> {
+  const res = await fetch("/api/v1/test/max-profit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `test ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface EnsembleResponse {
+  meta: {
+    engine_version: string;
+    request_hash: string;
+    figi: string;
+    bars: number;
+    lot: number;
+    capital: number;
+    qty_shares: number;
+    from: string;
+    to: string;
+    params: Record<string, unknown>;
+  };
+  regime: { tf: string; timeline: Array<{ from: string; to: string; state: string; reason: string }> };
+  oracle: { swings: number; trades: number; gross: number; net: number; zones: Array<{ from: string; to: string }> };
+  static: EnsembleRun;
+  adaptive: EnsembleRun | null;
+  comparison: {
+    static_net: number;
+    adaptive_net: number | null;
+    static_trades: number;
+    adaptive_trades: number | null;
+    static_capture: { causal_net_oracle_gross_pct: number };
+    adaptive_capture: { causal_net_oracle_gross_pct: number } | null;
+  };
+}
+
+export interface EnsembleRun {
+  label: string;
+  funnel: {
+    raw_signals: number;
+    unique_raw_ts: number;
+    quorum_unique: number;
+    quorum_BUY: number;
+    quorum_SELL: number;
+    entries_raw: number;
+    accepted_decisions: number;
+    unique_entry_episodes: number;
+    entries_rejected: number;
+    reentry_rejected?: number;
+    reentry_rejected_list?: Array<{ side: string; signal_ts: string; bars_since_exit: number | null; cooldown_bars: number | null; reason: string }>;
+    preview_trades: number;
+  };
+  funnel_tf: {
+    bias_states: { LONG_ALLOWED: number; SHORT_ALLOWED: number; NEUTRAL: number };
+    setups: { candidates: number; quorum_passed: number; BUY: number; SELL: number };
+    entries: { candidates: number; accepted: number; rejected: number };
+    rejected_by_reason: Record<string, number>;
+  };
+  why_no_entry: Array<{ ts: string; side: string; code: string; detail: string }>;
+  episodes: {
+    quorum_points: number;
+    entry_decisions: number;
+    unique_episodes: number;
+    completed: number;
+    unresolved: number;
+    list: Array<{
+      episode_id: string;
+      side: string;
+      quorum_event_id: string;
+      first_ts: string;
+      last_ts: string;
+      status: string;
+      entry_px: number | null;
+      exit_px: number | null;
+      net: number | null;
+    }>;
+  };
+  quorum_list: Array<{ ts: string; side: string; votes: number; event_id: string }>;
+  entries: Array<{ ts: string; side: string; reason: string; quorum_event_id?: string }>;
+  rejected: Array<{ ts: string; side: string; reason: string }>;
+  trades: Array<{
+    side: string; regime: string; entry_ts: string; exit_ts: string;
+    entry_px: number; exit_px: number; stop: number | null; target: number | null;
+    gross: number; commission: number; net: number; bars_held: number;
+    exit_reason: string; mfe_r: number; mae_r: number;
+    entry_notional: number; exit_notional: number;
+    entry_commission: number; exit_commission: number;
+    entry_slippage: number; exit_slippage: number;
+    costs: number; costs_pct_of_notional: number; gross_move_pct: number;
+  }>;
+  economic: {
+    trades: number; gross: number; commission: number; slippage: number; costs: number; net: number;
+    profit_factor: number; win_rate_pct: number; avg_hold_bars: number; turnover: number;
+    gross_per_trade: number; cost_per_trade: number; cost_gross_ratio: number; break_even_move_pct: number;
+    avg_gross_move_pct: number; median_gross_move_pct: number; median_costs: number; trades_above_break_even: number;
+    break_even_by_trade?: { n: number; mean: number; median: number; p25: number; p75: number };
+    break_even_by_regime?: Record<string, { n: number; mean: number; median: number }>;
+    break_even_by_side?: Record<string, { n: number; mean: number; median: number }>;
+    equity: Array<{ ts: string; equity: number }>;
+  };
+  capture_ratio: {
+    oracle_gross_potential: number; causal_gross: number; causal_costs: number; causal_net: number;
+    gross_capture_pct: number; net_capture_pct: number;
+  };
+  exit_coverage?: Record<string, number>;
+  oracle_coverage?: {
+    window_minutes: number;
+    point_total: number;
+    geometric: { raw_seen_before_point: number; accepted: number; executed: number; coverage_accepted_pct: number };
+    causal: { raw_seen_before_confirmation: number; accepted: number; executed: number; coverage_accepted_pct: number };
+    rejected_by_gate: Record<string, number>;
+    points?: Array<Record<string, unknown>>;
+  } | null;
+  quality: Array<{
+    role: string; strategy_id: string; tf: string; side: string; signals: number;
+    oracle_points: number; hits: number; coverage_pct: number; precision_pct: number;
+    lead_min_median: number | null; false_positives: number; useless: boolean;
+  }>;
+  useless_strategies: string[];
+  per_regime: Record<string, { trades: number; gross: number; net: number; win_rate_pct: number }>;
+}
+
+export async function fetchEnsemble(body: Record<string, unknown>): Promise<EnsembleResponse> {
+  const res = await fetch("/api/v1/test/ensemble", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `ensemble ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface SweepCell {
+  figi: string;
+  ticker: string;
+  price: number;
+  cooldown: number;
+  exit_confirm: number;
+  trades: number;
+  episodes: number;
+  gross: number;
+  costs: number;
+  net: number;
+  pf: number;
+  win_rate_pct: number;
+  break_even_median: number | null;
+  reentry_rejected: number;
+  counterfactual: { n: number; mean_net: number | null; median_net: number | null; wins_pct: number | null };
+}
+
+export interface SweepResponse {
+  cells: SweepCell[];
+  filtered_out: Array<{ figi: string; ticker: string; price: number | null; reason: string }>;
+  tf_minutes: number;
+  cooldown_minutes: Record<string, number>;
+  note: string;
+}
+
+export async function fetchEnsembleSweep(body: Record<string, unknown>): Promise<SweepResponse> {
+  const res = await fetch("/api/v1/test/ensemble-sweep", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `sweep ${res.status}`);
+  }
+  return res.json();
+}
+
+export type DecisionRow = {
+  signal_id: string; ts: string; side: string; reason: string | null;
+  decision: string; reason_code: string;
+  details: { position_state_before: string; position_state_after: string };
+};
+
+export async function fetchDecisions(
+  runId: string, minHoldBars = 0,
+): Promise<{ decisions: DecisionRow[]; counts: Record<string, number> }> {
+  const res = await fetch(`/api/v1/signals/${runId}/decisions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ policy_id: "ignore_same_side", min_hold_bars: minHoldBars }),
+  });
+  if (!res.ok) throw new Error(`decisions ${res.status}`);
+  return res.json();
+}
