@@ -153,3 +153,38 @@ def test_immediate_flip():
                  SignalPolicyConfig(confirm_flip=True))
     shorts = [t for t in ledger.trades if t.side == "SHORT"]
     assert len(shorts) == 1, "мгновенный flip должен открыть SHORT"
+
+
+# --- E5: trailing-стоп в AtrStopPolicy (trail_activation_r / trail_distance_r) ---
+def test_atr_stop_trailing_raises_stop():
+    from app.engine.exits import AtrStopPolicy
+    from app.engine.models import Candle as _C, Side
+    from datetime import datetime, timezone, timedelta
+    p = AtrStopPolicy(period=14, multiplier=2.0, risk_reward=2.0,
+                      trail_activation_r=1.0, trail_distance_r=1.0)
+    bars = [_C(ts=datetime(2026,5,1,tzinfo=timezone.utc)+timedelta(minutes=i),
+               open=100.0, high=100.0+i*0.5, low=99.0+i*0.2, close=100.0+i*0.4, volume=1000)
+            for i in range(20)]
+    plan = p.plan_entry(Side.BUY, 100.0, bars)
+    stop2 = p.update_stop(Side.BUY, 100.0, plan.stop_loss, bars)
+    assert stop2 > plan.stop_loss  # трейлинг поднял стоп
+    # короткая позиция на падающих барах: стоп опускается
+    bars_fall = [_C(ts=datetime(2026,5,1,tzinfo=timezone.utc)+timedelta(minutes=i),
+                    open=100.0, high=101.0-i*0.5, low=100.0-i*0.4, close=100.5-i*0.4, volume=1000)
+                 for i in range(20)]
+    plan_s = p.plan_entry(Side.SELL, 100.0, bars_fall)
+    stop_s = p.update_stop(Side.SELL, 100.0, plan_s.stop_loss, bars_fall)
+    assert stop_s < plan_s.stop_loss
+
+
+def test_atr_stop_no_trailing_keeps_stop():
+    from app.engine.exits import AtrStopPolicy
+    from app.engine.models import Candle as _C, Side
+    from datetime import datetime, timezone, timedelta
+    p = AtrStopPolicy(period=14, multiplier=2.0, risk_reward=2.0)  # без trailing
+    bars = [_C(ts=datetime(2026,5,1,tzinfo=timezone.utc)+timedelta(minutes=i),
+               open=100.0, high=100.0+i*0.5, low=99.0+i*0.2, close=100.0+i*0.4, volume=1000)
+            for i in range(20)]
+    plan = p.plan_entry(Side.BUY, 100.0, bars)
+    stop2 = p.update_stop(Side.BUY, 100.0, plan.stop_loss, bars)
+    assert stop2 == plan.stop_loss  # без trailing стоп не двигается

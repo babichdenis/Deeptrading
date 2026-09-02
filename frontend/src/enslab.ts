@@ -60,11 +60,31 @@ function renderSetupBlocks() {
   const wrap = $("el-setups");
   if (!wrap) return;
   const cards = catalog.filter((c) => ALL_SETUPS.includes(c.id));
-  wrap.innerHTML = cards.map((c, i) => `
-    <label class="el-block" style="display:flex;align-items:center;gap:6px">
-      <input type="checkbox" class="el-setup" data-sid="${c.id}" ${i < 7 ? "checked" : ""} />
-      <span>${c.name}</span>
-    </label>`).join("");
+  wrap.innerHTML = cards.map((c, i) => {
+    const paramsHtml = Object.entries(c.params_schema).map(([key, spec]) => `
+      <label class="mini-hint">${key}
+        <input type="number" data-skey="${key}" value="${spec.default}" min="${spec.min ?? ""}" max="${spec.max ?? ""}" step="any" style="width:56px" />
+      </label>`).join("");
+    return `<div class="el-block-wrap" data-sid="${c.id}">
+      <label class="el-block" style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" class="el-setup" data-sid="${c.id}" ${i < 7 ? "checked" : ""} />
+        <span>${c.name}</span>
+        <button type="button" class="btn-secondary btn-sm" data-reset="${c.id}" title="Сбросить в default">⟲</button>
+      </label>
+      <div class="el-block-params">${paramsHtml}</div>
+    </div>`;
+  }).join("");
+  wrap.querySelectorAll<HTMLButtonElement>("[data-reset]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const card = catalog.find((c) => c.id === b.dataset.reset);
+      if (!card) return;
+      const sid = card.id;
+      wrap.querySelectorAll<HTMLInputElement>(`.el-block-wrap[data-sid="${sid}"] input[data-skey]`).forEach((inp) => {
+        const spec = (card.params_schema as Record<string, any>)[inp.dataset.skey!];
+        if (spec) inp.value = String(spec.default);
+      });
+    }),
+  );
 }
 
 function renderExitParams() {
@@ -80,6 +100,34 @@ function parseFigis(): string[] {
   return [...selectedStocks];
 }
 
+function initDates() {
+  const fromEl = $("el-date-from") as HTMLInputElement;
+  const toEl = $("el-date-to") as HTMLInputElement;
+  if (!fromEl || !toEl) return;
+  const saved = localStorage.getItem("enslab-dates");
+  if (saved) {
+    try {
+      const d = JSON.parse(saved);
+      fromEl.value = d.from ?? "";
+      toEl.value = d.to ?? "";
+      return;
+    } catch { /* ignore */ }
+  }
+  // текущий месяц по умолчанию
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  const first = new Date(y, m, 1);
+  const last = new Date(y, m + 1, 0);
+  const iso = (dt: Date) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  fromEl.value = iso(first);
+  toEl.value = iso(last);
+  // сохраняем
+  const save = () => localStorage.setItem("enslab-dates", JSON.stringify({ from: fromEl.value, to: toEl.value }));
+  fromEl.addEventListener("change", save);
+  toEl.addEventListener("change", save);
+}
+
 function makeAutoName(): string {
   const setups = [...document.querySelectorAll<HTMLInputElement>(".el-setup:checked")]
     .map((b) => SHORT_NAMES[b.dataset.sid!] ?? b.dataset.sid)
@@ -91,21 +139,40 @@ function makeAutoName(): string {
   return `[${bias}|${setups}|${tf}|cd${cd}|x${n}]`;
 }
 
+function renderQuorumOptions() {
+  const sel = $("cfg-quorum") as HTMLSelectElement;
+  if (!sel) return;
+  const n = document.querySelectorAll<HTMLInputElement>(".el-setup:checked").length || 1;
+  const cur = Number(sel.value) || 2;
+  const def = Math.min(Math.max(cur, 1), n);
+  sel.innerHTML = Array.from({ length: n }, (_, i) =>
+    `<option value="${i + 1}"${i + 1 === def ? " selected" : ""}>${i + 1}-of-${n}</option>`,
+  ).join("");
+}
+
 function collectBody(): Record<string, unknown> {
   const setups = [...document.querySelectorAll<HTMLInputElement>(".el-setup:checked")]
-    .map((b) => ({ strategy_id: b.dataset.sid, tf: "5min", params: {} }));
+    .map((b) => {
+      const params: Record<string, number> = {};
+      document.querySelectorAll<HTMLInputElement>(`.el-block-wrap[data-sid="${b.dataset.sid}"] input[data-skey]`)
+        .forEach((inp) => { params[inp.dataset.skey!] = Number(inp.value); });
+      return { strategy_id: b.dataset.sid, tf: "5min", params };
+    });
   const exitId = ($("el-exit") as HTMLSelectElement).value;
   const exitParams: Record<string, number> = {};
   document.querySelectorAll<HTMLInputElement>("#el-exit-params input[data-exit-key]")
     .forEach((inp) => { exitParams[inp.dataset.exitKey!] = Number(inp.value); });
-  return {
+  const fromEl = $("el-date-from") as HTMLInputElement;
+  const toEl = $("el-date-to") as HTMLInputElement;
+  const body: Record<string, unknown> = {
     figis: parseFigis(),
     days: Number(($("el-days") as HTMLInputElement).value) || 30,
     capital: Number(($("el-capital") as HTMLInputElement).value) || 100000,
     bias_mode: ($("el-bias-mode") as HTMLSelectElement).value,
+    bias: { tf: "hour", period: Number(($("el-bias-period") as HTMLInputElement).value) || 50 },
     entry_tf: ($("el-entry-tf") as HTMLSelectElement).value,
     entry_session: ($("el-session") as HTMLSelectElement).value,
-    quorum: Number(($("el-quorum") as HTMLInputElement).value) || 2,
+    quorum: Number(($("cfg-quorum") as HTMLSelectElement).value) || 2,
     same_side_reentry_cooldown_bars: Number(($("el-cooldown") as HTMLInputElement).value) || 0,
     lot: 10,
     use_all_setups: setups.length === ALL_SETUPS.length,
@@ -114,6 +181,9 @@ function collectBody(): Record<string, unknown> {
     entry: { tf: ($("el-entry-tf") as HTMLSelectElement).value, lookback: Number(($("el-entry-lookback") as HTMLInputElement).value) || 1 },
     exit_policy: { id: exitId, params: exitParams },
   };
+  if (fromEl?.value) body.from_ts = `${fromEl.value}T00:00:00Z`;
+  if (toEl?.value) body.to_ts = `${toEl.value}T23:59:00Z`;
+  return body;
 }
 
 function fmtTs(iso: string | null): string {
@@ -191,6 +261,10 @@ export async function initEnsLab() {
   renderSetupBlocks();
   renderExitParams();
   renderStockChips();
+  initDates();
+  renderQuorumOptions();
+  document.querySelectorAll<HTMLInputElement>(".el-setup").forEach((cb) =>
+    cb.addEventListener("change", () => { renderQuorumOptions(); applyAutoName(); }));
   const nameInput = $("cfg-name") as HTMLInputElement;
   let nameTouched = false;
   nameInput.addEventListener("input", () => { nameTouched = true; });
@@ -205,7 +279,7 @@ export async function initEnsLab() {
   document.querySelectorAll<HTMLElement>(".el-setup, #el-entry-tf, #el-bias-mode, #el-cooldown")
     .forEach((el) => el.addEventListener("change", applyAutoName));
   ($("el-exit") as HTMLSelectElement).addEventListener("change", renderExitParams);
-  $("btn-enslab-run").addEventListener("click", () => void runToLab());
+  $("btn-enslab-run")?.addEventListener("click", () => void runToLab());
   connectWs();
   await refreshQueue();
   if (queueTimer) clearInterval(queueTimer);

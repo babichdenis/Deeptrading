@@ -41,12 +41,19 @@ class SessionPolicy:
         return seconds / 60
 
     def can_enter(self, ts: datetime, tf_minutes: int) -> tuple[bool, str]:
+        """Разрешён ли НОВЫЙ вход в момент ts.
+
+        Политика entry_session=main: вход разрешён ТОЛЬКО внутри окна
+        open_time..close_time (10:00–18:45 MSK) в будни. Вне окна — запрет
+        (вечерняя/утренняя сессия не является main; перенос открытой позиции
+        обрабатывается отдельно через overnight/force_flat).
+        """
         lt = self.local(ts)
         if lt.weekday() >= 5:
             return False, f"weekend {lt.date()}"
 
         if lt.time() < self.open_t or lt.time() > self.close_t:
-            return True, ""
+            return False, f"outside main session {lt.strftime('%H:%M')}"
 
         cutoff_bars = self.config.entry_cutoff_bars
         if cutoff_bars <= 0:

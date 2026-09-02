@@ -4,6 +4,8 @@ import {
   CrosshairMode,
   createChart,
   createSeriesMarkers,
+  HistogramSeries,
+  LineSeries,
   type CandlestickData,
   type IChartApi,
   type ISeriesMarkersPluginApi,
@@ -31,7 +33,7 @@ export interface LabTrade {
 interface ZoneRect {
   timeFrom: UTCTimestamp;
   timeTo: UTCTimestamp;
-  win: boolean;
+  win: boolean | null;
 }
 
 class ZonesPaneView implements IPrimitivePaneView {
@@ -53,7 +55,10 @@ class ZonesPaneView implements IPrimitivePaneView {
             if (x1 === null && x2 === null) continue;
             const left = x1 ?? 0;
             const right = x2 ?? scope.mediaSize.width;
-            ctx.fillStyle = z.win ? "rgba(38,166,154,0.14)" : "rgba(239,83,80,0.16)";
+            // приглушённые: зелёный плюс, красный минус, жёлтый открытая
+            ctx.fillStyle = z.win == null
+              ? "rgba(255,193,7,0.10)"
+              : z.win ? "rgba(38,166,154,0.10)" : "rgba(239,83,80,0.12)";
             ctx.fillRect(left, 0, Math.max(2, right - left), scope.mediaSize.height);
           }
         });
@@ -83,12 +88,25 @@ export function toUnix(iso: unknown): UTCTimestamp {
 
 export interface LabChartHandle {
   destroy: () => void;
+  focusRange: (fromTs: string, toTs: string) => void;
+}
+
+export interface LabChartOptions {
+  analysis?: {
+    sma20?: Array<number | null>;
+    ema50?: Array<number | null>;
+    bb_upper?: Array<number | null>;
+    bb_lower?: Array<number | null>;
+    rsi?: Array<number | null>;
+    macd?: { macd: Array<number | null>; signal: Array<number | null>; hist: Array<number | null> };
+  } | null;
 }
 
 export function createLabChart(
   container: HTMLElement,
   candlesJson: Array<{ ts: string; open: number; high: number; low: number; close: number; volume: number }>,
   trades: LabTrade[],
+  opts: LabChartOptions = {},
 ): LabChartHandle {
   container.innerHTML = "";
 
@@ -122,15 +140,58 @@ export function createLabChart(
   }));
   candleSeries.setData(data);
 
+  // индикаторы (из анализа акции) — SMA/EMA/BB как на Складе
+  const a = opts.analysis;
+  if (a) {
+    const line = (color: string, arr?: Array<number | null>, width = 1) => {
+      if (!arr) return;
+      const s = chart.addSeries(LineSeries, { color, lineWidth: width as never, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+      const pts = sortedCandles
+        .map((c, i) => ({ time: toUnix(c.ts), value: arr[i] }))
+        .filter((p) => p.value != null && Number.isFinite(p.value));
+      if (pts.length) s.setData(pts as never[]);
+    };
+    line("#4a90e2", a.sma20, 2);
+    line("#e6a23c", a.ema50, 2);
+    line("rgba(155,89,182,0.8)", a.bb_upper, 1);
+    line("rgba(155,89,182,0.8)", a.bb_lower, 1);
+    // нижняя панель: MACD и/или RSI
+    const hasMacd = !!a.macd?.macd?.some((v) => v != null);
+    const hasRsi = !!a.rsi?.some((v) => v != null);
+    if (hasMacd || hasRsi) {
+      const oscPts = sortedCandles.map((c) => toUnix(c.ts));
+      if (hasMacd && a.macd) {
+        const hist = chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, 1);
+        hist.setData(a.macd.hist.map((v, i) => ({
+          time: oscPts[i], value: v ?? 0,
+          color: (v ?? 0) >= 0 ? "rgba(38,166,154,0.55)" : "rgba(239,83,80,0.55)",
+        })).filter((_p, i) => a.macd!.macd[i] != null) as never[]);
+        const m = chart.addSeries(LineSeries, { color: "#2962ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false }, 1);
+        m.setData(a.macd.macd.map((v, i) => ({ time: oscPts[i], value: v })).filter((p) => p.value != null) as never[]);
+        const s = chart.addSeries(LineSeries, { color: "#ff9800", lineWidth: 2, priceLineVisible: false, lastValueVisible: false }, 1);
+        s.setData(a.macd.signal.map((v, i) => ({ time: oscPts[i], value: v })).filter((p) => p.value != null) as never[]);
+      }
+      if (hasRsi && a.rsi) {
+        const r = chart.addSeries(LineSeries, { color: "#c39bd3", lineWidth: 2, priceLineVisible: false, lastValueVisible: false }, 1);
+        r.setData(a.rsi.map((v, i) => ({ time: oscPts[i], value: v })).filter((p) => p.value != null) as never[]);
+      }
+      try {
+        const panes = chart.panes();
+        if (panes[1]) { panes[0].setStretchFactor(3); panes[1].setStretchFactor(2); }
+      } catch { /* старые версии */ }
+    }
+  }
+
   const zones: ZoneRect[] = [];
   const markers: SeriesMarker<Time>[] = [];
 
   for (const t of trades) {
     const tf = toUnix(t.entry_time);
     const tt = toUnix(t.exit_time);
-    zones.push({ timeFrom: tf, timeTo: tt, win: Number(t.net_pnl) >= 0 });
+    const isOpen = !t.exit_time;
+    const win = isOpen ? null : Number(t.net_pnl) >= 0;
+    zones.push({ timeFrom: tf, timeTo: tt, win: isOpen ? null : Number(t.net_pnl) >= 0 });
 
-    const win = Number(t.net_pnl) >= 0;
     const long = t.side === "LONG";
     const votes = t.entry_votes != null ? `${t.entry_votes}✓` : "";
     markers.push({
@@ -140,13 +201,26 @@ export function createLabChart(
       color: long ? "#26a69a" : "#ef5350",
       text: `${long ? "L" : "S"} ${votes}`,
     });
-    markers.push({
-      time: tt,
-      position: long ? "aboveBar" : "belowBar",
-      shape: "circle",
-      color: win ? "#26a69a" : "#ef5350",
-      text: String(t.exit_reason ?? "").slice(0, 8) || money(t.net_pnl),
-    });
+    if (!isOpen) {
+      markers.push({
+        time: tt,
+        position: long ? "aboveBar" : "belowBar",
+        shape: "circle",
+        color: win ? "#26a69a" : "#ef5350",
+        text: String(t.exit_reason ?? "").slice(0, 8) || money(t.net_pnl),
+      });
+    }
+    // стоп и тейк линиями на входе
+    const entryPrice = Number(t.entry_price);
+    const stop = (t as any).initial_stop != null ? Number((t as any).initial_stop) : null;
+    const target = (t as any).take_profit != null ? Number((t as any).take_profit) : null;
+    const addLine = (price: number, color: string, title: string) => {
+      if (!Number.isFinite(price)) return;
+      candleSeries.createPriceLine({ price, color, lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title });
+    };
+    if (stop != null) addLine(stop, "#ef5350", "SL");
+    if (target != null) addLine(target, "#26a69a", "TP");
+    void entryPrice;
   }
 
   if (zones.length > 0) {
@@ -205,6 +279,16 @@ export function createLabChart(
     destroy: () => {
       chart.remove();
       container.innerHTML = "";
+    },
+    focusRange: (fromTs: string, toTs: string) => {
+      const a = toUnix(fromTs);
+      const b = toUnix(toTs) || a + 3600;
+      const pad = Math.max(60, (b - a) * 0.15);
+      try {
+        chart.timeScale().setVisibleLogicalRange({ from: a - pad, to: b + pad } as never);
+      } catch {
+        chart.timeScale().setVisibleRange({ from: a - pad as never, to: b + pad as never });
+      }
     },
   };
 }

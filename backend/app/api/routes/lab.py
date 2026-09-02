@@ -174,6 +174,49 @@ async def lab_queue_create(body: QueueItemBody, db: AsyncSession = Depends(get_d
             from datetime import timezone
 
             dt_ = dt_.replace(tzinfo=timezone.utc)
+    # ансамблевая конфигурация? (фильтр ensemble с параметрами из модалки)
+    ens = next((f for f in (cfg.filters or []) if isinstance(f, dict) and f.get("id") == "ensemble"), None)
+    if ens and ens.get("params"):
+        p = ens["params"]
+        from app.models.ensemble_runs import EnsembleRun as _ER
+        # тикеры → figi (в filters храним тикеры, а движку нужны figi)
+        tickers = body.tickers or (p.get("tickers") or [])
+        figis = []
+        if tickers:
+            from app.models.instrument import Instrument as _Inst
+            inst_rows = (await db.execute(
+                select(_Inst).where(_Inst.ticker.in_([t.upper() for t in tickers]))
+            )).scalars().all()
+            figis = [r.figi for r in inst_rows]
+            if not figis:
+                figis = [t for t in tickers if str(t).startswith("BBG")]
+        params = {
+            "figis": figis,
+            "days": body.period_days or 30,
+            "bias_mode": p.get("bias_mode", "info"),
+            "entry_tf": p.get("entry_tf", "5min"),
+            "entry_session": p.get("entry_session", "main"),
+            "carry_overnight": True,
+            "quorum": cfg.quorum,
+            "same_side_reentry_cooldown_bars": p.get("cooldown_bars", 15),
+            "capital": 100000,
+            "lot": 10,
+            "use_all_setups": True,
+            "drop_useless": True,
+            "setups": [{"strategy_id": m["strategy_id"], "tf": "5min", "params": m.get("params", {})} for m in cfg.members],
+            "exit_policy": cfg.exit_policy,
+            "entry": {"tf": p.get("entry_tf", "5min"), "lookback": p.get("entry_lookback", 1)},
+            "bias": {"tf": "hour", "period": p.get("bias_period", 50)},
+            "from_ts": ((df.isoformat() if df else None) or p.get("date_from")),
+            "to_ts": ((dt_.isoformat() if dt_ else None) or p.get("date_to")),
+        }
+        run = _ER(status="QUEUED", params=params,
+                  progress={"done": 0, "total": len(params["figis"]), "current": "", "by_stock": {}})
+        db.add(run)
+        await db.commit()
+        from app.services.ensemble_queue import queue_dispatcher
+        queue_dispatcher.start()
+        return {"run_id": str(run.id), "status": run.status, "queued": True, "mode": "ensemble"}
     run = await enqueue(body.config_id, body.tickers, df, dt_, body.period_days)
     return {"run_id": str(run.id), "status": run.status, "queued": True}
 

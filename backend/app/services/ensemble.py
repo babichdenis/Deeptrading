@@ -8,14 +8,49 @@ MCP-контракт: запрос детерминирован (request_hash), 
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import re
+import statistics
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 from app.engine.costs import CostModel
 from app.engine.exits import ExitPolicy, intrabar_exit
+
+def _validate_candles(candles: list) -> tuple:
+    """Validate candles for anomalies and broken data.
+    
+    Returns:
+        (valid_candles, skipped_count)
+    """
+    valid = []
+    skipped = 0
+    for c in candles:
+        # Check for zero/negative prices
+        if c.open <= 0 or c.close <= 0 or c.high <= 0 or c.low <= 0:
+            skipped += 1
+            continue
+        # Check high >= low
+        if c.high < c.low:
+            skipped += 1
+            continue
+        # Check high >= open and high >= close
+        if c.high < c.open or c.high < c.close:
+            skipped += 1
+            continue
+        # Check low <= open and low <= close
+        if c.low > c.open or c.low > c.close:
+            skipped += 1
+            continue
+        # Check volume >= 0
+        if c.volume < 0:
+            skipped += 1
+            continue
+        valid.append(c)
+    return valid, skipped
+
 from app.engine.models import Candle as EngineCandle, PositionState, Side
 from app.engine.policies import SignalPolicyConfig
 from app.engine.quorum import merge_quorum
@@ -24,6 +59,7 @@ from app.engine.sessions import SessionPolicyConfig
 from app.engine.wave1 import ReplayStrategy
 from app.services.ceiling import zigzag_swings
 from app.services.experiments import build_exit_policy
+from app.services.ml_ensemble_filter import MlEnsembleFilter, resample_to_5m
 from app.services.regime import RegimeDetector, regime_at
 from app.services.signals import generate_signals
 
@@ -36,6 +72,45 @@ TF_SECONDS = {"1min": 60, "5min": 300, "15min": 900, "hour": 3600}
 def request_hash(payload: dict) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def entry_pullback_deep_pass(c5: list[EngineCandle], atr5: list[float | None],
+                              ts: datetime, side: str,
+                              lookback: int = 20, thr_mult: float = 0.5) -> tuple[bool, str]:
+    """B4-RUN: требовать глубокий pullback перед breakout на decision_ts.
+
+    pullback_bps = откат цены входа (close 5m-бара, содержащего ts) от недавнего
+    swing (max high / min low за lookback 5m-баров) в bps. Deep если
+    pullback_bps >= thr_mult * ATR5m(decision) в bps. Без look-ahead: только
+    прошлые бары. side: 'BUY' / 'SELL' (нотация micro_breakout).
+    """
+    c5ts = [c.ts for c in c5]
+    j = bisect.bisect_right(c5ts, ts) - 1
+    if j < lookback:
+        return False, "PULLBACK_WARMUP"
+    px = c5[j].close
+    if px <= 0:
+        return False, "PULLBACK_NA"
+    lo = max(0, j - lookback)
+    if side == "BUY":
+        swing = max(c.high for c in c5[lo:j + 1])
+        if swing <= 0:
+            return False, "PULLBACK_NA"
+        pb = (swing - px) / swing * 10000.0
+    elif side == "SELL":
+        swing = min(c.low for c in c5[lo:j + 1])
+        if swing <= 0:
+            return False, "PULLBACK_NA"
+        pb = (px - swing) / swing * 10000.0
+    else:
+        return False, "PULLBACK_NA"
+    atr = atr5[j] if j < len(atr5) else None
+    if atr is None or atr <= 0:
+        return False, "PULLBACK_NA"
+    thr = thr_mult * atr / px * 10000.0
+    if pb < thr:
+        return False, "PULLBACK_SHALLOW"
+    return True, ""
 
 
 def resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]:
@@ -107,6 +182,16 @@ class RegimeExitPolicy(ExitPolicy):
         regime = regime_at(self.regime_bars, bars[-1].ts) if bars else None
         policy = self.per_regime.get(regime["state"]) if regime else None
         return (policy or self.default).plan_entry(side, entry_price, bars)
+
+    def update_stop(self, side, entry_price, current_stop, bars):
+        """Трейлинг делегируется в подполитику режима текущего бара (как plan_entry)."""
+        regime = regime_at(self.regime_bars, bars[-1].ts) if bars else None
+        policy = self.per_regime.get(regime["state"]) if regime else None
+        target = policy or self.default
+        upd = getattr(target, "update_stop", None)
+        if upd is None:
+            return current_stop
+        return upd(side, entry_price, current_stop, bars)
 
 
 def _oracle_fixed_qty(candles: list[EngineCandle], threshold_pct: float, fee_rate: float,
@@ -325,7 +410,7 @@ def _oracle_coverage(oracle_swings_detail: list[dict], entries_raw: list[dict],
     ge = {"tot": 0, "raw_before_point": 0, "accepted": 0, "executed": 0}
     ca = {"tot": 0, "raw_before_conf": 0, "accepted": 0, "executed": 0}
     rejected_by_gate = {"not_seen": 0, "quorum": 0, "bias": 0, "regime": 0,
-                        "cooldown": 0, "price": 0, "other": 0}
+                        "cooldown": 0, "price": 0, "ml": 0, "other": 0}
     points_detail: list[dict] = []
 
     def _gate_failure(reason: str) -> str:
@@ -335,6 +420,8 @@ def _oracle_coverage(oracle_swings_detail: list[dict], entries_raw: list[dict],
             return "quorum"
         if reason.startswith("REGIME"):
             return "regime"
+        if reason.startswith("ML_"):
+            return "ml"
         if "REENTRY" in reason:
             return "cooldown"
         if reason == "REJECT_SHORT" or reason.startswith("SKIP_ENTRY") or reason.startswith("REJECT_SESSION"):
@@ -442,7 +529,11 @@ def _build_session_policy(req: dict) -> SessionPolicyConfig | None:
     force_flat = bool(req.get("force_flat_at_session_end", False))
     if entry_session == "all":
         return None
-    return SessionPolicyConfig(overnight=carry, force_flat_at_session_end=force_flat)
+    cfg = {"overnight": carry, "force_flat_at_session_end": force_flat}
+    if req.get("entry_session_extended"):
+        cfg["open_time"] = "09:30"
+        cfg["close_time"] = "19:15"
+    return SessionPolicyConfig(**cfg)
 
 
 def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
@@ -452,7 +543,8 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   adaptive: dict[str, dict] | None, oracle: dict,
                   oracle_points: dict[str, list[datetime]], lot: int,
                   capital: float, label: str,
-                  oracle_swings_detail: list[dict] | None = None) -> dict:
+                  oracle_swings_detail: list[dict] | None = None,
+                  ml_filter_obj=None) -> dict:
     """Один прогон (static или adaptive) через единый конвейер."""
     setup_runs: list[tuple[str, list[dict]]] = []
     setup_out: dict[str, dict] = {}
@@ -481,6 +573,78 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     entry_episodes: set[tuple[str, str]] = set()
     bias_mode = req.get("bias_mode", "veto")  # veto | info | strict_ct
     quorum_full = len(setup_runs)
+
+    # EXP-002: entry_volatility_gate = rolling_atr_high_only
+    # ATR_5m (Wilder 14, past-only) → per-day → rolling median 20 пред. торговых дней.
+    # WARMUP: первые 20 завершённых торговых дней → входы запрещены.
+    vol_gate = req.get("entry_volatility_gate")
+    gate_info: dict | None = None
+    if vol_gate == "rolling_atr_high_only":
+        from zoneinfo import ZoneInfo as _ZI2
+        _msk2 = _ZI2("Europe/Moscow")
+        _c5 = resample(candles, TF_SECONDS["5min"])
+        # ATR Wilder 14 по 5m (строго прошлые бары: на каждый 5m бар)
+        _atr = [None] * len(_c5)
+        _trs: list[float] = []
+        for i in range(1, len(_c5)):
+            h, l, pc = _c5[i].high, _c5[i].low, _c5[i-1].close
+            _trs.append(max(h-l, abs(h-pc), abs(l-pc)))
+            if len(_trs) > 14:
+                _trs.pop(0)
+            if i >= 14:
+                _atr[i] = sum(_trs) / 14
+        # per-day: последний ATR дня
+        _day_atr: dict[str, float] = {}
+        _day_ts: dict[str, datetime] = {}
+        for i, c in enumerate(_c5):
+            d = c.ts.astimezone(_msk2).date().isoformat()
+            if _atr[i] is not None:
+                _day_atr[d] = _atr[i]
+                _day_ts[d] = c.ts
+        _day_ord = sorted(_day_atr)
+        # rolling median предыдущих 20 дней (без текущего дня)
+        _roll: dict[str, float | None] = {}
+        for idx, d in enumerate(_day_ord):
+            prev = _day_ord[max(0, idx-20):idx]
+            _roll[d] = statistics.median([_day_atr[x] for x in prev]) if prev else None
+        _warmup_days = set(_day_ord[:20])  # первые 20 завершённых дней окна
+        gate_info = {"rolling_median_20d": {d: round(v,6) if v else None for d, v in _roll.items()},
+                     "days_total": len(_day_ord), "warmup_days": sorted(_warmup_days)}
+        _vol_day_ok: dict[str, bool] = {}
+        for d in _day_ord:
+            v = _roll.get(d)
+            _vol_day_ok[d] = (v is not None and d not in _warmup_days and _day_atr[d] > v)
+
+        def _gate_pass(ts_dt: datetime) -> tuple[bool, str]:
+            d = ts_dt.astimezone(_msk2).date().isoformat()
+            if d in _warmup_days:
+                return False, "VOL_GATE_WARMUP"
+            if not _vol_day_ok.get(d, False):
+                return False, "VOL_GATE_LOW_VOL"
+            return True, ""
+
+    # B4-RUN: entry_pullback_depth = require_deep
+    # pullback depth на decision_ts >= 0.5 * ATR5m(decision) в bps. Детерминированный
+    # порог (без утечки из July shadow). Блокирует мелкие pullback'и перед breakout.
+    pull_gate = req.get("entry_pullback_depth")
+    _pull_pass = None
+    if pull_gate in ("require_deep", "require_medium"):
+        _thr_mult = {"require_deep": 0.5, "require_medium": 0.25}.get(pull_gate, 0.5)
+        _c5 = resample(candles, TF_SECONDS["5min"])
+        _c5ts = [c.ts for c in _c5]
+        _atr5 = [None] * len(_c5)
+        _trs: list[float] = []
+        for i in range(1, len(_c5)):
+            h, l, pc = _c5[i].high, _c5[i].low, _c5[i-1].close
+            _trs.append(max(h-l, abs(h-pc), abs(l-pc)))
+            if len(_trs) > 14:
+                _trs.pop(0)
+            if i >= 14:
+                _atr5[i] = sum(_trs) / 14
+
+        def _pull_pass(ts_dt: datetime, side: str) -> tuple[bool, str]:
+            return entry_pullback_deep_pass(_c5, _atr5, ts_dt, side, thr_mult=_thr_mult)
+
     for e in entries_raw:
         ts, side = e["ts"], e["side"]
         bucket = int(ts.timestamp()) // 3600
@@ -491,6 +655,18 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                 continue
             # info/strict_ct: пропускаем против bias дальше, но строже по кворуму
             e = {**e, "against_bias": True}
+        # EXP-002: vol gate (rolling_atr_high_only) — блокирует входы в low-vol/WARMUP
+        if vol_gate == "rolling_atr_high_only":
+            _ok, _why = _gate_pass(ts)
+            if not _ok:
+                rejected.append({**e, "ts": ts.isoformat(), "reason": _why})
+                continue
+        # B4-RUN: pullback-depth gate — блокирует мелкие pullback'и перед breakout
+        if pull_gate in ("require_deep", "require_medium"):
+            _ok, _why = _pull_pass(ts, side)
+            if not _ok:
+                rejected.append({**e, "ts": ts.isoformat(), "reason": _why})
+                continue
         # адаптивный режим: своя конфигурация (setups/quorum/mode/exit) для состояния
         mode = "both"
         quorum_pool = quorum_sigs
@@ -525,6 +701,11 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         if state is not None:
             regime_by_ts[ts] = state
         entry_episodes.add((side, quorum_ev["event_id"]))
+        if ml_filter_obj is not None:
+            ok_ml, why_ml = ml_filter_obj.accepts(ts)
+            if not ok_ml:
+                rejected.append({**e, "ts": ts.isoformat(), "reason": why_ml})
+                continue
         accepted.append({**e, "ts": ts.isoformat(), "quorum_event_id": quorum_ev["event_id"]})
 
     if adaptive is not None:
@@ -867,9 +1048,36 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
     use_all = bool(req.get("use_all_setups", False))
     drop_useless = bool(req.get("drop_useless", False))
 
-    candles = [c for c in candles_1m if c.ts >= datetime.now(timezone.utc) - timedelta(days=days)]
+    # --- ML-фильтр: LightGBM gate качества сигналов (опционально) ---
+    ml_filter_cfg = req.get("ml_filter")
+    ml_filter_obj = None
+    if ml_filter_cfg:
+        ml_filter_obj = MlEnsembleFilter(
+            threshold=float(ml_filter_cfg.get("threshold", 0.55)),
+            ticker=ml_filter_cfg.get("ticker") or None,
+            figi=req.get("figi") or None,
+        )
+
+    if req.get("from_ts") or req.get("to_ts"):
+        _f = req.get("from_ts")
+        _t = req.get("to_ts")
+        if _f:
+            candles = [c for c in candles_1m if c.ts >= datetime.fromisoformat(_f.replace("Z", "+00:00"))]
+        else:
+            candles = candles_1m
+        if _t:
+            candles = [c for c in candles if c.ts <= datetime.fromisoformat(_t.replace("Z", "+00:00"))]
+    else:
+        candles = [c for c in candles_1m if c.ts >= datetime.now(timezone.utc) - timedelta(days=days)]
     if len(candles) < 120:
         return {"error": "мало свечей", "bars": len(candles)}
+
+    # --- Validate candles for anomalies ---
+    candles, skipped_count = _validate_candles(candles)
+    if skipped_count > 0:
+        print(f"[ensemble] Skipped {skipped_count} broken candles")
+    if len(candles) < 120:
+        return {"error": "мало свечей после валидации", "bars": len(candles)}
 
     # --- все функции, если запрошено ---
     if use_all or not setups_cfg:
@@ -883,12 +1091,29 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
     # --- regime timeline (на режимном ТФ) ---
     regime_tf_sec = TF_SECONDS.get(regime_cfg.get("tf", "5min"), 300)
     regime_bars = resample(candles, regime_tf_sec)
-    detector = RegimeDetector(**{k: v for k, v in regime_cfg.items()
-                                 if k in ("slope_threshold", "adx_threshold",
-                                          "atr_percentile_threshold", "range_mult")})
-    regime_row = detector.compute(regime_bars)
-    from app.services.regime import regime_timeline
-    timeline = regime_timeline(regime_row)
+    # REGIME-GATE: кастомный режим по дате (IMOEX daily range) вместо индикаторов
+    gate = req.get("regime_gate")
+    if gate and gate.get("high_vol_dates"):
+        from zoneinfo import ZoneInfo as _ZI
+        _msk = _ZI("Europe/Moscow")
+        _hv = set(gate["high_vol_dates"])
+        # regime_bars: заменяем ts на даты, состояние HIGH_VOL/LOW_VOL
+        _bars_out = []
+        for b in regime_bars:
+            d = b.ts.astimezone(_msk).date().isoformat()
+            _bars_out.append({"ts": b.ts, "state": "HIGH_VOL" if d in _hv else "LOW_VOL"})
+        regime_bars = _bars_out
+        timeline = regime_bars
+        regime_row = regime_bars
+        _regime_gated = True
+    else:
+        detector = RegimeDetector(**{k: v for k, v in regime_cfg.items()
+                                     if k in ("slope_threshold", "adx_threshold",
+                                              "atr_percentile_threshold", "range_mult")})
+        regime_row = detector.compute(regime_bars)
+        from app.services.regime import regime_timeline
+        timeline = regime_timeline(regime_row)
+        _regime_gated = False
 
     # --- размер позиции и оракул ---
     qty_shares = lot
@@ -960,16 +1185,22 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
             adaptive_map[state] = entry_cfg_adapt
         adaptive_map["_exit_policies"] = adaptive_exits
 
+    if ml_filter_obj is not None:
+        c5_all = resample_to_5m(candles)
+        ml_filter_obj.precompute(c5_all)
+
     static = _run_pipeline(candles, req, bias, setups_cfg, quorum_k, entry_window_min,
                            int(entry_cfg.get("lookback", 1)), static_exit, qty_shares,
-                           regime_row, None, oracle, o_points, lot, capital, "static",
-                           o_swings_detail)
+                           regime_row,
+                           adaptive_map if req.get("regime_gate") else None,
+                           oracle, o_points, lot, capital, "static",
+                           o_swings_detail, ml_filter_obj=ml_filter_obj)
 
     if adaptive_map is not None:
         adaptive = _run_pipeline(candles, req, bias, setups_cfg, quorum_k, entry_window_min,
                                  int(entry_cfg.get("lookback", 1)), static_exit, qty_shares,
                                  regime_row, adaptive_map, oracle, o_points, lot, capital,
-                                 "adaptive")
+                                 "adaptive", ml_filter_obj=ml_filter_obj)
     else:
         adaptive = None
 
@@ -985,7 +1216,8 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
                        "entry": entry_cfg, "entry_window_min": entry_window_min,
                        "exit_policy": exit_cfg, "oracle": oracle_cfg,
                        "regime": regime_cfg, "adaptive": adaptive_cfg,
-                       "use_all_setups": use_all, "drop_useless": drop_useless},
+                       "use_all_setups": use_all, "drop_useless": drop_useless,
+                       "ml_filter": bool(ml_filter_obj is not None)},
         },
         "regime": {"tf": regime_cfg.get("tf", "5min"), "timeline": timeline,
                    "bars": len(regime_row)},

@@ -29,7 +29,7 @@ import {
   type StrategyCardDto,
   previewConfiguration,
 } from "./api";
-import { initBot } from "./bot";
+import { initBot, pollOnce } from "./bot";
 import { initLab, refreshConfigs } from "./lab";
 import { initTest } from "./test";
 import { initEnsLab } from "./enslab";
@@ -42,7 +42,7 @@ declare global {
 }
 window.FIGI = "BBG004730N88";
 
-const FIGI = "BBG004730N88";
+let FIGI = "BBG004730N88";
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const money = (n: number | null | undefined): string =>
   n == null ? "—" : new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(n);
@@ -100,6 +100,10 @@ const PAGE_TITLES: Record<string, string> = {
   bot: "Paper-бот — дашборд",
 };
 
+const IS_EMBEDDED = new URLSearchParams(window.location.search).get("embedded") === "1";
+if (IS_EMBEDDED) document.body.classList.add("embedded");
+const lk = (k: string) => (IS_EMBEDDED ? "bote_" : "") + k;
+
 function initNav() {
   const $ = (id: string) => document.getElementById(id) as HTMLElement;
   const btns = document.querySelectorAll<HTMLButtonElement>(".nav-btn");
@@ -112,6 +116,7 @@ function initNav() {
       document.getElementById(`page-${page}`)!.classList.add("active");
       $("page-title").textContent = PAGE_TITLES[page] ?? page;
       if (page === "lab") void refreshConfigs();
+      if (page === "bot") void pollOnce();
     }),
   );
 }
@@ -137,10 +142,12 @@ interface ChartRefs {
 
 let refs: ChartRefs | null = null;
 let oraclePrim: ReturnType<typeof makeOraclePrim> | null = null;
+let _overlayLines: Array<{ remove: () => void }> = [];
 let oracleBusy = false;
 let analysis: AnalysisDto | null = null;
-const savedTf = localStorage.getItem("sklad_tf");
-let currentTf = TIMEFRAMES.find((t) => t.interval === savedTf) ?? TIMEFRAMES.find((t) => t.interval === "day")!;
+const savedTf = localStorage.getItem(lk("sklad_tf"));
+const defTf = IS_EMBEDDED ? "1min" : "day";
+let currentTf = TIMEFRAMES.find((t) => t.interval === savedTf) ?? TIMEFRAMES.find((t) => t.interval === defTf)!;
 window.LAB_INTERVAL = currentTf.interval;
 let ensuredFrom: UTCTimestamp | null = null;
 let ensuredTo: UTCTimestamp | null = null;
@@ -184,7 +191,7 @@ interface IndicatorState {
 function loadIndicatorState(): IndicatorState {
   const fallback: IndicatorState = { sma: true, ema: false, bb: false, rsi: false, macd: true };
   try {
-    const raw = localStorage.getItem("indicators");
+    const raw = localStorage.getItem(lk("indicators"));
     return raw ? { ...fallback, ...JSON.parse(raw) } : fallback;
   } catch {
     return fallback;
@@ -734,7 +741,7 @@ async function loadOracle() {
       interval_name: currentTf.interval,
       limit: 20000,
       threshold_pct: 0.5,
-      fee_rate_pct: Number(localStorage.getItem("oracle-fee") || 0.05),
+      fee_rate_pct: Number(localStorage.getItem(lk("oracle-fee")) || 0.05),
       capital: 100_000,
       from_ts: new Date(win.from * 1000).toISOString(),
       to_ts: new Date(win.to * 1000).toISOString(),
@@ -876,7 +883,7 @@ function rebuildChartPreservingView() {
 }
 
 function applyIndicators() {
-  localStorage.setItem("indicators", JSON.stringify(indicators));
+  localStorage.setItem(lk("indicators"), JSON.stringify(indicators));
   const wantPane = indicators.macd || indicators.rsi;
   if (wantPane !== chartFlags.oscPane) {
     rebuildChartPreservingView();
@@ -897,49 +904,23 @@ window.__chartOverlay = (trade: Record<string, unknown>) => {
   if (!refs) return;
   try {
     const entryTime = Math.floor(new Date(String(trade.entry_time)).getTime() / 1000) as UTCTimestamp;
-    const exitTime = Math.floor(new Date(String(trade.exit_time)).getTime() / 1000) as UTCTimestamp;
+    const rawExit = trade.exit_time;
+    const exitTime = rawExit ? (Math.floor(new Date(String(rawExit)).getTime() / 1000) as UTCTimestamp) : null;
     const side = String(trade.side);
-    const pnl = Number(trade.net_pnl);
+    const pnl = trade.net_pnl != null ? Number(trade.net_pnl) : null;
     const color = side === "LONG" ? COLORS.up : COLORS.down;
-    refs.markers.setMarkers([
-      { time: entryTime, position: side === "LONG" ? "belowBar" : "aboveBar", color, shape: "arrowUp", text: `Вход ${side}` },
-      { time: exitTime, position: side === "LONG" ? "aboveBar" : "belowBar", color: pnl >= 0 ? COLORS.up : COLORS.down, shape: "circle", text: `Выход ${money(pnl)} ₽` },
-    ]);
-    refs.candles.createPriceLine({
-      price: Number(trade.entry_price),
-      color: "#e6a23c",
-      lineWidth: 1,
-      lineStyle: 0,
-      axisLabelVisible: true,
-      title: "Вход",
-    });
-    const stop = trade.initial_stop ?? null;
-    if (stop != null) {
-      refs.candles.createPriceLine({
-        price: Number(stop),
-        color: COLORS.down,
-        lineWidth: 1,
-        lineStyle: 2,
-        axisLabelVisible: true,
-        title: "SL",
-      });
+    const markers: SeriesMarker<Time>[] = [
+      { time: entryTime, position: side === "LONG" ? "belowBar" : "aboveBar", color, shape: "arrowUp", text: `Вход` },
+    ];
+    if (exitTime != null) {
+      markers.push({ time: exitTime, position: side === "LONG" ? "aboveBar" : "belowBar", color: pnl != null && pnl >= 0 ? COLORS.up : COLORS.down, shape: "circle", text: pnl != null ? `Выход ${money(pnl)} ₽` : "Выход" });
     }
-    const tp = trade.take_profit ?? null;
-    if (tp != null) {
-      refs.candles.createPriceLine({
-        price: Number(tp),
-        color: COLORS.up,
-        lineWidth: 1,
-        lineStyle: 2,
-        axisLabelVisible: true,
-        title: "TP",
-      });
+    window.__setTradeLines?.(trade);
+    refs.markers.setMarkers(markers);
+    if (exitTime != null) {
+      refs.chart.timeScale().setVisibleLogicalRange({ from: Number(entryTime), to: Number(exitTime) } as never);
     }
-    // подстройка видимой области на окно сделки
-    const pad = 10;
-    refs.chart.timeScale().setVisibleLogicalRange({ from: Number(entryTime), to: Number(exitTime) } as never);
-    void pad;
-    setStatus(`Сделка ${side} ${money(pnl)} ₽ — вход/выход отмечены на графике`);
+    setStatus(`Сделка ${side}${pnl != null ? " " + money(pnl) + " ₽" : ""} — отмечена на графике`);
   } catch (e) {
     console.warn("overlay error", e);
   }
@@ -956,7 +937,7 @@ function initToolbar() {
       nav.querySelectorAll(".tf-btn").forEach((el) => el.classList.remove("active"));
       b.classList.add("active");
       currentTf = tf;
-      localStorage.setItem("sklad_tf", tf.interval);
+      localStorage.setItem(lk("sklad_tf"), tf.interval);
       window.LAB_INTERVAL = tf.interval;
       activeRuns.clear();
       quorumState = null;
@@ -968,12 +949,12 @@ function initToolbar() {
   }
 
   const cbm = document.getElementById("cb-markers") as HTMLInputElement;
-  cbm.checked = localStorage.getItem("sklad_markers") !== "0";
-  cbm.addEventListener("change", () => localStorage.setItem("sklad_markers", cbm.checked ? "1" : "0"));
+  cbm.checked = localStorage.getItem(lk("sklad_markers")) !== "0";
+  cbm.addEventListener("change", () => localStorage.setItem(lk("sklad_markers"), cbm.checked ? "1" : "0"));
   const qk = document.getElementById("quorum-k") as HTMLInputElement;
-  const savedQ = Number(localStorage.getItem("sklad_quorum"));
+  const savedQ = Number(localStorage.getItem(lk("sklad_quorum")));
   if (savedQ >= 1) qk.value = String(savedQ);
-  qk.addEventListener("change", () => localStorage.setItem("sklad_quorum", qk.value));
+  qk.addEventListener("change", () => localStorage.setItem(lk("sklad_quorum"), qk.value));
 
   document.querySelectorAll<HTMLInputElement>("#indicators-menu input[data-ind]").forEach((box) => {
     box.checked = (indicators as unknown as Record<string, boolean>)[box.dataset.ind!] ?? false;
@@ -1001,7 +982,7 @@ function initResizer() {
   const wrap = document.getElementById("chart-wrap")!;
   const resizer = document.getElementById("resizer")!;
 
-  const saved = Number(localStorage.getItem("chartHeight"));
+  const saved = Number(localStorage.getItem(lk("chartHeight")));
   const initial =
     saved > 0 ? saved : Math.round(window.innerHeight * 0.5);
   wrap.style.height = `${clampHeight(initial)}px`;
@@ -1015,7 +996,7 @@ function initResizer() {
   };
   const onUp = () => {
     resizer.classList.remove("dragging");
-    localStorage.setItem("chartHeight", String(wrap.clientHeight));
+    localStorage.setItem(lk("chartHeight"), String(wrap.clientHeight));
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
   };
@@ -1238,12 +1219,14 @@ function renderCatalog(cards: StrategyCardDto[]) {
       <div class="scard-params" id="params-${c.id}">${paramsHtml}</div>
       <label class="scard-role">Роль
         <select id="role-${c.id}">
-          <option value="setup" selected>SETUP</option>
-          <option value="bias">BIAS</option>
-          <option value="entry">ENTRY</option>
+          <option value="setup"${localStorage.getItem(`sklad_role:${c.id}`) === "bias" ? "" : " selected"}>SETUP</option>
+          <option value="bias"${localStorage.getItem(`sklad_role:${c.id}`) === "bias" ? " selected" : ""}>BIAS</option>
+          <option value="entry"${localStorage.getItem(`sklad_role:${c.id}`) === "entry" ? " selected" : ""}>ENTRY</option>
         </select>
       </label>
     `;
+    const cb = el.querySelector<HTMLInputElement>("input[type=checkbox]")!;
+    cb.checked = localStorage.getItem(`sklad_check:${c.id}`) !== "0";
     el.addEventListener("click", (ev) => {
       const target = ev.target as HTMLElement;
       if (target.tagName === "INPUT" || target.tagName === "SELECT") return;
@@ -1263,11 +1246,16 @@ function renderCatalog(cards: StrategyCardDto[]) {
         localStorage.setItem(`sklad_p:${c.id}:${inp.dataset.key!}`, inp.value)));
     el.querySelector("input[type=checkbox]")!.addEventListener("change", (ev) => {
       const on = (ev.target as HTMLInputElement).checked;
+      localStorage.setItem(`sklad_check:${c.id}`, on ? "1" : "0");
       el.classList.toggle("checked", on);
       if (!on) {
         activeRuns.delete(c.id);
         redrawMarkers();
       }
+      renderConstructor();
+    });
+    el.querySelector<HTMLSelectElement>(`#role-${c.id}`)!.addEventListener("change", (ev) => {
+      localStorage.setItem(`sklad_role:${c.id}`, (ev.target as HTMLSelectElement).value);
       renderConstructor();
     });
     wrap.appendChild(el);
@@ -1344,6 +1332,75 @@ function setupTooltipAfterFirstRender() {
     }
   });
   observer.observe(document.body, { childList: true, subtree: true });
+}
+
+
+function initSidebarResize() {
+  const sb = document.getElementById("sidebar");
+  if (!sb) return;
+  const KEY = "deeptrading_sidebar_w";
+  try {
+    const saved = localStorage.getItem(KEY);
+    if (saved) {
+      const w = Math.max(190, Math.min(560, Number(saved)));
+      if (w > 0) sb.style.width = w + "px";
+    }
+  } catch {
+    /* noop */
+  }
+  window.addEventListener("mouseup", () => {
+    try {
+      localStorage.setItem(KEY, String(Math.round(sb.getBoundingClientRect().width)));
+    } catch {
+      /* noop */
+    }
+  });
+}
+
+initSidebarResize();
+if (IS_EMBEDDED) {
+  let curFigi = FIGI;
+  window.addEventListener("message", (ev) => {
+    const d = ev.data as { type?: string; figi?: string; ticker?: string; trade?: Record<string, unknown> };
+    if (!d || d.type !== "focus") return;
+    void (async () => {
+      try {
+        const f = String(d.figi || "");
+        if (f && f !== curFigi) {
+          curFigi = f;
+          FIGI = f;
+          window.FIGI = f;
+          let data = await fetchAnalysis(f, currentTf.interval, 2000);
+          if (!(data && data.candles && data.candles.length)) {
+            try {
+              await syncCandles(f, currentTf.interval, ENSURE_DAYS[currentTf.interval] ?? 7);
+            } catch { /* noop */ }
+            data = await fetchAnalysis(f, currentTf.interval, 2000);
+          }
+          if (data && data.candles && data.candles.length) {
+            renderData(data);
+          } else {
+            setStatus("нет свечей в базе для " + (d.ticker || f));
+          }
+        }
+        if (refs) {
+          const hist = (d.trades || []) as Record<string, unknown>[];
+          const mks: SeriesMarker<Time>[] = [];
+          for (const tr of hist) {
+            const et = tr.entry_time ? toUnix(String(tr.entry_time)) : null;
+            const xt = tr.ts ? toUnix(String(tr.ts)) : null;
+            const isL = String(tr.side) === "LONG";
+            if (et != null && !isNaN(Number(et))) mks.push({ time: et, position: isL ? "belowBar" : "aboveBar", color: COLORS.up, shape: "arrowUp", text: String(tr.qty ?? "") });
+            if (xt != null && tr.exit_price != null && !isNaN(Number(xt))) mks.push({ time: xt, position: isL ? "aboveBar" : "belowBar", color: COLORS.down, shape: "arrowDown", text: "" });
+          }
+          if (mks.length) refs.markers.setMarkers(mks);
+          if (d.trade) window.__setTradeLines?.(d.trade);
+        }
+      } catch (e) {
+        console.warn("embed focus error", e);
+      }
+    })();
+  });
 }
 
 initNav();

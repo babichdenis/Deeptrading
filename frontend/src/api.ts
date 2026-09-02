@@ -320,10 +320,12 @@ export async function botPositions(): Promise<BotPositionRow[]> {
 }
 
 export interface BotTradeRow {
-  ticker: string; side: string; qty: number;
+  figi?: string; ticker: string; side: string; qty: number;
   entry_price: number; exit_price: number;
   entry_time: string; exit_time: string;
-  net_pnl: number; exit_reason: string;
+  ts?: string;
+  price?: number;
+  net_pnl: number; commission: number; exit_reason: string;
 }
 
 export async function botTrades(limit = 50): Promise<BotTradeRow[]> {
@@ -389,6 +391,50 @@ export async function botCloseAll(): Promise<{ closed: number }> {
   const res = await fetch("/api/v1/bot/positions/close-all", { method: "POST" });
   if (!res.ok) throw new Error(`close-all ${res.status}`);
   return res.json();
+}
+
+// ============ Sandbox API (T-Invest live data) ============
+
+export interface SandboxStatus {
+  running: boolean;
+  mode: string;
+  error?: string;
+  portfolio: { cash: number; initial_cash: number; equity: number; market_value: number; pnl: number; positions_open: number };
+}
+
+export async function sandboxStatus(): Promise<SandboxStatus> {
+  const res = await fetch("/api/v1/sandbox/status");
+  if (!res.ok) throw new Error(`sandbox ${res.status}`);
+  return res.json();
+}
+
+export interface SandboxPositionRow {
+  figi: string; ticker: string; side: string; qty: number;
+  entry_price: number; current_price: number; prev_close: number | null;
+  unrealized_pnl: number;
+  entry_time: string; stop_loss: number | null; take_profit: number | null;
+  strategy_id: string;
+}
+
+export async function sandboxPositions(): Promise<SandboxPositionRow[]> {
+  const res = await fetch("/api/v1/sandbox/positions");
+  if (!res.ok) throw new Error(`sandbox positions ${res.status}`);
+  const d = await res.json();
+  return d.positions;
+}
+
+export async function sandboxTrades(limit = 50): Promise<BotTradeRow[]> {
+  const res = await fetch(`/api/v1/sandbox/trades?limit=${limit}`);
+  if (!res.ok) throw new Error(`sandbox trades ${res.status}`);
+  const d = await res.json();
+  return d.trades;
+}
+
+export async function sandboxOrders(limit = 30): Promise<BotOrderRow[]> {
+  const res = await fetch(`/api/v1/sandbox/orders?limit=${limit}`);
+  if (!res.ok) throw new Error(`sandbox orders ${res.status}`);
+  const d = await res.json();
+  return d.orders;
 }
 
 export interface ConfigurationDto {

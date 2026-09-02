@@ -48,6 +48,8 @@ EXIT_POLICY_SPECS: dict[str, dict] = {
             "period": {"type": "int", "default": 14, "min": 3, "max": 100},
             "multiplier": {"type": "float", "default": 2.0, "min": 0.5, "max": 6},
             "risk_reward": {"type": "float", "default": 2.0, "min": 0.5, "max": 6},
+            "trail_activation_r": {"type": "float", "default": None, "min": 0.1, "max": 6},
+            "trail_distance_r": {"type": "float", "default": None, "min": 0.1, "max": 6},
         },
     },
     "atr_trailing": {
@@ -75,6 +77,9 @@ def validate_exit_params(policy_id: str, params: dict | None) -> dict:
     validated: dict = {}
     for key, pspec in spec["schema"].items():
         value = incoming.pop(key, pspec["default"])
+        if value is None:
+            validated[key] = None
+            continue
         try:
             value = int(value) if pspec["type"] == "int" else float(value)
         except (TypeError, ValueError):

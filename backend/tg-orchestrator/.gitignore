@@ -1,0 +1,12 @@
+*.pid
+*.log
+state.json
+control.json
+decisions.json
+agent_pending.json
+agent_decision.json
+executor_task.md
+executor_response.md
+reports/*.md
+!.gitkeep
+reports/.gitkeep

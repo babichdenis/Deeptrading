@@ -8,16 +8,23 @@
   <body>
     <div id="modal-backdrop" class="modal-backdrop hidden"></div>
     <div id="app">
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar">
         <div class="brand">⚡<span class="brand-name">Deeptrading</span></div>
         <nav class="side-nav">
           <button class="nav-btn active" data-page="chart"><span class="ico">📈</span><span>Склад</span></button>
           <button class="nav-btn" data-page="lab"><span class="ico">🧪</span><span>Lab</span></button>
           <button class="nav-btn" data-page="bot"><span class="ico">🤖</span><span>Бот</span></button>
         </nav>
-        <div class="sidebar-foot">
-          <div id="bot-pill" class="bot-pill off"><span class="dot"></span><span id="bot-state-short">OFF</span></div>
-          <button id="btn-bot-toggle" class="btn-bot-toggle start">▶ Старт</button>
+        <div class="sidebar-logs">
+          <div class="sl-title">🤖 Логи бота</div>
+          <div class="log-toolbar">
+            <label class="lg-chip on"><input type="checkbox" id="lg-candles" checked><span>Свечи</span></label>
+            <label class="lg-chip on"><input type="checkbox" id="lg-signals" checked><span>Сигналы</span></label>
+            <label class="lg-chip on"><input type="checkbox" id="lg-trades" checked><span>Сделки</span></label>
+            <label class="lg-chip on"><input type="checkbox" id="lg-events" checked><span>События</span></label>
+            <button class="lg-btn" id="lg-clear">Очистить</button>
+          </div>
+          <div class="bot-live-logs" id="bot-live-logs"><span style="color:#666">нет логов — запусти бота</span></div>
         </div>
       </aside>
 
@@ -25,7 +32,19 @@
         <header class="topbar">
           <div class="page-title" id="page-title">Склад</div>
           <div class="topbar-right">
-            <div class="equity-chip" id="equity-chip" title="Paper-портфель">— ₽</div>
+            <div class="hdr-stats">
+              <span class="hdr-stat" title="Торговая сессия МосБиржи"><b>Сессия</b><span id="bs-session">—</span></span>
+              <span class="hdr-stat" title="Режим потока данных"><b>Реж</b><span id="bs-mode">—</span></span>
+              <span class="hdr-stat" title="Свечей получено"><b>Свечи</b><span id="bs-candles">0</span></span>
+              <span class="hdr-stat" title="Сигналов"><b>Сигн</b><span id="bs-signals">0</span></span>
+              <span class="hdr-stat" title="Позиций"><b>Поз</b><span id="bs-positions">0</span></span>
+              <span class="hdr-stat" title="Equity"><b>Eq</b><span id="bs-equity">—</span></span>
+              <span class="hdr-stat" title="P&L"><b>P&L</b><span id="bs-pnl">—</span></span>
+            </div>
+            <div class="hdr-bot-ctrl">
+              <button class="btn-primary start btn-xs" id="btn-bot-start">▶ Запустить</button>
+              <button class="btn-primary stop hidden btn-xs" id="btn-bot-stop">■ Остановить</button>
+            </div>
             <div id="bot-pill-top" class="bot-pill off"><span class="dot"></span><span id="bot-state-text">Бот выключен</span><span id="bot-mode" class="mode-chip hidden"></span></div>
           </div>
         </header>
@@ -127,7 +146,7 @@
                 </select></label>
                 <label>Порог зигзага, %<input type="number" id="test-threshold" value="0.5" min="0.05" max="5" step="0.05" style="width:90px" /></label>
                 <label>Комиссия, %<input type="number" id="test-fee" value="0.05" min="0" max="1" step="0.05" style="width:90px" /></label>
-                <label>Капитал<input type="number" id="test-capital" value="100000" min="1000" style="width:110px" /></label>
+                <label>Капитал<input type="number" id="test-capital" value="10000" min="1000" style="width:110px" /></label>
                 <button class="btn-primary" id="btn-test-run">▶ Потолок торговли</button>
               </div>
             </div>
@@ -331,13 +350,16 @@
                           <label>Дней<input type="number" id="el-days" value="30" min="1" max="120" style="width:70px" /></label>
                           <label>Капитал<input type="number" id="el-capital" value="100000" style="width:90px" /></label>
                         </div>
+                        <div class="row2" style="margin-top:6px">
+                          <label>Дата с<input type="date" id="el-date-from" style="width:130px" /></label>
+                          <label>Дата по<input type="date" id="el-date-to" style="width:130px" /></label>
+                        </div>
                       </div>
                     </div>
                   </div>
                   <div class="cfg-modal-foot">
                     <button class="btn-primary" id="btn-cfg-save">💾 Сохранить</button>
                     <button class="btn-primary" id="btn-cfg-save-run" style="background:#b388ff">🧪 Сохранить и Тестировать</button>
-                    <button class="btn-primary" id="btn-enslab-run" style="background:#26a69a">▶ В Lab (очередь ансамбля)</button>
                     <button class="btn-secondary" id="btn-cfg-cancel">Отмена</button>
                   </div>
                   <div id="el-queue" class="el-queue-box"></div>
@@ -352,6 +374,7 @@
                 <div class="col-title">Протестированы</div>
                 <div id="cfg-tested"></div>
               </div>
+            </div>
             </div>
             <div class="card" id="lab-results-v2">
               <div id="lr-progress" style="display:none">
@@ -370,78 +393,28 @@
           </section>
 
           <section class="page page-pad" id="page-bot">
-            <h2 class="pg-h">🤖 Paper-бот — дашборд</h2>
-            <div class="status-strip" id="bot-status-strip">
-              <span class="st-chip off" id="strip-status"><b>СТАТУС</b><span>—</span></span>
-              <span class="st-chip" id="strip-mode"><b>РЕЖИМ</b><span>—</span></span>
-              <span class="st-chip" id="strip-session"><b>СЕССИЯ</b><span>—</span></span>
-              <span class="st-chip" id="strip-data"><b>ДАННЫЕ</b><span>—</span></span>
-              <span class="st-chip" id="strip-signals"><b>СИГНАЛЫ</b><span>—</span></span>
-              <span class="st-chip" id="strip-risk"><b>РИСК</b><span>—</span></span>
-              <span class="st-chip err hidden" id="strip-error"><b>ОШИБКА</b><span>—</span></span>
-            </div>
-            <div class="lab-grid">
-              <div class="card bot-config">
-                <div class="row2">
-                  <label>Стратегия<select id="bot-strategy"></select></label>
-                  <label>ТФ<select id="bot-interval">
-                    <option value="5min" selected>5 мин</option>
-                    <option value="15min">15 мин</option>
-                    <option value="10min">10 мин</option>
-                    <option value="1min">1 мин</option>
-                  </select></label>
-                  <label>Топ-N акций<input type="number" id="bot-topn" value="6" min="2" max="15" /></label>
-                  <label>Qty<input type="number" id="bot-qty" value="1" min="1" /></label>
-                </div>
-                <div class="params-line" id="bot-strategy-params"></div>
-                <div class="row4">
-                  <label>SL %<input type="number" id="bot-stop" value="0.8" step="0.1" /></label>
-                  <label>TP %<input type="number" id="bot-target" value="2" step="0.1" /></label>
-                  <label>Капитал<input type="number" id="bot-cash" value="100000" /></label>
-                  <label>Short<input type="checkbox" id="bot-short" /></label>
-                </div>
-                <div class="btn-row">
-                  <button class="btn-primary" id="btn-bot-start">▶ Запустить бота</button>
-                  <button class="btn-danger" id="btn-bot-stopui">■ Остановить</button>
-                  <button class="btn-secondary" id="btn-bot-reset">♻ Сброс портфеля</button>
-                </div>
-                <div class="mini-hint">Бот сам выбирает самые волатильные ликвидные акции, подписывается на их свечи и торгует стратегией в paper-режиме. Стоп/тейк проверяются на каждой свече.</div>
-              </div>
-              <div class="card bot-status-cards">
-                <div class="stat"><span class="stat-k">Режим</span><span class="stat-v" id="bs-mode">—</span></div>
-                <div class="stat"><span class="stat-k">Свечей получено</span><span class="stat-v" id="bs-candles">0</span></div>
-                <div class="stat"><span class="stat-k">Сигналов</span><span class="stat-v" id="bs-signals">0</span></div>
-                <div class="stat"><span class="stat-k">Позиций</span><span class="stat-v" id="bs-positions">0</span></div>
-                <div class="stat"><span class="stat-k">Equity</span><span class="stat-v" id="bs-equity">—</span></div>
-                <div class="stat"><span class="stat-k">P&L</span><span class="stat-v" id="bs-pnl">—</span></div>
-              </div>
-            </div>
-            <div class="card kill-row">
-              <span class="kill-title">Kill switch:</span>
-              <button class="btn-secondary" id="btn-bot-pause">⏸ Пауза новых входов</button>
-              <button class="btn-secondary" id="btn-bot-cancelpending">✖ Отменить заявки (<span id="pending-count">0</span>)</button>
-              <button class="btn-danger btn-closeall" title="Закрыть все позиции по последней цене (подтверждение не требуется в paper)">▼ Закрыть все позиции</button>
-            </div>
-            <div class="card portfolio-summary" id="portfolio-summary"></div>
+<div class="card portfolio-summary" id="portfolio-summary"></div>
             <div class="universe-chips" id="bot-universe"></div>
-            <h3 class="pg-h3">Заявки (lifecycle)</h3>
-            <table class="runs-table" id="bot-orders-table">
-              <thead><tr><th>Время</th><th>Акция</th><th>Action</th><th>Side</th><th>Qty</th><th>Статус</th><th>Цена</th><th>ID</th></tr></thead>
-              <tbody></tbody>
-            </table>
+            
+            <div class="chart-section bot-chart-section" id="bot-chart-section">
+              <div class="chart-wrap bot-chart-wrap" id="bot-chart-wrap">
+                <iframe id="bot-chart-frame" src="/?embedded=1" title="График бота"></iframe>
+              </div>
+              <div class="resizer" id="bot-resizer" title="Потяните — изменится высота графика"><span></span></div>
+            </div>
             <h3 class="pg-h3">Открытые позиции</h3>
             <table class="runs-table" id="bot-positions-table">
-              <thead><tr><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Stop</th><th>Target</th></tr></thead>
+              <thead><tr><th>Вход время</th><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Текущая</th><th>P&L</th><th>SL</th><th>TP</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
             <h3 class="pg-h3">Последние сделки</h3>
             <table class="runs-table" id="bot-trades-table">
-              <thead><tr><th>Акция</th><th>Side</th><th>Вход→Выход</th><th>P&L</th><th>Причина</th></tr></thead>
+              <thead><tr><th>Время входа→выхода</th><th>Акция</th><th>Направл.</th><th>Кол-во</th><th>Цена входа→выхода</th><th>Доход</th><th>Комиссия</th><th>Причина выхода</th></tr></thead>
               <tbody></tbody>
             </table>
             <h3 class="pg-h3">Все сделки (история paper-портфеля)</h3>
             <table class="runs-table" id="pf-trades-table">
-              <thead><tr><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Выход</th><th>P&L</th><th>Причина</th></tr></thead>
+              <thead><tr><th>Время</th><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Выход</th><th>P&L</th><th>Комиссия</th><th>Причина</th></tr></thead>
               <tbody></tbody>
             </table>
             <h3 class="pg-h3">Поток событий <span class="mini-hint">сигналы → решения → заявки → исполнения; обновление каждые 3 с</span></h3>

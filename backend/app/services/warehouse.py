@@ -92,7 +92,7 @@ async def update_configuration(db: AsyncSession, config_id: uuid.UUID, body: dic
     if cfg_row.status == "IN_LAB":
         raise ConfigurationError("идёт тест — дождитесь завершения или удалите конфигурацию")
     editable = ["name", "members", "quorum", "exit_policy", "min_hold_bars",
-                "allow_short", "session_policy", "preview_figi"]
+                "allow_short", "session_policy", "preview_figi", "filters"]
     for key in editable:
         if key not in body:
             continue

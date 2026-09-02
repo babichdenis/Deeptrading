@@ -74,19 +74,23 @@ async def _execute(run_id: uuid.UUID) -> None:
             async with SessionLocal() as db:
                 inst = await db.scalar(select(Instrument).where(Instrument.figi == figi))
                 ticker = inst.ticker if inst else figi
-                await ensure_candles(db, figi, "1min", days)
-                rows = (await db.execute(
-                    select(Candle)
-                    .where(Candle.figi == figi, Candle.interval == interval_value)
-                    .order_by(Candle.ts)
-                )).scalars().all()
+                # НЕ докачиваем с биржи: историю заливаем CSV (load_history_csv.py),
+                # а свежие бары уже есть в базе. Биржевой fetch для старых 1m даёт 50002.
+                stmt = select(Candle).where(Candle.figi == figi, Candle.interval == interval_value)
+                from_ts = params.get("from_ts")
+                to_ts = params.get("to_ts")
+                if from_ts:
+                    stmt = stmt.where(Candle.ts >= datetime.fromisoformat(from_ts.replace("Z", "+00:00")))
+                if to_ts:
+                    stmt = stmt.where(Candle.ts <= datetime.fromisoformat(to_ts.replace("Z", "+00:00")))
+                rows = (await db.execute(stmt.order_by(Candle.ts))).scalars().all()
                 candles = [EngineCandle(ts=r.ts, open=float(r.open), high=float(r.high),
                                         low=float(r.low), close=float(r.close), volume=float(r.volume))
                            for r in rows]
             await event_bus.publish(channel, "FIGI_STARTED", {"ticker": ticker})
             body = {k: v for k, v in params.items() if k != "figis"}
             body["figi"] = figi
-            res = compute_ensemble(candles, body)
+            res = await asyncio.to_thread(compute_ensemble, candles, body)
             if "error" in res:
                 results.append({"ticker": ticker, "figi": figi, "error": res["error"]})
             else:

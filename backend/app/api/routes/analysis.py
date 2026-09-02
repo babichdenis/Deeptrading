@@ -35,13 +35,22 @@ async def get_analysis(
     if interval is None:
         raise HTTPException(400, f"Unknown interval. Available: {', '.join(INTERVAL_NAMES)}")
 
+    from sqlalchemy import text as _text
     instrument = await db.scalar(select(Instrument).where(Instrument.figi == figi))
+    fallback_ticker = None
     if not instrument:
-        raise HTTPException(404, "Instrument not found, call /api/instruments/sync first")
+        # TCS figi (sandbox) -> ticker -> BBG figi
+        ticker_row = await db.execute(_text("SELECT ticker FROM instrument_info WHERE figi = :f"), {"f": figi})
+        fallback_ticker = ticker_row.scalar()
+        if fallback_ticker:
+            instrument = await db.scalar(select(Instrument).where(Instrument.ticker == fallback_ticker))
+    resolved_figi = instrument.figi if instrument else figi
+    name = (instrument.name if instrument else "") or fallback_ticker or figi[:8]
+    ticker_name = (instrument.ticker if instrument else "") or fallback_ticker or figi[:8]
 
     stmt = (
         select(Candle)
-        .where(Candle.figi == figi, Candle.interval == int(getattr(interval, "value", interval)))
+        .where(Candle.figi == resolved_figi, Candle.interval == int(getattr(interval, "value", interval)))
         .order_by(Candle.ts.desc())
         .limit(limit)
     )
@@ -50,8 +59,8 @@ async def get_analysis(
     if not candles:
         return {
             "figi": figi,
-            "ticker": instrument.ticker,
-            "name": instrument.name,
+            "ticker": ticker_name,
+            "name": name,
             "interval": interval_name,
             "candles": [],
             "sma20": [],
@@ -71,8 +80,8 @@ async def get_analysis(
 
     return {
         "figi": figi,
-        "ticker": instrument.ticker,
-        "name": instrument.name,
+        "ticker": ticker_name,
+        "name": name,
         "interval": interval_name,
         "candles": [
             {

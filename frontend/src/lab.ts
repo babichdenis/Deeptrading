@@ -94,15 +94,20 @@ function verdictBadge(v: string): string {
   return `<span class="verdict-badge v-${v.toLowerCase()}">${v}</span>`;
 }
 
+function setStatus(text: string) {
+  const el = document.getElementById("status-text");
+  if (el) el.textContent = text;
+}
+
 export async function initLab() {
   catalog = (await fetchCatalog()).strategies.filter((c) => c.status === "AVAILABLE");
   $("btn-lab-settings")?.addEventListener("click", openSettingsDialog);
   $("btn-cfg-new").addEventListener("click", () => openEditor());
   $("btn-cfg-cancel").addEventListener("click", closeEditor);
   $("btn-cfg-close")?.addEventListener("click", closeEditor);
-  $("btn-cfg-save").addEventListener("click", () => void saveConfiguration(false));
+  $("btn-cfg-save")?.addEventListener("click", () => void saveConfiguration(false));
   $("btn-cfg-save-run")?.addEventListener("click", () => void saveConfiguration(true));
-  ($("cfg-exit") as HTMLSelectElement).addEventListener("change", renderExitParams);
+  ($("cfg-exit") as HTMLSelectElement)?.addEventListener("change", renderExitParams);
   await refreshConfigs();
 }
 
@@ -207,9 +212,12 @@ function renderLeft() {
         ev.stopPropagation();
         const act = b.dataset.act!;
         if (act === "tolab") {
-          const fromV = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-          const toV = new Date().toISOString().slice(0, 10);
-          await enqueueTest(c.configuration_id, [], fromV, toV, 30);
+          const ens = (c.filters ?? []).find((f: any) => f.id === "ensemble") as any;
+          const p = ens?.params ?? {};
+          const fromV = p.date_from ?? new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+          const toV = p.date_to ?? new Date().toISOString().slice(0, 10);
+          const tickers = (p.tickers as string[] | undefined) ?? [];
+          await enqueueTest(c.configuration_id, tickers, fromV, toV, 30);
           await refreshConfigs();
         } else if (act === "results") await showResults(c.configuration_id);
         else if (act === "edit") await editConfiguration(c);
@@ -386,6 +394,7 @@ function openEditor() {
   $("cfg-editor").classList.remove("hidden");
   document.getElementById("modal-backdrop")?.classList.remove("hidden");
   const wrap = $("cfg-strategies");
+  if (!wrap) return;
   wrap.innerHTML = "";
   for (const c of catalog) {
     const el = document.createElement("div");
@@ -419,6 +428,11 @@ function openEditor() {
   renderExitParams();
   autoName();
   initTestSection();
+  // переинициализация ансамблевых полей (чипы акций, даты) при каждом открытии
+  const ensInit = (window as any).__ensLabInit;
+  if (typeof ensInit === "function") {
+    ensInit();
+  }
 }
 
 function initTestSection() {
@@ -447,11 +461,12 @@ function initTestSection() {
 }
 
 function autoName() {
-  const checked = [...document.querySelectorAll<HTMLInputElement>("#cfg-strategies input:checked")]
-    .map((b) => catalog.find((c) => c.id === b.dataset.sid)?.id ?? "");
+  const checked = [...document.querySelectorAll<HTMLInputElement>("#cfg-strategies input:checked, #el-setups .el-setup:checked")]
+    .map((b) => b.dataset.sid ?? "");
   if (!checked.length) return;
-  const q = Number(($("cfg-quorum") as HTMLSelectElement).value) || Math.min(2, checked.length);
-  const tf = ($("cfg-interval") as HTMLSelectElement)?.value || window.LAB_INTERVAL || "hour";
+  const q = Number(($("cfg-quorum") as HTMLSelectElement)?.value) || Math.min(2, checked.length);
+  const tf = ($("el-entry-tf") as HTMLSelectElement)?.value
+    || ($("cfg-interval") as HTMLSelectElement)?.value || window.LAB_INTERVAL || "hour";
   const nameInput = $("cfg-name") as HTMLInputElement;
   if (nameInput.dataset.auto === "1") {
     nameInput.value = `${checked.map((c) => TAGS[c] ?? c).join("+")} ${q}of${checked.length} · ${tf}`;
@@ -478,36 +493,76 @@ function renderExitParams() {
 
 async function saveConfiguration(runAfter = false) {
   const members: Array<{ strategy_id: string; params: Record<string, number> }> = [];
-  document.querySelectorAll<HTMLInputElement>("#cfg-strategies input:checked").forEach((box) => {
-    const sid = box.dataset.sid!;
-    const params: Record<string, number> = {};
-    document.querySelectorAll<HTMLInputElement>(`#cfgp-${sid} input`).forEach((inp) => {
-      params[inp.dataset.key!] = Number(inp.value);
+  const ensBoxes = document.querySelectorAll<HTMLInputElement>("#el-setups .el-setup:checked");
+  if (ensBoxes.length > 0) {
+    // ансамблевая модалка: функции-голоса с параметрами
+    for (const box of ensBoxes) {
+      const sid = box.dataset.sid!;
+      const params: Record<string, number> = {};
+      document.querySelectorAll<HTMLInputElement>(`.el-block-wrap[data-sid="${sid}"] input[data-skey]`).forEach((inp) => {
+        params[inp.dataset.skey!] = Number(inp.value);
+      });
+      members.push({ strategy_id: sid, params });
+    }
+  } else {
+    // старая модалка (cfg-strategies)
+    document.querySelectorAll<HTMLInputElement>("#cfg-strategies input:checked").forEach((box) => {
+      const sid = box.dataset.sid!;
+      const params: Record<string, number> = {};
+      document.querySelectorAll<HTMLInputElement>(`#cfgp-${sid} input`).forEach((inp) => {
+        params[inp.dataset.key!] = Number(inp.value);
+      });
+      members.push({ strategy_id: sid, params });
     });
-    members.push({ strategy_id: sid, params });
-  });
+  }
   if (!members.length) {
     alert("Выберите минимум одну стратегию");
     return;
   }
   const exitParams: Record<string, number> = {};
-  document.querySelectorAll<HTMLInputElement>("#cfg-exit-params input").forEach((inp) => {
-    exitParams[inp.dataset.key!] = Number(inp.value);
+  document.querySelectorAll<HTMLInputElement>("#el-exit-params input[data-exit-key], #cfg-exit-params input").forEach((inp) => {
+    exitParams[inp.dataset.exitKey!] = Number(inp.value);
   });
+
+  const ensFilter: Record<string, unknown> = {};
+  const biasMode = ($("el-bias-mode") as HTMLSelectElement)?.value;
+  const entryTf = ($("el-entry-tf") as HTMLSelectElement)?.value;
+  const entrySession = ($("el-session") as HTMLSelectElement)?.value;
+  const cooldown = ($("el-cooldown") as HTMLInputElement)?.value;
+  const biasPeriod = ($("el-bias-period") as HTMLInputElement)?.value;
+  const lookback = ($("el-entry-lookback") as HTMLInputElement)?.value;
+  const fromEl = $("el-date-from") as HTMLInputElement;
+  const toEl = $("el-date-to") as HTMLInputElement;
+  const stockTickers = [...document.querySelectorAll<HTMLButtonElement>("#el-figis .chip.selected")].map((c) => c.textContent!.trim());
+  if (biasMode) ensFilter["bias_mode"] = biasMode;
+  if (biasPeriod) ensFilter["bias_period"] = Number(biasPeriod);
+  if (entryTf) ensFilter["entry_tf"] = entryTf;
+  if (lookback) ensFilter["entry_lookback"] = Number(lookback);
+  if (entrySession) ensFilter["entry_session"] = entrySession;
+  if (cooldown) ensFilter["cooldown_bars"] = Number(cooldown);
+  if (fromEl?.value) ensFilter["date_from"] = fromEl.value;
+  if (toEl?.value) ensFilter["date_to"] = toEl.value;
+  if (stockTickers.length) ensFilter["tickers"] = stockTickers;
 
   const body = {
     name: ($("cfg-name") as HTMLInputElement).value,
-    interval_name: ($("cfg-interval") as HTMLSelectElement).value,
+    interval_name: ($("el-entry-tf") as HTMLSelectElement)?.value
+      ?? ($("cfg-interval") as HTMLSelectElement)?.value ?? "1min",
     members,
-    quorum: Number(($("cfg-quorum") as HTMLSelectElement).value),
-    exit_policy: { id: ($("cfg-exit") as HTMLSelectElement).value, params: exitParams },
-    min_hold_bars: Number(($("cfg-minhold") as HTMLInputElement).value),
-    allow_short: ($("cfg-short") as HTMLInputElement).checked,
+    quorum: Number(($("cfg-quorum") as HTMLSelectElement)?.value ?? 2),
+    exit_policy: {
+      id: ($("el-exit") as HTMLSelectElement)?.value ?? ($("cfg-exit") as HTMLSelectElement)?.value ?? "atr_stop",
+      params: exitParams,
+    },
+    min_hold_bars: Number(($("cfg-minhold") as HTMLInputElement)?.value ?? 0),
+    allow_short: ($("cfg-short") as HTMLInputElement)?.checked ?? false,
     session_policy: { entry_cutoff_bars: 0, overnight: true },
     figi: window.FIGI,
+    filters: [{ id: "ensemble", params: ensFilter }],
   };
 
   try {
+    console.log("[saveConfig] body:", JSON.stringify(body));
     $("btn-cfg-save").classList.add("busy");
     let savedId = editingId;
     if (editingId) {
@@ -519,6 +574,7 @@ async function saveConfiguration(runAfter = false) {
     closeEditor();
     editingId = null;
     await refreshConfigs();
+    setStatus(`Конфигурация «${body.name}» сохранена (${members.length} функций, K=${body.quorum})`);
     if (runAfter && savedId) {
       const tickers = [...(window.__selectedTestTickers ?? new Set<string>())];
       const fromV = ($("cfg-test-from") as HTMLInputElement).value;
@@ -549,17 +605,23 @@ async function editConfiguration(c: ConfigurationDto) {
     window.__selectedTestTickers = new Set(tickers);
     initTestSection();
   }
-  for (const cb of document.querySelectorAll<HTMLInputElement>("#cfg-strategies input")) {
+    for (const cb of document.querySelectorAll<HTMLInputElement>("#cfg-strategies input")) {
     const m = full.members.find((x) => x.strategy_id === cb.dataset.sid);
     cb.checked = !!m;
     cb.dispatchEvent(new Event("change"));
+  }
+  // ансамблевые галочки и их параметры из members
+  for (const cb of document.querySelectorAll<HTMLInputElement>("#el-setups .el-setup")) {
+    const m = full.members.find((x) => x.strategy_id === cb.dataset.sid);
+    cb.checked = !!m;
     if (m) {
-      document.querySelectorAll<HTMLInputElement>(`#cfgp-${cb.dataset.sid} input`).forEach((inp) => {
-        if (m.params[inp.dataset.key!] != null) inp.value = String(m.params[inp.dataset.key!]);
+      document.querySelectorAll<HTMLInputElement>(`.el-block-wrap[data-sid="${cb.dataset.sid}"] input[data-skey]`).forEach((inp) => {
+        const v = (m.params as Record<string, number>)[inp.dataset.skey!];
+        if (v != null) inp.value = String(v);
       });
     }
   }
-  updateQuorumOptions();
+updateQuorumOptions();
   ($("cfg-interval") as HTMLSelectElement).value = full.interval_name || "hour";
   ($("cfg-exit") as HTMLSelectElement).value = full.exit_policy.id;
   renderExitParams();
@@ -893,11 +955,16 @@ function renderLab(full: ConfigurationDto) {
 
   const panel = $("lab-results-v2");
   panel.classList.remove("hidden");
+  const rpFrom = (full.lab_result as any)?.progress?.window_from ?? ((full.lab_result as any)?.progress?.date_from ?? "");
+  const rpTo = (full.lab_result as any)?.progress?.window_to ?? ((full.lab_result as any)?.progress?.date_to ?? "");
+  const rpTickers = perStock.map((p) => p.ticker).join(",") || "RUAL,AFLT,SNGSP,MVID,NLMK";
   panel.innerHTML = `
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
       <b>${full.name}</b>
       ${full.lab_result?.config_snapshot ? `<span class="mini-hint">[${(configSnap(full) as any)?.interval_name}]</span>` : ""}
       ${full.research_status ? verdictBadge(full.research_status) : ""}
+      <button class="btn-secondary btn-sm" id="btn-export-research" title="Экспорт research pack (read-only, локально)">📦 Экспорт research pack</button>
+      <span id="rp-export-note" class="mini-hint"></span>
     </div>
     <div class="totals-line">
       <span>Сделок: <b>${totals.trades ?? 0}</b></span>
@@ -996,6 +1063,34 @@ function renderLab(full: ConfigurationDto) {
       document.querySelector<HTMLButtonElement>('.nav-btn[data-page="chart"]')?.click();
     });
   });
+
+  // Экспорт research pack (read-only, локально; никуда не отправляется)
+  panel.querySelector<HTMLButtonElement>("#btn-export-research")?.addEventListener("click", async () => {
+    const btn = panel.querySelector<HTMLButtonElement>("#btn-export-research");
+    if (btn) btn.disabled = true;
+    const note = panel.querySelector<HTMLElement>("#rp-export-note");
+    const setNote = (txt: string) => {
+      if (note) note.textContent = txt;
+      else if (btn) btn.title = txt;
+    };
+    try {
+      const from = rpFrom || "2026-07-01T00:00:00Z";
+      const to = rpTo || "2026-07-31T00:00:00Z";
+      const url = `/api/v1/research/pack?from_ts=${encodeURIComponent(from)}&to_ts=${encodeURIComponent(to)}&figis=${encodeURIComponent(rpTickers)}`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        const err = await res.text().catch(() => "");
+        throw new Error(`research pack ${res.status}: ${err.slice(0, 200)}`);
+      }
+      const data = await res.json();
+      setNote(`✅ research pack: ${data.out_dir}`);
+      if (btn) btn.title = data.out_dir;
+    } catch (e) {
+      setNote(`❌ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
 }
 
 function configSnap(full: ConfigurationDto): unknown {
@@ -1020,7 +1115,62 @@ function renderTickerSummary(
     chartAnchor.id = chartBoxId;
     panel.appendChild(chartAnchor);
   }
-  chartAnchor.innerHTML = `<div id="lab-chart" class="lab-chart-box"><span class="mini-hint">Загружаю свечи для Lab-графика…</span></div>`;
+  const cfgInterval = configs.find((c) => c.configuration_id === (window as any).__lastConfigId)?.interval_name ?? "hour";
+  const interval_name = ((configSnap(_full) as any)?.interval_name as string) ?? cfgInterval ?? "hour";
+
+  chartAnchor.innerHTML = `
+    <div id="lab-chart-wrap" class="lab-chart-wrap">
+      <div class="lab-toolbar">
+        <span class="mini-hint">ТФ:</span>
+        ${["1min", "5min", "15min", "1hour"].map((tf) =>
+          `<button class="lab-tf-btn" data-tf="${tf}" ${tf === interval_name ? "disabled" : ""}>${tf.replace("min", "м").replace("1hour", "1ч")}</button>`).join("")}
+      </div>
+      <div id="lab-chart" class="lab-chart-box"><span class="mini-hint">Загружаю свечи для Lab-графика…</span></div>
+      <div class="lab-resizer" id="lab-resizer"><span></span></div>
+    </div>`;
+  initLabResizer(chartAnchor);
+
+  const loadChart = (iv: string) => {
+    (window as any).__labChartHandle?.destroy?.();
+    const box = chartAnchor!.querySelector("#lab-chart") as HTMLElement;
+    box.innerHTML = `<span class="mini-hint">Загружаю свечи для Lab-графика…</span>`;
+    fetch(`/api/analysis/${window.FIGI}?interval_name=${iv}&limit=5000`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`analysis ${r.status}`))))
+      .then((d: { candles: Array<Record<string, unknown>>; sma20: Array<number | null>; ema50: Array<number | null>; bb_upper: Array<number | null>; bb_lower: Array<number | null>; rsi: Array<number | null>; macd: { macd: Array<number | null>; signal: Array<number | null>; hist: Array<number | null> } }) => {
+        const t0 = trades.length ? String(trades[0].entry_time) : "";
+        const t1 = trades.length ? String(trades[trades.length - 1].exit_time) : "";
+        const idx0 = t0 ? d.candles.findIndex((c) => String(c.ts) >= t0) : 0;
+        const idx1 = t1 ? d.candles.findIndex((c) => String(c.ts) > t1) : d.candles.length;
+        const lo = Math.max(0, idx0 - 100);
+        const hi = idx1 > 0 ? Math.min(d.candles.length, idx1 + 100) : d.candles.length;
+        const slice = (arr: Array<number | null>) => arr.slice(lo, hi);
+        const candles = d.candles.slice(lo, hi).map((c) => ({
+          ts: String(c.ts), open: Number(c.open), high: Number(c.high),
+          low: Number(c.low), close: Number(c.close), volume: Number(c.volume),
+        }));
+        (window as any).__labChartHandle = createLabChart(box, candles, trades as never[], {
+          analysis: { sma20: slice(d.sma20), ema50: slice(d.ema50), bb_upper: slice(d.bb_upper), bb_lower: slice(d.bb_lower), rsi: slice(d.rsi), macd: { macd: slice(d.macd.macd), signal: slice(d.macd.signal), hist: slice(d.macd.hist) } },
+        });
+        // клик по сделке → фокус на ней
+        chartAnchor.querySelectorAll<HTMLTableRowElement>("tr.trade-row-click").forEach((row, i) => {
+          row.addEventListener("click", () => {
+            const t = trades[i];
+            if (!t) return;
+            const h = (window as any).__labChartHandle;
+            if (h?.focusRange) h.focusRange(String(t.entry_time), String(t.exit_time ?? t.entry_time));
+          });
+        });
+      })
+      .catch((e) => (box.innerHTML = `<span class="mini-hint">${e.message}</span>`));
+  };
+  loadChart(interval_name);
+  chartAnchor.querySelectorAll<HTMLButtonElement>(".lab-tf-btn").forEach((b) =>
+    b.addEventListener("click", () => {
+      chartAnchor.querySelectorAll<HTMLButtonElement>(".lab-tf-btn").forEach((x) => (x.disabled = false));
+      b.disabled = true;
+      loadChart(b.dataset.tf!);
+    }),
+  );
 
   const holderId = "ticker-trades-holder";
   let holder = panel.querySelector("#" + holderId) as HTMLElement | null;
@@ -1038,22 +1188,34 @@ function renderTickerSummary(
     </div>
     ${tradesTable(trades)}`;
   panel.appendChild(holder);
+}
 
-  const cfgInterval = configs.find((c) => c.configuration_id === (window as any).__lastConfigId)?.interval_name ?? "hour";
-  const sel = configs.find((c) => c.preview_figi === (window as any).FIGI);
-  void sel;
-  const interval_name = ((configSnap(_full) as any)?.interval_name as string) ?? cfgInterval ?? "hour";
+function initLabResizer(anchor: HTMLElement) {
+  const wrap = anchor.querySelector("#lab-chart-wrap") as HTMLElement | null;
+  const resizer = anchor.querySelector("#lab-resizer") as HTMLElement | null;
+  if (!wrap || !resizer) return;
 
-  fetch(`/api/candles/${window.FIGI}?interval_name=${interval_name}&limit=5000`)
-    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`candles ${r.status}`))))
-    .then((d: { candles: Array<Record<string, unknown>> }) => {
-      const t0 = trades.length ? String(trades[0].entry_time) : "";
-      const t1 = trades.length ? String(trades[trades.length - 1].exit_time) : "";
-      const candles = d.candles.filter((c) => !t0 || (String(c.ts) >= t0 && String(c.ts) <= t1)).map((c) => ({
-        ts: String(c.ts), open: Number(c.open), high: Number(c.high),
-        low: Number(c.low), close: Number(c.close), volume: Number(c.volume),
-      }));
-      createLabChart(chartAnchor!.querySelector("#lab-chart") as HTMLElement, candles, trades as never[]);
-    })
-    .catch((e) => (chartAnchor!.innerHTML = `<span class="mini-hint">${e.message}</span>`));
+  const saved = Number(localStorage.getItem("labChartHeight"));
+  if (saved > 200) wrap.style.height = `${saved}px`;
+
+  let startY = 0;
+  let startH = 0;
+  const clamp = (h: number) => Math.min(0.85 * window.innerHeight, Math.max(220, h));
+  const onMove = (e: PointerEvent) => {
+    wrap.style.height = `${clamp(startH + (e.clientY - startY))}px`;
+  };
+  const onUp = () => {
+    resizer.classList.remove("dragging");
+    localStorage.setItem("labChartHeight", String(wrap.clientHeight));
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  };
+  resizer.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    startY = e.clientY;
+    startH = wrap.clientHeight;
+    resizer.classList.add("dragging");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
 }

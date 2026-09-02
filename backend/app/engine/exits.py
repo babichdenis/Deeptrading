@@ -91,13 +91,18 @@ class AtrStopPolicy(ExitPolicy):
     period: int = 14
     multiplier: float = 2.0
     risk_reward: float | None = None
+    trail_activation_r: float | None = None
+    trail_distance_r: float | None = None
     policy_id: str = "atr_stop"
-    version: str = "1.0.0"
+    version: str = "1.1.0"
 
-    def plan_entry(self, side: Side, entry_price: float, bars: Sequence[Candle]) -> ExitPlan:
+    def _risk(self, entry_price: float, bars: Sequence[Candle]) -> float:
         values = atr(bars, self.period)
         last = values[-1] if values else None
-        distance = (last or entry_price * 0.01) * self.multiplier
+        return (last or entry_price * 0.01) * self.multiplier
+
+    def plan_entry(self, side: Side, entry_price: float, bars: Sequence[Candle]) -> ExitPlan:
+        distance = self._risk(entry_price, bars)
         if side is Side.BUY:
             stop = entry_price - distance
             target = entry_price + distance * self.risk_reward if self.risk_reward else None
@@ -105,6 +110,39 @@ class AtrStopPolicy(ExitPolicy):
             stop = entry_price + distance
             target = entry_price - distance * self.risk_reward if self.risk_reward else None
         return ExitPlan(stop_loss=stop, take_profit=target)
+
+    def update_stop(
+        self,
+        side: Side,
+        entry_price: float,
+        current_stop: float | None,
+        bars: Sequence[Candle],
+    ) -> float | None:
+        """Трейлинг-стоп (активация на trail_activation_r × risk, дистанция
+        trail_distance_r × risk). Вызывается движком, только если заданы
+        trail_activation_r и trail_distance_r."""
+        if self.trail_activation_r is None or self.trail_distance_r is None:
+            return current_stop
+        if len(bars) < 2:
+            return current_stop
+        risk = self._risk(entry_price, bars)
+        if risk <= 0:
+            return current_stop
+        window = bars[-self.period :]
+        if side is Side.BUY:
+            highest = max(b.high for b in window)
+            move = highest - entry_price
+            if move < self.trail_activation_r * risk:
+                return current_stop
+            candidate = highest - self.trail_distance_r * risk
+            return max(current_stop or candidate, candidate)
+        lowest = min(b.low for b in window)
+        move = entry_price - lowest
+        if move < self.trail_activation_r * risk:
+            return current_stop
+        candidate = lowest + self.trail_distance_r * risk
+        stop = current_stop if current_stop is not None else candidate
+        return min(stop, candidate)
 
 
 def intrabar_exit(

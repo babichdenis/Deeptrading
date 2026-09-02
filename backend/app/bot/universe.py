@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engine.indicators import atr as atr_series
@@ -13,6 +13,34 @@ LIQUID_TICKERS = [
     "SBER", "GAZP", "LKOH", "GMKN", "ROSN", "MTSS", "TATN", "MGNT",
     "CHMF", "ALRS", "PLZL", "SNGS", "VTBR", "AFLT", "PHOR",
 ]
+
+
+async def select_all_tradeable(db: AsyncSession) -> list[dict]:
+    """Все бумаги с api_trade_available=true из instrument_info (как файлик-бот)."""
+    from app.models.instrument import Instrument
+    from app.database import SessionLocal
+
+    res = await db.execute(
+        select(Instrument.figi, Instrument.ticker, Instrument.name)
+    )
+    by_figi: dict[str, tuple] = {}
+    for figi, ticker, name in res.all():
+        if figi:
+            by_figi[figi] = (ticker, name)
+
+    rows = (await db.execute(
+        text("SELECT figi, ticker, lot, name FROM instrument_info "
+             "WHERE figi IS NOT NULL AND api_trade_available=true ORDER BY ticker")
+    )).all()
+    out = []
+    for figi, ticker, lot, name in rows:
+        out.append({
+            "figi": figi,
+            "ticker": ticker or (by_figi.get(figi) or ("", ""))[0],
+            "lot": int(lot) if lot else 10,
+            "name": name or (by_figi.get(figi) or ("", ""))[1],
+        })
+    return out
 
 
 async def select_volatile_universe(
@@ -76,4 +104,3 @@ def session_date(ts: datetime) -> str:
 def align_step(step_sec: int) -> datetime:
     now = datetime.now(timezone.utc)
     epoch = now.timestamp() // step_sec * step_sec
-    return datetime.fromtimestamp(epoch + step_sec, tz=timezone.utc) + timedelta(seconds=5)

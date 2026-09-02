@@ -1,0 +1,16 @@
+{
+  "last_completed_by": "executor",
+  "last_task": "Интерпретация macro-regime; решение: скачивание Brent/Gold/USD-RUB для полной Фазы 1; pre-reg IMOEX/risk up_trend gate?",
+  "active_running_experiment": null,
+  "blocked_on": "My3",
+  "next_action_owner": "executor",
+  "next_action": "/Volumes/Dev/Deeptrading/backend/orchestrator/executor_task_screening_allocation.md",
+  "pending_decision": null,
+  "history": [
+    {
+      "ts": "2026-08-28T22:03:48.356507+00:00",
+      "by": "executor",
+      "task": "Интерпретация macro-regime; решение: скачивание Brent/Gold/USD-RUB для полной Фазы 1; pre-reg IMOEX/risk up_trend gate?"
+    }
+  ]
+}

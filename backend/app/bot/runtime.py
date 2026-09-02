@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.bot.events import EventLog
 from app.bot.feed import STEP_SEC, CandleFeed
 from app.bot.paper_broker import PaperBroker
+from app.bot.live_broker import LiveBroker
 from app.bot.risk import RiskSnapshot
 from app.bot.session import session_state
 from app.config import get_settings
@@ -22,9 +23,11 @@ from app.engine.policies import SignalPolicy
 from app.engine.strategies import build_strategy
 from app.models.instrument import Instrument
 from app.models.paper import PaperTrade
+from app.services.signals import _load_candles as _lc
 from app.services.tinvest import INTERVAL_NAMES
 
 MAX_BUFFER = 300
+ENSEMBLE_BUFFER = 100000
 DAILY_PNL_TTL = timedelta(seconds=30)
 
 
@@ -40,6 +43,11 @@ class BotConfig:
     allow_short: bool = False
     initial_cash: float = 100_000.0
     daily_loss_limit: float = 1000.0
+    mode: str = "paper"  # paper | sandbox | live
+    use_ensemble: bool = False
+    ensemble_capital: float = 2000.0
+    ensemble_quorum: int = 2
+    ensemble_session: str = "main"
 
 
 @dataclass
@@ -85,6 +93,7 @@ class PaperBotRuntime:
         self.error: str | None = None
         self.config = BotConfig()
         self.broker = PaperBroker(SessionLocal)
+        self.broker_mode = "paper"
         self.events = EventLog()
         self.strategies: dict[str, object] = {}
         self.buffers: dict[str, deque] = {}
@@ -99,6 +108,51 @@ class PaperBotRuntime:
         self.data_source = "—"
         self.feed: CandleFeed | None = None
         self._daily_pnl_cache: tuple[datetime, float] | None = None
+        self._signal_busy: set[str] = set()
+        self._held: set[str] = set()
+        self._live_logs: deque[str] = deque(maxlen=400)
+        self.log_candles = True
+        self._last_candle_log_ts: float = 0.0
+
+    def _log(self, msg: str) -> None:
+        ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        self._live_logs.append(f"[{ts}] {msg}")
+
+    async def _st_open(self, figi, ticker, side, qty, price, sl, tp) -> None:
+        from app.models.sandbox_trade import SandboxTrade
+        try:
+            async with SessionLocal() as db:
+                db.add(SandboxTrade(
+                    figi=figi, ticker=ticker, side=side, qty=int(qty),
+                    entry_time=datetime.now(timezone.utc),
+                    entry_price=float(price),
+                    stop_loss=float(sl) if sl else None,
+                    take_profit=float(tp) if tp else None,
+                ))
+                await db.commit()
+        except Exception:
+            pass
+
+    async def _st_close(self, figi, exit_price, reason="", net=None) -> None:
+        from app.models.sandbox_trade import SandboxTrade
+        try:
+            async with SessionLocal() as db:
+                res = await db.execute(
+                    select(SandboxTrade)
+                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None))
+                    .order_by(SandboxTrade.entry_time.desc())
+                    .limit(1)
+                )
+                row = res.scalar_one_or_none()
+                if row is not None:
+                    row.exit_time = datetime.now(timezone.utc)
+                    row.exit_price = float(exit_price)
+                    row.exit_reason = reason or ""
+                    if net is not None:
+                        row.net_pnl = float(net)
+                    await db.commit()
+        except Exception:
+            pass
 
     @property
     def status(self) -> dict:
@@ -123,6 +177,11 @@ class PaperBotRuntime:
                 "qty": self.config.qty_per_trade,
                 "stop_pct": self.config.stop_pct,
                 "target_pct": self.config.target_pct,
+                "mode": self.config.mode,
+                "use_ensemble": self.config.use_ensemble,
+                "ensemble_capital": self.config.ensemble_capital,
+                "ensemble_quorum": self.config.ensemble_quorum,
+                "ensemble_session": self.config.ensemble_session,
             },
             "universe": self.universe,
             "candles_seen": self.candles_seen,
@@ -171,6 +230,8 @@ class PaperBotRuntime:
         if self.running or self.starting:
             raise RuntimeError("bot already running")
         self.config = cfg
+        if cfg.use_ensemble:
+            cfg.interval_name = "1min"
         self.error = None
         self.candles_seen = 0
         self.signals_seen = 0
@@ -180,6 +241,19 @@ class PaperBotRuntime:
         self.tickers = {}
         self.entries_paused = False
         self.last_candle_ts = None
+        self.broker_mode = cfg.mode
+        if cfg.mode == "sandbox" or cfg.mode == "live":
+            self.broker = LiveBroker(SessionLocal)
+            try:
+                real_cash = await self.broker.cash()
+                if real_cash and real_cash > 0:
+                    cfg.initial_cash = real_cash
+                    cfg.ensemble_capital = real_cash / max(2, cfg.top_n)
+                    self._log(f"КАПИТАЛ со счёта: {real_cash:.0f} ₽ · на инструмент {cfg.ensemble_capital:.0f}")
+            except Exception as e:
+                self._log(f"КАПИТАЛ не получен: {str(e)[:80]}")
+        else:
+            self.broker = PaperBroker(SessionLocal)
         await self.broker.ensure_account(cfg.initial_cash)
         await self.refresh_daily_pnl()
         self.starting = True
@@ -194,33 +268,88 @@ class PaperBotRuntime:
                 tick_rows = await db.execute(select(Instrument.figi, Instrument.ticker))
                 self.tickers = dict(tick_rows.all())
 
-            from app.bot.universe import select_volatile_universe
+            from sqlalchemy import text
+            ii_rows = await db.execute(text(
+                "SELECT figi, ticker FROM instrument_info"))
+            self.bbg_to_tcs = {}
+            self.tcs_to_bbg = {}
+            for ii_figi, ii_ticker in ii_rows.all():
+                bb = figi_by_ticker.get(ii_ticker)
+                if bb and ii_figi:
+                    self.bbg_to_tcs[bb] = ii_figi
+                    self.tcs_to_bbg[ii_figi] = bb
+
+            from app.bot.universe import select_all_tradeable, select_volatile_universe
 
             async with SessionLocal() as db:
-                self.universe = await select_volatile_universe(
-                    db, figi_by_ticker, top_n=cfg.top_n
-                )
+                if cfg.use_ensemble:
+                    self.universe = await select_all_tradeable(db)
+                else:
+                    self.universe = await select_volatile_universe(
+                        db, figi_by_ticker, top_n=cfg.top_n
+                    )
             if not self.universe:
                 raise RuntimeError("universe is empty")
+            for u in self.universe:
+                if u.get("ticker"):
+                    self.tickers.setdefault(u["figi"], u["ticker"])
+                    self.tickers.setdefault(self.tcs_to_bbg.get(u["figi"], u["figi"]), u["ticker"])
 
             from app.engine.models import Candle as EC
 
-            for u in self.universe:
-                proto = build_strategy(cfg.strategy_id, cfg.params)
-                self.strategies[u["figi"]] = proto
-                buf = deque(maxlen=MAX_BUFFER)
+            async def _load_one(u):
+                if cfg.use_ensemble:
+                    from app.bot.ensemble_strategy import EnsembleParams, EnsembleV4Strategy
+                    proto = EnsembleV4Strategy(EnsembleParams(
+                        figi=u["figi"],
+                        lot=10,
+                        capital=cfg.ensemble_capital,
+                        quorum=cfg.ensemble_quorum,
+                        session=cfg.ensemble_session,
+                    ))
+                else:
+                    proto = build_strategy(cfg.strategy_id, cfg.params)
+                buf = deque(maxlen=ENSEMBLE_BUFFER if cfg.use_ensemble else MAX_BUFFER)
                 async with SessionLocal() as db:
-                    from app.services.candle_cache import ensure_candles
-                    await ensure_candles(db, u["figi"], cfg.interval_name, days=7)
-                    from app.services.signals import _load_candles as _lc
-                    interval_value = self._interval_value()
-                    candles = await _lc(db, u["figi"], interval_value)
-                    for row in candles[-MAX_BUFFER:]:
-                        buf.append(EC(ts=row.ts, open=row.open, high=row.high,
-                                      low=row.low, close=row.close, volume=row.volume))
-                self.buffers[u["figi"]] = buf
+                    if cfg.use_ensemble:
+                        from app.bot.moex import ensure_moex_candles
+                        await ensure_moex_candles(u["figi"], u.get("ticker", ""), days=10)
+                        candles = await _lc(db, u["figi"], 1,
+                                            date_from=datetime.now(timezone.utc) - timedelta(days=60))
+                        for row in candles:
+                            buf.append(EC(ts=row.ts, open=row.open, high=row.high,
+                                          low=row.low, close=row.close, volume=row.volume))
+                    else:
+                        from app.services.candle_cache import ensure_candles
+                        await ensure_candles(db, u["figi"], cfg.interval_name, days=7)
+                        interval_value = self._interval_value()
+                        candles = await _lc(db, u["figi"], interval_value,
+                                            date_from=datetime.now(timezone.utc) - timedelta(days=60))
+                        for row in candles[-MAX_BUFFER:]:
+                            buf.append(EC(ts=row.ts, open=row.open, high=row.high,
+                                          low=row.low, close=row.close, volume=row.volume))
+                return u["figi"], proto, buf
 
+            sem = asyncio.Semaphore(10)
+
+            async def _load_bounded(u):
+                async with sem:
+                    return await _load_one(u)
+
+            results = await asyncio.gather(*[_load_bounded(u) for u in self.universe])
+            for figi, proto, buf in results:
+                self.strategies[figi] = proto
+                self.buffers[figi] = buf
+
+            try:
+                held_now = await self.broker.positions()
+                self._held = {p.figi for p in held_now}
+                if self._held:
+                    self._log(f"ОТКРЫТО при старте: {len(self._held)} поз.")
+            except Exception:
+                self._held = set()
             self.running = True
+            self._log("БОТ ЗАПУЩЕН")
             self.started_at = datetime.now(timezone.utc)
             self.task = asyncio.create_task(self._run())
             self.events.log("BOT_STARTED", reason=f"{cfg.strategy_id}@{cfg.interval_name} "
@@ -286,6 +415,8 @@ class PaperBotRuntime:
         return {"closed": len(closed), "positions": closed}
 
     def _interval_value(self) -> int:
+        if self.config.use_ensemble:
+            return 1
         interval = INTERVAL_NAMES[self.config.interval_name]
         return int(getattr(interval, "value", interval))
 
@@ -317,6 +448,7 @@ class PaperBotRuntime:
 
     async def _process_candle(self, c) -> None:
         figi = c.figi
+        figi = self.tcs_to_bbg.get(c.figi, c.figi)
         strategy = self.strategies.get(figi)
         buffer = self.buffers.get(figi)
         if strategy is None or buffer is None:
@@ -329,8 +461,14 @@ class PaperBotRuntime:
         self.candles_seen += 1
         self.last_candle_ts = c.ts
         self.data_source = self.mode
+        if self.log_candles:
+            _now = datetime.now(timezone.utc).timestamp()
+            if _now - self._last_candle_log_ts >= 3.0:
+                self._last_candle_log_ts = _now
+                self._log(f"СВЕЧА {figi[-6:]} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} v={c.volume}")
 
-        pos = await self.broker.get_position(figi)
+        _lookup = self.tcs_to_bbg.get(figi, figi)
+        pos = await self.broker.get_position(_lookup) or await self.broker.get_position(figi)
         if pos is not None:
             state = PositionState.LONG if pos.side == "LONG" else PositionState.SHORT
             stop = float(pos.stop_loss) if pos.stop_loss is not None else None
@@ -338,15 +476,30 @@ class PaperBotRuntime:
             price, reason = intrabar_exit(c, state, stop, target)
             if price is not None:
                 trade = await self.broker.close_position(figi, price, reason)
+                self._held.discard(figi)
+                await self._st_close(figi, price, reason=reason,
+                                      net=float(trade.net_pnl) if trade else None)
+                pnl = float(trade.net_pnl) if trade else 0
+                self._log(f"ВЫХОД {figi[-6:]} ({reason}) pnl={pnl:+.2f}")
                 self.events.log("POSITION_CLOSED", figi=figi, ticker=pos.ticker,
                                 reason=reason, net_pnl=float(trade.net_pnl) if trade else None)
                 await self._check_circuit_breaker()
 
-        sig = strategy.on_bar(list(buffer))
+        if figi in self._signal_busy:
+            return
+        self._signal_busy.add(figi)
+        try:
+            sig = await asyncio.to_thread(strategy.on_bar, list(buffer))
+        except Exception as e:
+            self.events.log("SIGNAL_ERROR", figi=figi, reason=str(e)[:200])
+            sig = None
+        finally:
+            self._signal_busy.discard(figi)
         if sig is None:
             return
         self.signals_seen += 1
         ticker = self.tickers.get(figi, "")
+        self._log(f"СИГНАЛ {ticker} {sig.side.value} ({sig.kind})")
         self.events.log("SIGNAL_CREATED", figi=figi, ticker=ticker,
                         side=sig.side.value)
 
@@ -360,6 +513,9 @@ class PaperBotRuntime:
 
         from app.engine.models import DecisionAction
         if action is DecisionAction.ACCEPT_ENTRY:
+            if figi in self._held:
+                self._log(f"ПРОПУСК ВХОДА {ticker}: поз. уже открыта")
+                return
             if self.entries_paused:
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                 reason="ENTRIES_PAUSED")
@@ -382,13 +538,35 @@ class PaperBotRuntime:
                             reason=str(note))
 
     async def _submit_order(self, figi: str, ticker: str, action: str, side: str) -> None:
+        cfg = self.config
+        qty = cfg.qty_per_trade
+        if action == "open" and cfg.use_ensemble:
+            buf = self.buffers.get(figi)
+            price = float(buf[-1].close) if buf else 0.0
+            lot = 10
+            for u in self.universe:
+                if u.get("figi") == figi and u.get("lot"):
+                    lot = int(u["lot"])
+                    break
+            budget = cfg.ensemble_capital
+            if isinstance(self.broker, LiveBroker):
+                try:
+                    live_cash = await self.broker.cash()
+                    budget = min(cfg.ensemble_capital, live_cash)
+                except Exception:
+                    pass
+            lot_cost = price * lot
+            if price <= 0 or lot <= 0 or lot_cost <= 0 or budget < lot_cost:
+                self._log(f"ПРОПУСК СДЕЛКИ {ticker}: бюджет {budget:.0f} < стоимость лота {lot_cost:.0f}")
+                return
+            qty = max(1, int(budget / lot_cost))
         order = BotOrder(
             id=_new_order_id(),
             figi=figi,
             ticker=ticker,
             action=action,
             side=side,
-            qty=self.config.qty_per_trade,
+            qty=qty,
         )
         self.pending_orders[figi] = order
         self.orders.append(order)
@@ -405,19 +583,34 @@ class PaperBotRuntime:
             order.status = "FILLED"
             order.filled_at = datetime.now(timezone.utc)
             order.price = c.open
+            self._held.discard(figi)
+            await self._st_close(figi, c.open, reason="signal_exit",
+                                  net=float(trade.net_pnl) if trade else None)
+            pnl = float(trade.net_pnl) if trade else 0
+            self._log(f"СДЕЛКА ЗАКРЫТИЕ {order.ticker} @ {c.open:.2f} pnl={pnl:+.2f}")
             self.events.log("ORDER_FILLED", figi=figi, ticker=order.ticker,
                             order_id=order.id, price=c.open, action="close",
                             net_pnl=float(trade.net_pnl) if trade else None)
             return
         from app.engine.models import Side
         side = Side(order.side)
-        exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
-        plan = exit_policy.plan_entry(side, c.open, [])
+        if cfg.use_ensemble:
+            from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy
+            # SL/TP из UI работают как override (stop_pct/target_pct заданы не дефолт)
+            if cfg.stop_pct != 0.01 or cfg.target_pct != 0.02:
+                exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
+                plan = exit_policy.plan_entry(side, c.open, [])
+            else:
+                exit_policy = AtrStopPolicy(period=14, multiplier=2.0, risk_reward=2.0)
+                plan = exit_policy.plan_entry(side, c.open, list(self.buffers.get(figi, [])))
+        else:
+            exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
+            plan = exit_policy.plan_entry(side, c.open, [])
         await self.broker.open_position(
             figi=figi,
             ticker=order.ticker,
             side=order.side,
-            qty=cfg.qty_per_trade,
+            qty=order.qty,
             price=c.open,
             stop_loss=round(plan.stop_loss, 6) if plan.stop_loss is not None else None,
             take_profit=round(plan.take_profit, 6) if plan.take_profit is not None else None,
@@ -426,10 +619,14 @@ class PaperBotRuntime:
         order.status = "FILLED"
         order.filled_at = datetime.now(timezone.utc)
         order.price = c.open
+        self._held.add(figi)
+        await self._st_open(figi, order.ticker, order.side, order.qty, c.open,
+                            plan.stop_loss, plan.take_profit)
+        self._log(f"СДЕЛКА ВХОД {order.ticker} {order.side} qty={order.qty} @ {c.open:.2f}")
         self.events.log("ORDER_FILLED", figi=figi, ticker=order.ticker,
                         order_id=order.id, price=c.open, action="open")
         self.events.log("POSITION_OPENED", figi=figi, ticker=order.ticker,
-                        side=order.side, qty=cfg.qty_per_trade, entry_price=c.open)
+                        side=order.side, qty=order.qty, entry_price=c.open)
 
     async def _check_circuit_breaker(self) -> None:
         risk = RiskSnapshot(daily_pnl=await self.refresh_daily_pnl(),
