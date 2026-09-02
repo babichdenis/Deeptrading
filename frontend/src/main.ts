@@ -900,6 +900,23 @@ function applyIndicators() {
   }
 }
 
+window.__setTradeLines = (trade: Record<string, unknown>) => {
+  if (!refs) return;
+  try {
+    _overlayLines.forEach((l) => l.remove());
+    _overlayLines = [];
+    const mkLine = (price: number, color: string, title: string, dashed: boolean) => {
+      const line = refs!.candles.createPriceLine({ price, color, lineWidth: 1, lineStyle: dashed ? 2 : 0, axisLabelVisible: true, title });
+      _overlayLines.push(line as { remove: () => void });
+    };
+    if (Number(trade.entry_price) > 0) mkLine(Number(trade.entry_price), "#e6a23c", "Вход", false);
+    const stop = trade.initial_stop ?? trade.stop_loss ?? null;
+    if (stop != null && Number(stop) > 0) mkLine(Number(stop), COLORS.down, "SL", true);
+    const tp = trade.take_profit ?? null;
+    if (tp != null && Number(tp) > 0) mkLine(Number(tp), COLORS.up, "TP", true);
+  } catch { /* noop */ }
+};
+
 window.__chartOverlay = (trade: Record<string, unknown>) => {
   if (!refs) return;
   try {

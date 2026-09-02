@@ -149,10 +149,21 @@ function botIso(s?: string | null): string | undefined {
   if (!s) return undefined;
   return s.includes("T") ? s : s.replace(" ", "T");
 }
-function sendEmbedFocus(figi: string, ticker: string, trade: Record<string, unknown>) {
+function sendEmbedFocus(figi: string, ticker: string, trade: Record<string, unknown> | null) {
   const f = botEmbedFrame();
   if (!f || !f.contentWindow) return;
-  f.contentWindow.postMessage({ type: "focus", figi, ticker, trade }, "*");
+  const hist = _lastTrades
+    .filter((t) => t.figi === figi)
+    .slice(-80)
+    .map((t) => ({
+      side: t.side,
+      entry_time: botIso((t as { entry_time?: string }).entry_time ?? t.ts),
+      ts: t.ts ? botIso(t.ts) : undefined,
+      entry_price: (t as { entry_price?: number }).entry_price ?? t.price,
+      exit_price: (t as { exit_price?: number }).exit_price,
+      qty: t.qty,
+    }));
+  f.contentWindow.postMessage({ type: "focus", figi, ticker, trade, trades: hist }, "*");
 }
 function positionAsTrade(p: SandboxPositionRow): Record<string, unknown> {
   return {
