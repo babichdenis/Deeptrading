@@ -13,6 +13,7 @@ from app.bot.feed import STEP_SEC, CandleFeed
 from app.bot.paper_broker import PaperBroker
 from app.bot.live_broker import LiveBroker
 from app.bot.risk import RiskSnapshot
+from app.bot.stream_manager import StreamManager
 
 
 def price_from_trade(trade) -> float | None:
@@ -164,6 +165,7 @@ class PaperBotRuntime:
         self._signal_busy: set[str] = set()
         self._held: set[str] = set()
         self._live_logs: deque[str] = deque(maxlen=400)
+        self.stream_manager: StreamManager | None = None
         self._persist_queue: list = []
         self._persist_last: dict[str, float] = {}
         # --- Opposite-hold tracking ---
@@ -339,6 +341,16 @@ class PaperBotRuntime:
         self.broker_mode = cfg.mode
         if cfg.mode == "sandbox" or cfg.mode == "live":
             self.broker = LiveBroker(SessionLocal, config=cfg)
+            # --- StreamManager: subscribe to server streams ---
+            from app.bot.live_broker import TOKEN as _TOKEN, SB as _SB, ACC as _ACC
+            target = _SB if cfg.mode == "sandbox" else None
+            self.stream_manager = StreamManager(token=_TOKEN, account_id=_ACC, target=target)
+            try:
+                await self.stream_manager.start()
+                self._log("STREAM MANAGER запущен (positions + trades + orders)")
+            except Exception as e:
+                self._log(f"STREAM MANAGER не запущен: {str(e)[:80]}")
+                self.stream_manager = None
             try:
                 real_cash = await self.broker.cash()
                 if real_cash and real_cash > 0:
@@ -469,6 +481,13 @@ class PaperBotRuntime:
         self.running = False
         if self.feed is not None:
             self.feed.request_stop()
+        # --- Stop StreamManager ---
+        if self.stream_manager is not None:
+            try:
+                await self.stream_manager.stop()
+            except Exception:
+                pass
+            self.stream_manager = None
         for t in (self.startup_task, self.task):
             if t and not t.done():
                 t.cancel()
@@ -699,7 +718,27 @@ class PaperBotRuntime:
                 self._log(f"СВЕЧА {figi[-6:]} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} v={c.volume}")
 
         _lookup = self.tcs_to_bbg.get(figi, figi)
-        pos = await self.broker.get_position(_lookup) or await self.broker.get_position(figi)
+        # --- Stream position (single source of truth) ---
+        _srv_pos = None
+        if self.stream_manager is not None:
+            _srv_pos = self.stream_manager.get_position(_lookup) or self.stream_manager.get_position(figi)
+        # Fallback: broker poll (paper mode or stream unavailable)
+        pos = None
+        if _srv_pos is not None:
+            # Convert ServerPosition → LivePosition for intrabar_exit compatibility
+            from app.bot.live_broker import LivePosition
+            pos = LivePosition(
+                figi=_srv_pos.figi,
+                ticker=_srv_pos.ticker,
+                side=_srv_pos.side,
+                qty=_srv_pos.qty,
+                entry_price=_srv_pos.entry_price,
+                entry_time=datetime.now(timezone.utc),
+                stop_loss=None,
+                take_profit=None,
+            )
+        elif self.stream_manager is None or self.mode != "sandbox":
+            pos = await self.broker.get_position(_lookup) or await self.broker.get_position(figi)
         if pos is not None:
             state = PositionState.LONG if pos.side == "LONG" else PositionState.SHORT
             stop = float(pos.stop_loss) if pos.stop_loss is not None else None
@@ -770,7 +809,18 @@ class PaperBotRuntime:
         self.events.log("SIGNAL_CREATED", figi=figi, ticker=ticker,
                         side=sig.side.value)
 
-        pos_now = await self.broker.get_position(figi)
+        pos_now = None
+        if self.stream_manager is not None:
+            _srv_now = self.stream_manager.get_position(figi)
+            if _srv_now is not None:
+                from app.bot.live_broker import LivePosition
+                pos_now = LivePosition(
+                    figi=_srv_now.figi, ticker=_srv_now.ticker, side=_srv_now.side,
+                    qty=_srv_now.qty, entry_price=_srv_now.entry_price,
+                    entry_time=datetime.now(timezone.utc), stop_loss=None, take_profit=None,
+                )
+        if pos_now is None:
+            pos_now = await self.broker.get_position(figi)
         state_now = PositionState.LONG if (pos_now and pos_now.side == "LONG") else (
             PositionState.SHORT if (pos_now and pos_now.side == "SHORT") else PositionState.FLAT
         )
