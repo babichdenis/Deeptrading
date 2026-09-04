@@ -610,6 +610,33 @@ class PaperBotRuntime:
             except Exception:
                 pass
 
+    async def _reconcile_loop(self) -> None:
+        """Фоновая задача: каждые 60с сверяет StreamManager vs broker positions."""
+        while self.running:
+            await asyncio.sleep(60.0)
+            try:
+                if self.stream_manager is None or not isinstance(self.broker, LiveBroker):
+                    continue
+                stream_positions = {p.figi: p for p in self.stream_manager.get_positions()}
+                broker_positions = {p.figi: p for p in await self.broker.positions()}
+                all_figi = set(stream_positions.keys()) | set(broker_positions.keys())
+                for figi in all_figi:
+                    sp = stream_positions.get(figi)
+                    bp = broker_positions.get(figi)
+                    if sp is None and bp is not None:
+                        self._log(f"RECONCILE: stream=NONE broker={bp.side} {bp.qty} {figi[-6:]}")
+                    elif sp is not None and bp is None:
+                        self._log(f"RECONCILE: stream={sp.side} {sp.qty} broker=NONE {figi[-6:]}")
+                    elif sp is not None and bp is not None:
+                        if sp.qty != bp.qty:
+                            self._log(f"RECONCILE: qty mismatch {figi[-6:]} stream={sp.qty} broker={bp.qty}")
+                        if sp.side != bp.side:
+                            self._log(f"RECONCILE: side mismatch {figi[-6:]} stream={sp.side} broker={bp.side}")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
     def _interval_value(self) -> int:
         if self.config.use_ensemble:
             return 1
@@ -648,6 +675,7 @@ class PaperBotRuntime:
         self._persist_task = asyncio.create_task(self._flush_persist())
         self._held_sync_task = asyncio.create_task(self._sync_held())
         self._hot_add_task = asyncio.create_task(self._hot_add_universe())
+        self._reconcile_task = asyncio.create_task(self._reconcile_loop()) if self.stream_manager else None
         try:
             async for candle in feed.stream():
                 if not self.running:
@@ -671,7 +699,7 @@ class PaperBotRuntime:
                     await self._persist_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            for t in ('_held_sync_task', '_hot_add_task'):
+            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task'):
                 task = getattr(self, t, None)
                 if task:
                     task.cancel()
