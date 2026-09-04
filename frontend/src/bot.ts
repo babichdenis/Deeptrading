@@ -109,7 +109,80 @@ function initBotResizer() {
   });
 }
 
+function sendBotConfigPatch(extra?: Record<string, unknown>) {
+  const sessMap: Record<string, string> = {
+    "sg-morning": "morning", "sg-day": "day", "sg-evening": "evening"
+  };
+  const sessKeys = ["sg-morning", "sg-day", "sg-evening"];
+  const sessions = sessKeys.filter((x) => ($(x) as HTMLInputElement).checked).map((x) => sessMap[x]);
+  const longOn = ($("dg-long") as HTMLInputElement)?.checked ?? true;
+  const shortOn = ($("dg-short") as HTMLInputElement)?.checked ?? false;
+  const lev = ($("sg-lev") as HTMLInputElement)?.checked ?? false;
+  const body: Record<string, unknown> = {
+    sessions: sessions.length ? sessions : ["day"],
+    long_allowed: longOn,
+    short_allowed: shortOn,
+    leverage: lev ? 2 : 1,
+  };
+  if (extra) Object.assign(body, extra);
+  fetch("/api/v1/bot/config", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+function initSessChips() {
+  const ids = ["sg-morning", "sg-day", "sg-evening", "sg-lev"];
+  let saved: string[] = [];
+  try {
+    saved = JSON.parse(localStorage.getItem("bot_sess") || "[]");
+  } catch { saved = []; }
+  const sessKeys = ["sg-morning", "sg-day", "sg-evening"];
+  const defaultSess = saved.length ? saved : ["sg-morning", "sg-day", "sg-evening"];
+  for (const id of sessKeys) {
+    const cb = $(id) as HTMLInputElement | null;
+    if (!cb) continue;
+    cb.checked = defaultSess.includes(id);
+    cb.closest("label")?.classList.toggle("on", cb.checked);
+    cb.addEventListener("change", () => {
+      cb.closest("label")?.classList.toggle("on", cb.checked);
+      const on = sessKeys.filter((x) => ($(x) as HTMLInputElement).checked);
+      localStorage.setItem("bot_sess", JSON.stringify(on.length ? on : ["sg-morning", "sg-day", "sg-evening"]));
+      sendBotConfigPatch();
+    });
+  }
+  const lev = $("sg-lev") as HTMLInputElement | null;
+  if (lev) {
+    lev.checked = localStorage.getItem("bot_lev") === "1";
+    lev.closest("label")?.classList.toggle("on", lev.checked);
+    lev.addEventListener("change", () => {
+      lev.closest("label")?.classList.toggle("on", lev.checked);
+      localStorage.setItem("bot_lev", lev.checked ? "1" : "0");
+      sendBotConfigPatch();
+    });
+  }
+  const dirIds = ["dg-long", "dg-short"];
+  let dirSaved: string[] = [];
+  try { dirSaved = JSON.parse(localStorage.getItem("bot_dir") || "[]"); } catch { dirSaved = []; }
+  const defDir = dirSaved.length ? dirSaved : ["dg-long"];
+  for (const id of dirIds) {
+    const cb = $(id) as HTMLInputElement | null;
+    if (!cb) continue;
+    cb.checked = defDir.includes(id);
+    cb.closest("label")?.classList.toggle("on", cb.checked);
+    cb.addEventListener("change", () => {
+      cb.closest("label")?.classList.toggle("on", cb.checked);
+      const on = dirIds.filter((x) => ($(x) as HTMLInputElement).checked);
+      localStorage.setItem("bot_dir", JSON.stringify(on));
+      sendBotConfigPatch();
+    });
+  }
+}
+
 export async function initBot(onStateChange?: (running: boolean) => void) {
+  initSessChips();
+  initBotSettings();
   $("btn-bot-start").addEventListener("click", () => void doStart());
   $("btn-bot-stop").addEventListener("click", () => void doStop());
 
@@ -124,19 +197,24 @@ export async function initBot(onStateChange?: (running: boolean) => void) {
     const tr = (e.target as HTMLElement).closest("tr") as HTMLElement | null;
     if (!tr) return;
     const idx = Array.from(tr.parentElement!.children).indexOf(tr);
-    const t = _lastTrades.slice(0, 30)[idx];
+    const t = _lastTrades[idx];
     if (t) sendEmbedFocus(t.figi, t.ticker, tradeAsTrade(t));
   });
 
   void pollOnce();
   setInterval(() => void pollOnce(onStateChange), 8000);
-  setInterval(() => void pollEvents(), 3000);
   setInterval(() => void pollLogs(), 1000);
   setupLogFilters();
   initBotResizer();
 }
 
-const LGF = { candles: true, signals: true, trades: true, events: true };
+function _loadLGF() {
+  const saved = localStorage.getItem("log_lgf");
+  if (saved) { try { return JSON.parse(saved); } catch {} }
+  return { candles: true, signals: true, trades: true, events: true };
+}
+const LGF: Record<string, boolean> = _loadLGF();
+let _logDateFilter = localStorage.getItem("log_date_filter") ?? new Date().toLocaleDateString("sv-SE");
 let _allLogs: string[] = [];
 let _lastPositions: SandboxPositionRow[] = [];
 let _lastTrades: BotTradeRow[] = [];
@@ -163,24 +241,30 @@ function sendEmbedFocus(figi: string, ticker: string, trade: Record<string, unkn
       exit_price: (t as { exit_price?: number }).exit_price,
       qty: t.qty,
     }));
-  f.contentWindow.postMessage({ type: "focus", figi, ticker, trade, trades: hist }, "*");
+  const msg = { type: "focus", figi, ticker, trade, trades: hist };
+  f.contentWindow.postMessage(msg, "*");
+
 }
 function positionAsTrade(p: SandboxPositionRow): Record<string, unknown> {
+  const t = p as unknown as { meta?: string; exit_meta?: string | null; entry_reason?: string | null };
   return {
     side: p.side, entry_time: botIso(p.entry_time), entry_price: p.entry_price,
     stop_loss: p.stop_loss, take_profit: p.take_profit,
+    meta: t.meta, exit_meta: t.exit_meta, entry_reason: t.entry_reason,
   };
 }
 function tradeAsTrade(t: BotTradeRow): Record<string, unknown> {
+  const e = t as unknown as { meta?: string; exit_meta?: string | null; entry_reason?: string | null; stop_loss?: number | null; take_profit?: number | null };
   return {
     side: t.side,
     entry_time: botIso((t as { entry_time?: string }).entry_time ?? t.ts),
     exit_time: t.ts ? botIso(t.ts) : undefined,
     entry_price: (t as { entry_price?: number }).entry_price ?? t.price,
     exit_price: (t as { exit_price?: number }).exit_price,
-    stop_loss: (t as { stop_loss?: number | null }).stop_loss,
-    take_profit: (t as { take_profit?: number | null }).take_profit,
+    stop_loss: e.stop_loss,
+    take_profit: e.take_profit,
     net_pnl: t.net_pnl,
+    meta: e.meta, exit_meta: e.exit_meta, entry_reason: e.entry_reason,
   };
 }
 
@@ -195,7 +279,9 @@ function logKind(l: string): string {
 function renderLogs() {
   const el = $("bot-live-logs");
   if (!el) return;
-  const rows = _allLogs.filter((l) => LGF[logKind(l) as keyof typeof LGF]).slice(-250);
+  let rows = _allLogs.filter((l) => LGF[logKind(l) as keyof typeof LGF]);
+  if (_logDateFilter) rows = rows.filter((l) => l.startsWith("[" + _logDateFilter));
+  rows = rows.slice(-500);
   el.innerHTML = rows.length
     ? rows.map((l) => {
         let cls = "";
@@ -230,6 +316,7 @@ function setupLogFilters() {
     if (cb) cb.addEventListener("change", () => {
       LGF[key] = cb.checked;
       cb.closest("label")?.classList.toggle("on", cb.checked);
+      localStorage.setItem("log_lgf", JSON.stringify(LGF));
       renderLogs();
       if (key === "candles") {
         void fetch("/api/v1/bot/logconfig", {
@@ -240,13 +327,27 @@ function setupLogFilters() {
       }
     });
   };
+  for (const [id, key] of [["lg-candles","candles"],["lg-signals","signals"],["lg-trades","trades"],["lg-events","events"]]) {
+    const cb = $(id) as HTMLInputElement | null;
+    if (cb) { cb.checked = !!LGF[key]; cb.closest("label")?.classList.toggle("on", cb.checked); }
+  }
   setLG("lg-candles", "candles");
   setLG("lg-signals", "signals");
   setLG("lg-trades", "trades");
   setLG("lg-events", "events");
+  const dateInput = $("log-filter-date") as HTMLInputElement | null;
+  if (dateInput) {
+    dateInput.value = _logDateFilter;
+    dateInput.addEventListener("change", () => {
+      _logDateFilter = dateInput.value;
+      localStorage.setItem("log_date_filter", _logDateFilter);
+      renderLogs();
+    });
+  }
   const clear = $("lg-clear");
   if (clear) clear.addEventListener("click", () => {
     _allLogs = [];
+    if (dateInput) { dateInput.value = ""; _logDateFilter = ""; localStorage.removeItem("log_date_filter"); }
     renderLogs();
     void fetch("/api/v1/bot/logs/clear", { method: "POST" });
   });
@@ -307,17 +408,125 @@ function renderStrategyParams() {
     .join("");
 }
 
+function currentSessions(): string[] {
+  const map: Record<string, string> = { "sg-morning": "morning", "sg-day": "day", "sg-evening": "evening" };
+  const out = Object.keys(map).filter((id) => ($(id) as HTMLInputElement | null)?.checked).map((id) => map[id]);
+  return out.length ? out : ["morning", "day", "evening"];
+}
+
+interface BotCfg { stop: number; target: number; topn: number; slMode: string; atrPeriod: number; atrMult: number; atrRr: number; commission: number; reentry: number; overnight: boolean; }
+
+function loadBotCfg(): BotCfg {
+  const d: BotCfg = { stop: 2.5, target: 2.5, topn: 20, slMode: "atr", atrPeriod: 14, atrMult: 4.0, atrRr: 4.0, commission: 0.3, reentry: 15, overnight: false };
+  try {
+    const raw = localStorage.getItem("bot_cfg");
+    if (raw) Object.assign(d, JSON.parse(raw));
+  } catch { /* noop */ }
+  return d;
+}
+
+
+async function fetchTradingStatus() {
+  try {
+    const resp = await fetch("/api/v1/bot/trading_status");
+    const data = await resp.json();
+    const el = document.getElementById("bs-trading-status");
+    if (el) {
+      const session = data.session || "—";
+      const status = data.status || "—";
+      el.textContent = status;
+      el.classList.remove("pos", "neg", "warn");
+      if (session === "trading") el.classList.add("pos");
+      else if (session === "pre_market" || session === "clearing") el.classList.add("warn");
+      else el.classList.add("neg");
+      el.title = "MOEX: " + status + " (" + session + ")";
+    }
+  } catch { /* noop */ }
+}
+
+function toggleSlSections(mode: string) {
+  const atrSection = $("bs-atr-section");
+  const fixedSection = $("bs-fixed-section");
+  if (atrSection) atrSection.classList.toggle("bs-hidden", mode !== "atr");
+  if (fixedSection) fixedSection.classList.toggle("bs-hidden", mode !== "fixed");
+}
+
+function initBotSettings() {
+  void fetchTradingStatus();
+  setInterval(() => void fetchTradingStatus(), 30000);
+
+  const overlay = $("bot-modal-overlay");
+  const btn = $("btn-bot-settings");
+  if (!overlay || !btn) return;
+  const close = () => overlay.classList.add("hidden");
+  const open = () => {
+    const cfg = loadBotCfg();
+    ($("bs-sl") as HTMLInputElement).value = String(cfg.stop);
+    ($("bs-tp") as HTMLInputElement).value = String(cfg.target);
+    ($("bs-topn") as HTMLInputElement).value = String(cfg.topn);
+    ($("bs-atr-period") as HTMLInputElement).value = String(cfg.atrPeriod);
+    ($("bs-atr-mult") as HTMLInputElement).value = String(cfg.atrMult);
+    ($("bs-atr-rr") as HTMLInputElement).value = String(cfg.atrRr);
+    // Set radio button
+  const radios = document.querySelectorAll('input[name="sl-mode"]') as NodeListOf<HTMLInputElement>;
+    radios.forEach(r => { r.checked = r.value === cfg.slMode; });
+    toggleSlSections(cfg.slMode);
+    overlay.classList.remove("hidden");
+  };
+  btn.addEventListener("click", open);
+  const closeBtn = $("bs-close");
+  if (closeBtn) closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  const save = $("bs-save");
+  if (save) save.addEventListener("click", () => {
+    const sl = Number(($("bs-sl") as HTMLInputElement).value) || 2.5;
+    const tp = Number(($("bs-tp") as HTMLInputElement).value) || 2.5;
+    const topn = Math.max(2, Math.min(15, Number(($("bs-topn") as HTMLInputElement).value) || 6));
+    const slMode = (document.querySelector('input[name="sl-mode"]:checked') as HTMLInputElement)?.value || "atr";
+    const atrPeriod = Math.max(5, Number(($("bs-atr-period") as HTMLInputElement).value) || 14);
+    const atrMult = Math.max(0.5, Number(($("bs-atr-mult") as HTMLInputElement).value) || 4.0);
+    const atrRr = Math.max(0.5, Number(($("bs-atr-rr") as HTMLInputElement).value) || 4.0);
+    localStorage.setItem("bot_cfg", JSON.stringify({ stop: sl, target: tp, topn, slMode, atrPeriod, atrMult, atrRr }));
+    sendBotConfigPatch({
+      stop_pct: sl / 100,
+      target_pct: tp / 100,
+      top_n: topn,
+      sl_mode: slMode,
+      atr_period: atrPeriod,
+      atr_multiplier: atrMult,
+      atr_risk_reward: atrRr,
+    });
+    close();
+  });
+  // Radio buttons for SL mode
+  const radios = document.querySelectorAll('input[name="sl-mode"]') as NodeListOf<HTMLInputElement>;
+  radios.forEach(r => r.addEventListener("change", () => toggleSlSections(r.value)));
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
+}
+
 async function doStart() {
   try {
     $("btn-bot-start").classList.add("busy");
+    const cfg = loadBotCfg();
     await botStart({
       strategy_id: "ensemble_v4",
       params: {},
-      interval_name: "1min",
-      top_n: 6,
+      interval_name: "5min",
+      top_n: cfg.topn,
+      commission_rate: cfg.commission,
+      reentry_cooldown_bars: cfg.reentry,
+      overnight: cfg.overnight,
       qty_per_trade: 1,
-      stop_pct: 0.008,
-      target_pct: 0.02,
+      stop_pct: cfg.stop / 100,
+      target_pct: cfg.target / 100,
+      sl_mode: cfg.slMode,
+      atr_period: cfg.atrPeriod,
+      atr_multiplier: cfg.atrMult,
+      atr_risk_reward: cfg.atrRr,
       allow_short: false,
       initial_cash: 10000,
       mode: "sandbox",
@@ -325,6 +534,10 @@ async function doStart() {
       ensemble_capital: 0,
       ensemble_quorum: 2,
       ensemble_session: "main",
+      sessions: currentSessions(),
+      leverage: ($("sg-lev") as HTMLInputElement | null)?.checked ? 2 : 1,
+      long_allowed: ($("dg-long") as HTMLInputElement | null)?.checked ?? true,
+      short_allowed: ($("dg-short") as HTMLInputElement | null)?.checked ?? false,
     });
   } catch (e) {
     alert(e instanceof Error ? e.message : String(e));
@@ -394,10 +607,15 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     modeChip.classList.add("hidden");
   }
 
-  if (bst && bst.error) $("bs-mode").textContent = "ошибка";
-  $("bs-mode").textContent = bst && bst.running ? bst.mode : "—";
-  $("bs-candles").textContent = bst && bst.candles_seen != null ? String(bst.candles_seen) : "—";
-  $("bs-signals").textContent = bst && bst.signals_seen != null ? String(bst.signals_seen) : "—";
+  const bsMode = $("bs-mode");
+  if (bsMode) {
+    if (bst && bst.error) bsMode.textContent = "ошибка";
+    else bsMode.textContent = bst && bst.running ? bst.mode : "—";
+  }
+  const bsCandles = $("bs-candles");
+  if (bsCandles) bsCandles.textContent = bst && bst.candles_seen != null ? String(bst.candles_seen) : "—";
+  const bsSignals = $("bs-signals");
+  if (bsSignals) bsSignals.textContent = bst && bst.signals_seen != null ? String(bst.signals_seen) : "—";
   const sessEl = $("bs-session");
   if (sessEl) {
     const s = bst && bst.session ? bst.session : "—";
@@ -424,6 +642,8 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
 
   const eqChip = $("equity-chip");
   if (eqChip) eqChip.textContent = `${money(st.portfolio.equity)} ₽`;
+  const bsCash = $("bs-cash");
+  if (bsCash) bsCash.textContent = `${money(st.portfolio.cash)} ₽`;
   const bsEq = $("bs-equity");
   if (bsEq) bsEq.textContent = `${money(st.portfolio.equity)} ₽`;
   const pnlEl = $("bs-pnl");
@@ -439,31 +659,43 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   try {
   const positions: SandboxPositionRow[] = await sandboxPositions().catch(() => []);
   _lastPositions = positions;
+  const totalOwn = positions.reduce((s, p) => s + p.entry_price * p.qty / (p.leverage || 1), 0);
+  const bsPosVal = $("bs-positions-value");
+  if (bsPosVal) bsPosVal.textContent = `${money(totalOwn)} ₽`;
+  _lastPositions = positions;
   document.querySelector("#bot-positions-table tbody")!.innerHTML =
     positions
       .map((p) => {
         const trend = priceTrend(p.current_price, p.prev_close);
         const closeAction = p.side.toUpperCase() === "LONG" ? "Продать" : "Купить";
         const closeClass = p.side.toUpperCase() === "LONG" ? "btn-sell" : "btn-buy";
+        const lev = p.leverage || 1;
+        const notional = p.entry_price * p.qty;
+        const own = notional / lev;
+        const pnl = p.unrealized_pnl ?? ((p.current_price - p.entry_price) * p.qty);
+        const roi = own > 0 ? (pnl / own * 100) : 0;
         return `<tr>` +
           `<td class="num" style="font-size:10px;color:var(--text-dim)">${fmtTime(p.entry_time)}</td>` +
           `<td><b>${p.ticker}</b></td>` +
           `<td>${sideIcon(p.side)}</td>` +
           `<td class="num">${p.qty}</td>` +
-          `<td class="num">${price(p.entry_price)} <span class="dim">(${money(p.entry_price * p.qty)}₽)</span></td>` +
+          `<td class="num">${price(p.entry_price)}</td>` +
+          `<td class="num dim">${money(notional)}₽ <span class="dim">(${money(own)}₽ own)</span></td>` +
           `<td class="num${trend}">${price(p.current_price)}</td>` +
-          `<td class="num ${p.unrealized_pnl >= 0 ? "pos" : "neg"}">${p.unrealized_pnl >= 0 ? "+" : ""}${money(p.unrealized_pnl)}</td>` +
+          `<td class="num ${pnl >= 0 ? "pos" : "neg"}">${pnl >= 0 ? "+" : ""}${money(pnl)}₽</td>` +
+          `<td class="num ${roi >= 0 ? "pos" : "neg"}">${roi >= 0 ? "+" : ""}${roi.toFixed(1)}%</td>` +
+          `<td class="num">×${lev}</td>` +
           `<td class="num">${p.stop_loss != null ? price(p.stop_loss) : "—"}</td>` +
           `<td class="num">${p.take_profit != null ? price(p.take_profit) : "—"}</td>` +
           `<td><button class="btn-sm ${closeClass}" onclick="window.__closePosition('${p.ticker}','${p.side}',${p.qty})">${closeAction}</button></td>` +
           `</tr>`;
       })
-      .join("") || `<tr><td colspan=10 style="color:var(--text-dim)">нет открытых позиций</td></tr>`;
+      .join("") || `<tr><td colspan=13 style="color:var(--text-dim)">нет открытых позиций</td></tr>`;
 
-  const trades: BotTradeRow[] = await sandboxTrades(200).catch(() => []);
+  const trades: BotTradeRow[] = await sandboxTrades(500).catch(() => []);
   _lastTrades = trades;
   renderTrades(trades);
-  renderPortfolioSummary(st, trades);
+  renderPortfolioSummary(st, trades, positions);
   if (!_chartInit && positions.length > 0) {
     _chartInit = true;
     const first = positions[0];
@@ -521,7 +753,7 @@ function hideEmptyTables() {
   });
   document.querySelectorAll(".pages .card").forEach((c) => {
     const el = c as HTMLElement;
-    if (el.id === "portfolio-summary" || el.id === "bot-events" || el.id === "cfg-editor") return;
+    if (el.id === "portfolio-summary" || el.id === "bot-events") return;
     const visibleKids = Array.from(el.children).filter((ch) => {
       const h = ch as HTMLElement;
       return h.style.display !== "none" && (h.offsetParent !== null || h.style.position === "fixed");
@@ -535,7 +767,6 @@ function hideEmptyTables() {
 function renderTrades(trades: BotTradeRow[]) {
   document.querySelector("#bot-trades-table tbody")!.innerHTML =
     trades
-      .slice(0, 30)
       .map(
         (t) => {
           const isOpen = !t.ts || t.exit_reason === "на торгах" || t.exit_price == null;
@@ -562,30 +793,22 @@ function renderTrades(trades: BotTradeRow[]) {
         }
       )
       .join("") || `<tr><td colspan=8 style="color:var(--text-dim)">пока нет сделок</td></tr>`;
-  document.querySelector("#pf-trades-table tbody")!.innerHTML =
-    trades
-      .map(
-        (t) =>
-          `<tr><td style="font-size:10px;color:var(--text-dim)">${fmtTime(t.ts)}</td>` +
-          `<td><b>${t.ticker}</b></td><td>${sideIcon(t.side)}</td><td class="num">${t.qty}</td>` +
-          `<td class="num">${price(t.price != null ? t.price : t.entry_price)}</td><td class="num">${price(t.exit_price)}</td>` +
-          `<td class="num ${t.net_pnl >= 0 ? "pos" : "neg"}">${t.net_pnl >= 0 ? "+" : ""}${money(t.net_pnl)}</td>` +
-          `<td class="num" style="color:var(--text-dim)">${t.commission != null ? money(t.commission) : "—"}</td>` +
-          `<td>${t.exit_reason}</td></tr>`
-      )
-      .join("") || `<tr><td colspan=9 style="color:var(--text-dim)">сделок пока нет</td></tr>`;
+
 }
 
 function renderPortfolioSummary(
   st: { portfolio: { cash: number; equity: number; pnl: number; initial_cash: number } },
   trades: BotTradeRow[],
+  positions: SandboxPositionRow[],
 ) {
   const p = st.portfolio;
   const wins = trades.filter((t) => t.net_pnl > 0).length;
+  const totalOwn = positions.reduce((s, pos) => s + pos.entry_price * pos.qty / (pos.leverage || 1), 0);
   $("portfolio-summary").innerHTML = `
     <div class="metrics-grid">
-      <div class="metric"><span class="k">Equity</span><span class="v">${money(p.equity)} ₽</span></div>
-      <div class="metric"><span class="k">Кеш</span><span class="v">${money(p.cash)} ₽</span></div>
+      <div class="metric"><span class="k">Equity (gross)</span><span class="v">${money(p.equity)} ₽</span></div>
+      <div class="metric"><span class="k">Свободные</span><span class="v">${money(p.cash)} ₽</span></div>
+      <div class="metric"><span class="k">Мои в позициях</span><span class="v">${money(totalOwn)} ₽</span></div>
       <div class="metric"><span class="k">P&L всего</span><span class="v ${p.pnl >= 0 ? "pos" : "neg"}">${p.pnl >= 0 ? "+" : ""}${money(p.pnl)} ₽</span></div>
       <div class="metric"><span class="k">Сделок</span><span class="v">${trades.length}</span></div>
       <div class="metric"><span class="k">Прибыльных</span><span class="v">${wins}</span></div>
