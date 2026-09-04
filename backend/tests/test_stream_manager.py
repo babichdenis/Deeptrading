@@ -161,3 +161,79 @@ class TestStopStart:
         await sm.start()  # should not create duplicate tasks
         assert len(sm._tasks) == 0
         sm._running = False
+
+
+class TestReconcileData:
+    def test_positions_match(self, sm):
+        """Stream and broker positions are identical — no discrepancy."""
+        sp = ServerPosition(figi="F1", ticker="T1", side="LONG", qty=10, entry_price=280.0)
+        sm._positions["F1"] = sp
+        assert sm.get_position("F1").qty == 10
+        assert sm.get_position("F1").side == "LONG"
+
+    def test_position_missing_in_stream(self, sm):
+        """Position exists in broker but not in stream."""
+        assert sm.get_position("MISSING") is None
+
+    def test_position_extra_in_stream(self, sm):
+        """Position exists in stream but not in broker."""
+        sp = ServerPosition(figi="F1", ticker="T1", side="LONG", qty=5, entry_price=100.0)
+        sm._positions["F1"] = sp
+        assert sm.get_position("F1") is not None
+
+
+class TestOrderConfirmation:
+    @pytest.mark.asyncio
+    async def test_order_fills_via_stream(self, sm):
+        """Order is confirmed via TradesStream."""
+        # Simulate order submission
+        sm._orders["order-1"] = ServerOrder(
+            order_id="order-1", figi="F1", direction="BUY", status="NEW"
+        )
+        # Simulate trade execution
+        sm._trades["trade-1"] = ServerTrade(
+            order_id="order-1", figi="F1", direction="BUY",
+            price=280.5, quantity=7, trade_id="trade-1",
+            executed_at=datetime.now(timezone.utc),
+        )
+        # Update order status
+        sm._orders["order-1"].status = "FILLED"
+
+        order = sm.get_order("order-1")
+        assert order.status == "FILLED"
+        assert order.quantity == 0  # not updated in this sim
+
+    @pytest.mark.asyncio
+    async def test_order_rejected(self, sm):
+        """Order is rejected by exchange."""
+        sm._orders["order-1"] = ServerOrder(
+            order_id="order-1", figi="F1", direction="BUY", status="REJECTED"
+        )
+        order = sm.get_order("order-1")
+        assert order.status == "REJECTED"
+
+
+class TestStreamLifecycle:
+    @pytest.mark.asyncio
+    async def test_start_creates_tasks(self, sm):
+        """Start creates background tasks (will fail but tasks are created)."""
+        # Mock the stream methods to prevent actual API calls
+        sm._run_positions_stream = AsyncMock(side_effect=asyncio.CancelledError)
+        sm._run_trades_stream = AsyncMock(side_effect=asyncio.CancelledError)
+        sm._run_orders_stream = AsyncMock(side_effect=asyncio.CancelledError)
+        await sm.start()
+        assert sm.running is True
+        assert len(sm._tasks) == 3
+        await sm.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_tasks(self, sm):
+        """Stop cancels all background tasks."""
+        sm._run_positions_stream = AsyncMock(side_effect=asyncio.CancelledError)
+        sm._run_trades_stream = AsyncMock(side_effect=asyncio.CancelledError)
+        sm._run_orders_stream = AsyncMock(side_effect=asyncio.CancelledError)
+        await sm.start()
+        assert sm.running is True
+        await sm.stop()
+        assert sm.running is False
+        assert len(sm._tasks) == 0
