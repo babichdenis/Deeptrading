@@ -174,7 +174,9 @@ class PaperBotRuntime:
         # --- Re-entry cooldown tracking ---
         self._last_exit_bar: dict[str, int] = {}  # figi -> bar number of last exit
         self._bar_counter: int = 0  # global bar counter
-        self._exit_plans: dict = {}  # figi -> ExitPolicy (for trailing stop)        self._persist_task: asyncio.Task | None = None
+        self._exit_plans: dict = {}  # figi -> ExitPolicy (for trailing stop)
+        self._just_opened_this_candle: set[str] = set()  # figis opened this candle
+        self._persist_task: asyncio.Task | None = None
         self.log_candles = True
         self._last_candle_log_ts: float = 0.0
 
@@ -735,7 +737,7 @@ class PaperBotRuntime:
         if strategy is None or buffer is None:
             return
 
-        await self._execute_pending(figi, c)
+        _did_execute = await self._execute_pending(figi, c)
 
         buffer.append(EngineCandle(ts=c.ts, open=c.open, high=c.high,
                                    low=c.low, close=c.close, volume=c.volume))
@@ -961,10 +963,11 @@ class PaperBotRuntime:
         self.events.log("ORDER_SUBMITTED", figi=figi, ticker=ticker,
                         order_id=order.id, action=action, side=side)
 
-    async def _execute_pending(self, figi: str, c) -> None:
+    async def _execute_pending(self, figi: str, c) -> bool:
+        """Process pending order."""
         order = self.pending_orders.pop(figi, None)
         if order is None or order.status == "CANCELLED":
-            return
+            return False
         cfg = self.config
         if order.action == "close":
             trade = await self.broker.close_position(figi, c.open, "signal_exit")
@@ -981,7 +984,7 @@ class PaperBotRuntime:
             self.events.log("ORDER_FILLED", figi=figi, ticker=order.ticker,
                             order_id=order.id, price=actual_exit, action="close",
                             net_pnl=float(trade.net_pnl) if trade else None)
-            return
+            return True
         from app.engine.models import Side
         side = Side(order.side)
         if cfg.use_ensemble:
@@ -1023,6 +1026,7 @@ class PaperBotRuntime:
                         order_id=order.id, price=entry_px, action="open")
         self.events.log("POSITION_OPENED", figi=figi, ticker=order.ticker,
                         side=order.side, qty=order.qty, entry_price=entry_px)
+        return True
 
     async def _check_circuit_breaker(self) -> None:
         risk = RiskSnapshot(daily_pnl=await self.refresh_daily_pnl(),

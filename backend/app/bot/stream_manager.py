@@ -182,43 +182,62 @@ class StreamManager:
         from t_tech.invest import AsyncClient
 
         async with AsyncClient(self.token, target=self.target) as client:
-            accounts_resp = await client.users.get_accounts()
-            account_ids = [a.id for a in accounts_resp.accounts]
+            account_ids = [self.account_id]
+
+            # --- Snapshot: load current positions via non-stream API first ---
+            # Sandbox positions_stream does NOT push existing positions on
+            # subscribe — it only sends deltas. So prime state from get_positions.
+            try:
+                for acc_id in account_ids:
+                    pos_resp = await client.operations.get_positions(account_id=acc_id)
+                    for sec in pos_resp.securities:
+                        qty = sec.balance
+                        if abs(qty) < 1:
+                            continue
+                        side = "LONG" if qty > 0 else "SHORT"
+                        sp = ServerPosition(
+                            figi=sec.figi,
+                            ticker=sec.ticker or sec.figi[:8],
+                            side=side,
+                            qty=abs(qty),
+                            entry_price=0.0,
+                            instrument_uid=sec.instrument_uid,
+                        )
+                        self._positions[sec.figi] = sp
+                        logger.info(f"PositionsSnapshot: {sec.figi} {side} qty={abs(qty)}")
+                self._last_positions_update = time.monotonic()
+                logger.info(f"PositionsSnapshot: {len(self._positions)} positions loaded")
+            except Exception as e:
+                logger.warning(f"PositionsSnapshot failed: {e}")
 
             logger.info(f"PositionsStream: subscribing to {len(account_ids)} accounts")
 
-            initial_received = False
             async for response in client.operations_stream.positions_stream(
                 accounts=account_ids,
                 with_initial_positions=True,
-                ping_delay_ms=10_000,
             ):
                 # Subscription confirmation
                 if response.subscriptions:
                     for sub in response.subscriptions.accounts:
                         logger.info(f"PositionsStream: account {sub.account_id} status={sub.subscription_status}")
 
-                # Initial positions
+                # Initial positions (PositionsResponse with .securities)
                 if response.initial_positions:
-                    for pos in response.initial_positions.positions:
-                        if pos.instrument_type == "currency":
-                            continue
-                        qty = pos.quantity.units + pos.quantity.nano / 1e9
+                    for sec in response.initial_positions.securities:
+                        qty = sec.balance
                         if abs(qty) < 1:
                             continue
                         side = "LONG" if qty > 0 else "SHORT"
-                        entry = self._q(pos.average_position_price)
                         sp = ServerPosition(
-                            figi=pos.figi,
-                            ticker=pos.figi[:8],
+                            figi=sec.figi,
+                            ticker=sec.ticker or sec.figi[:8],
                             side=side,
                             qty=abs(int(qty)),
-                            entry_price=entry,
-                            instrument_uid=getattr(pos, "instrument_uid", ""),
+                            entry_price=0.0,
+                            instrument_uid=sec.instrument_uid,
                         )
-                        self._positions[pos.figi] = sp
-                        logger.debug(f"PositionsStream: initial {pos.figi} {side} qty={abs(int(qty))}")
-                    initial_received = True
+                        self._positions[sec.figi] = sp
+                        logger.debug(f"PositionsStream: initial {sec.figi} {side} qty={abs(int(qty))}")
                     self._last_positions_update = time.monotonic()
 
                 # Position update
@@ -274,18 +293,15 @@ class StreamManager:
         from t_tech.invest import AsyncClient
 
         async with AsyncClient(self.token, target=self.target) as client:
-            accounts_resp = await client.users.get_accounts()
-            account_ids = [a.id for a in accounts_resp.accounts]
+            account_ids = [self.account_id]
 
             logger.info(f"TradesStream: subscribing to {len(account_ids)} accounts")
 
             async for response in client.orders_stream.trades_stream(
                 accounts=account_ids,
-                ping_delay_ms=10_000,
             ):
-                if response.subscriptions:
-                    for sub in response.subscriptions.accounts:
-                        logger.info(f"TradesStream: account {sub.account_id} status={sub.subscription_status}")
+                if response.subscription:
+                    logger.info(f"TradesStream: subscription status={response.subscription}")
 
                 if response.order_trades:
                     ot = response.order_trades
@@ -348,9 +364,8 @@ class StreamManager:
 
             stream = client.orders_stream.order_state_stream(request=request)
             async for response in stream:
-                if response.subscriptions:
-                    for sub in response.subscriptions.accounts:
-                        logger.info(f"OrderStateStream: account {sub.account_id} status={sub.subscription_status}")
+                if response.subscription:
+                    logger.info(f"OrderStateStream: subscription status={response.subscription}")
 
                 if response.order_state:
                     os_data = response.order_state
