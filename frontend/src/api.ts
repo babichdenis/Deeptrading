@@ -411,9 +411,10 @@ export async function sandboxStatus(): Promise<SandboxStatus> {
 export interface SandboxPositionRow {
   figi: string; ticker: string; side: string; qty: number;
   entry_price: number; current_price: number; prev_close: number | null;
-  unrealized_pnl: number;
+  unrealized_pnl: number; roi_pct: number; sell_value: number;
   entry_time: string; stop_loss: number | null; take_profit: number | null;
   strategy_id: string;
+  leverage: number; own_money: number; leveraged: number;
 }
 
 export async function sandboxPositions(): Promise<SandboxPositionRow[]> {

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Integer, Numeric, String
+from sqlalchemy import BigInteger, DateTime, Float, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -25,3 +25,7 @@ class SandboxTrade(Base):
     commission: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
     net_pnl: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    entry_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    meta: Mapped[str | None] = mapped_column("meta", Text, nullable=True)
+    exit_meta: Mapped[str | None] = mapped_column("exit_meta", Text, nullable=True)
+    leverage: Mapped[float] = mapped_column(Float, default=1.0)

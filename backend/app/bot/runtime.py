@@ -75,6 +75,9 @@ class BotConfig:
     reentry_cooldown_bars: int = 15  # баров между выходом и повторным входом (0=отключено)
     # --- Overnight ---
     overnight: bool = False  # закрывать позиции в конце сессии
+    # --- Margin ---
+    use_margin: bool = True  # использовать маржинальное кредитование
+    max_margin_pct: float = 80.0  # макс % от доступного маржинального лимита на сделку
 
 
 @dataclass
@@ -701,6 +704,8 @@ class PaperBotRuntime:
             state = PositionState.LONG if pos.side == "LONG" else PositionState.SHORT
             stop = float(pos.stop_loss) if pos.stop_loss is not None else None
             target = float(pos.take_profit) if pos.take_profit is not None else None
+            if figi.endswith("N88"):
+                self._log(f"DEBUG {figi[-6:]} state={state} sl={pos.stop_loss} tp={pos.take_profit} stop_calc={stop} target_calc={target} bar_o={c.open:.2f} bar_l={c.low:.2f} bar_h={c.high:.2f}")
             price, reason = intrabar_exit(c, state, stop, target)
             if price is not None:
                 trade = await self.broker.close_position(figi, price, reason)
@@ -850,6 +855,20 @@ class PaperBotRuntime:
                 self._log(f"ПРОПУСК СДЕЛКИ {ticker}: бюджет {budget:.0f} < own/лот {own_per_lot:.0f}")
                 return
             qty = max(1, int(budget / own_per_lot))
+        # --- Margin cap: check max lots from broker ---
+        if action == "open" and isinstance(self.broker, LiveBroker) and cfg.use_margin:
+            try:
+                from app.bot.live_broker import get_max_lots
+                ml = await get_max_lots(self.broker, figi)
+                max_lots = ml.buy_margin if side == "BUY" else ml.sell_margin
+                if max_lots <= 0:
+                    self._log(f"ПРОПУСК СДЕЛКИ {ticker}: маржинальный лимит = 0")
+                    return
+                if qty > max_lots:
+                    self._log(f"QTY CAP {ticker}: {qty} → {max_lots} (margin limit)")
+                    qty = max_lots
+            except Exception as e:
+                self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed without cap")
         order = BotOrder(
             id=_new_order_id(),
             figi=figi,

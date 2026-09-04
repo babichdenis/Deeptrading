@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -44,6 +44,27 @@ async def sync_candles(
     report = await ensure_candles(
         db, figi, interval_name, days, range_from=range_from, range_to=range_to
     )
+    return report
+
+
+@router.post("/{figi}/backfill")
+async def backfill_candles(
+    figi: str,
+    ticker: str | None = Query(None),
+    days: int = Query(35, ge=1, le=120),
+    workers: int = Query(4, ge=1, le=8),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Восполнить дыры 1m-свечей для одной акции (MOEX -> T-Invest)."""
+    tk = ticker
+    if not tk:
+        row = await db.execute(text("SELECT ticker FROM instruments WHERE figi = :f"), {"f": figi})
+        tk = row.scalar()
+        if not tk:
+            row2 = await db.execute(text("SELECT ticker FROM instrument_info WHERE figi = :f"), {"f": figi})
+            tk = row2.scalar()
+    from app.services.data_backfill import run_backfill
+    report = await run_backfill([(figi, tk or "")], days=days, workers=workers)
     return report
 
 

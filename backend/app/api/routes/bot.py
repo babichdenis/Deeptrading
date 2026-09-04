@@ -28,7 +28,13 @@ class StartRequest(BaseModel):
     qty_per_trade: int = 1
     stop_pct: float = 0.01
     target_pct: float = 0.02
+    sl_mode: str = "atr"
+    atr_period: int = 14
+    atr_multiplier: float = 4.0
+    atr_risk_reward: float = 4.0
     allow_short: bool = False
+    long_allowed: bool = True
+    short_allowed: bool = False
     initial_cash: float = 100_000.0
     daily_loss_limit: float = Field(1000.0, ge=0)
     mode: str = "paper"  # paper | sandbox | live
@@ -36,6 +42,15 @@ class StartRequest(BaseModel):
     ensemble_capital: float = 2000.0
     ensemble_quorum: int = 2
     ensemble_session: str = "main"
+    sessions: list[str] = Field(default_factory=lambda: ["day"])
+    leverage: float = 1.0
+    commission_rate: float = 0.3  # percent per trade
+    slippage_bps: float = 2.0
+    confirm_flip: int = 2
+    reentry_cooldown_bars: int = 15
+    use_margin: bool = True
+    max_margin_pct: float = 80.0
+    overnight: bool = False
 
 
 @router.post("/start")
@@ -55,7 +70,13 @@ async def bot_start(req: StartRequest) -> dict:
         qty_per_trade=max(1, req.qty_per_trade),
         stop_pct=req.stop_pct,
         target_pct=req.target_pct,
+        sl_mode=req.sl_mode,
+        atr_period=req.atr_period,
+        atr_multiplier=req.atr_multiplier,
+        atr_risk_reward=req.atr_risk_reward,
         allow_short=req.allow_short,
+        long_allowed=req.long_allowed,
+        short_allowed=req.short_allowed,
         initial_cash=req.initial_cash,
         daily_loss_limit=req.daily_loss_limit,
         mode=req.mode if req.mode in ("paper", "sandbox", "live") else "paper",
@@ -63,12 +84,109 @@ async def bot_start(req: StartRequest) -> dict:
         ensemble_capital=req.ensemble_capital,
         ensemble_quorum=max(1, req.ensemble_quorum),
         ensemble_session=req.ensemble_session if req.ensemble_session in ("main", "all") else "main",
+        sessions=[s for s in req.sessions if s in ("morning", "day", "evening")] or ["day"],
+        leverage=max(1.0, float(req.leverage)),
+        commission_rate=req.commission_rate / 100.0,  # convert % to decimal
+        slippage_bps=req.slippage_bps,
+        confirm_flip=req.confirm_flip,
+        reentry_cooldown_bars=req.reentry_cooldown_bars,
+        overnight=req.overnight,
     )
     try:
         result = await runtime.start(cfg)
     except RuntimeError as e:
         raise HTTPException(409, str(e))
     return {"status": "STARTING", **result}
+
+
+class BotConfigPatch(BaseModel):
+    sessions: list[str] | None = None
+    long_allowed: bool | None = None
+    short_allowed: bool | None = None
+    leverage: float | None = None
+    stop_pct: float | None = None
+    target_pct: float | None = None
+    sl_mode: str | None = None
+    atr_period: int | None = None
+    atr_multiplier: float | None = None
+    atr_risk_reward: float | None = None
+    top_n: int | None = None
+    ensemble_quorum: int | None = None
+    commission_rate: float | None = None
+    overnight: bool | None = None
+    reentry_cooldown_bars: int | None = None
+    confirm_flip: int | None = None
+
+
+@router.patch("/config")
+async def bot_config_patch(req: BotConfigPatch) -> dict:
+    if not runtime.running and not runtime.starting:
+        raise HTTPException(400, "бот не запущен")
+    cfg = runtime.config
+    changes: list[str] = []
+    valid_sessions = {"morning", "day", "evening"}
+    sess_names = {"morning": "утро", "day": "день", "evening": "вечер"}
+    if req.sessions is not None:
+        new_s = [s for s in req.sessions if s in valid_sessions] or ["day"]
+        if new_s != cfg.sessions:
+            changes.append(f"сессия: {'/'.join(sess_names.get(s, s) for s in cfg.sessions)} → {'/'.join(sess_names.get(s, s) for s in new_s)}")
+        cfg.sessions = new_s
+    if req.long_allowed is not None and req.long_allowed != cfg.long_allowed:
+        changes.append(f"long: {'вкл' if cfg.long_allowed else 'выкл'} → {'вкл' if req.long_allowed else 'выкл'}")
+        cfg.long_allowed = req.long_allowed
+    if req.short_allowed is not None and req.short_allowed != cfg.short_allowed:
+        changes.append(f"short: {'вкл' if cfg.short_allowed else 'выкл'} → {'вкл' if req.short_allowed else 'выкл'}")
+        cfg.short_allowed = req.short_allowed
+    if req.leverage is not None and req.leverage != cfg.leverage:
+        changes.append(f"плечо: ×{cfg.leverage} → ×{req.leverage}")
+        cfg.leverage = req.leverage
+    if req.stop_pct is not None:
+        new_sl = max(0.001, req.stop_pct)
+        if new_sl != cfg.stop_pct:
+            changes.append(f"SL: {cfg.stop_pct*100:.1f}% → {new_sl*100:.1f}%")
+        cfg.stop_pct = new_sl
+    if req.target_pct is not None:
+        new_tp = max(0.001, req.target_pct)
+        if new_tp != cfg.target_pct:
+            changes.append(f"TP: {cfg.target_pct*100:.1f}% → {new_tp*100:.1f}%")
+        cfg.target_pct = new_tp
+    if req.sl_mode is not None and req.sl_mode in ("atr", "fixed"):
+        if req.sl_mode != cfg.sl_mode:
+            changes.append(f"SL mode: {cfg.sl_mode} → {req.sl_mode}")
+        cfg.sl_mode = req.sl_mode
+    if req.atr_period is not None:
+        cfg.atr_period = max(5, req.atr_period)
+    if req.atr_multiplier is not None:
+        cfg.atr_multiplier = max(0.5, req.atr_multiplier)
+    if req.atr_risk_reward is not None:
+        cfg.atr_risk_reward = max(0.5, req.atr_risk_reward)
+    if req.top_n is not None:
+        new_tn = max(1, req.top_n)
+        if new_tn != cfg.top_n:
+            changes.append(f"Top-N: {cfg.top_n} → {new_tn}")
+        cfg.top_n = new_tn
+    if req.ensemble_quorum is not None:
+        new_q = max(1, req.ensemble_quorum)
+        if new_q != cfg.ensemble_quorum:
+            changes.append(f"quorum: {cfg.ensemble_quorum} → {new_q}")
+        cfg.ensemble_quorum = new_q
+    if changes:
+        runtime._log("⚙ КОНФИГ: " + " | ".join(changes))
+    return {
+        "ok": True,
+        "sessions": cfg.sessions,
+        "long_allowed": cfg.long_allowed,
+        "short_allowed": cfg.short_allowed,
+        "leverage": cfg.leverage,
+        "stop_pct": cfg.stop_pct,
+        "target_pct": cfg.target_pct,
+        "sl_mode": cfg.sl_mode,
+        "atr_period": cfg.atr_period,
+        "atr_multiplier": cfg.atr_multiplier,
+        "atr_risk_reward": cfg.atr_risk_reward,
+        "top_n": cfg.top_n,
+        "ensemble_quorum": cfg.ensemble_quorum,
+    }
 
 
 @router.post("/stop")
@@ -254,3 +372,72 @@ async def bot_reset(initial_cash: float = 100_000.0) -> dict:
         raise HTTPException(409, "остановите бота перед сбросом")
     await runtime.broker.reset(initial_cash)
     return {"reset": True}
+
+
+@router.get("/trading_status")
+async def bot_trading_status() -> dict:
+    """Возвращает реальный торговый статус MOEX через market_data.get_trading_status."""
+    from t_tech.invest import Client, SecurityTradingStatus
+    TOKEN = "t.Qhvl9v-tXNNrDLAw0AATld17wzqZ0E_CLJzkmp5AAoTZO92sJLdZxdVEGtpcOTrEZw1PfdXusqhRFhqONcU4Rw"
+    SB = "sandbox-invest-public-api.tbank.ru"
+    
+    from t_tech.invest import SecurityTradingStatus as STS
+    STATUS_MAP = {
+        STS.SECURITY_TRADING_STATUS_UNSPECIFIED: "UNSPECIFIED",
+        STS.SECURITY_TRADING_STATUS_NOT_AVAILABLE_FOR_TRADING: "NOT_AVAILABLE",
+        STS.SECURITY_TRADING_STATUS_OPENING_PERIOD: "OPENING",
+        STS.SECURITY_TRADING_STATUS_CLOSING_PERIOD: "CLOSING",
+        STS.SECURITY_TRADING_STATUS_BREAK_IN_TRADING: "BREAK",
+        STS.SECURITY_TRADING_STATUS_NORMAL_TRADING: "TRADING",
+        STS.SECURITY_TRADING_STATUS_CLOSING_AUCTION: "CLOSING_AUCTION",
+        STS.SECURITY_TRADING_STATUS_DARK_POOL_AUCTION: "DARK_POOL",
+        STS.SECURITY_TRADING_STATUS_DISCRETE_AUCTION: "DISCRETE",
+        STS.SECURITY_TRADING_STATUS_OPENING_AUCTION_PERIOD: "OPENING_AUCTION",
+        STS.SECURITY_TRADING_STATUS_TRADING_AT_CLOSING_AUCTION_PRICE: "CLOSING_AUCTION_PRICE",
+        STS.SECURITY_TRADING_STATUS_SESSION_ASSIGNED: "SESSION_ASSIGNED",
+        STS.SECURITY_TRADING_STATUS_SESSION_CLOSE: "SESSION_CLOSE",
+        STS.SECURITY_TRADING_STATUS_SESSION_OPEN: "SESSION_OPEN",
+        STS.SECURITY_TRADING_STATUS_DEALER_NORMAL_TRADING: "DEALER_TRADING",
+        STS.SECURITY_TRADING_STATUS_DEALER_BREAK_IN_TRADING: "DEALER_BREAK",
+        STS.SECURITY_TRADING_STATUS_DEALER_NOT_AVAILABLE_FOR_TRADING: "DEALER_NOT_AVAILABLE",
+    }
+    
+    figis = [
+        ("BBG004730N88", "SBER"), ("BBG004730RP0", "GAZP"), ("BBG004731032", "LKOH"),
+        ("BBG00475KKY8", "NVTK"), ("BBG00F6NKQX3", "SMLT"),
+    ]
+    
+    results = {}
+    try:
+        with Client(TOKEN, target=SB) as client:
+            for figi, ticker in figis:
+                try:
+                    resp = client.market_data.get_trading_status(figi=figi)
+                    code = resp.trading_status
+                    results[ticker] = {
+                        "figi": figi,
+                        "status_code": code,
+                        "status": STATUS_MAP.get(code, f"UNKNOWN_{code}"),
+                    }
+                except Exception as e:
+                    results[ticker] = {"figi": figi, "status": "ERROR", "error": str(e)}
+    except Exception as e:
+        return {"error": str(e), "statuses": {}}
+    
+    sber = results.get("SBER", {})
+    sber_status = sber.get("status", "UNKNOWN")
+    
+    session_map = {
+        "TRADING": "trading", "OPENING": "pre_market", "OPENING_AUCTION": "pre_market",
+        "CLOSING": "clearing", "CLOSING_AUCTION": "clearing",
+        "CLOSING_AUCTION_PRICE": "clearing",
+        "DEALER_TRADING": "weekend", "BREAK": "break",
+        "NOT_AVAILABLE": "closed", "SESSION_CLOSE": "closed",
+        "SESSION_OPEN": "trading",
+    }
+    
+    return {
+        "session": session_map.get(sber_status, "unknown"),
+        "status": sber_status,
+        "statuses": results,
+    }

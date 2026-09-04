@@ -44,6 +44,27 @@ class Notifier:
             t.start()
         return self._loop
 
+    def _send_tg_direct(self, text):
+        import urllib.request
+        token = config.TELEGRAM_BOT_TOKEN
+        chat_id = config.TELEGRAM_CHAT_ID
+        relay = config.TELEGRAM_API_BASE
+        if not all([token, chat_id, relay]):
+            return False
+        try:
+            url = relay.rstrip("/") + "/bot" + token + "/sendMessage"
+            data = json.dumps({"chat_id": chat_id, "text": text}).encode()
+            req = urllib.request.Request(url, data, {
+                "Content-Type": "application/json",
+                "X-Relay-Secret": getattr(config, "TELEGRAM_RELAY_SECRET", "") or "",
+            })
+            resp = urllib.request.urlopen(req, timeout=15)
+            result = json.loads(resp.read())
+            return result.get("ok", False)
+        except Exception as e:
+            print("[TG:ERR] %s: %s" % (type(e).__name__, e))
+            return False
+
     def _send(self, text, reply_markup=None):
         # 1) REST-мост в бэкенд (event_bus -> WS фронту)
         try:
@@ -73,6 +94,12 @@ class Notifier:
                 return True
             except Exception as e:
                 print(f"[TG:ERR] {type(e).__name__}: {e} (fallback to console)")
+        if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
+            try:
+                if self._send_tg_direct(text):
+                    return True
+            except Exception:
+                pass
         print(f"[TG] {text}")
         return False
 

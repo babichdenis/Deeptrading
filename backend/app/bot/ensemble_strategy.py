@@ -32,6 +32,7 @@ class EnsembleParams:
     use_all_setups: bool = False
     drop_useless: bool = True
     session: str = "main"
+    sessions: list = field(default_factory=lambda: ["day"])
     setups: list = field(default_factory=lambda: V2_SETUPS)
 
 
@@ -48,12 +49,23 @@ class EnsembleV4Strategy:
     def warmup_bars(self) -> int:
         return 50
 
-    def _is_main_session(self, dt_utc: datetime) -> bool:
+    SESSION_WINDOWS = {
+        "morning": (6 * 60 + 50, 9 * 60 + 50),
+        "day":     (9 * 60 + 50, 18 * 60 + 45),
+        "evening": (19 * 60 + 5, 23 * 60 + 50),
+    }
+
+    def _is_session_active(self, dt_utc: datetime, sessions: list[str]) -> bool:
+        """Проверяет, попадает ли время в одну из активных сессий."""
         msk = dt_utc.astimezone(MSK)
         if msk.weekday() >= 5:
             return False
-        t = msk.hour * 60 + msk.minute
-        return 10 * 60 <= t <= 18 * 60 + 45
+        mins = msk.hour * 60 + msk.minute
+        for s in sessions:
+            a, b = self.SESSION_WINDOWS.get(s, (0, 0))
+            if a <= mins < b:
+                return True
+        return False
 
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if not candles:
@@ -61,8 +73,10 @@ class EnsembleV4Strategy:
         last = candles[-1]
         if last.ts.minute % 5 != 0:
             return None
-        if self.p.session == "main" and not self._is_main_session(last.ts):
-            return None
+        # Проверяем сессию через sessions список из конфига
+        if self.p.sessions:
+            if not self._is_session_active(last.ts, self.p.sessions):
+                return None
         if len(candles) < 50:
             return None
         try:
@@ -104,10 +118,23 @@ class EnsembleV4Strategy:
             return None
         last_e = fresh[-1]
         side = Side.BUY if last_e.get("side") == "BUY" else Side.SELL
+        st = res.get("static", {})
+        quorum_list = st.get("quorum_list", [])
+        qevent = None
+        for q in quorum_list:
+            if q.get("event_id") == last_e.get("quorum_event_id"):
+                qevent = q
+                break
+        meta = {
+            "entry": {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in last_e.items()},
+            "quorum_event": qevent or {},
+            "setups": {k: v for k, v in (st.get("setups") or {}).items()},
+        }
         return Signal(
             strategy_id=self.strategy_id,
             side=side,
             time=last.ts,
             reason=f"ensemble_v4 {last_e.get('side')}",
             kind="entry",
+            features=meta,
         )

@@ -11,26 +11,28 @@
       <aside class="sidebar" id="sidebar">
         <div class="brand">⚡<span class="brand-name">Deeptrading</span></div>
         <nav class="side-nav">
-          <button class="nav-btn active" data-page="chart"><span class="ico">📈</span><span>Склад</span></button>
+          <button class="nav-btn" data-page="chart"><span class="ico">📈</span><span>Склад</span></button>
           <button class="nav-btn" data-page="lab"><span class="ico">🧪</span><span>Lab</span></button>
-          <button class="nav-btn" data-page="bot"><span class="ico">🤖</span><span>Бот</span></button>
+          <button class="nav-btn active" data-page="bot"><span class="ico">🤖</span><span>Бот</span></button>
         </nav>
         <div class="sidebar-logs">
-          <div class="sl-title">🤖 Логи бота</div>
+          <div class="sl-title">🤖 Логи бота (МСК)</div>
           <div class="log-toolbar">
             <label class="lg-chip on"><input type="checkbox" id="lg-candles" checked><span>Свечи</span></label>
             <label class="lg-chip on"><input type="checkbox" id="lg-signals" checked><span>Сигналы</span></label>
             <label class="lg-chip on"><input type="checkbox" id="lg-trades" checked><span>Сделки</span></label>
             <label class="lg-chip on"><input type="checkbox" id="lg-events" checked><span>События</span></label>
+            <input type="date" id="log-filter-date" class="log-date-input" title="Фильтр по дате" />
             <button class="lg-btn" id="lg-clear">Очистить</button>
           </div>
           <div class="bot-live-logs" id="bot-live-logs"><span style="color:#666">нет логов — запусти бота</span></div>
         </div>
+        <div class="sidebar-grip" title="Изменить ширину"></div>
       </aside>
 
       <div class="main-col">
         <header class="topbar">
-          <div class="page-title" id="page-title">Склад</div>
+          <div class="page-title" id="page-title">Paper-бот — дашборд</div>
           <div class="topbar-right">
             <div class="hdr-stats">
               <span class="hdr-stat" title="Торговая сессия МосБиржи"><b>Сессия</b><span id="bs-session">—</span></span>
@@ -38,19 +40,36 @@
               <span class="hdr-stat" title="Свечей получено"><b>Свечи</b><span id="bs-candles">0</span></span>
               <span class="hdr-stat" title="Сигналов"><b>Сигн</b><span id="bs-signals">0</span></span>
               <span class="hdr-stat" title="Позиций"><b>Поз</b><span id="bs-positions">0</span></span>
-              <span class="hdr-stat" title="Equity"><b>Eq</b><span id="bs-equity">—</span></span>
+              <span class="hdr-stat" title="Equity — если закрыть всё"><b>Eq</b><span id="bs-equity">—</span></span>
+              <span class="hdr-stat" title="Свободные деньги"><b>Cash</b><span id="bs-cash">—</span></span>
+              <span class="hdr-stat" title="Мои деньги в позициях"><b>В поз</b><span id="bs-positions-value">—</span></span>
               <span class="hdr-stat" title="P&L"><b>P&L</b><span id="bs-pnl">—</span></span>
+            </div>
+            <div class="hdr-sess" title="Сессии торговли бота">
+              <label class="lg-chip"><input type="checkbox" id="sg-morning"><span>Утро</span></label>
+              <label class="lg-chip"><input type="checkbox" id="sg-day" checked><span>День</span></label>
+              <label class="lg-chip"><input type="checkbox" id="sg-evening"><span>Вечер</span></label>
+              <label class="lg-chip" title="Торговать с плечом ×2 (песочница)"><input type="checkbox" id="sg-lev"><span>Плечо ×2</span></label>
+            </div>
+            <div class="hdr-dir" title="Направления торговли (хотя бы одно)">
+              <label class="lg-chip on" title="Покупать (вход BUY)"><input type="checkbox" id="dg-long" checked><span>Long</span></label>
+              <label class="lg-chip" title="Шортить (вход SELL)"><input type="checkbox" id="dg-short"><span>Short</span></label>
             </div>
             <div class="hdr-bot-ctrl">
               <button class="btn-primary start btn-xs" id="btn-bot-start">▶ Запустить</button>
               <button class="btn-primary stop hidden btn-xs" id="btn-bot-stop">■ Остановить</button>
+              <button class="btn-secondary btn-xs" id="btn-bot-settings" title="Настройки бота">⚙</button>
             </div>
             <div id="bot-pill-top" class="bot-pill off"><span class="dot"></span><span id="bot-state-text">Бот выключен</span><span id="bot-mode" class="mode-chip hidden"></span></div>
+          </div>
+          <div class="topbar-status">
+            <span class="hdr-stat" title="Торговая сессия Мосбиржи"><b>Сессия</b> <span id="bs-session">—</span></span>
+            <span class="hdr-stat" title="MOEX Trading Status (T-Investments API)"><b>MOEX</b> <span id="bs-trading-status">—</span></span>
           </div>
         </header>
 
         <div class="pages">
-          <section class="page page-chart active" id="page-chart">
+          <section class="page page-chart" id="page-chart">
             <header class="toolbar">
               <div class="toolbar-left">
                 <div class="symbol-block">
@@ -392,7 +411,7 @@
             </div>
           </section>
 
-          <section class="page page-pad" id="page-bot">
+          <section class="page page-pad active" id="page-bot">
 <div class="card portfolio-summary" id="portfolio-summary"></div>
             <div class="universe-chips" id="bot-universe"></div>
             
@@ -404,7 +423,7 @@
             </div>
             <h3 class="pg-h3">Открытые позиции</h3>
             <table class="runs-table" id="bot-positions-table">
-              <thead><tr><th>Вход время</th><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Текущая</th><th>P&L</th><th>SL</th><th>TP</th><th></th></tr></thead>
+              <thead><tr><th>Вход время</th><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Notional</th><th>Текущая</th><th>P&L ₽</th><th>ROI %</th><th>Плечо</th><th>SL</th><th>TP</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
             <h3 class="pg-h3">Последние сделки</h3>
@@ -412,13 +431,8 @@
               <thead><tr><th>Время входа→выхода</th><th>Акция</th><th>Направл.</th><th>Кол-во</th><th>Цена входа→выхода</th><th>Доход</th><th>Комиссия</th><th>Причина выхода</th></tr></thead>
               <tbody></tbody>
             </table>
-            <h3 class="pg-h3">Все сделки (история paper-портфеля)</h3>
-            <table class="runs-table" id="pf-trades-table">
-              <thead><tr><th>Время</th><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Выход</th><th>P&L</th><th>Комиссия</th><th>Причина</th></tr></thead>
-              <tbody></tbody>
-            </table>
-            <h3 class="pg-h3">Поток событий <span class="mini-hint">сигналы → решения → заявки → исполнения; обновление каждые 3 с</span></h3>
-            <div class="card ev-log" id="bot-events"></div>
+
+
           </section>
         </div>
 
@@ -428,6 +442,62 @@
         </footer>
       </div>
     </div>
+
+<div class="modal-overlay hidden" id="bot-modal-overlay">
+  <div class="bot-modal">
+    <div class="bot-modal-head">
+      <b>⚙ Настройки бота</b>
+      <button class="btn-secondary btn-sm" id="bs-close" title="Закрыть">✕</button>
+    </div>
+    <div class="bot-modal-body">
+
+      <div class="bs-section">
+        <div class="bs-section-title">Режим SL/TP</div>
+        <div class="bs-radio-group">
+          <label class="bs-radio"><input type="radio" name="sl-mode" value="atr" checked /> ATR (адаптивный)</label>
+          <label class="bs-radio"><input type="radio" name="sl-mode" value="fixed" /> Fixed %</label>
+        </div>
+      </div>
+
+      <div class="bs-section" id="bs-atr-section">
+        <div class="bs-section-title">ATR SL/TP</div>
+        <div class="bs-grid">
+          <label>ATR период<input type="number" id="bs-atr-period" value="14" step="1" min="5" max="50" /></label>
+          <label>Multiplier (SL距离 = ATR × N)<input type="number" id="bs-atr-mult" value="4.0" step="0.5" min="0.5" max="20" /></label>
+          <label>Risk:Reward (TP = SL距离 × N)<input type="number" id="bs-atr-rr" value="4.0" step="0.5" min="0.5" max="20" /></label>
+        </div>
+        <div class="mini-hint">SL = entry − mult×ATR, TP = entry + mult×rr×ATR. Адаптируется под волатильность каждой акции.</div>
+      </div>
+
+      <div class="bs-section bs-hidden" id="bs-fixed-section">
+        <div class="bs-section-title">Fixed SL/TP</div>
+        <div class="bs-grid">
+          <label>Стоп (SL), %<input type="number" id="bs-sl" value="2.5" step="0.1" min="0.1" max="20" /></label>
+          <label>Тейк (TP), %<input type="number" id="bs-tp" value="2.5" step="0.1" min="0.1" max="20" /></label>
+        </div>
+        <div class="mini-hint">Фиксированный процент от цены входа. Одинаковый для всех акций.</div>
+      </div>
+
+      <div class="bs-section">
+        <div class="bs-section-title">Прочее</div>
+        <div class="bs-grid">
+          <label>Top-N акций<input type="number" id="bs-topn" value="20" min="2" max="30" /></label>
+          <label>Комиссия, %<input type="number" id="bs-commission" value="0.3" step="0.05" min="0" max="1" /></label>
+          <label>Re-entry cooldown (баров)<input type="number" id="bs-reentry" value="15" step="1" min="0" max="100" /></label>
+        </div>
+        <div class="bs-grid" style="margin-top:8px">
+          <label class="lg-chip" title="Закрывать все позиции в конце торговой сессии"><input type="checkbox" id="bs-overnight"><span>Overnight (закрытие EOD)</span></label>
+        </div>
+      </div>
+
+      <div class="mini-hint bs-hint">Применяются при следующем запуске бота.</div>
+    </div>
+    <div class="bot-modal-foot">
+      <button class="btn-primary btn-sm" id="bs-save">Сохранить</button>
+    </div>
+  </div>
+</div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

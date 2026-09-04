@@ -9,6 +9,7 @@ import {
   type CandlestickData,
   type HistogramData,
   type IChartApi,
+  type IPriceLine,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
   type LineData,
@@ -101,7 +102,18 @@ const PAGE_TITLES: Record<string, string> = {
 };
 
 const IS_EMBEDDED = new URLSearchParams(window.location.search).get("embedded") === "1";
-if (IS_EMBEDDED) document.body.classList.add("embedded");
+if (IS_EMBEDDED) {
+  document.body.classList.add("embedded");
+  const chartPage = document.getElementById("page-chart");
+  const botPage = document.getElementById("page-bot");
+  if (chartPage) chartPage.classList.add("active");
+  if (botPage) botPage.classList.remove("active");
+  const chartBtn = document.querySelector('.nav-btn[data-page="chart"]');
+  const botBtn = document.querySelector('.nav-btn[data-page="bot"]');
+  if (chartBtn) chartBtn.classList.add("active");
+  if (botBtn) botBtn.classList.remove("active");
+  document.getElementById("page-title")!.textContent = "График";
+}
 const lk = (k: string) => (IS_EMBEDDED ? "bote_" : "") + k;
 
 function initNav() {
@@ -142,7 +154,7 @@ interface ChartRefs {
 
 let refs: ChartRefs | null = null;
 let oraclePrim: ReturnType<typeof makeOraclePrim> | null = null;
-let _overlayLines: Array<{ remove: () => void }> = [];
+let _overlayLines: IPriceLine[] = [];
 let oracleBusy = false;
 let analysis: AnalysisDto | null = null;
 const savedTf = localStorage.getItem(lk("sklad_tf"));
@@ -224,6 +236,7 @@ function buildChart(): ChartRefs {
     localization: {
       locale: "ru-RU",
       priceFormatter: (p: number) => priceFmt.format(p),
+      timeFormatter: (t) => axisTimeLabel(t as never),
     },
   });
 
@@ -350,6 +363,7 @@ function buildChart(): ChartRefs {
 }
 
 function renderData(data: AnalysisDto, keepView = false) {
+  if (!keepView && refs) { try { refs.markers.setMarkers([]); } catch { /* noop */ } }
   if (!refs) refs = buildChart();
   const r = refs;
   const n = data.candles.length;
@@ -424,15 +438,17 @@ function renderData(data: AnalysisDto, keepView = false) {
   document.getElementById("symbol-name")!.textContent = data.name || "";
 }
 
+const TZ = "Europe/Moscow";
+const _dtMSK = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+const _dtMSKFull = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
 function fmtDateTime(ts: string): string {
-  const d = new Date(ts);
-  return d.toLocaleString("ru-RU", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return _dtMSKFull.format(new Date(ts));
+}
+
+function axisTimeLabel(t: unknown): string {
+  const num = typeof t === "number" ? t : Number(t);
+  return Number.isFinite(num) ? _dtMSK.format(new Date(num * 1000)) : String(t ?? "");
 }
 
 function updateLegend(idx: number | null) {
@@ -460,6 +476,14 @@ function setupTooltip() {
   const wrap = document.querySelector(".chart-wrap")!;
 
   refs.chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleRangeChanged);
+
+  const resetView = () => {
+    try {
+      refs!.chart.timeScale().resetTimeScale();
+      refs!.chart.timeScale().scrollToRealTime();
+    } catch { /* noop */ }
+  };
+  wrap.addEventListener("dblclick", resetView);
 
   refs.chart.subscribeCrosshairMove((param) => {
     if (!param.point || !param.time || !analysis) {
@@ -900,20 +924,51 @@ function applyIndicators() {
   }
 }
 
+function _voteText(metaRaw: unknown): string {
+  try {
+    const m = typeof metaRaw === "string" ? JSON.parse(metaRaw) : metaRaw;
+    const q = m && m.quorum_event;
+    if (q && Array.isArray(q.members_for) && q.members_for.length) {
+      return (q.members_for as string[]).join("+");
+    }
+    if (q && q.reason) return String(q.reason);
+  } catch { /* noop */ }
+  return "";
+}
+
+function showVoteNote(text: string) {
+  let el = document.getElementById("embed-note");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "embed-note";
+    const wrap = document.querySelector(".chart-wrap");
+    if (wrap) wrap.appendChild(el);
+  }
+  if (!el) return;
+  el.textContent = text;
+  (el as HTMLElement).style.display = text ? "block" : "none";
+}
+
 window.__setTradeLines = (trade: Record<string, unknown>) => {
   if (!refs) return;
   try {
-    _overlayLines.forEach((l) => l.remove());
+    for (const l of _overlayLines) { try { refs.candles.removePriceLine(l); } catch { /* noop */ } }
     _overlayLines = [];
     const mkLine = (price: number, color: string, title: string, dashed: boolean) => {
       const line = refs!.candles.createPriceLine({ price, color, lineWidth: 1, lineStyle: dashed ? 2 : 0, axisLabelVisible: true, title });
-      _overlayLines.push(line as { remove: () => void });
+      _overlayLines.push(line);
     };
     if (Number(trade.entry_price) > 0) mkLine(Number(trade.entry_price), "#e6a23c", "Вход", false);
     const stop = trade.initial_stop ?? trade.stop_loss ?? null;
     if (stop != null && Number(stop) > 0) mkLine(Number(stop), COLORS.down, "SL", true);
     const tp = trade.take_profit ?? null;
     if (tp != null && Number(tp) > 0) mkLine(Number(tp), COLORS.up, "TP", true);
+    const parts: string[] = [];
+    const vin = _voteText(trade.meta);
+    const vout = _voteText(trade.exit_meta);
+    if (vin) parts.push("ВХОД: " + vin);
+    if (vout) parts.push("ВЫХОД: " + vout);
+    showVoteNote(parts.join("   |   "));
   } catch { /* noop */ }
 };
 
@@ -1362,21 +1417,83 @@ function initSidebarResize() {
       const w = Math.max(190, Math.min(560, Number(saved)));
       if (w > 0) sb.style.width = w + "px";
     }
-  } catch {
-    /* noop */
-  }
-  window.addEventListener("mouseup", () => {
+  } catch { /* noop */ }
+
+  let dragging = false;
+  let startX = 0;
+  let startW = 0;
+
+  const onMove = (e: PointerEvent) => {
+    if (!dragging) return;
+    const w = Math.max(190, Math.min(560, startW + (e.clientX - startX)));
+    sb.style.width = `${w}px`;
+    sb.style.flexBasis = `${w}px`;
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("sb-resizing");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
     try {
       localStorage.setItem(KEY, String(Math.round(sb.getBoundingClientRect().width)));
-    } catch {
-      /* noop */
-    }
+    } catch { /* noop */ }
+  };
+  const grip = document.querySelector(".sidebar-grip") as HTMLElement | null;
+  const target = grip ?? sb;
+  target.addEventListener("pointerdown", (e) => {
+    const rect = sb.getBoundingClientRect();
+    if (!grip && e.clientX < rect.right - 8) return;
+    e.preventDefault();
+    dragging = true;
+    startX = e.clientX;
+    startW = rect.width;
+    document.body.classList.add("sb-resizing");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   });
 }
 
 initSidebarResize();
 if (IS_EMBEDDED) {
   let curFigi = FIGI;
+  let _liveFigi = "";
+  let _lastFocusMks: SeriesMarker<Time>[] = [];
+  let _lastFocusTrade: Record<string, unknown> | null = null;
+  const syncBtn = document.getElementById("btn-sync");
+  if (syncBtn) {
+    syncBtn.addEventListener("click", () => {
+      void (async () => {
+        try {
+          syncBtn.classList.add("busy");
+          syncBtn.textContent = "⟳ Докачка…";
+          const r = await fetch(`/api/candles/${encodeURIComponent(FIGI)}/backfill?days=35&workers=4`, { method: "POST" });
+          const rep = r.ok ? await r.json() : null;
+          const nd = await fetchAnalysis(FIGI, currentTf.interval, 2000);
+          if (nd && nd.candles && nd.candles.length) renderData(nd, true);
+          setStatus(rep ? `докачка: +${rep.total_added ?? 0} свечей` : "докачка: ошибка");
+        } catch { /* noop */ } finally {
+          syncBtn.classList.remove("busy");
+          syncBtn.textContent = "⟳ Данные";
+        }
+      })();
+    });
+  }
+
+  window.setInterval(() => {
+    if (!refs || !_liveFigi) return;
+    void (async () => {
+      try {
+        const nd = await fetchAnalysis(_liveFigi, currentTf.interval, 2000);
+        if (nd && nd.candles && nd.candles.length) {
+          renderData(nd, true);
+          try { refs!.markers.setMarkers(_lastFocusMks); } catch { /* noop */ }
+          if (_lastFocusTrade) window.__setTradeLines?.(_lastFocusTrade);
+          try { refs!.chart.timeScale().scrollToRealTime(); } catch { /* noop */ }
+        }
+      } catch { /* noop */ }
+    })();
+  }, 8000);
   window.addEventListener("message", (ev) => {
     const d = ev.data as { type?: string; figi?: string; ticker?: string; trade?: Record<string, unknown> };
     if (!d || d.type !== "focus") return;
@@ -1387,6 +1504,7 @@ if (IS_EMBEDDED) {
           curFigi = f;
           FIGI = f;
           window.FIGI = f;
+          _liveFigi = f;
           let data = await fetchAnalysis(f, currentTf.interval, 2000);
           if (!(data && data.candles && data.candles.length)) {
             try {
@@ -1396,6 +1514,7 @@ if (IS_EMBEDDED) {
           }
           if (data && data.candles && data.candles.length) {
             renderData(data);
+            setStatus(`${data.ticker ?? d.ticker ?? f} — ${data.candles.length} свечей`);
           } else {
             setStatus("нет свечей в базе для " + (d.ticker || f));
           }
@@ -1410,8 +1529,10 @@ if (IS_EMBEDDED) {
             if (et != null && !isNaN(Number(et))) mks.push({ time: et, position: isL ? "belowBar" : "aboveBar", color: COLORS.up, shape: "arrowUp", text: String(tr.qty ?? "") });
             if (xt != null && tr.exit_price != null && !isNaN(Number(xt))) mks.push({ time: xt, position: isL ? "aboveBar" : "belowBar", color: COLORS.down, shape: "arrowDown", text: "" });
           }
-          if (mks.length) refs.markers.setMarkers(mks);
-          if (d.trade) window.__setTradeLines?.(d.trade);
+          _lastFocusMks = mks;
+          refs.markers.setMarkers(mks);
+          if (d.trade) { _lastFocusTrade = d.trade as Record<string, unknown>; window.__setTradeLines?.(d.trade); }
+          try { refs.chart.timeScale().scrollToRealTime(); } catch { /* noop */ }
         }
       } catch (e) {
         console.warn("embed focus error", e);
@@ -1422,6 +1543,6 @@ if (IS_EMBEDDED) {
 
 initNav();
 void initLab();
-void initBot();
+if (!IS_EMBEDDED) void initBot();
 void initTest();
 void initEnsLab();

@@ -47,6 +47,10 @@ async def to_thread(func, *args):
     return await asyncio.to_thread(func, *args)
 
 
+def _q2f(q) -> float:
+    return q.units + q.nano / 1e9
+
+
 def fetch_shares() -> list[dict]:
     settings = get_settings()
     with Client(settings.tinkoff_token) as client:
@@ -61,6 +65,10 @@ def fetch_shares() -> list[dict]:
             "currency": s.currency,
             "sector": s.sector or None,
             "lot": s.lot,
+            "dlong": _q2f(s.dlong),
+            "dshort": _q2f(s.dshort),
+            "long_lev": round(1.0 / _q2f(s.dlong), 2) if _q2f(s.dlong) > 0 else 0,
+            "short_lev": round(1.0 / _q2f(s.dshort), 2) if _q2f(s.dshort) > 0 else 0,
         }
         for s in response.instruments
         if s.api_trade_available_flag and s.figi
@@ -114,6 +122,10 @@ async def upsert_instruments(db: AsyncSession, items: list[dict]) -> int:
             "currency": stmt.excluded.currency,
             "sector": stmt.excluded.sector,
             "lot": stmt.excluded.lot,
+            "dlong": stmt.excluded.dlong,
+            "dshort": stmt.excluded.dshort,
+            "long_lev": stmt.excluded.long_lev,
+            "short_lev": stmt.excluded.short_lev,
         },
     )
     await db.execute(stmt)
