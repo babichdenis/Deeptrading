@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,6 +19,35 @@ async def lifespan(app: FastAPI):
 
     queue_dispatcher.start()
     ens_dispatcher.start()
+
+    # Auto-start paper bot on backend startup
+    try:
+        from app.bot.runtime import runtime, BotConfig
+        if not runtime.running:
+            cfg = BotConfig(
+                strategy_id="ensemble_v4",
+                interval_name="5min",
+                top_n=20,
+                use_ensemble=True,
+                mode="paper",
+                sessions=["morning", "day", "evening"],
+                long_allowed=True,
+                short_allowed=False,
+                atr_period=14,
+                atr_multiplier=4.0,
+                atr_risk_reward=4.0,
+                leverage=1.0,
+                commission_rate=0.003,
+                slippage_bps=2.0,
+                confirm_flip=2,
+                reentry_cooldown_bars=15,
+                overnight=False,
+            )
+            asyncio.create_task(runtime.start(cfg))
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn").warning("Auto-start bot failed: %s", e)
+
     try:
         yield
     finally:
