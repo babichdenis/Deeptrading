@@ -1,0 +1,43 @@
+import asyncio, time, sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from app.bot.ensemble_strategy import EnsembleParams, EnsembleV4Strategy
+from app.services.signals import _load_candles as _lc
+from app.database import SessionLocal
+from app.engine.models import Candle as EngineCandle
+from sqlalchemy import text
+from datetime import datetime, timezone
+
+async def main():
+    async with SessionLocal() as db:
+        row = (await db.execute(text("SELECT figi, lot, optuna_params FROM instruments WHERE ticker='SMLT'"))).first()
+        figi, lot, opt = row
+        candles = await _lc(db, figi, 1, date_from=datetime(2026,8,1,tzinfo=timezone.utc), date_to=datetime(2026,8,8,tzinfo=timezone.utc))
+    op = opt or {}
+    active = list(op.get("active_sids", ["rsi_reversal","bollinger_reclaim","pullback_ema","vwap_reclaim","range_compression_breakout","macd_cross","donchian_breakout"]))
+    sp = op.get("strategy_params") or {}
+    from app.bot.ensemble_strategy import V2_SETUPS
+    v2 = {s["strategy_id"]: s["params"] for s in V2_SETUPS}
+    setups = [{"strategy_id": s, "tf": "5min", "params": dict(sp.get(s, v2.get(s, {})))} for s in active]
+    strat = EnsembleV4Strategy(EnsembleParams(
+        figi=figi, lot=lot, capital=10000, quorum=int(op.get("quorum",2)),
+        session="all", sessions=["morning","day","evening"],
+        setups=setups, sl_mult=float(op.get("sl_mult",4.0)), rr=float(op.get("rr",4.0)),
+        vol_thr=float(op.get("vol_thr",0.0) or 0.0), neutral_mode="semi_flip",
+    ))
+    ec = [EngineCandle(ts=c.ts, open=c.open, high=c.high, low=c.low, close=c.close, volume=c.volume) for c in candles]
+    # measure 10 real calls at 5m boundaries spread through the week
+    idxs = [i for i in range(100, len(ec)) if ec[i].ts.minute % 5 == 0][::50][:10]
+    print("measuring", len(idxs), "calls, buffer ~2000")
+    t0 = time.time()
+    sigs = 0
+    for i in idxs:
+        s = strat.on_bar(ec[max(0,i-2000):i+1])
+        if s: sigs += 1
+    dt = time.time() - t0
+    per = dt/len(idxs)
+    print("10 calls: %.2fs => %.2fs/call, signals=%d" % (dt, per, sigs))
+    # estimate full: 250 5m bars/day x 22 days x 20 tickers
+    total_calls = 250*22*20
+    print("estimated full aug 20tk: %.0f min = %.1f hours" % (total_calls*per/60, total_calls*per/3600))
+
+asyncio.run(main())
