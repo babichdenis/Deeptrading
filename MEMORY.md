@@ -115,18 +115,54 @@ reconcile loop. НЕ реализовано: StreamingEnsemble (инкремен
 
 ## 🔧 ОПЕРАЦИОННЫЕ ЗАМЕТКИ (актуально)
 
-- **Проект:** `/Volumes/Dev/Deeptrading` (= `/Users/Denis/Dev/Deeptrading` на .54), git на месте.
-- **Инфраструктура:** 2 машины. Код правим на .7 (opencode), .54 = Postgres+backend+frontend.
-- **Backend .54:** `cd ~/Dev/Deeptrading/backend && nohup .venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/uvicorn.log 2>&1 &`
-- **SSH .54:** `sshpass -p '0987' ssh Denis@192.168.1.54` (иногда таймаутит — повторить).
-- **SSH .5 (Windows, та же БД):** `sshpass -p '0987' ssh nadts@192.168.1.5`, запуск через `wmic process call create "cmd /c ..."` или bat-файл.
-- **Frontend .54:** vite :5173. **⚠️ управляется launchd `com.denys.vite-frontend` (KeepAlive). НЕ убивать kill!**
+### Инфраструктура — 3 машины, что где есть
+
+| Машина | IP | ОС | Роль | Что есть |
+|--------|-----|-----|------|----------|
+| **.7 (эта)** | 192.168.1.7 | macOS | код/opencode | правим код, SMB-шара на проект |
+| **.54 (сервер)** | 192.168.1.54 | macOS | **Postgres + backend + frontend + git-репо** | БД (:5432), uvicorn (:8000), vite (:5173), Docker, python .venv |
+| **.5** | 192.168.1.5 | Windows 10 | вычисления (бэктесты/Optuna) | Python 3.12, копия backend, **БД на .54 через сеть** |
+
+**SSH:**
+- .54: `sshpass -p '0987' ssh Denis@192.168.1.54` (иногда таймаутит — повторить; не задавать пароль в интерактиве)
+- .5: `sshpass -p '0987' ssh nadts@192.168.1.5` (без пароля). SSH ставит NLS_LANG=cp866 — кириллица в выводе cmd битая, не пугаться.
+
+**Фоновые процессы на .5 (Windows):**
+- `nohup`/`&` НЕ работают (процесс умирает при закрытии ssh). Использовать:
+  - `wmic process call create "cmd /c cd /d C:\Users\nadts\Dev\backend && python scripts\foo.py > C:\out.log 2>&1"` — вернёт PID
+  - ИЛИ bat-файл: `scp run.bat` → `wmic process call create "C:\path\run.bat"` (надёжнее для длинных команд)
+- Убить: `taskkill /F /PID <pid>` (wmic-обёртка может дать другой PID, искать в `tasklist | findstr python`)
+- ⚠️ Не гнать параллельно тяжёлые скрипты на .5 (БД .54 перегружается).
+
+
+**Код (где правка):**
+- Проект = git-репо на .54: `/Users/Denis/Dev/Deeptrading`. С этой машины (мак) виден как SMB-шара `/Volumes/Dev/Deeptrading`.
+- Правим с .7 через шару — изменения сразу на .54. На .5 — ОТДЕЛЬНАЯ копия `C:\Users\nadts\Dev\backend`, синхронизируется вручную (scp ключевых файлов), когда .5 нужен для расчётов.
+- git-операции делаем на .54 (там .git), НЕ с .5.
+
+**База данных (как цепляться со всех машин):**
+- Postgres живёт ТОЛЬКО на .54: `deeptrading:deeptrading@192.168.1.54:5432/deeptrading`
+- С .7 (мак, opencode): код подключается через `app.database` → `get_settings().database_url`. Если локально `.env` нет — упадёт; тогда в `.env` прописать `postgres_host=192.168.1.54`.
+- С .5: в `C:\Users\nadts\Dev\backend\.env` уже прописан `postgres_host=192.168.1.54` → .5 ходит к БД .54 по сети. ⚠️ на .5 в `database.py` нужен `connect_args={'ssl': False}` (asyncpg/Windows), НЕ удалять.
+- Прямой SQL: `psql postgresql://deeptrading:deeptrading@192.168.1.54:5432/deeptrading` (psql есть на .54, на маке — через python/psycopg или установить).
+- ⚠️ **Одна БД на всех** — не гонять параллельно тяжёлые БД-скрипты с .54 и .5 одновременно (перегруз).
+
+**Сервисы на .54 (живые сейчас):**
+- Backend: `cd ~/Dev/Deeptrading/backend && nohup .venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/uvicorn.log 2>&1 &`
+- Frontend: vite :5173. **⚠️ управляется launchd `com.denys.vite-frontend` (KeepAlive). НЕ убивать kill!**
   - Перезапуск: `launchctl kickstart -k gui/$(id -u)/com.denys.vite-frontend`
   - Остановка: `launchctl bootout gui/$(id -u)/com.denys.vite-frontend`
-- **БД:** `.54:5432 deeptrading/deeptrading`. Часовой пояс ВСЁ по Москве (UTC+3). ts в БД = UTC, метка бара = закрытие.
-- **Секреты:** реальные токены только в `.env` (не в git) и `live_broker.py` (в .gitignore). Шаблон без токенов: `live_broker.py.example`.
-- **Тесты движка:** `cd backend && .venv/bin/python3 -m pytest tests/ -q` (сейчас ~206 зелёных).
-- **Не убивать чужие uvicorn** (могут быть параллельные процессы пользователя).
+- Проверка бота: `curl -s http://127.0.0.1:8000/api/v1/bot/status`
+- Не убивать чужие uvicorn (могут быть параллельные процессы пользователя).
+
+**Секреты:**
+- Реальные токены ТОЛЬКО в `.env` (на .54 и .5, НЕ в git) и `live_broker.py` (в .gitignore). Шаблон без токенов: `live_broker.py.example`.
+- Sandbox-токен/аккаунт — см. `SESSION_SUMMARY_2026-09-07.md`. Боевой live-токен (`TINKOFF_TOKEN` в .env) не смешивать с sandbox.
+
+**Прочее:**
+- Проект на .7: рабочая папка `~/Documents/Default Project` — только заметки/артефакты сессии, НЕ код.
+- Тесты движка: `cd ~/Dev/Deeptrading/backend && .venv/bin/python3 -m pytest tests/ -q` (~206 зелёных).
+- БД: часовой пояс ВСЁ по Москве (UTC+3). ts в БД = UTC, метка бара = закрытие.
 
 ---
 
