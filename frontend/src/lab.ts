@@ -1,3 +1,5 @@
+const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
+
 import { createLabChart } from "./labchart";
 import { connectWs, subscribe as wsSubscribe } from "./ws";
 import {
@@ -1076,7 +1078,7 @@ function renderLab(full: ConfigurationDto) {
     try {
       const from = rpFrom || "2026-07-01T00:00:00Z";
       const to = rpTo || "2026-07-31T00:00:00Z";
-      const url = `/api/v1/research/pack?from_ts=${encodeURIComponent(from)}&to_ts=${encodeURIComponent(to)}&figis=${encodeURIComponent(rpTickers)}`;
+      const url = `${API}/api/v1/research/pack?from_ts=${encodeURIComponent(from)}&to_ts=${encodeURIComponent(to)}&figis=${encodeURIComponent(rpTickers)}`;
       const res = await fetch(url);
       if (!res.ok) {
         const err = await res.text().catch(() => "");
@@ -1134,7 +1136,7 @@ function renderTickerSummary(
     (window as any).__labChartHandle?.destroy?.();
     const box = chartAnchor!.querySelector("#lab-chart") as HTMLElement;
     box.innerHTML = `<span class="mini-hint">Загружаю свечи для Lab-графика…</span>`;
-    fetch(`/api/analysis/${window.FIGI}?interval_name=${iv}&limit=5000`)
+    fetch(`${API}/api/analysis/${window.FIGI}?interval_name=${iv}&limit=5000`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`analysis ${r.status}`))))
       .then((d: { candles: Array<Record<string, unknown>>; sma20: Array<number | null>; ema50: Array<number | null>; bb_upper: Array<number | null>; bb_lower: Array<number | null>; rsi: Array<number | null>; macd: { macd: Array<number | null>; signal: Array<number | null>; hist: Array<number | null> } }) => {
         const t0 = trades.length ? String(trades[0].entry_time) : "";

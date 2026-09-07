@@ -1,3 +1,5 @@
+const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
+
 import {
   botCancelPending,
   botCloseAll,
@@ -66,7 +68,7 @@ async function doClosePosition(ticker: string, side: string, qty: number) {
       alert("Позиция не найдена");
       return;
     }
-    const resp = await fetch(`/api/v1/bot/positions/close?figi=${encodeURIComponent(pos.figi)}`, { method: "POST" });
+    const resp = await fetch(`${API}/api/v1/bot/positions/close?figi=${encodeURIComponent(pos.figi)}`, { method: "POST" });
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.detail || `HTTP ${resp.status}`);
@@ -125,7 +127,7 @@ function sendBotConfigPatch(extra?: Record<string, unknown>) {
     leverage: lev ? 2 : 1,
   };
   if (extra) Object.assign(body, extra);
-  fetch("/api/v1/bot/config", {
+  fetch(`${API}/api/v1/bot/config`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -300,7 +302,7 @@ async function pollLogs() {
   const el = $("bot-live-logs");
   if (!el) return;
   try {
-    const r = await fetch("/api/v1/bot/logs?limit=400");
+    const r = await fetch(`${API}/api/v1/bot/logs?limit=400`);
     if (!r.ok) return;
     const data = await r.json();
     _allLogs = data.logs || [];
@@ -319,7 +321,7 @@ function setupLogFilters() {
       localStorage.setItem("log_lgf", JSON.stringify(LGF));
       renderLogs();
       if (key === "candles") {
-        void fetch("/api/v1/bot/logconfig", {
+        void fetch(`${API}/api/v1/bot/logconfig`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ log_candles: cb.checked }),
@@ -349,7 +351,7 @@ function setupLogFilters() {
     _allLogs = [];
     if (dateInput) { dateInput.value = ""; _logDateFilter = ""; localStorage.removeItem("log_date_filter"); }
     renderLogs();
-    void fetch("/api/v1/bot/logs/clear", { method: "POST" });
+    void fetch(`${API}/api/v1/bot/logs/clear`, { method: "POST" });
   });
 }
 
@@ -428,7 +430,7 @@ function loadBotCfg(): BotCfg {
 
 async function fetchTradingStatus() {
   try {
-    const resp = await fetch("/api/v1/bot/trading_status");
+    const resp = await fetch(`${API}/api/v1/bot/trading_status`);
     const data = await resp.json();
     const el = document.getElementById("bs-trading-status");
     if (el) {
@@ -590,7 +592,7 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
 
   const bst = await (async () => {
     try {
-      const r = await fetch("/api/v1/bot/status");
+      const r = await fetch(`${API}/api/v1/bot/status`);
       return r.ok ? await r.json() : null;
     } catch {
       return null;
@@ -689,6 +691,10 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
         const own = notional / lev;
         const pnl = p.unrealized_pnl ?? ((p.current_price - p.entry_price) * p.qty);
         const roi = own > 0 ? (pnl / own * 100) : 0;
+        const reg = p.regime || "";
+        const regColor = reg === "TREND_UP" ? "#2ecc71" : reg === "TREND_DOWN" ? "#e74c3c" : reg === "HIGH_VOLATILITY" ? "#f39c12" : reg === "RANGE" ? "#3498db" : "var(--text-dim)";
+        const regChip = reg ? `<span style="font-size:10px;color:${regColor};font-weight:600">${reg.replace('_', ' ')}</span>` : "—";
+        const volTxt = p.vol != null ? `×${p.vol.toFixed(2)}` : "—";
         return `<tr>` +
           `<td class="num" style="font-size:10px;color:var(--text-dim)">${fmtTime(p.entry_time)}</td>` +
           `<td><b>${p.ticker}</b></td>` +
@@ -700,12 +706,14 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
           `<td class="num ${pnl >= 0 ? "pos" : "neg"}">${pnl >= 0 ? "+" : ""}${money(pnl)}₽</td>` +
           `<td class="num ${roi >= 0 ? "pos" : "neg"}">${roi >= 0 ? "+" : ""}${roi.toFixed(1)}%</td>` +
           `<td class="num">×${lev}</td>` +
+          `<td class="num" title="${p.regime_reason || ""}${p.regime_atr_pct != null ? " | ATR " + p.regime_atr_pct + "%" : ""}${p.regime_adx != null ? " | ADX " + p.regime_adx : ""}">${regChip}</td>` +
+          `<td class="num${p.vol != null && p.vol >= 1 ? " pos" : ""}">${volTxt}</td>` +
           `<td class="num">${p.stop_loss != null ? price(p.stop_loss) : "—"}</td>` +
           `<td class="num">${p.take_profit != null ? price(p.take_profit) : "—"}</td>` +
           `<td><button class="btn-sm ${closeClass}" onclick="window.__closePosition('${p.ticker}','${p.side}',${p.qty})">${closeAction}</button></td>` +
           `</tr>`;
       })
-      .join("") || `<tr><td colspan=13 style="color:var(--text-dim)">нет открытых позиций</td></tr>`;
+      .join("") || `<tr><td colspan=15 style="color:var(--text-dim)">нет открытых позиций</td></tr>`;
 
   const trades: BotTradeRow[] = await sandboxTrades(500).catch(() => []);
   _lastTrades = trades;

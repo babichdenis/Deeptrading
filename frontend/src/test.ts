@@ -1,3 +1,5 @@
+const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
+
 import {
   CandlestickSeries,
   ColorType,
@@ -247,7 +249,7 @@ async function loadTest() {
 
 async function resolveFigi(ticker: string): Promise<string | null> {
   if (ticker.length > 12 && ticker.startsWith("BBG")) return ticker;
-  const res = await fetch(`/api/instruments?search=${encodeURIComponent(ticker)}&limit=10`);
+  const res = await fetch(`${API}/api/instruments?search=${encodeURIComponent(ticker)}&limit=10`);
   if (!res.ok) return null;
   const d = await res.json();
   const hit = d.items.find((i: { ticker: string }) => i.ticker.toUpperCase() === ticker);
@@ -261,7 +263,7 @@ export async function initTest() {
   $("btn-diag-run").addEventListener("click", () => void loadDiagnostics());
   const dl = $("test-tickers") as HTMLDataListElement;
   try {
-    const res = await fetch("/api/instruments?limit=50");
+    const res = await fetch(`${API}/api/instruments?limit=50`);
     const d = await res.json();
     for (const i of d.items as Array<{ ticker: string; name: string }>) {
       const opt = document.createElement("option");

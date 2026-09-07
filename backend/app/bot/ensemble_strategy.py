@@ -103,6 +103,25 @@ class EnsembleV4Strategy:
             return None
         if "error" in res:
             return None
+        try:
+            tl = (res.get("regime") or {}).get("timeline") or []
+            if tl:
+                r_cur = tl[-1]
+                feats = r_cur.get("features") or {}
+                self._last_regime = {
+                    "state": r_cur.get("state"),
+                    "reason": r_cur.get("reason"),
+                    "features": feats,
+                    "from": r_cur.get("from"),
+                    "to": r_cur.get("to"),
+                }
+                self._last_vol = feats.get("volume_ratio")
+            else:
+                self._last_regime = None
+                self._last_vol = None
+        except Exception:
+            self._last_regime = None
+            self._last_vol = None
         entries = res.get("static", {}).get("entries", [])
         if not entries:
             return None

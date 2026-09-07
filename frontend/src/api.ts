@@ -1,3 +1,5 @@
+const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
+
 export interface CandleDto {
   ts: string;
   open: number;
@@ -26,7 +28,7 @@ export async function fetchAnalysis(
   intervalName: string,
   limit = 2000,
 ): Promise<AnalysisDto> {
-  const res = await fetch(`/api/analysis/${figi}?interval_name=${intervalName}&limit=${limit}`);
+  const res = await fetch(`${API}/api/analysis/${figi}?interval_name=${intervalName}&limit=${limit}`);
   if (!res.ok) throw new Error(`Ошибка загрузки анализа (${res.status})`);
   return res.json();
 }
@@ -94,7 +96,7 @@ export async function syncCandles(
   rangeFromSec?: number,
   rangeToSec?: number,
 ): Promise<SyncReport> {
-  let url = `/api/candles/${figi}/sync?interval_name=${intervalName}&days=${days}`;
+  let url = `${API}/api/candles/${figi}/sync?interval_name=${intervalName}&days=${days}`;
   if (rangeFromSec != null && rangeToSec != null) {
     const iso = (sec: number) => new Date(sec * 1000).toISOString();
     url += `&from_ts=${iso(rangeFromSec)}&to_ts=${iso(rangeToSec)}`;
@@ -105,7 +107,7 @@ export async function syncCandles(
 }
 
 export async function fetchCatalog(): Promise<{ count: number; strategies: StrategyCardDto[] }> {
-  const res = await fetch("/api/v1/strategies/catalog");
+  const res = await fetch(`${API}/api/v1/strategies/catalog`);
   if (!res.ok) throw new Error(`Каталог недоступен (${res.status})`);
   return res.json();
 }
@@ -124,7 +126,7 @@ export async function computeSignals(
     body.from_ts = iso(rangeFromSec);
     body.to_ts = iso(rangeToSec);
   }
-  const res = await fetch("/api/v1/signals/compute", {
+  const res = await fetch(`${API}/api/v1/signals/compute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -137,7 +139,7 @@ export async function computeSignals(
 }
 
 export async function fetchRuns(figi: string): Promise<RunRowDto[]> {
-  const res = await fetch(`/api/v1/signals/runs?figi=${figi}`);
+  const res = await fetch(`${API}/api/v1/signals/runs?figi=${figi}`);
   if (!res.ok) throw new Error(`runs ${res.status}`);
   const data = await res.json();
   return data.runs;
@@ -151,7 +153,7 @@ export async function computeQuorum(
   memberRunIds: string[],
   k: number,
 ): Promise<QuorumResponse> {
-  const res = await fetch("/api/v1/quorum/compute", {
+  const res = await fetch(`${API}/api/v1/quorum/compute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ member_run_ids: memberRunIds, k }),
@@ -173,7 +175,7 @@ export async function fetchPoliciesCatalog(): Promise<{
   exit_policies: PolicySpec[];
   signal_policies: PolicySpec[];
 }> {
-  const res = await fetch("/api/v1/policies/catalog");
+  const res = await fetch(`${API}/api/v1/policies/catalog`);
   if (!res.ok) throw new Error(`policies ${res.status}`);
   return res.json();
 }
@@ -204,7 +206,7 @@ export interface ExperimentResult {
 }
 
 export async function runExperiment(body: Record<string, unknown>): Promise<ExperimentResult> {
-  const res = await fetch("/api/v1/experiments", {
+  const res = await fetch(`${API}/api/v1/experiments`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -222,7 +224,7 @@ export interface SweepResult {
 }
 
 export async function runSweep(body: Record<string, unknown>): Promise<SweepResult> {
-  const res = await fetch("/api/v1/lab/sweep", {
+  const res = await fetch(`${API}/api/v1/lab/sweep`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -237,7 +239,7 @@ export interface BatchResult {
 }
 
 export async function runBatch(body: Record<string, unknown>): Promise<BatchResult> {
-  const res = await fetch("/api/v1/lab/batch", {
+  const res = await fetch(`${API}/api/v1/lab/batch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -259,7 +261,7 @@ export interface ExperimentListRow {
 }
 
 export async function fetchExperiments(limit = 30): Promise<ExperimentListRow[]> {
-  const res = await fetch(`/api/v1/experiments?limit=${limit}`);
+  const res = await fetch(`${API}/api/v1/experiments?limit=${limit}`);
   if (!res.ok) throw new Error(`experiments ${res.status}`);
   const d = await res.json();
   return d.experiments;
@@ -281,13 +283,13 @@ export interface BotStatus {
 }
 
 export async function botStatus(): Promise<BotStatus> {
-  const res = await fetch("/api/v1/bot/status");
+  const res = await fetch(`${API}/api/v1/bot/status`);
   if (!res.ok) throw new Error(`bot ${res.status}`);
   return res.json();
 }
 
 export async function botStart(body: Record<string, unknown>): Promise<unknown> {
-  const res = await fetch("/api/v1/bot/start", {
+  const res = await fetch(`${API}/api/v1/bot/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -297,12 +299,12 @@ export async function botStart(body: Record<string, unknown>): Promise<unknown> 
 }
 
 export async function botStop(): Promise<void> {
-  const res = await fetch("/api/v1/bot/stop", { method: "POST" });
+  const res = await fetch(`${API}/api/v1/bot/stop`, { method: "POST" });
   if (!res.ok) throw new Error(`bot stop ${res.status}`);
 }
 
 export async function botReset(cash: number): Promise<void> {
-  const res = await fetch(`/api/v1/bot/reset?initial_cash=${cash}`, { method: "POST" });
+  const res = await fetch(`${API}/api/v1/bot/reset?initial_cash=${cash}`, { method: "POST" });
   if (!res.ok) throw new Error(`bot reset ${res.status}`);
 }
 
@@ -313,7 +315,7 @@ export interface BotPositionRow {
 }
 
 export async function botPositions(): Promise<BotPositionRow[]> {
-  const res = await fetch("/api/v1/bot/positions");
+  const res = await fetch(`${API}/api/v1/bot/positions`);
   if (!res.ok) throw new Error(`positions ${res.status}`);
   const d = await res.json();
   return d.positions;
@@ -329,7 +331,7 @@ export interface BotTradeRow {
 }
 
 export async function botTrades(limit = 50): Promise<BotTradeRow[]> {
-  const res = await fetch(`/api/v1/bot/trades?limit=${limit}`);
+  const res = await fetch(`${API}/api/v1/bot/trades?limit=${limit}`);
   if (!res.ok) throw new Error(`trades ${res.status}`);
   const d = await res.json();
   return d.trades;
@@ -349,7 +351,7 @@ export interface BotOrderRow {
 }
 
 export async function botOrders(limit = 50): Promise<BotOrderRow[]> {
-  const res = await fetch(`/api/v1/bot/orders?limit=${limit}`);
+  const res = await fetch(`${API}/api/v1/bot/orders?limit=${limit}`);
   if (!res.ok) throw new Error(`orders ${res.status}`);
   const d = await res.json();
   return d.orders;
@@ -365,14 +367,14 @@ export interface BotEventRow {
 }
 
 export async function botEvents(limit = 100): Promise<BotEventRow[]> {
-  const res = await fetch(`/api/v1/bot/events?limit=${limit}`);
+  const res = await fetch(`${API}/api/v1/bot/events?limit=${limit}`);
   if (!res.ok) throw new Error(`events ${res.status}`);
   const d = await res.json();
   return d.events;
 }
 
 export async function botPause(paused: boolean): Promise<{ entries_paused: boolean }> {
-  const res = await fetch("/api/v1/bot/pause", {
+  const res = await fetch(`${API}/api/v1/bot/pause`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ paused }),
@@ -382,13 +384,13 @@ export async function botPause(paused: boolean): Promise<{ entries_paused: boole
 }
 
 export async function botCancelPending(): Promise<{ cancelled: number }> {
-  const res = await fetch("/api/v1/bot/orders/cancel-pending", { method: "POST" });
+  const res = await fetch(`${API}/api/v1/bot/orders/cancel-pending`, { method: "POST" });
   if (!res.ok) throw new Error(`cancel ${res.status}`);
   return res.json();
 }
 
 export async function botCloseAll(): Promise<{ closed: number }> {
-  const res = await fetch("/api/v1/bot/positions/close-all", { method: "POST" });
+  const res = await fetch(`${API}/api/v1/bot/positions/close-all`, { method: "POST" });
   if (!res.ok) throw new Error(`close-all ${res.status}`);
   return res.json();
 }
@@ -403,7 +405,7 @@ export interface SandboxStatus {
 }
 
 export async function sandboxStatus(): Promise<SandboxStatus> {
-  const res = await fetch("/api/v1/sandbox/status");
+  const res = await fetch(`${API}/api/v1/sandbox/status`);
   if (!res.ok) throw new Error(`sandbox ${res.status}`);
   return res.json();
 }
@@ -415,24 +417,29 @@ export interface SandboxPositionRow {
   entry_time: string; stop_loss: number | null; take_profit: number | null;
   strategy_id: string;
   leverage: number; own_money: number; leveraged: number;
+  regime: string;
+  regime_reason: string;
+  regime_atr_pct: number | null;
+  regime_adx: number | null;
+  vol: number | null;
 }
 
 export async function sandboxPositions(): Promise<SandboxPositionRow[]> {
-  const res = await fetch("/api/v1/sandbox/positions");
+  const res = await fetch(`${API}/api/v1/sandbox/positions`);
   if (!res.ok) throw new Error(`sandbox positions ${res.status}`);
   const d = await res.json();
   return d.positions;
 }
 
 export async function sandboxTrades(limit = 50): Promise<BotTradeRow[]> {
-  const res = await fetch(`/api/v1/sandbox/trades?limit=${limit}`);
+  const res = await fetch(`${API}/api/v1/sandbox/trades?limit=${limit}`);
   if (!res.ok) throw new Error(`sandbox trades ${res.status}`);
   const d = await res.json();
   return d.trades;
 }
 
 export async function sandboxOrders(limit = 30): Promise<BotOrderRow[]> {
-  const res = await fetch(`/api/v1/sandbox/orders?limit=${limit}`);
+  const res = await fetch(`${API}/api/v1/sandbox/orders?limit=${limit}`);
   if (!res.ok) throw new Error(`sandbox orders ${res.status}`);
   const d = await res.json();
   return d.orders;
@@ -485,14 +492,14 @@ export interface ConfigurationDto {
 }
 
 export async function fetchConfigurations(): Promise<ConfigurationDto[]> {
-  const res = await fetch("/api/v1/warehouse/configurations");
+  const res = await fetch(`${API}/api/v1/warehouse/configurations`);
   if (!res.ok) throw new Error(`configs ${res.status}`);
   const d = await res.json();
   return d.configurations;
 }
 
 export async function createConfiguration(body: Record<string, unknown>): Promise<ConfigurationDto> {
-  const res = await fetch("/api/v1/warehouse/configurations", {
+  const res = await fetch(`${API}/api/v1/warehouse/configurations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -515,7 +522,7 @@ export async function previewConfiguration(
   figi: string,
   days = 240
 ): Promise<PreviewResponse> {
-  const res = await fetch(`/api/v1/warehouse/configurations/${configId}/preview`, {
+  const res = await fetch(`${API}/api/v1/warehouse/configurations/${configId}/preview`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ figi, days }),
@@ -541,7 +548,7 @@ export async function sendToLab(
   periodDays = 30,
   topN = 10,
 ): Promise<LabRunResult> {
-  const res = await fetch(`/api/v1/warehouse/configurations/${configId}/send-to-lab`, {
+  const res = await fetch(`${API}/api/v1/warehouse/configurations/${configId}/send-to-lab`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ period_days: periodDays, top_n: topN }),
@@ -551,7 +558,7 @@ export async function sendToLab(
 }
 
 export async function getConfiguration(configId: string): Promise<ConfigurationDto> {
-  const res = await fetch(`/api/v1/warehouse/configurations/${configId}`);
+  const res = await fetch(`${API}/api/v1/warehouse/configurations/${configId}`);
   if (!res.ok) throw new Error(`config ${res.status}`);
   return res.json();
 }
@@ -565,7 +572,7 @@ export async function sendToLabAsync(
   if (opts.dateFrom) body.date_from = opts.dateFrom;
   if (opts.dateTo) body.dateTo = undefined;
   if (opts.dateTo) { delete body.dateTo; body.date_to = opts.dateTo; }
-  const res = await fetch(`/api/v1/warehouse/configurations/${configId}/send-to-lab-async`, {
+  const res = await fetch(`${API}/api/v1/warehouse/configurations/${configId}/send-to-lab-async`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -574,7 +581,7 @@ export async function sendToLabAsync(
 }
 
 export async function updateConfiguration(configId: string, body: Record<string, unknown>): Promise<ConfigurationDto> {
-  const res = await fetch(`/api/v1/warehouse/configurations/${configId}`, {
+  const res = await fetch(`${API}/api/v1/warehouse/configurations/${configId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -584,7 +591,7 @@ export async function updateConfiguration(configId: string, body: Record<string,
 }
 
 export async function deleteConfiguration(configId: string): Promise<void> {
-  const res = await fetch(`/api/v1/warehouse/configurations/${configId}`, { method: "DELETE" });
+  const res = await fetch(`${API}/api/v1/warehouse/configurations/${configId}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`delete ${res.status}`);
 }
 
@@ -616,7 +623,7 @@ export interface LabQueueResponse {
 }
 
 export async function fetchLabQueue(): Promise<LabQueueResponse> {
-  const res = await fetch("/api/v1/lab/queue");
+  const res = await fetch(`${API}/api/v1/lab/queue`);
   if (!res.ok) throw new Error(`queue ${res.status}`);
   return res.json();
 }
@@ -628,7 +635,7 @@ export async function enqueueTest(
   dateTo: string | null,
   periodDays: number,
 ): Promise<void> {
-  const res = await fetch("/api/v1/lab/queue", {
+  const res = await fetch(`${API}/api/v1/lab/queue`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ config_id: configId, tickers, date_from: dateFrom, date_to: dateTo, period_days: periodDays }),
@@ -637,19 +644,19 @@ export async function enqueueTest(
 }
 
 export async function pauseRun(runId: string): Promise<void> {
-  await fetch(`/api/v1/lab/queue/${runId}/pause`, { method: "POST" });
+  await fetch(`${API}/api/v1/lab/queue/${runId}/pause`, { method: "POST" });
 }
 export async function resumeRun(runId: string): Promise<void> {
-  await fetch(`/api/v1/lab/queue/${runId}/resume`, { method: "POST" });
+  await fetch(`${API}/api/v1/lab/queue/${runId}/resume`, { method: "POST" });
 }
 export async function stopRun(runId: string): Promise<void> {
-  await fetch(`/api/v1/lab/queue/${runId}/stop`, { method: "POST" });
+  await fetch(`${API}/api/v1/lab/queue/${runId}/stop`, { method: "POST" });
 }
 export async function deleteRun(runId: string): Promise<void> {
-  await fetch(`/api/v1/lab/runs/${runId}`, { method: "DELETE" });
+  await fetch(`${API}/api/v1/lab/runs/${runId}`, { method: "DELETE" });
 }
 export async function recycleRun(runId: string): Promise<void> {
-  await fetch(`/api/v1/lab/runs/${runId}/recycle`, { method: "POST" });
+  await fetch(`${API}/api/v1/lab/runs/${runId}/recycle`, { method: "POST" });
 }
 export interface LabSettings {
   max_concurrent_tests: number;
@@ -658,7 +665,7 @@ export interface LabSettings {
 }
 
 export async function fetchLabSettings(): Promise<LabSettings> {
-  const res = await fetch("/api/v1/lab/settings");
+  const res = await fetch(`${API}/api/v1/lab/settings`);
   if (!res.ok) throw new Error(`settings ${res.status}`);
   return res.json();
 }
@@ -666,7 +673,7 @@ export async function saveLabSettings(maxConcurrent: number, commissionRate?: nu
   const body: Record<string, unknown> = { max_concurrent_tests: maxConcurrent };
   if (commissionRate != null) body.commission_rate = commissionRate;
   if (slippageBps != null) body.slippage_bps = slippageBps;
-  const res = await fetch("/api/v1/lab/settings", {
+  const res = await fetch(`${API}/api/v1/lab/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -729,7 +736,7 @@ export interface TestMaxProfitResponse {
 }
 
 export async function fetchMaxProfit(body: Record<string, unknown>): Promise<TestMaxProfitResponse> {
-  const res = await fetch("/api/v1/test/max-profit", {
+  const res = await fetch(`${API}/api/v1/test/max-profit`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -855,7 +862,7 @@ export interface EnsembleRun {
 }
 
 export async function fetchEnsemble(body: Record<string, unknown>): Promise<EnsembleResponse> {
-  const res = await fetch("/api/v1/test/ensemble", {
+  const res = await fetch(`${API}/api/v1/test/ensemble`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -894,7 +901,7 @@ export interface SweepResponse {
 }
 
 export async function fetchEnsembleSweep(body: Record<string, unknown>): Promise<SweepResponse> {
-  const res = await fetch("/api/v1/test/ensemble-sweep", {
+  const res = await fetch(`${API}/api/v1/test/ensemble-sweep`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -915,7 +922,7 @@ export type DecisionRow = {
 export async function fetchDecisions(
   runId: string, minHoldBars = 0,
 ): Promise<{ decisions: DecisionRow[]; counts: Record<string, number> }> {
-  const res = await fetch(`/api/v1/signals/${runId}/decisions`, {
+  const res = await fetch(`${API}/api/v1/signals/${runId}/decisions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ policy_id: "ignore_same_side", min_hold_bars: minHoldBars }),
@@ -950,7 +957,7 @@ export interface EnsembleLabRun {
 }
 
 export async function createEnsembleRun(body: Record<string, unknown>): Promise<{ run_id: string; status: string }> {
-  const res = await fetch("/api/v1/lab/ensemble", {
+  const res = await fetch(`${API}/api/v1/lab/ensemble`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -960,16 +967,16 @@ export async function createEnsembleRun(body: Record<string, unknown>): Promise<
 }
 
 export async function fetchEnsembleRuns(limit = 20): Promise<EnsembleLabRun[]> {
-  const res = await fetch(`/api/v1/lab/ensemble?limit=${limit}`);
+  const res = await fetch(`${API}/api/v1/lab/ensemble?limit=${limit}`);
   if (!res.ok) throw new Error(`enslab list ${res.status}`);
   const d = await res.json();
   return d.runs as EnsembleLabRun[];
 }
 
 export async function cancelEnsembleRun(runId: string): Promise<void> {
-  await fetch(`/api/v1/lab/ensemble/${runId}/cancel`, { method: "POST" });
+  await fetch(`${API}/api/v1/lab/ensemble/${runId}/cancel`, { method: "POST" });
 }
 
 export async function deleteEnsembleRun(runId: string): Promise<void> {
-  await fetch(`/api/v1/lab/ensemble/${runId}`, { method: "DELETE" });
+  await fetch(`${API}/api/v1/lab/ensemble/${runId}`, { method: "DELETE" });
 }

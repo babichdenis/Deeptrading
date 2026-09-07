@@ -39,7 +39,7 @@ from app.services.signals import _load_candles as _lc
 from app.services.tinvest import INTERVAL_NAMES
 
 MAX_BUFFER = 300
-ENSEMBLE_BUFFER = 100000
+ENSEMBLE_BUFFER = 20000
 DAILY_PNL_TTL = timedelta(seconds=30)
 POS_PCT = 0.20  # доля портфеля на одну позицию (модель portfolio_merge)
 
@@ -163,6 +163,7 @@ class PaperBotRuntime:
         self._just_opened_this_candle: set[str] = set()  # figis opened this candle
         self._entry_bar_index: dict[str, int] = {}  # figi -> bar_index at entry
         self._no_trade_stats: dict[str, int] = {}  # reason -> count (NO_TRADE diagnostics)
+        self._regimes: dict[str, dict] = {}  # figi -> {state, vol} последних 5м баров
         self._persist_task: asyncio.Task | None = None
         self.log_candles = True
         self._last_candle_log_ts: float = 0.0
@@ -1013,6 +1014,11 @@ class PaperBotRuntime:
             sig = None
         finally:
             self._signal_busy.discard(figi)
+        self._regimes[figi] = {
+            "state": getattr(strategy, "_last_regime", None),
+            "vol": getattr(strategy, "_last_vol", None),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
         if sig is None:
             return
         self.signals_seen += 1

@@ -1,3 +1,5 @@
+const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
+
 import {
   ColorType,
   CandlestickSeries,
@@ -1467,7 +1469,7 @@ if (IS_EMBEDDED) {
         try {
           syncBtn.classList.add("busy");
           syncBtn.textContent = "⟳ Докачка…";
-          const r = await fetch(`/api/candles/${encodeURIComponent(FIGI)}/backfill?days=35&workers=4`, { method: "POST" });
+          const r = await fetch(`${API}/api/candles/${encodeURIComponent(FIGI)}/backfill?days=35&workers=4`, { method: "POST" });
           const rep = r.ok ? await r.json() : null;
           const nd = await fetchAnalysis(FIGI, currentTf.interval, 2000);
           if (nd && nd.candles && nd.candles.length) renderData(nd, true);
@@ -1480,20 +1482,8 @@ if (IS_EMBEDDED) {
     });
   }
 
-  window.setInterval(() => {
-    if (!refs || !_liveFigi) return;
-    void (async () => {
-      try {
-        const nd = await fetchAnalysis(_liveFigi, currentTf.interval, 2000);
-        if (nd && nd.candles && nd.candles.length) {
-          renderData(nd, true);
-          try { refs!.markers.setMarkers(_lastFocusMks); } catch { /* noop */ }
-          if (_lastFocusTrade) window.__setTradeLines?.(_lastFocusTrade);
-          try { refs!.chart.timeScale().scrollToRealTime(); } catch { /* noop */ }
-        }
-      } catch { /* noop */ }
-    })();
-  }, 8000);
+  // HMR-FIX: auto-refresh графика ОТКЛЮЧЁН
+  window.setInterval(() => { /* disabled */ }, 8000);
   window.addEventListener("message", (ev) => {
     const d = ev.data as { type?: string; figi?: string; ticker?: string; trade?: Record<string, unknown> };
     if (!d || d.type !== "focus") return;
