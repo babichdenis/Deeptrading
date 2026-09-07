@@ -327,11 +327,21 @@ class PaperBotRuntime:
 
     async def _st_open(self, figi, ticker, side, qty, price, sl, tp, meta: dict | None = None, leverage: float = 1.0) -> None:
         from app.models.sandbox_trade import SandboxTrade
+        _lot = 1
+        try:
+            from sqlalchemy import text as _text
+            from app.models.instrument import Instrument
+            from sqlalchemy import select as _sel2
+            async with SessionLocal() as _db2:
+                _lot = int((await _db2.execute(_sel2(Instrument.lot).where(Instrument.figi == figi))).scalar_one_or_none() or 1)
+        except Exception:
+            pass
+        qty_shares = int(qty) * _lot
         import json as _json
         try:
             async with SessionLocal() as db:
                 db.add(SandboxTrade(
-                    figi=figi, ticker=ticker, side=side, qty=int(qty),
+                    figi=figi, ticker=ticker, side=side, qty=qty_shares,
                     entry_time=datetime.now(timezone.utc),
                     entry_price=float(price),
                     stop_loss=float(sl) if sl else None,

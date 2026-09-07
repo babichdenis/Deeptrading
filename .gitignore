@@ -182,8 +182,6 @@ docs/research/
 .pytest_cache/
 
 # sandbox scripts with hardcoded token - keep out of git
-backend/app/api/routes/sandbox.py
-backend/app/bot/live_broker.py
 backend/scripts/check_ops.py
 backend/scripts/check_sandbox_pf.py
 backend/scripts/clean_sandbox2.py
