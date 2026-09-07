@@ -39,8 +39,9 @@ STEP_SEC = {"1min": 60, "5min": 300, "10min": 600, "15min": 900}
 
 
 class CandleFeed:
-    def __init__(self, token: str, interval_name: str, figis: list[str]):
+    def __init__(self, token: str, interval_name: str, figis: list[str], target: str | None = None):
         self.token = token
+        self.target = target
         self.interval_name = interval_name if interval_name in INTERVAL_ENUM else "5min"
         self.figis = figis
         self.mode = "stream"
@@ -79,7 +80,7 @@ class CandleFeed:
             )
             await asyncio.Event().wait()
 
-        async with AsyncClient(self.token) as client:
+        async with AsyncClient(self.token, target=self.target) as client:
             async for resp in client.market_data_stream.market_data_stream(requests()):
                 candle = getattr(resp, "candle", None)
                 if candle is None:
@@ -99,7 +100,7 @@ class CandleFeed:
         buffers: dict[str, deque] = {f: deque(maxlen=3) for f in self.figis}
         seen: set[tuple[str, datetime]] = set()
         next_poll = datetime.now(timezone.utc)
-        async with AsyncClient(self.token) as client:
+        async with AsyncClient(self.token, target=self.target) as client:
             while True:
                 wait = (next_poll - datetime.now(timezone.utc)).total_seconds()
                 if wait > 0:

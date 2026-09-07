@@ -34,6 +34,11 @@ class EnsembleParams:
     session: str = "main"
     sessions: list = field(default_factory=lambda: ["day"])
     setups: list = field(default_factory=lambda: V2_SETUPS)
+    # --- per-ticker optuna-параметры (расширение; дефолты == прежний хардкод) ---
+    sl_mult: float = 2.0
+    rr: float = 2.0
+    vol_thr: float = 0.0
+    neutral_mode: str | None = None
 
 
 class EnsembleV4Strategy:
@@ -49,25 +54,8 @@ class EnsembleV4Strategy:
     def warmup_bars(self) -> int:
         return 50
 
-    SESSION_WINDOWS = {
-        "morning": (6 * 60 + 50, 9 * 60 + 50),
-        "day":     (9 * 60 + 50, 18 * 60 + 45),
-        "evening": (19 * 60 + 5, 23 * 60 + 50),
-    }
-
-    def _is_session_active(self, dt_utc: datetime, sessions: list[str]) -> bool:
-        """Проверяет, попадает ли время в одну из активных сессий."""
-        msk = dt_utc.astimezone(MSK)
-        if msk.weekday() >= 5:
-            return False
-        mins = msk.hour * 60 + msk.minute
-        for s in sessions:
-            a, b = self.SESSION_WINDOWS.get(s, (0, 0))
-            if a <= mins < b:
-                return True
-        return False
-
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        from app.engine.sessions import is_session_active
         if not candles:
             return None
         last = candles[-1]
@@ -75,7 +63,7 @@ class EnsembleV4Strategy:
             return None
         # Проверяем сессию через sessions список из конфига
         if self.p.sessions:
-            if not self._is_session_active(last.ts, self.p.sessions):
+            if not is_session_active(last.ts, self.p.sessions):
                 return None
         if len(candles) < 50:
             return None
@@ -93,7 +81,9 @@ class EnsembleV4Strategy:
                 "same_side_reentry_cooldown_bars": 15,
                 "carry_overnight": True,
                 "opposite_hold": False,
-                "exit_policy": {"id": "atr_stop", "params": {"period": 14, "multiplier": 2.0, "risk_reward": 2.0}},
+                "exit_policy": {"id": "atr_stop",
+                                "params": {"period": 14, "multiplier": self.p.sl_mult,
+                                           "risk_reward": self.p.rr}},
                 "commission_rate": 0.0005,
                 "slippage_bps": 2.0,
                 "capital": self.p.capital,
@@ -104,6 +94,10 @@ class EnsembleV4Strategy:
                 "from_ts": candles[0].ts.isoformat(),
                 "to_ts": last.ts.isoformat(),
             }
+            if self.p.vol_thr and self.p.vol_thr > 0:
+                req["volume_filter_threshold"] = self.p.vol_thr
+            if self.p.neutral_mode:
+                req["neutral_mode"] = self.p.neutral_mode
             res = compute_ensemble(list(candles), req)
         except Exception:
             return None
@@ -125,9 +119,24 @@ class EnsembleV4Strategy:
             if q.get("event_id") == last_e.get("quorum_event_id"):
                 qevent = q
                 break
+        qe_raw = qevent or {}
+        qe_feats = qe_raw if isinstance(qe_raw, dict) else {}
+        quorum_event = {
+            "ts": qe_raw.get("ts", ""),
+            "side": qe_raw.get("side", ""),
+            "votes": qe_feats.get("votes", 0),
+            "buy_votes": qe_feats.get("buy_votes", 0),
+            "sell_votes": qe_feats.get("sell_votes", 0),
+            "members_for": qe_feats.get("members_for", []),
+            "opposition": qe_feats.get("opposition", []),
+            "total_members": qe_feats.get("total_members", 0),
+            "quorum_k": qe_feats.get("quorum_k", 0),
+            "event_id": qe_raw.get("event_id", ""),
+            "reason": qe_raw.get("reason", ""),
+        }
         meta = {
             "entry": {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in last_e.items()},
-            "quorum_event": qevent or {},
+            "quorum_event": quorum_event,
             "setups": {k: v for k, v in (st.get("setups") or {}).items()},
         }
         return Signal(

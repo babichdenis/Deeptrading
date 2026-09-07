@@ -27,11 +27,11 @@ async def select_eligible_universe(db: AsyncSession, top_n: int = 20) -> list[di
     if not rows:
         return []
 
-    # Проверяем наличие 5min свечей в БД (стрим накопит данные)
+    # Проверяем наличие свечей в БД (1m достаточно — бот ресемплит в 5m сам)
     figi_list = [r[0] for r in rows]
     recent = (await db.execute(
         select(Candle.figi)
-        .where(Candle.figi.in_(figi_list), Candle.interval == 5)
+        .where(Candle.figi.in_(figi_list), Candle.interval == 1)
         .group_by(Candle.figi)
         .having(func.count(Candle.ts) >= 1)
     )).scalars().all()
@@ -46,21 +46,37 @@ async def select_eligible_universe(db: AsyncSession, top_n: int = 20) -> list[di
         if figi not in has_data:
             continue
 
+        # 5m из 1m на лету для ATR (последние 200 1m-баров)
         bars = (
             await db.execute(
                 select(Candle)
-                .where(Candle.figi == figi, Candle.interval == 5)
+                .where(Candle.figi == figi, Candle.interval == 1)
                 .order_by(Candle.ts.desc())
-                .limit(200)
+                .limit(1000)
             )
         ).scalars().all()
-        if len(bars) < 1:
+        if len(bars) < 5:
             continue
 
-        bars = list(reversed(bars))
-        ec = [EC(ts=b.ts, open=float(b.open), high=float(b.high),
-                 low=float(b.low), close=float(b.close), volume=float(b.volume))
-              for b in bars]
+        # ресемпл 1m → 5m в памяти
+        from app.engine.models import Candle as EC5
+        _by5 = {}
+        for b in reversed(bars):
+            key = int(b.ts.timestamp() // 300)
+            if key not in _by5:
+                _by5[key] = {"ts": datetime.fromtimestamp(key * 300, tz=timezone.utc),
+                             "open": float(b.open), "high": float(b.high),
+                             "low": float(b.low), "close": float(b.close), "volume": float(b.volume)}
+            else:
+                g = _by5[key]
+                g["high"] = max(g["high"], float(b.high))
+                g["low"] = min(g["low"], float(b.low))
+                g["close"] = float(b.close)
+                g["volume"] += float(b.volume)
+        ec = [EC5(ts=g["ts"], open=g["open"], high=g["high"], low=g["low"],
+                  close=g["close"], volume=g["volume"]) for g in _by5.values()]
+        if len(ec) < 15:
+            continue
         values = atr_series(ec[-44:], 14)
         last_atr = next((v for v in reversed(values) if v is not None), None)
 

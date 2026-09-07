@@ -26,22 +26,23 @@ async def lifespan(app: FastAPI):
         if not runtime.running:
             cfg = BotConfig(
                 strategy_id="ensemble_v4",
-                interval_name="5min",
+                interval_name="1min",
                 top_n=20,
                 use_ensemble=True,
-                mode="paper",
+                mode="sandbox",
                 sessions=["morning", "day", "evening"],
                 long_allowed=True,
-                short_allowed=False,
+                short_allowed=True,
+                ensemble_session="all",
                 atr_period=14,
                 atr_multiplier=4.0,
                 atr_risk_reward=4.0,
                 leverage=1.0,
-                commission_rate=0.003,
+                commission_rate=0.0005,
                 slippage_bps=2.0,
                 confirm_flip=2,
                 reentry_cooldown_bars=15,
-                overnight=False,
+                overnight=True,
             )
             asyncio.create_task(runtime.start(cfg))
     except Exception as e:
