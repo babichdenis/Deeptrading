@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -396,7 +397,8 @@ async def bot_reset(initial_cash: float = 100_000.0) -> dict:
 async def bot_trading_status() -> dict:
     """Возвращает реальный торговый статус MOEX через market_data.get_trading_status."""
     from t_tech.invest import Client, SecurityTradingStatus
-    TOKEN = "t.Qhvl9v-tXNNrDLAw0AATld17wzqZ0E_CLJzkmp5AAoTZO92sJLdZxdVEGtpcOTrEZw1PfdXusqhRFhqONcU4Rw"
+    from app.config import get_settings
+    TOKEN = get_settings().sandbox or get_settings().tinkoff_token
     SB = "sandbox-invest-public-api.tbank.ru"
     
     from t_tech.invest import SecurityTradingStatus as STS

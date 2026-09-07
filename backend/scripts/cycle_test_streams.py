@@ -1,3 +1,4 @@
+import os
 """
 Полный цикл-тест стримов в sandbox после открытия MOEX:
   1. StreamManager (positions+trades) стартует, snapshot ALRS SHORT 110
@@ -19,7 +20,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
 
-TOKEN = "t.Qhvl9v-tXNNrDLAw0AATld17wzqZ0E_CLJzkmp5AAoTZO92sJLdZxdVEGtpcOTrEZw1PfdXusqhRFhqONcU4Rw"
+TOKEN = os.environ.get("SANDBOX") or os.environ.get("TINKOFF_TOKEN")
 ACC = "413306e6-f634-4aef-a553-c84e764b298a"
 ALRS_UID = "30817fea-20e6-4fee-ab1f-d20fc1a1bb72"
 SBER_UID = "e6123145-9665-43e0-8413-cd61b8aa9b13"

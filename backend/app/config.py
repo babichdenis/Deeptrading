@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     postgres_db: str = "deeptrading"
     tinkoff_token: str = ""
     tinkoff_live_token: str = ""
+    sandbox: str = ""
 
     @property
     def database_url(self) -> str:
