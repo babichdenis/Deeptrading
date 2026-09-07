@@ -1,0 +1,227 @@
+{
+  "SMLT": {
+    "figi": "BBG00F6NKQX3",
+    "lot": 1,
+    "trials": 40,
+    "elapsed_s": 112.2,
+    "best_params": {
+      "sl_mult": 6.0,
+      "rr": 5.5,
+      "quorum": 2,
+      "vol_thr": 0.6000000000000001,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": true,
+      "inc_pullback_ema": true,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": false,
+      "active_sids": [
+        "bollinger_reclaim",
+        "pullback_ema",
+        "range_compression_breakout"
+      ]
+    },
+    "baseline_w1": {
+      "net": 2871.13,
+      "trades": 103,
+      "pf": 4.09
+    },
+    "baseline_w2": {
+      "net": 7439.84,
+      "trades": 135,
+      "pf": 6.63
+    },
+    "opt_w1": {
+      "net": 11244.31,
+      "trades": 109,
+      "pf": 20.04
+    },
+    "opt_w2": {
+      "net": 6096.04,
+      "trades": 96,
+      "pf": 5.58
+    }
+  },
+  "NLMK": {
+    "figi": "BBG004S681B4",
+    "lot": 10,
+    "trials": 40,
+    "elapsed_s": 52.8,
+    "best_params": {
+      "sl_mult": 6.0,
+      "rr": 2.5,
+      "quorum": 2,
+      "vol_thr": 0.0,
+      "inc_rsi_reversal": true,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": true,
+      "inc_vwap_reclaim": true,
+      "inc_range_compression_breakout": true,
+      "inc_macd_cross": true,
+      "inc_donchian_breakout": true,
+      "active_sids": [
+        "rsi_reversal",
+        "pullback_ema",
+        "vwap_reclaim",
+        "range_compression_breakout",
+        "macd_cross",
+        "donchian_breakout"
+      ]
+    },
+    "baseline_w1": {
+      "net": 1628.51,
+      "trades": 116,
+      "pf": 4.63
+    },
+    "baseline_w2": {
+      "net": 2450.64,
+      "trades": 132,
+      "pf": 3.64
+    },
+    "opt_w1": {
+      "net": 1541.41,
+      "trades": 74,
+      "pf": 7.78
+    },
+    "opt_w2": {
+      "net": 4087.69,
+      "trades": 145,
+      "pf": 6.48
+    }
+  },
+  "GAZP": {
+    "figi": "BBG004730RP0",
+    "lot": 10,
+    "trials": 40,
+    "elapsed_s": 74.7,
+    "best_params": {
+      "sl_mult": 5.5,
+      "rr": 6.0,
+      "quorum": 2,
+      "vol_thr": 0.2,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": true,
+      "inc_pullback_ema": true,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": false,
+      "active_sids": [
+        "bollinger_reclaim",
+        "pullback_ema",
+        "range_compression_breakout"
+      ]
+    },
+    "baseline_w1": {
+      "net": 482.51,
+      "trades": 131,
+      "pf": 3.26
+    },
+    "baseline_w2": {
+      "net": 4104.81,
+      "trades": 137,
+      "pf": 8.71
+    },
+    "opt_w1": {
+      "net": 4134.77,
+      "trades": 121,
+      "pf": 23.39
+    },
+    "opt_w2": {
+      "net": 3198.83,
+      "trades": 122,
+      "pf": 4.76
+    }
+  },
+  "LENT": {
+    "figi": "BBG0063FKTD9",
+    "lot": 1,
+    "trials": 40,
+    "elapsed_s": 37.8,
+    "best_params": {
+      "sl_mult": 6.0,
+      "rr": 4.5,
+      "quorum": 2,
+      "vol_thr": 0.0,
+      "inc_rsi_reversal": true,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": true,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "inc_macd_cross": true,
+      "inc_donchian_breakout": false,
+      "active_sids": [
+        "rsi_reversal",
+        "pullback_ema",
+        "range_compression_breakout",
+        "macd_cross"
+      ]
+    },
+    "baseline_w1": {
+      "net": 2797.95,
+      "trades": 109,
+      "pf": 6.8
+    },
+    "baseline_w2": {
+      "net": 3452.15,
+      "trades": 135,
+      "pf": 9.25
+    },
+    "opt_w1": {
+      "net": 4123.13,
+      "trades": 114,
+      "pf": 7.9
+    },
+    "opt_w2": {
+      "net": 4311.81,
+      "trades": 104,
+      "pf": 11.97
+    }
+  },
+  "CHMF": {
+    "figi": "BBG00475K6C3",
+    "lot": 1,
+    "trials": 40,
+    "elapsed_s": 57.6,
+    "best_params": {
+      "sl_mult": 5.0,
+      "rr": 6.0,
+      "quorum": 2,
+      "vol_thr": 0.0,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": true,
+      "inc_pullback_ema": true,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": true,
+      "active_sids": [
+        "bollinger_reclaim",
+        "pullback_ema",
+        "range_compression_breakout",
+        "donchian_breakout"
+      ]
+    },
+    "baseline_w1": {
+      "net": 2306.76,
+      "trades": 139,
+      "pf": 5.42
+    },
+    "baseline_w2": {
+      "net": 4290.95,
+      "trades": 139,
+      "pf": 5.46
+    },
+    "opt_w1": {
+      "net": 2587.99,
+      "trades": 154,
+      "pf": 5.44
+    },
+    "opt_w2": {
+      "net": 5269.03,
+      "trades": 168,
+      "pf": 4.57
+    }
+  }
+}

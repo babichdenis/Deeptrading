@@ -1,0 +1,68 @@
+[
+  {
+    "label": "1: Semi-flip + Volume (baseline quorum)",
+    "trades": 1200,
+    "net": 37796.63000000005,
+    "wr": 61.916666666666664,
+    "pf": 3.285773119814224,
+    "gross_win": 54332.23000000003,
+    "gross_loss": -16535.599999999984,
+    "capital": 47796.62999999999,
+    "vol_rejected": 1869
+  },
+  {
+    "label": "2: Full flip + Volume (baseline quorum)",
+    "trades": 1034,
+    "net": 32280.619999999984,
+    "wr": 62.379110251450676,
+    "pf": 4.130490860849066,
+    "gross_win": 42592.30000000003,
+    "gross_loss": -10311.679999999984,
+    "capital": 42280.62,
+    "vol_rejected": 1869
+  },
+  {
+    "label": "3: Semi-flip + Volume + Gate2 quorum",
+    "trades": 812,
+    "net": 29008.58000000004,
+    "wr": 62.93103448275862,
+    "pf": 3.513212555761657,
+    "gross_win": 40551.010000000046,
+    "gross_loss": -11542.430000000008,
+    "capital": 39008.579999999994,
+    "vol_rejected": 211
+  },
+  {
+    "label": "4: Full flip + Volume + Gate2 quorum",
+    "trades": 757,
+    "net": 25891.529999999973,
+    "wr": 63.540290620871865,
+    "pf": 4.431932717415804,
+    "gross_win": 33435.83000000002,
+    "gross_loss": -7544.299999999995,
+    "capital": 35891.530000000006,
+    "vol_rejected": 211
+  },
+  {
+    "label": "5: Semi-flip + Volume + My quorum",
+    "trades": 863,
+    "net": 32964.91000000006,
+    "wr": 63.615295480880654,
+    "pf": 3.783765867466546,
+    "gross_win": 44806.75000000007,
+    "gross_loss": -11841.840000000007,
+    "capital": 42964.909999999996,
+    "vol_rejected": 265
+  },
+  {
+    "label": "6: Full flip + Volume + My quorum",
+    "trades": 787,
+    "net": 26872.229999999996,
+    "wr": 63.15120711562897,
+    "pf": 4.442443458042702,
+    "gross_win": 34678.38000000002,
+    "gross_loss": -7806.149999999995,
+    "capital": 36872.23,
+    "vol_rejected": 265
+  }
+]
