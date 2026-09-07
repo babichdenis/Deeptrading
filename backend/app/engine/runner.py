@@ -28,6 +28,8 @@ class EngineConfig:
     cost_model: CostModel = field(default_factory=CostModel)
     signal_policy: SignalPolicyConfig = field(default_factory=SignalPolicyConfig)
     session_policy: SessionPolicyConfig | None = None
+    neutral_mode: str | None = None  # "gate" | "semi_flip" | None
+    regime_bars: list[dict] | None = None  # regime timeline from RegimeDetector
 
 
 class EngineRunner:
@@ -44,6 +46,7 @@ class EngineRunner:
         self.session = (
             SessionPolicy(self.cfg.session_policy) if self.cfg.session_policy else None
         )
+        self._regime_bars = self.cfg.regime_bars or []
         self.exit_coverage: dict = {
             "opposite_received": 0,
             "exit_ignored_flat": 0,
@@ -52,6 +55,18 @@ class EngineRunner:
             "confirmed": 0,
             "accepted": 0,
         }
+
+    def _regime_at(self, ts) -> str | None:
+        """Look up regime state for timestamp ts from regime_bars."""
+        if not self._regime_bars:
+            return None
+        best = None
+        for r in self._regime_bars:
+            if r.get("ts") and r["ts"] <= ts:
+                best = r
+            else:
+                break
+        return best.get("state") if best else None
 
     def run(self, candles: Sequence[Candle], progress_cb=None) -> TradeLedger:
         ledger = TradeLedger()
@@ -112,6 +127,30 @@ class EngineRunner:
                 if pending_kind == "entry":
                     position = self._open(i, bar, candles, pending, position, ledger)
                 elif pending_kind == "flip":
+                    # --- NEUTRAL gate / semi-flip ---
+                    neutral_mode = self.cfg.neutral_mode
+                    regime = self._regime_at(bar.ts) if neutral_mode else None
+                    if neutral_mode and regime == "NEUTRAL":
+                        if neutral_mode == "gate":
+                            # Полный запрет flip в NEUTRAL: не закрываем, не входим
+                            pending = None
+                            pending_kind = None
+                            ledger.log(i, bar.ts, "DECISION", "NEUTRAL_GATE flip blocked")
+                            continue
+                        elif neutral_mode == "semi_flip":
+                            # Semi-flip: закрываем позицию, НЕ входим в новую
+                            if position is not None:
+                                last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
+                                last_exit_bar = i
+                                exit_candidate = None
+                                self._close(
+                                    i, bar.ts, position, bar.open, ExitReason.SIGNAL_EXIT.value, ledger,
+                                )
+                            pending = None
+                            pending_kind = None
+                            ledger.log(i, bar.ts, "DECISION", "NEUTRAL_SEMI_FLIP closed, staying flat")
+                            continue
+                    # Обычный flip (вне NEUTRAL или neutral_mode=None)
                     if position is not None:
                         last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
                         last_exit_bar = i

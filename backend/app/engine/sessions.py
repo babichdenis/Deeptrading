@@ -68,3 +68,31 @@ class SessionPolicy:
                 f"late entry: {minutes_left:.0f}min left < {cutoff_bars} bars x {tf_minutes}min",
             )
         return True, ""
+
+# --- Shared session windows (used by runtime + ensemble_strategy) ---
+
+SESSION_WINDOWS: dict[str, tuple[int, int]] = {
+    "morning": (6 * 60 + 50, 9 * 60 + 50),
+    "day": (9 * 60 + 50, 18 * 60 + 45),
+    "evening": (19 * 60 + 5, 23 * 60 + 50),
+}
+
+_MSK_TZ = ZoneInfo("Europe/Moscow")
+
+
+def is_session_active(ts, sessions: list[str] | None = None) -> bool:
+    """Check if timestamp falls within any of the given session windows (MSK).
+    
+    Unified function used by both runtime.py and ensemble_strategy.py.
+    """
+    if not sessions:
+        sessions = ["day"]
+    msk = ts.astimezone(_MSK_TZ)
+    if msk.weekday() >= 5:
+        return False
+    mins = msk.hour * 60 + msk.minute
+    for s in sessions:
+        a, b = SESSION_WINDOWS.get(s, (0, 0))
+        if a <= mins < b:
+            return True
+    return False

@@ -48,7 +48,7 @@ def validate_members(members: list) -> list[dict]:
         sid = m.get("strategy_id")
         params = m.get("params") or {}
         try:
-            from app.engine.strategies import validate_params
+            from app.engine.strategies import validate_params, ParamValidationError
 
             validated = validate_params(sid, params)
         except ParamValidationError as e:
@@ -228,6 +228,7 @@ async def preview_configuration(
 
 
 async def _commit_progress(row):
+    from app.database import SessionLocal
     async with SessionLocal() as db:
         db_row = await db.get(Configuration, row.id)
         if db_row:

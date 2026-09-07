@@ -414,10 +414,10 @@ function currentSessions(): string[] {
   return out.length ? out : ["morning", "day", "evening"];
 }
 
-interface BotCfg { stop: number; target: number; topn: number; slMode: string; atrPeriod: number; atrMult: number; atrRr: number; commission: number; reentry: number; overnight: boolean; }
+interface BotCfg { stop: number; target: number; topn: number; slMode: string; atrPeriod: number; atrMult: number; atrRr: number; commission: number; reentry: number; overnight: boolean; confirmFlip: number; ensembleQuorum: number; }
 
 function loadBotCfg(): BotCfg {
-  const d: BotCfg = { stop: 2.5, target: 2.5, topn: 20, slMode: "atr", atrPeriod: 14, atrMult: 4.0, atrRr: 4.0, commission: 0.3, reentry: 15, overnight: false };
+  const d: BotCfg = { stop: 2.5, target: 2.5, topn: 20, slMode: "atr", atrPeriod: 14, atrMult: 4.0, atrRr: 4.0, commission: 0.3, reentry: 15, overnight: false, confirmFlip: 2, ensembleQuorum: 2 };
   try {
     const raw = localStorage.getItem("bot_cfg");
     if (raw) Object.assign(d, JSON.parse(raw));
@@ -471,6 +471,11 @@ function initBotSettings() {
   const radios = document.querySelectorAll('input[name="sl-mode"]') as NodeListOf<HTMLInputElement>;
     radios.forEach(r => { r.checked = r.value === cfg.slMode; });
     toggleSlSections(cfg.slMode);
+    ($("bs-commission") as HTMLInputElement).value = String(cfg.commission);
+    ($("bs-reentry") as HTMLInputElement).value = String(cfg.reentry);
+    ($("bs-overnight") as HTMLInputElement).checked = cfg.overnight;
+    ($("bs-confirm-flip") as HTMLInputElement).value = String(cfg.confirmFlip);
+    ($("bs-quorum") as HTMLInputElement).value = String(cfg.ensembleQuorum);
     overlay.classList.remove("hidden");
   };
   btn.addEventListener("click", open);
@@ -488,7 +493,12 @@ function initBotSettings() {
     const atrPeriod = Math.max(5, Number(($("bs-atr-period") as HTMLInputElement).value) || 14);
     const atrMult = Math.max(0.5, Number(($("bs-atr-mult") as HTMLInputElement).value) || 4.0);
     const atrRr = Math.max(0.5, Number(($("bs-atr-rr") as HTMLInputElement).value) || 4.0);
-    localStorage.setItem("bot_cfg", JSON.stringify({ stop: sl, target: tp, topn, slMode, atrPeriod, atrMult, atrRr }));
+    const commission = Math.max(0, Number(($("bs-commission") as HTMLInputElement).value) || 0.3);
+    const reentry = Math.max(0, Number(($("bs-reentry") as HTMLInputElement).value) || 15);
+    const overnight = ($("bs-overnight") as HTMLInputElement).checked;
+    const confirmFlip = Math.max(0, Number(($("bs-confirm-flip") as HTMLInputElement).value) || 2);
+    const ensembleQuorum = Math.max(1, Number(($("bs-quorum") as HTMLInputElement).value) || 2);
+    localStorage.setItem("bot_cfg", JSON.stringify({ stop: sl, target: tp, topn, slMode, atrPeriod, atrMult, atrRr, commission, reentry, overnight, confirmFlip, ensembleQuorum }));
     sendBotConfigPatch({
       stop_pct: sl / 100,
       target_pct: tp / 100,
@@ -497,6 +507,11 @@ function initBotSettings() {
       atr_period: atrPeriod,
       atr_multiplier: atrMult,
       atr_risk_reward: atrRr,
+      commission_rate: commission,
+      reentry_cooldown_bars: reentry,
+      overnight: overnight,
+      confirm_flip: confirmFlip,
+      ensemble_quorum: ensembleQuorum,
     });
     close();
   });

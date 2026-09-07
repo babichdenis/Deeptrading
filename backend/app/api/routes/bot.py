@@ -170,6 +170,24 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         if new_q != cfg.ensemble_quorum:
             changes.append(f"quorum: {cfg.ensemble_quorum} → {new_q}")
         cfg.ensemble_quorum = new_q
+    if req.commission_rate is not None:
+        new_cr = max(0.0, req.commission_rate) / 100.0
+        if new_cr != cfg.commission_rate:
+            changes.append(f"commission: {cfg.commission_rate*100:.2f}% → {req.commission_rate:.2f}%")
+        cfg.commission_rate = new_cr
+    if req.overnight is not None and req.overnight != cfg.overnight:
+        changes.append(f"overnight: {'вкл' if cfg.overnight else 'выкл'} → {'вкл' if req.overnight else 'выкл'}")
+        cfg.overnight = req.overnight
+    if req.reentry_cooldown_bars is not None:
+        new_rc = max(0, req.reentry_cooldown_bars)
+        if new_rc != cfg.reentry_cooldown_bars:
+            changes.append(f"cooldown: {cfg.reentry_cooldown_bars} → {new_rc}")
+        cfg.reentry_cooldown_bars = new_rc
+    if req.confirm_flip is not None:
+        new_cf = max(0, req.confirm_flip)
+        if new_cf != cfg.confirm_flip:
+            changes.append(f"confirm_flip: {cfg.confirm_flip} → {new_cf}")
+        cfg.confirm_flip = new_cf
     if changes:
         runtime._log("⚙ КОНФИГ: " + " | ".join(changes))
     return {

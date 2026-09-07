@@ -488,6 +488,10 @@
         <div class="bs-grid" style="margin-top:8px">
           <label class="lg-chip" title="Закрывать все позиции в конце торговой сессии"><input type="checkbox" id="bs-overnight"><span>Overnight (закрытие EOD)</span></label>
         </div>
+        <div class="bs-grid" style="margin-top:8px">
+          <label>Confirm flip (встречных перед закрытием)<input type="number" id="bs-confirm-flip" value="2" step="1" min="0" max="10" /></label>
+          <label>Quorum (голосов для входа)<input type="number" id="bs-quorum" value="2" step="1" min="1" max="7" /></label>
+        </div>
       </div>
 
       <div class="mini-hint bs-hint">Применяются при следующем запуске бота.</div>

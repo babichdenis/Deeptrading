@@ -1,5 +1,4 @@
 """Ансамбль ролей: bias → setups+quorum → entry → exits → oracle.
-
 MCP-контракт: запрос детерминирован (request_hash), setup-сигналы кэшируются,
 выходы считаются каноническим движком. Никакого look-ahead.
 
@@ -16,18 +15,58 @@ import statistics
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
+import logging
 from app.engine.costs import CostModel
+
+logger = logging.getLogger(__name__)
 from app.engine.exits import ExitPolicy, intrabar_exit
 
 def _validate_candles(candles: list) -> tuple:
     """Validate candles for anomalies and broken data.
-    
+
+    Уровень 1 — битые ДНИ (мерцание цены): если в пределах торгового дня (МСК)
+    цена между соседними барами прыгает >50% не менее FLICKER_JUMPS раз, весь
+    день считается битым (сбой источника, напр. 2026-08-22: AFLT 32->85,
+    MVID 46->4222, NLMK 70->317 мерцают весь день). Такие бары отбрасываются.
+
+    Уровень 2 — битые бары: zero/negative, high<low, high<open/close,
+    low>open/close, volume<0, и единичный ценовой прыжок >40% от prev close.
+
     Returns:
         (valid_candles, skipped_count)
     """
+    from zoneinfo import ZoneInfo as _ZI
+    _msk = _ZI("Europe/Moscow")
+
+    FLICKER_JUMPS = 3
+    FLICKER_THR = 0.50
+    JUMP_THR = 0.40
+
+    # --- Уровень 1: определить битые дни (мерцание) ---
+    bad_days: set[str] = set()
+    day_jumps: dict[str, int] = {}
+    day_prev: dict[str, float] = {}
+    for c in candles:
+        d = c.ts.astimezone(_msk).date().isoformat()
+        pv = day_prev.get(d)
+        if pv is not None and pv > 0:
+            j = abs(c.close - pv) / pv
+            if j > FLICKER_THR:
+                day_jumps[d] = day_jumps.get(d, 0) + 1
+        day_prev[d] = c.close
+    for d, n in day_jumps.items():
+        if n >= FLICKER_JUMPS:
+            bad_days.add(d)
+
+    # --- Уровень 2: фильтрация баров ---
     valid = []
     skipped = 0
+    prev_valid_close: float | None = None
     for c in candles:
+        d = c.ts.astimezone(_msk).date().isoformat()
+        if d in bad_days:
+            skipped += 1
+            continue
         # Check for zero/negative prices
         if c.open <= 0 or c.close <= 0 or c.high <= 0 or c.low <= 0:
             skipped += 1
@@ -48,6 +87,12 @@ def _validate_candles(candles: list) -> tuple:
         if c.volume < 0:
             skipped += 1
             continue
+        # Unit price jump vs previous valid close (gap between sessions allowed up to 40%)
+        if prev_valid_close is not None and prev_valid_close > 0:
+            if abs(c.close - prev_valid_close) / prev_valid_close > JUMP_THR:
+                skipped += 1
+                continue
+        prev_valid_close = c.close
         valid.append(c)
     return valid, skipped
 
@@ -128,6 +173,22 @@ def resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]
             out.append(EngineCandle(ts=key, open=c.open, high=c.high, low=c.low,
                                     close=c.close, volume=c.volume))
     return out
+
+
+_resample_cache: dict[int, list[EngineCandle]] = {}
+
+
+def cached_resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]:
+    """Resample with per-call cache. Within one compute_ensemble call,
+    same tf_seconds returns cached result (avoids redundant O(N) passes)."""
+    key = id(candles), tf_seconds
+    if key not in _resample_cache:
+        _resample_cache[key] = resample(candles, tf_seconds)
+    return _resample_cache[key]
+
+
+def clear_resample_cache():
+    _resample_cache.clear()
 
 
 def _ema(values: list[float], span: int) -> list[float]:
@@ -551,7 +612,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     for s in setups_cfg:
         sid = s["strategy_id"]
         tf_sec = TF_SECONDS.get(s.get("tf", "5min"), 300)
-        sigs = generate_signals(sid, s.get("params"), resample(candles, tf_sec))
+        sigs = generate_signals(sid, s.get("params"), cached_resample(candles, tf_sec))
         setup_runs.append((sid, sigs))
         setup_out[sid] = {"tf": s.get("tf", "5min"), "signals": len(sigs),
                           "BUY": sum(1 for x in sigs if x["side"] == "BUY"),
@@ -563,7 +624,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     # entry_tf: "1min" (по умолчанию) — микро-брейкаут на 1м; "5min" — сигнал на 5м,
     # исполнение движком по open следующего 1м бара
     entry_tf = req.get("entry_tf", "1min")
-    entry_candles = resample(candles, TF_SECONDS.get(entry_tf, 60)) if entry_tf != "1min" else candles
+    entry_candles = cached_resample(candles, TF_SECONDS.get(entry_tf, 60)) if entry_tf != "1min" else candles
     entries_raw = micro_breakout(entry_candles, entry_lookback)
     unique_raw_ts = len({s["ts"] for _, sigs in setup_runs for s in sigs})
 
@@ -582,7 +643,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     if vol_gate == "rolling_atr_high_only":
         from zoneinfo import ZoneInfo as _ZI2
         _msk2 = _ZI2("Europe/Moscow")
-        _c5 = resample(candles, TF_SECONDS["5min"])
+        _c5 = cached_resample(candles, TF_SECONDS["5min"])
         # ATR Wilder 14 по 5m (строго прошлые бары: на каждый 5m бар)
         _atr = [None] * len(_c5)
         _trs: list[float] = []
@@ -630,7 +691,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     _pull_pass = None
     if pull_gate in ("require_deep", "require_medium"):
         _thr_mult = {"require_deep": 0.5, "require_medium": 0.25}.get(pull_gate, 0.5)
-        _c5 = resample(candles, TF_SECONDS["5min"])
+        _c5 = cached_resample(candles, TF_SECONDS["5min"])
         _c5ts = [c.ts for c in _c5]
         _atr5 = [None] * len(_c5)
         _trs: list[float] = []
@@ -671,6 +732,20 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         mode = "both"
         quorum_pool = quorum_sigs
         state = None
+        # Per-regime quorum: filter strategies by regime
+        per_rq = req.get("per_regime_quorum")
+        if per_rq is not None:
+            _pr_state = regime_at(regime_bars, ts)
+            _pr_name = _pr_state["state"] if _pr_state else "NEUTRAL"
+            _pr_allowed = per_rq.get(_pr_name)
+            if _pr_allowed is not None:
+                _pr_member_runs = [(sid, sigs) for sid, sigs in setup_runs if sid in _pr_allowed]
+                if _pr_member_runs:
+                    _pr_quorum, _ = merge_quorum(_pr_member_runs, quorum_k)
+                    for _pi, _pq in enumerate(_pr_quorum):
+                        if "event_id" not in _pq:
+                            _pq["event_id"] = f"PR_{_pr_name}_{_pi}"
+                    quorum_pool = _pr_quorum
         if adaptive is not None:
             r = regime_at(regime_bars, ts)
             state = r["state"] if r else "NEUTRAL"
@@ -706,6 +781,24 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             if not ok_ml:
                 rejected.append({**e, "ts": ts.isoformat(), "reason": why_ml})
                 continue
+        # Volume filter: reject entries with low volume_ratio
+        vol_filter_thr = req.get("volume_filter_threshold")
+        if vol_filter_thr is not None:
+            _vf_ts = ts
+            _vf_c5 = cached_resample(candles, TF_SECONDS["5min"])
+            _vf_idx = None
+            for _i, _c in enumerate(_vf_c5):
+                if _c.ts <= _vf_ts:
+                    _vf_idx = _i
+                else:
+                    break
+            if _vf_idx is not None and _vf_idx >= 1:
+                _vf_vols = [v.volume for v in _vf_c5[:_vf_idx+1]]
+                _vf_mean = sum(_vf_vols[max(0, _vf_idx-50):_vf_idx]) / max(1, min(_vf_idx, 50))
+                _vf_ratio = _vf_c5[_vf_idx].volume / max(_vf_mean, 1e-9)
+                if _vf_ratio < vol_filter_thr:
+                    rejected.append({**e, "ts": ts.isoformat(), "reason": f"VOL_FILTER:{_vf_ratio:.2f}<{vol_filter_thr}"})
+                    continue
         accepted.append({**e, "ts": ts.isoformat(), "quorum_event_id": quorum_ev["event_id"]})
 
     if adaptive is not None:
@@ -723,10 +816,35 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                                          opposite_hold=bool(req.get("opposite_hold", False)),
                                          confirm_flip=bool(req.get("confirm_flip", False))),
         session_policy=_build_session_policy(req),
+        neutral_mode=req.get("neutral_mode"),
+        regime_bars=regime_bars,
     )
+    # Exit volume filter: remove exits with low volume
+    vol_filter_thr = req.get("volume_filter_threshold")
+    filtered_exits = entries_raw
+    if vol_filter_thr is not None:
+        _ef_c5 = cached_resample(candles, TF_SECONDS["5min"])
+        _ef_pass = []
+        for _ef_e in entries_raw:
+            _ef_ts = _ef_e["ts"]
+            _ef_idx = None
+            for _i, _c in enumerate(_ef_c5):
+                if _c.ts <= _ef_ts:
+                    _ef_idx = _i
+                else:
+                    break
+            if _ef_idx is not None and _ef_idx >= 1:
+                _ef_vols = [v.volume for v in _ef_c5[:_ef_idx+1]]
+                _ef_mean = sum(_ef_vols[max(0, _ef_idx-50):_ef_idx]) / max(1, min(_ef_idx, 50))
+                _ef_ratio = _ef_c5[_ef_idx].volume / max(_ef_mean, 1e-9)
+                if _ef_ratio >= vol_filter_thr:
+                    _ef_pass.append(_ef_e)
+            else:
+                _ef_pass.append(_ef_e)
+        filtered_exits = _ef_pass
     runner = EngineRunner(strategy=ReplayStrategy(
         [(a["ts"], a["side"]) for a in accepted],
-        exits=[(e["ts"], e["side"]) for e in entries_raw],
+        exits=[(e["ts"], e["side"]) for e in filtered_exits],
     ),
         exit_policy=exit_obj, config=cfg_engine)
     ledger = runner.run(candles)
@@ -953,7 +1071,14 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             "list": episodes,
         },
         "quorum_list": [{"ts": q["ts"].isoformat(), "side": q["side"],
-                         "votes": q["features"].get("votes"), "event_id": q["event_id"]}
+                         "votes": q["features"].get("votes"),
+                         "buy_votes": q["features"].get("buy_votes", 0),
+                         "sell_votes": q["features"].get("sell_votes", 0),
+                         "members_for": q["features"].get("members_for", []),
+                         "opposition": q["features"].get("opposition", []),
+                         "total_members": len(setup_runs),
+                         "quorum_k": quorum_k,
+                         "event_id": q["event_id"]}
                         for q in quorum_sigs],
         "entries": accepted,
         "rejected": rejected,
@@ -1075,7 +1200,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
     # --- Validate candles for anomalies ---
     candles, skipped_count = _validate_candles(candles)
     if skipped_count > 0:
-        print(f"[ensemble] Skipped {skipped_count} broken candles")
+        logger.warning("Skipped %d broken candles", skipped_count)
     if len(candles) < 120:
         return {"error": "мало свечей после валидации", "bars": len(candles)}
 
@@ -1085,12 +1210,12 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
         setups_cfg = [{"strategy_id": sid, "tf": default_tf, "params": {}} for sid in ALL_STRATEGY_IDS]
 
     # --- bias ---
-    hourly = resample(candles, 3600)
+    hourly = cached_resample(candles, 3600)
     bias = compute_bias(hourly, int(bias_cfg.get("period", 50)))
 
     # --- regime timeline (на режимном ТФ) ---
     regime_tf_sec = TF_SECONDS.get(regime_cfg.get("tf", "5min"), 300)
-    regime_bars = resample(candles, regime_tf_sec)
+    regime_bars = cached_resample(candles, regime_tf_sec)
     # REGIME-GATE: кастомный режим по дате (IMOEX daily range) вместо индикаторов
     gate = req.get("regime_gate")
     if gate and gate.get("high_vol_dates"):
@@ -1143,7 +1268,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
         keep: list[dict] = []
         for s in setups_cfg:
             sigs = generate_signals(s["strategy_id"], s.get("params"),
-                                    resample(candles, TF_SECONDS.get(s.get("tf", "5min"), 300)))
+                                    cached_resample(candles, TF_SECONDS.get(s.get("tf", "5min"), 300)))
             q = _signal_quality("setup", s["strategy_id"], s.get("tf", "5min"), sigs,
                                 o_points, entry_window_min)
             if not any(x.get("useless") for x in q):
@@ -1171,7 +1296,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
                 runs_sub = [
                     (s["strategy_id"],
                      generate_signals(s["strategy_id"], s.get("params"),
-                                      resample(candles, TF_SECONDS.get(s.get("tf", "5min"), 300))))
+                                      cached_resample(candles, TF_SECONDS.get(s.get("tf", "5min"), 300))))
                     for s in setups_sub
                 ]
                 q_sub, _ = merge_quorum(runs_sub, q_k)
