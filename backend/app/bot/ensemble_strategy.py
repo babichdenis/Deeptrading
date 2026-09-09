@@ -39,6 +39,7 @@ class EnsembleParams:
     rr: float = 2.0
     vol_thr: float = 0.0
     neutral_mode: str | None = None
+    entry_confirm_bars: int = 0  # ждать N подряд подтверждающих свечей в сторону входа; 0 = без подтверждения
 
 
 class EnsembleV4Strategy:
@@ -94,6 +95,8 @@ class EnsembleV4Strategy:
                 "from_ts": candles[0].ts.isoformat(),
                 "to_ts": last.ts.isoformat(),
             }
+            if self.p.entry_confirm_bars and self.p.entry_confirm_bars > 0:
+                req["entry_confirm_bars"] = self.p.entry_confirm_bars
             if self.p.vol_thr and self.p.vol_thr > 0:
                 req["volume_filter_threshold"] = self.p.vol_thr
             if self.p.neutral_mode:

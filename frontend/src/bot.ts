@@ -38,11 +38,28 @@ function price(n: number | null | undefined): string {
   return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
 }
 
+function pnlAtStop(p: SandboxPositionRow): number {
+  if (p.stop_loss == null) return 0;
+  const isShort = p.side.toUpperCase() === "SHORT";
+  return isShort
+    ? (p.entry_price - p.stop_loss) * p.qty
+    : (p.stop_loss - p.entry_price) * p.qty;
+}
+
+const _dtMSK = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+
 function fmtTime(ts: string | null | undefined): string {
   if (!ts) return "—";
   const d = new Date(ts);
   if (isNaN(d.getTime())) return ts;
-  return d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return _dtMSK.format(d);
+}
+
+function fmtTimeOnly(ts: string): string {
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return ts;
+  const h = d.toLocaleString("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit", hour12: false });
+  return h;
 }
 
 function sideIcon(side: string): string {
@@ -213,7 +230,7 @@ export async function initBot(onStateChange?: (running: boolean) => void) {
 function _loadLGF() {
   const saved = localStorage.getItem("log_lgf");
   if (saved) { try { return JSON.parse(saved); } catch {} }
-  return { candles: true, signals: true, trades: true, events: true };
+  return { candles: true, signals: true, trades: true, events: true, tech: true };
 }
 const LGF: Record<string, boolean> = _loadLGF();
 let _logDateFilter = localStorage.getItem("log_date_filter") ?? new Date().toLocaleDateString("sv-SE");
@@ -272,6 +289,7 @@ function tradeAsTrade(t: BotTradeRow): Record<string, unknown> {
 
 
 function logKind(l: string): string {
+  if (l.includes("TECHINFO")) return "tech";
   if (l.includes("СВЕЧА")) return "candles";
   if (l.includes("СИГНАЛ")) return "signals";
   if (l.includes("СДЕЛКА") || l.includes("ВЫХОД")) return "trades";
@@ -287,7 +305,8 @@ function renderLogs() {
   el.innerHTML = rows.length
     ? rows.map((l) => {
         let cls = "";
-        if (l.includes("ПРОПУСК") || l.includes("ошибк") || l.includes("ERROR")) cls = ' class="lg-err"';
+        if (l.includes("TECHINFO")) cls = ' class="lg-tech"';
+        else if (l.includes("ПРОПУСК") || l.includes("ошибк") || l.includes("ERROR")) cls = ' class="lg-err"';
         else if (l.includes("СИГНАЛ")) cls = ' class="lg-sig"';
         else if (l.includes("ВЫХОД") || l.includes("ЗАКРЫТИЕ")) cls = ' class="lg-exit"';
         else if (l.includes("СДЕЛКА")) cls = ' class="lg-fill"';
@@ -329,7 +348,7 @@ function setupLogFilters() {
       }
     });
   };
-  for (const [id, key] of [["lg-candles","candles"],["lg-signals","signals"],["lg-trades","trades"],["lg-events","events"]]) {
+  for (const [id, key] of [["lg-candles","candles"],["lg-signals","signals"],["lg-trades","trades"],["lg-events","events"],["lg-tech","tech"]]) {
     const cb = $(id) as HTMLInputElement | null;
     if (cb) { cb.checked = !!LGF[key]; cb.closest("label")?.classList.toggle("on", cb.checked); }
   }
@@ -337,6 +356,7 @@ function setupLogFilters() {
   setLG("lg-signals", "signals");
   setLG("lg-trades", "trades");
   setLG("lg-events", "events");
+  setLG("lg-tech", "tech");
   const dateInput = $("log-filter-date") as HTMLInputElement | null;
   if (dateInput) {
     dateInput.value = _logDateFilter;
@@ -629,10 +649,6 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     if (bst && bst.error) bsMode.textContent = "ошибка";
     else bsMode.textContent = bst && bst.running ? bst.mode : "—";
   }
-  const bsCandles = $("bs-candles");
-  if (bsCandles) bsCandles.textContent = bst && bst.candles_seen != null ? String(bst.candles_seen) : "—";
-  const bsSignals = $("bs-signals");
-  if (bsSignals) bsSignals.textContent = bst && bst.signals_seen != null ? String(bst.signals_seen) : "—";
   const sessEl = $("bs-session");
   if (sessEl) {
     const s = bst && bst.session ? bst.session : "—";
@@ -668,8 +684,14 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     pnlEl.textContent = `${st.portfolio.pnl >= 0 ? "+" : ""}${money(st.portfolio.pnl)} ₽`;
     pnlEl.className = "stat-v " + (st.portfolio.pnl >= 0 ? "pos" : "neg");
   }
-  const bsPos = $("bs-positions");
-  if (bsPos) bsPos.textContent = String(st.portfolio.positions_open);
+  const bsCur = $("bs-currencies");
+  if (bsCur) bsCur.textContent = st.portfolio.tinkoff_currencies != null ? `${money(st.portfolio.tinkoff_currencies)} ₽` : "—";
+  const bsShares = $("bs-shares");
+  if (bsShares) {
+    const sh = st.portfolio.tinkoff_shares ?? 0;
+    bsShares.textContent = `${sh < 0 ? "−" : sh > 0 ? "+" : ""}${money(Math.abs(sh))} ₽`;
+    bsShares.className = sh < 0 ? "neg" : sh > 0 ? "pos" : "";
+  }
 
   if (!$("page-bot")) return;
 
@@ -678,7 +700,8 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   _lastPositions = positions;
   const totalOwn = positions.reduce((s, p) => s + p.entry_price * p.qty / (p.leverage || 1), 0);
   const bsPosVal = $("bs-positions-value");
-  if (bsPosVal) bsPosVal.textContent = `${money(totalOwn)} ₽`;
+  const ownPos = (st?.portfolio as any)?.own_in_positions;
+  if (bsPosVal) bsPosVal.textContent = `${money(ownPos != null ? ownPos : totalOwn)} ₽`;
   _lastPositions = positions;
   document.querySelector("#bot-positions-table tbody")!.innerHTML =
     positions
@@ -708,8 +731,10 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
           `<td class="num">×${lev}</td>` +
           `<td class="num" title="${p.regime_reason || ""}${p.regime_atr_pct != null ? " | ATR " + p.regime_atr_pct + "%" : ""}${p.regime_adx != null ? " | ADX " + p.regime_adx : ""}">${regChip}</td>` +
           `<td class="num${p.vol != null && p.vol >= 1 ? " pos" : ""}">${volTxt}</td>` +
-          `<td class="num">${p.stop_loss != null ? price(p.stop_loss) : "—"}</td>` +
-          `<td class="num">${p.take_profit != null ? price(p.take_profit) : "—"}</td>` +
+          `<td class="num" style="color:${p.trail_active ? "#f39c12" : "var(--text-dim)"}" title="${p.trail_active ? "трейлинг активен" : "статичный SL"}">${p.stop_loss != null ? price(p.stop_loss) : "—"}${p.trail_active ? " ◆" : ""}</td>` +
+          `<td class="num" title="${p.trail_active ? "P&L при выходе по стопу" : ""}">${p.trail_active && p.stop_loss != null
+              ? `<span style="color:#3b82f6">${pnlAtStop(p) >= 0 ? "+" : ""}${money(pnlAtStop(p))}₽</span>`
+              : p.take_profit != null ? price(p.take_profit) : "—"}</td>` +
           `<td><button class="btn-sm ${closeClass}" onclick="window.__closePosition('${p.ticker}','${p.side}',${p.qty})">${closeAction}</button></td>` +
           `</tr>`;
       })
@@ -747,7 +772,7 @@ async function pollEvents() {
   }
   box.innerHTML = evs
     .map((e) => {
-      const t = new Date(e.ts).toLocaleTimeString("ru-RU");
+      const t = fmtTimeOnly(String(e.ts));
       const side = String((e.payload as { side?: string } | null)?.side ?? "");
       const pnl = (e.payload as { net_pnl?: number } | null)?.net_pnl;
       const cls =
@@ -820,21 +845,28 @@ function renderTrades(trades: BotTradeRow[]) {
 }
 
 function renderPortfolioSummary(
-  st: { portfolio: { cash: number; equity: number; pnl: number; initial_cash: number } },
+  st: { portfolio: { cash: number; equity: number; pnl: number; initial_cash: number; own_in_positions?: number; trades?: { total: number; wins: number; winrate: number } } },
   trades: BotTradeRow[],
   positions: SandboxPositionRow[],
 ) {
   const p = st.portfolio;
-  const wins = trades.filter((t) => t.net_pnl > 0).length;
-  const totalOwn = positions.reduce((s, pos) => s + pos.entry_price * pos.qty / (pos.leverage || 1), 0);
+  const tr = p.trades ?? {
+    total: trades.length,
+    wins: trades.filter((t) => t.net_pnl > 0).length,
+    winrate: trades.length ? Math.round(trades.filter((t) => t.net_pnl > 0).length / trades.length * 100) : 0,
+  };
+  const totalOwn = p.own_in_positions != null
+    ? p.own_in_positions
+    : positions.reduce((s, pos) => s + pos.entry_price * pos.qty / (pos.leverage || 1), 0);
+  const wins = tr.wins; const tradeTotal = tr.total; const wr = tr.winrate;
   $("portfolio-summary").innerHTML = `
     <div class="metrics-grid">
       <div class="metric"><span class="k">Equity (gross)</span><span class="v">${money(p.equity)} ₽</span></div>
       <div class="metric"><span class="k">Свободные</span><span class="v">${money(p.cash)} ₽</span></div>
       <div class="metric"><span class="k">Мои в позициях</span><span class="v">${money(totalOwn)} ₽</span></div>
       <div class="metric"><span class="k">P&L всего</span><span class="v ${p.pnl >= 0 ? "pos" : "neg"}">${p.pnl >= 0 ? "+" : ""}${money(p.pnl)} ₽</span></div>
-      <div class="metric"><span class="k">Сделок</span><span class="v">${trades.length}</span></div>
+      <div class="metric"><span class="k">Сделок</span><span class="v">${tradeTotal}</span></div>
       <div class="metric"><span class="k">Прибыльных</span><span class="v">${wins}</span></div>
-      <div class="metric"><span class="k">Win rate</span><span class="v">${trades.length ? Math.round(wins / trades.length * 100) : 0}%</span></div>
+      <div class="metric"><span class="k">Win rate</span><span class="v">${Math.round(wr)}%</span></div>
     </div>`;
 }

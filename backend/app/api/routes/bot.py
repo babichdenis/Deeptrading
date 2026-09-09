@@ -327,15 +327,30 @@ async def bot_status() -> dict:
         except Exception:
             pass
 
+    portfolio = {}
+    try:
+        from app.api.routes.sandbox import _portfolio_digest
+        dig = await _portfolio_digest()
+        if dig:
+            portfolio = dig
+    except Exception:
+        portfolio = {}
+
     return {
         **status,
         "portfolio": {
-            "cash": 0,
-            "initial_cash": 10000,
-            "market_value": 0,
-            "equity": 0,
-            "pnl": 0,
-            "positions_open": len(runtime.buffers),
+            "cash": portfolio.get("cash", 0),
+            "initial_cash": portfolio.get("initial_cash", 10000),
+            "market_value": portfolio.get("market_value", 0),
+            "equity": portfolio.get("equity", 0),
+            "pnl": portfolio.get("pnl", 0),
+            "positions_open": portfolio.get("positions_open", len(runtime.buffers)),
+            "own_in_positions": portfolio.get("own_in_positions", 0),
+            "positions_value": portfolio.get("positions_value", 0),
+            "tinkoff_currencies": portfolio.get("tinkoff_currencies", 0),
+            "tinkoff_shares": portfolio.get("tinkoff_shares", 0),
+            "trades": portfolio.get("trades", {"total": 0, "wins": 0, "winrate": 0}),
+            "reconcile": portfolio.get("reconcile", {"ok": False}),
         },
     }
 

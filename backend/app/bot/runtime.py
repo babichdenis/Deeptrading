@@ -29,8 +29,8 @@ from app.bot.session import session_state
 from app.config import get_settings
 from app.database import SessionLocal
 from app.engine.costs import CostModel
-from app.engine.exits import FixedSlTpPolicy, intrabar_exit
-from app.engine.models import Candle as EngineCandle, PositionState
+from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy, intrabar_exit
+from app.engine.models import Candle as EngineCandle, PositionState, Side
 from app.engine.policies import SignalPolicy
 from app.engine.strategies import build_strategy
 from app.models.instrument import Instrument
@@ -39,7 +39,7 @@ from app.services.signals import _load_candles as _lc
 from app.services.tinvest import INTERVAL_NAMES
 
 MAX_BUFFER = 300
-ENSEMBLE_BUFFER = 20000
+ENSEMBLE_BUFFER = 4320  # 3 дня 1m-свечей (~72 часовых бара для bias EMA50) — больше не нужно
 DAILY_PNL_TTL = timedelta(seconds=30)
 POS_PCT = 0.20  # доля портфеля на одну позицию (модель portfolio_merge)
 
@@ -57,6 +57,10 @@ class BotConfig:
     atr_period: int = 14
     atr_multiplier: float = 4.0
     atr_risk_reward: float = 4.0
+    # --- Trailing stop ---
+    initial_sl_atr: float = 1.0  # начальный SL = 1×ATR
+    trail_activation_comm_mult: float = 4.0  # активация при pnl >= комиссия_входа × mult
+    trail_distance_atr: float = 2.5  # дистанция трейлинга за ценой = 2.5×ATR
     allow_short: bool = False
     long_allowed: bool = True
     short_allowed: bool = False
@@ -70,7 +74,7 @@ class BotConfig:
     sessions: list = field(default_factory=lambda: ["day"])
     leverage: float = 1.0
     # --- Commission & slippage (live parity with backtest) ---
-    commission_rate: float = 0.003  # 0.3% per trade (T-Investments)
+    commission_rate: float = 0.0005  # 0.05% per trade (T-Invest, parity с движком)
     slippage_bps: float = 2.0  # 2 bps adverse slippage
     # --- Opposite-hold / confirm_flip ---
     confirm_flip: int = 2  # N встречных сигналов перед закрытием (0=отключено)
@@ -141,6 +145,9 @@ class PaperBotRuntime:
         self.stream_universe: list[str] = []
         self.candles_seen = 0
         self.signals_seen = 0
+        self._candles_received = 0
+        self._last_q_report_ts = 0.0
+        self._persist_flushes = 0
         self.entries_paused = False
         self.last_candle_ts: datetime | None = None
         self.data_source = "—"
@@ -148,18 +155,20 @@ class PaperBotRuntime:
         self._daily_pnl_cache: tuple[datetime, float] | None = None
         self._signal_busy: set[str] = set()
         self._held: set[str] = set()
+        self._held_since: dict[str, float] = {}  # figi -> время добавления в _held (для grace синка)
         self._live_logs: deque[str] = deque(maxlen=400)
         self.stream_manager: StreamManager | None = None
-        self._persist_queue: list = []
-        self._persist_last: dict[str, float] = {}
-        self._persist_queue_5m: list = []  # (figi, ts, o, h, l, c, v) для 5m
+        self._persist_queue: deque = deque(maxlen=2000)
+        self._persist_queue_5m: deque = deque(maxlen=2000)  # (figi, ts, o, h, l, c, v) для 5m
+        # --- Closed-bar gates ---
+        self._last_closed_bar: dict[str, datetime] = {}  # figi -> ts последней обработанной ЗАКРЫТОЙ свечи
+        self._last_persist_bar: dict[str, datetime] = {}  # figi -> ts последней записанной в БД ЗАКРЫТОЙ свечи
         # --- Opposite-hold tracking ---
         self._opposite_count: dict[str, int] = {}  # figi -> consecutive opposite signals
         self._last_signal_side: dict[str, str] = {}  # figi -> last signal side
         # --- Re-entry cooldown tracking ---
         self._last_exit_bar: dict[str, int] = {}  # figi -> bar number of last exit
         self._bar_counter: int = 0  # global bar counter
-        self._exit_plans: dict = {}  # figi -> ExitPolicy (for trailing stop)
         self._just_opened_this_candle: set[str] = set()  # figis opened this candle
         self._entry_bar_index: dict[str, int] = {}  # figi -> bar_index at entry
         self._no_trade_stats: dict[str, int] = {}  # reason -> count (NO_TRADE diagnostics)
@@ -170,6 +179,16 @@ class PaperBotRuntime:
         # --- 5m resample cache (trailing stop optimization) ---
         self._5m_cache: dict[str, list] = {}  # figi -> [resampled 5m candles]
         self._5m_last_close: dict[str, int] = {}  # figi -> last 5m close minute
+        # --- Exit state per figi (единый учёт выхода, зеркалит движок runner) ---
+        # Источник истины для SL/TP/trailing — ЭТИ поля, а не объект позиции брокера
+        # (в sandbox/live pos.stop_loss/take_profit/entry_price приходят пустыми).
+        self._exit_plans: dict[str, object] = {}   # figi -> ExitPolicy (AtrStopPolicy и т.п.)
+        self._exit_side: dict[str, str] = {}       # figi -> "LONG" | "SHORT" (сторона нашего входа)
+        self._exit_entry_px: dict[str, float] = {}  # figi -> реальная цена входа (штуки по факту)
+        self._exit_qty: dict[str, int] = {}         # figi -> qty в штуках (для комиссии/активации)
+        self._trail_active: dict[str, bool] = {}    # figi -> трейлинг активирован (pnl>=comm*4)
+        self._trail_stop: dict[str, float] = {}     # figi -> актуальный защитный стоп (изначально = SL входа, потом подтягивается)
+        self._exit_target: dict[str, float] = {}    # figi -> актуальный TP (None после активации трейлинга)
         # --- Broken candle validation (mirrors _validate_candles in ensemble.py) ---
         self._prev_close: dict[str, float] = {}  # figi -> last VALID close
         self._day_jumps: dict[str, dict[str, int]] = {}  # figi -> {msk_date: jump_count}
@@ -193,6 +212,19 @@ class PaperBotRuntime:
             self._5m_cache[figi] = _resample5u(buf_list, 300)
             self._5m_last_close[figi] = current_5m
         return self._5m_cache.get(figi, [])
+
+    def _is_closed(self, c) -> bool:
+        """Только ЗАКРЫТАЯ свеча допускается к торговой логике и записи в БД.
+
+        Метка бара ts — время ЗАКРЫТИЯ минутного интервала. Свеча считается
+        закрытой, если now(UTC) >= ts (т.е. интервал уже завершился).
+        Незакрытые/текущие обновления текущего бара отбрасываются.
+        """
+        try:
+            now = datetime.now(timezone.utc)
+            return now >= c.ts
+        except Exception:
+            return True
 
     def _candle_ok(self, c) -> bool:
         """Инкрементальная валидация свечи из стрима (зеркало _validate_candles).
@@ -327,22 +359,35 @@ class PaperBotRuntime:
 
     async def _st_open(self, figi, ticker, side, qty, price, sl, tp, meta: dict | None = None, leverage: float = 1.0) -> None:
         from app.models.sandbox_trade import SandboxTrade
+        import json as _json
         _lot = 1
         try:
-            from sqlalchemy import text as _text
             from app.models.instrument import Instrument
-            from sqlalchemy import select as _sel2
-            async with SessionLocal() as _db2:
-                _lot = int((await _db2.execute(_sel2(Instrument.lot).where(Instrument.figi == figi))).scalar_one_or_none() or 1)
+            async with SessionLocal() as db2:
+                _lot = int((await db2.execute(select(Instrument.lot).where(Instrument.figi == figi))).scalar_one_or_none() or 1)
         except Exception:
             pass
         qty_shares = int(qty) * _lot
-        import json as _json
         try:
             async with SessionLocal() as db:
+                # Идемпотентность: один открытый ряд на figi. Если уже есть
+                # открытая строка того же инструмента — сначала архивируем её
+                # (защита от двойных записей при переоткрытии фиджи).
+                _now = datetime.now(timezone.utc)
+                prev = (await db.execute(
+                    select(SandboxTrade)
+                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None))
+                    .order_by(SandboxTrade.entry_time.desc())
+                )).scalars().all()
+                for _old in prev:
+                    _old.exit_time = _now
+                    _old.exit_price = float(_old.entry_price or 0.0)
+                    _old.exit_reason = "reopened"
+                    _old.net_pnl = 0.0
+                    await db.flush()
                 db.add(SandboxTrade(
                     figi=figi, ticker=ticker, side=side, qty=qty_shares,
-                    entry_time=datetime.now(timezone.utc),
+                    entry_time=_now,
                     entry_price=float(price),
                     stop_loss=float(sl) if sl else None,
                     take_profit=float(tp) if tp else None,
@@ -378,6 +423,28 @@ class PaperBotRuntime:
                     entry_comm = costs.commission(float(row.entry_price) * int(row.qty))
                     exit_comm = costs.commission(float(exit_price) * int(row.qty))
                     row.commission = round(entry_comm + exit_comm, 4)
+                    await db.commit()
+        except Exception:
+            pass
+
+    async def _st_update_sl(self, figi: str, sl: float, trail_active: bool | None = None) -> None:
+        from app.models.sandbox_trade import SandboxTrade
+        try:
+            async with SessionLocal() as db:
+                res = await db.execute(
+                    select(SandboxTrade)
+                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None))
+                    .order_by(SandboxTrade.entry_time.desc())
+                    .limit(1)
+                )
+                row = res.scalar_one_or_none()
+                if row is not None:
+                    if sl is not None:
+                        row.stop_loss = float(sl)
+                    if trail_active is not None:
+                        row.trailing_active = bool(trail_active)
+                        if trail_active:
+                            row.take_profit = None  # TP выключается при активации трейлинга
                     await db.commit()
         except Exception:
             pass
@@ -479,6 +546,7 @@ class PaperBotRuntime:
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS entry_reason VARCHAR(128)"))
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS meta TEXT"))
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS exit_meta TEXT"))
+                await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS trailing_active BOOLEAN DEFAULT FALSE"))
                 await _db.commit()
         except Exception:
             pass
@@ -495,7 +563,11 @@ class PaperBotRuntime:
         if cfg.mode == "sandbox" or cfg.mode == "live":
             self.broker = LiveBroker(SessionLocal, config=cfg)
             # --- StreamManager: subscribe to server streams ---
-            from app.bot.live_broker import TOKEN as _TOKEN, SB as _SB, ACC as _ACC
+            from app.config import get_settings
+            _s = get_settings()
+            _TOKEN = _s.get_token(cfg.mode)
+            _ACC = _s.get_account(cfg.mode)
+            _SB = _s.get_target(cfg.mode)
             target = _SB if cfg.mode == "sandbox" else None
             self.stream_manager = StreamManager(token=_TOKEN, account_id=_ACC, target=target)
             try:
@@ -578,7 +650,7 @@ class PaperBotRuntime:
                         from app.bot.moex import ensure_moex_candles
                         await ensure_moex_candles(u["figi"], u.get("ticker", ""), days=10)
                         candles = await _lc(db, u["figi"], 1,
-                                            date_from=datetime.now(timezone.utc) - timedelta(days=60))
+                                            date_from=datetime.now(timezone.utc) - timedelta(days=3))
                         for row in candles:
                             buf.append(EC(ts=row.ts, open=row.open, high=row.high,
                                           low=row.low, close=row.close, volume=row.volume))
@@ -587,7 +659,7 @@ class PaperBotRuntime:
                         await ensure_candles(db, u["figi"], cfg.interval_name, days=7)
                         interval_value = self._interval_value()
                         candles = await _lc(db, u["figi"], interval_value,
-                                            date_from=datetime.now(timezone.utc) - timedelta(days=60))
+                                            date_from=datetime.now(timezone.utc) - timedelta(days=3))
                         for row in candles[-MAX_BUFFER:]:
                             buf.append(EC(ts=row.ts, open=row.open, high=row.high,
                                           low=row.low, close=row.close, volume=row.volume))
@@ -607,8 +679,75 @@ class PaperBotRuntime:
             try:
                 held_now = await self.broker.positions()
                 self._held = {p.figi for p in held_now}
+                import time as _t0
+                for _hf in self._held:
+                    self._held_since[_hf] = _t0.monotonic()
                 if self._held:
                     self._log(f"ОТКРЫТО при старте: {len(self._held)} поз.")
+                    # Реставрация exit-состояния после перезагрузки из sandbox_trades:
+                    # SL/TP/трейлинг/цена входа переживают рестарт (источник — БД, не брокер).
+                    from app.models.sandbox_trade import SandboxTrade as _STM
+                    _open_rows: dict[str, _STM] = {}
+                    try:
+                        async with SessionLocal() as _db_r:
+                            _rows_r = (await _db_r.execute(
+                                select(_STM)
+                                .where(_STM.exit_time.is_(None))
+                                .order_by(_STM.entry_time.desc())
+                            )).scalars().all()
+                        for _r in _rows_r:
+                            _open_rows.setdefault(_r.figi, _r)
+                    except Exception as _re_err:
+                        self._log(f"restore rows error: {_re_err}")
+                    from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy
+                    for _p in held_now:
+                        _f = _p.figi
+                        try:
+                            if _p.side == "LONG":
+                                _st = Side.BUY
+                                _side_str = "LONG"
+                            elif _p.side == "SHORT":
+                                _st = Side.SELL
+                                _side_str = "SHORT"
+                            else:
+                                continue
+                            _row = _open_rows.get(_f)
+                            _entry_px = float(_row.entry_price) if (_row is not None and _row.entry_price) else float(_p.entry_price or 0)
+                            _strat_r = self.strategies.get(_f)
+                            _slm_r = getattr(_strat_r.p, "sl_mult", None) if _strat_r is not None else None
+                            _rr_r = getattr(_strat_r.p, "rr", None) if _strat_r is not None else None
+                            if cfg.sl_mode == "fixed":
+                                _pol = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
+                                _pl = _pol.plan_entry(_st, _entry_px, [])
+                            else:
+                                _pol = AtrStopPolicy(period=cfg.atr_period,
+                                                     multiplier=float(_slm_r) if _slm_r else cfg.initial_sl_atr,
+                                                     risk_reward=float(_rr_r) if _rr_r else cfg.atr_risk_reward,
+                                                     trail_activation_comm_mult=cfg.trail_activation_comm_mult,
+                                                     trail_distance_r=cfg.trail_distance_atr)
+                                _buf_raw = self._get_5m_bars(_f, list(self.buffers.get(_f, [])))
+                                _pl = _pol.plan_entry(_st, _entry_px, _buf_raw)
+                            # Сохранённые уровни важнее пересчитанного плана:
+                            # трейлинг мог уже подтянуть стоп / отключить TP.
+                            _sl = float(_row.stop_loss) if (_row is not None and _row.stop_loss) else (
+                                float(_pl.stop_loss) if _pl.stop_loss is not None else None)
+                            _trail_was = bool(_row.trailing_active) if _row is not None else False
+                            _tp = (float(_row.take_profit) if (_row is not None and _row.take_profit) else
+                                   (float(_pl.take_profit) if _pl.take_profit is not None else None))
+                            if _trail_was:
+                                _tp = None  # TP выключен после активации трейлинга
+                            self._exit_plans[_f] = _pol
+                            self._exit_side[_f] = _side_str
+                            self._exit_entry_px[_f] = _entry_px
+                            self._exit_qty[_f] = int(abs(getattr(_p, "qty", 0) or 0))
+                            self._trail_active[_f] = _trail_was
+                            self._trail_stop[_f] = float(_sl) if _sl is not None else 0.0
+                            if _tp is not None:
+                                self._exit_target[_f] = _tp
+                            self._entry_bar_index[_f] = 0
+                            self._log(f"ВЫХОД ВОССТАНОВЛЕН {_f[-6:]} {_p.side} entry={_entry_px:.2f} sl={self._trail_stop[_f]:.2f} trail={_trail_was}")
+                        except Exception as _restore_e:
+                            self._log(f"restore trailing {_f[-6:]} error: {_restore_e}")
             except Exception:
                 self._held = set()
             self.running = True
@@ -676,6 +815,9 @@ class PaperBotRuntime:
             buf = self.buffers.get(p.figi)
             price = float(buf[-1].close) if buf else float(p.entry_price)
             trade = await self.broker.close_position(p.figi, price, "kill_switch_close_all")
+            self._held.discard(p.figi)
+            self._clear_exit_state(p.figi)
+            self._entry_bar_index.pop(p.figi, None)
             closed.append({"figi": p.figi, "ticker": p.ticker,
                            "price": round(price, 6),
                            "net_pnl": float(trade.net_pnl) if trade else None})
@@ -688,11 +830,24 @@ class PaperBotRuntime:
         while self.running:
             await asyncio.sleep(30.0)
             try:
+                import time as _t
                 real = await self.broker.positions()
                 real_set = {p.figi for p in real}
+                now = _t.monotonic()
+                for f in real_set:
+                    self._held_since.setdefault(f, now)
                 stale = self._held - real_set
                 for f in stale:
+                    # Grace: не сноси сразу открытую позицию — лаг видимости в positions()
+                    # (позиция может «не успеть» появиться до ~40с после входа).
+                    opened_at = self._held_since.get(f, 0.0)
+                    if now - opened_at < 90.0 and opened_at > 0.0:
+                        continue
+                    real_f = await self.broker.get_position(f)
+                    if real_f is not None:
+                        continue  # позиция реально есть, просто не попала в этот снапшот
                     self._held.discard(f)
+                    self._held_since.pop(f, None)
                     self._log(f"♻ ОЧИСТКА _held: {f[-6:]} (нет в портфеле)")
             except Exception:
                 pass
@@ -735,7 +890,7 @@ class PaperBotRuntime:
 
                         buf = deque(maxlen=ENSEMBLE_BUFFER if cfg.use_ensemble else MAX_BUFFER)
                         candles = await _lc(db, figi, 1,
-                                            date_from=datetime.now(timezone.utc) - timedelta(days=60))
+                                            date_from=datetime.now(timezone.utc) - timedelta(days=3))
                         for row in candles:
                             buf.append(EC(ts=row.ts, open=row.open, high=row.high,
                                           low=row.low, close=row.close, volume=row.volume))
@@ -756,31 +911,115 @@ class PaperBotRuntime:
                 pass
 
     async def _reconcile_loop(self) -> None:
-        """Фоновая задача: каждые 60с сверяет StreamManager vs broker positions."""
+        """Фоновая задача: каждые 60с.
+
+        Источник истины — фактические позиции брокера (тиньков). Локальный учёт
+        (sandbox_trades, exit_time IS NULL) постоянно приводится к факту:
+          * позиция брокера без локальной открытой строки      -> строка создаётся
+          * локальная открытая строка без позиции брокера      -> закрывается (orphan)
+          * несколько локальных строк на один figi              -> закрываются все,
+                                                                   кроме лучшей по цене
+        Каждая правка логируется (rec_pnlid). Дупликаты/орфаны не удаляются —
+        переводятся в историю с причиной.
+        """
         while self.running:
             await asyncio.sleep(60.0)
             try:
-                if self.stream_manager is None or not isinstance(self.broker, LiveBroker):
+                if not isinstance(self.broker, LiveBroker):
                     continue
-                stream_positions = {p.figi: p for p in self.stream_manager.get_positions()}
-                broker_positions = {p.figi: p for p in await self.broker.positions()}
-                all_figi = set(stream_positions.keys()) | set(broker_positions.keys())
-                for figi in all_figi:
-                    sp = stream_positions.get(figi)
-                    bp = broker_positions.get(figi)
-                    if sp is None and bp is not None:
-                        self._log(f"RECONCILE: stream=NONE broker={bp.side} {bp.qty} {figi[-6:]}")
-                    elif sp is not None and bp is None:
-                        self._log(f"RECONCILE: stream={sp.side} {sp.qty} broker=NONE {figi[-6:]}")
-                    elif sp is not None and bp is not None:
-                        if sp.qty != bp.qty:
-                            self._log(f"RECONCILE: qty mismatch {figi[-6:]} stream={sp.qty} broker={bp.qty}")
-                        if sp.side != bp.side:
-                            self._log(f"RECONCILE: side mismatch {figi[-6:]} stream={sp.side} broker={bp.side}")
+                await self._reconcile_positions(force=False)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass
+            except Exception as _re_err:
+                self._log(f"RECONCILE FAIL: {type(_re_err).__name__}: {_re_err}")
+
+    async def _reconcile_positions(self, force: bool = False) -> None:
+        """Привести локальный учёт открытых позиций к факту брокера."""
+        from app.models.sandbox_trade import SandboxTrade
+        from sqlalchemy import select as _sel_r
+        # Форс-сброс кэша портфеля, чтобы reconcile не видел устаревший снапшот
+        # после только что отправленного ордера (иначе свежая строка съедается как orphan).
+        try:
+            await self.broker.flush_portfolio()
+        except Exception:
+            pass
+        broker_pos = {p.figi: p for p in await self.broker.positions()}
+        async with SessionLocal() as db:
+            rows = (await db.execute(_sel_r(SandboxTrade)
+                                     .where(SandboxTrade.exit_time.is_(None)))).scalars().all()
+            local_by_figi: dict[str, list] = {}
+            for r in rows:
+                local_by_figi.setdefault(r.figi, []).append(r)
+
+            created = closed = 0
+            # 1) Позиции брокера без локальной строки -> создать.
+            for figi, bp in broker_pos.items():
+                if figi in local_by_figi:
+                    continue
+                ticker = self.tickers.get(figi, figi[:8])
+                db.add(SandboxTrade(
+                    figi=figi, ticker=ticker,
+                    side="SELL" if bp.side == "SHORT" else "BUY",
+                    qty=int(abs(bp.qty)),
+                    entry_time=datetime.now(timezone.utc),
+                    entry_price=float(getattr(bp, "entry_price", 0.0) or 0.0),
+                    stop_loss=None, take_profit=None,
+                    entry_reason="rebuilt_from_tinkoff",
+                    leverage=1.0,
+                ))
+                created += 1
+                self._log(f"RECONCILE: создана строка {ticker} ({figi[-6:]}) {bp.side} {bp.qty} @{getattr(bp, 'entry_price', 0.0):.2f}")
+
+            # 2) Локальные строки без позиции брокера -> закрыть (orphan).
+            now = datetime.now(timezone.utc)
+            # Grace-период: строки, открытые в последние 2 минуты, НЕ трогаем —
+            # брокер (sandbox/биржа) может отражать позицию с лагом после ордера.
+            _grace = 120.0
+            for figi, lst in local_by_figi.items():
+                if figi in broker_pos:
+                    continue
+                pending = [r for r in lst if (now - (r.entry_time or now)).total_seconds() < _grace]
+                if pending and len(pending) == len(lst):
+                    self._log(f"RECONCILE: свежие строки {figi[-6:]} ({len(lst)}) — жду отражения позиции (grace {_grace:.0f}с)")
+                    continue
+                closed_here = 0
+                for r in lst:
+                    if (now - (r.entry_time or now)).total_seconds() < _grace:
+                        continue
+                    r.exit_time = now
+                    r.exit_price = float(r.entry_price or 0.0)
+                    r.exit_reason = "orphan_cleanup"
+                    r.net_pnl = 0.0
+                    closed_here += 1
+                closed += closed_here
+                if closed_here:
+                    self._log(f"RECONCILE: закрыт orphan {figi[-6:]} ({closed_here} строк)")
+
+            # 3) Дубликаты на один figi -> оставить только лучшую по цене.
+            for figi, lst in local_by_figi.items():
+                if figi not in broker_pos or len(lst) <= 1:
+                    continue
+                bp = broker_pos[figi]
+                ref = float(getattr(bp, "entry_price", 0.0) or 0.0)
+                best = min(lst, key=lambda r: abs(float(r.entry_price or 0.0) - ref) if ref else 0.0)
+                for r in lst:
+                    if r is best:
+                        continue
+                    r.exit_time = now
+                    r.exit_price = float(r.entry_price or 0.0)
+                    r.exit_reason = "duplicate_cleanup"
+                    r.net_pnl = 0.0
+                    closed += 1
+                    _tk = self.tickers.get(figi, figi[:8])
+                    self._log(f"RECONCILE: закрыт дубликат {_tk} {figi[-6:]} @{r.entry_price:.2f} (best @{ref:.2f})")
+            if created or closed:
+                await db.commit()
+            # Лог состояния сверки КАЖДЫЙ цикл (не только при изменениях).
+            if not force:
+                if created or closed:
+                    self._log(f"RECONCILE CHECK: MISMATCH → +{created} создано, {closed} закрыто | брокер {len(broker_pos)} поз, локально {len(local_by_figi)} строк")
+                else:
+                    self._log(f"RECONCILE CHECK: OK | брокер {len(broker_pos)} поз, локально {len(local_by_figi)} строк, расхождений нет")
 
     def _interval_value(self) -> int:
         if self.config.use_ensemble:
@@ -790,14 +1029,16 @@ class PaperBotRuntime:
 
     async def _flush_persist(self) -> None:
         from sqlalchemy import text as _text
+
+        def _drain(q: deque) -> list:
+            return [q.popleft() for _ in range(len(q))]
+
         while self.running:
             await asyncio.sleep(3.0)
             if not self._persist_queue and not self._persist_queue_5m:
                 continue
-            batch = self._persist_queue
-            batch5 = self._persist_queue_5m
-            self._persist_queue = []
-            self._persist_queue_5m = []
+            batch = _drain(self._persist_queue)
+            batch5 = _drain(self._persist_queue_5m)
             try:
                 sql = _text(
                     "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
@@ -819,32 +1060,43 @@ class PaperBotRuntime:
                     for f, ts, o, h, l, cl, v in batch5:
                         await db.execute(sql5, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
                     await db.commit()
-            except Exception:
-                pass
+                self._persist_flushes += 1
+                if batch or batch5:
+                    _s = (batch[0] if batch else batch5[0])
+                    self._log(
+                        f"TECHINFO FLUSH_ITEM f={_s[0][-6:]} ts={_s[1]} "
+                        f"iv={1 if batch else 5} flushes={self._persist_flushes} "
+                        f"q={len(batch)} q5={len(batch5)}"
+                    )
+                if self._persist_flushes % 10 == 0:
+                    self._log(
+                        f"TECHINFO persist ok q={len(batch)} q5={len(batch5)} "
+                        f"flushes={self._persist_flushes}"
+                    )
+            except Exception as e:
+                self._log(f"PERSIST_ERR {type(e).__name__}: {str(e)[:80]}")
+                # Вернуть данные обратно в очередь, чтобы не потерять
+                self._persist_queue.extend(batch)
+                self._persist_queue_5m.extend(batch5)
 
     async def _run(self) -> None:
-        # feed-токен и target: для sandbox используем sandbox-токен и sandbox API,
-        # для paper/live — боевой. sandbox-токен НЕ работает на боевом API.
-        if self.config.mode == "sandbox":
-            from app.bot.live_broker import TOKEN as _TOKEN, SB as _SB
-            _feed_token = _TOKEN
-            _feed_target = _SB
-        elif self.config.mode == "live":
-            settings = get_settings()
-            _feed_token = settings.tinkoff_token
-            _feed_target = None
-        else:
-            settings = get_settings()
-            _feed_token = settings.tinkoff_token
-            _feed_target = None
+        # Feed = источник СВЕЧЕЙ: всегда боевой токен + основной API, потому что
+        # sandbox НЕ отдаёт market-data стрим (CancelledError на подписке) и свежие
+        # бары тогда идут только polling'ом.
+        # Broker (LiveBroker) при этом остаётся на sandbox — торговля по-прежнему
+        # тестовая. Обратное сочетание (sandbox-токен на боевом API) не работает.
+        settings = get_settings()
+        _feed_token = settings.feed_token
+        _feed_target = None
         feed = CandleFeed(_feed_token, self.config.interval_name,
                           self.stream_universe, target=_feed_target)
+        feed.on_log = lambda msg: self._log("TECHINFO [feed] " + msg)
         self.feed = feed
         exited = "stream_exhausted"
         self._persist_task = asyncio.create_task(self._flush_persist())
         self._held_sync_task = asyncio.create_task(self._sync_held())
         self._hot_add_task = asyncio.create_task(self._hot_add_universe())
-        self._reconcile_task = asyncio.create_task(self._reconcile_loop()) if self.stream_manager else None
+        self._reconcile_task = asyncio.create_task(self._reconcile_loop())
         try:
             async for candle in feed.stream():
                 if not self.running:
@@ -883,25 +1135,65 @@ class PaperBotRuntime:
         figi = c.figi
         figi = self.tcs_to_bbg.get(c.figi, c.figi)
 
+        # Обновляем last_candle_ts ДО валидации — health-check должен видеть,
+        # что данные ПОСТУПАЮТ, даже если свеча битая и отброшена.
+        self._candles_received += 1
+        self.last_candle_ts = c.ts
+        self.data_source = self.mode
+
         # Битая свеча (прыжок цены / битые OHLC): пропускаем полностью —
         # не персистим и не кормим стратегию (согласуется с backtest _validate_candles)
         if not self._candle_ok(c):
+            self._candles_rejected += 1
             self.events.log("DATA_BAD_CANDLE", figi=figi,
                             reason=f"rejected open={c.open} close={c.close}")
+            return
+
+        # Только ЗАКРЫТЫЕ свечи пишем в БД и допускаем к торговой логике.
+        # Исторический backfill/незакрытые обновления текущего бара отбрасываются.
+        if not self._is_closed(c):
+            self._candles_rejected += 1
+            self.events.log("DATA_UNCLOSED_CANDLE", figi=figi,
+                            reason=f"not closed ts={c.ts}")
             return
 
         # Всегда сохраняем свечу в БД (для всех 20 eligible тикеров)
         self.candles_seen += 1
         self._bar_counter += 1
-        self.last_candle_ts = c.ts
-        self.data_source = self.mode
         try:
-            _now2 = datetime.now(timezone.utc).timestamp()
-            if _now2 - self._persist_last.get(figi, 0) >= 5.0:
-                self._persist_last[figi] = _now2
-                self._persist_queue.append(
-                    (figi, c.ts, float(c.open), float(c.high), float(c.low), float(c.close), int(c.volume or 0))
+            # Каждая валидная свеча сразу уходит в очередь персиста (flush каждые 3с,
+            # ON CONFLICT дедуплицирует дубли) — ничего не теряем при рестарте.
+            self._persist_queue.append(
+                (figi, c.ts, float(c.open), float(c.high), float(c.low), float(c.close), int(c.volume or 0))
+            )
+        except Exception:
+            pass
+
+        # TECHINFO: периодический отчёт (раз в 60с) о поступлении/персисте свечей
+        try:
+            _now3 = datetime.now(timezone.utc).timestamp()
+            if _now3 - self._last_q_report_ts >= 60:
+                self._last_q_report_ts = _now3
+                self._log(
+                    f"TECHINFO stat received={self._candles_received} seen={self.candles_seen} "
+                    f"rejected={self._candles_rejected} persist_q={len(self._persist_queue)} "
+                    f"persist_q5={len(self._persist_queue_5m)} mode={self.mode}"
                 )
+        except Exception:
+            pass
+
+        # ГЕЙТ СВЕЖЕСТИ (wall-clock): в торговлю допускаем ТОЛЬКО последний
+        # закрытый бар. Свеча, чей ts сильно позади now (исторический баклог,
+        # перемотка после рестарта), НЕ торгуется — иначе решения BUY/SELL
+        # флипают каждые секунды на старых данных.
+        try:
+            _step = STEP_SEC.get(self.config.interval_name, 60)
+            _age = (datetime.now(timezone.utc) - c.ts).total_seconds()
+            if _age > _step * 2:
+                self._candles_rejected += 1
+                self.events.log("DATA_STALE_CANDLE", figi=figi,
+                                reason=f"stale age={int(_age)}s ts={c.ts}")
+                return
         except Exception:
             pass
 
@@ -938,68 +1230,48 @@ class PaperBotRuntime:
             _now = datetime.now(timezone.utc).timestamp()
             if _now - self._last_candle_log_ts >= 3.0:
                 self._last_candle_log_ts = _now
-                self._log(f"СВЕЧА {figi[-6:]} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} v={c.volume}")
+                self._log(f"СВЕЧА {figi[-6:]} ts={c.ts.strftime('%H:%M:%S')} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} v={c.volume}")
 
         _lookup = self.tcs_to_bbg.get(figi, figi)
-        # --- Stream position (single source of truth) ---
-        _srv_pos = None
-        if self.stream_manager is not None:
+        # Позиция брокера/стрима нужна только как ФАКТ открытой позиции (side/qty).
+        # Стоп/TP/трейлинг живут в собственном учёте (_exit_*) — в sandbox/live
+        # pos.stop_loss/take_profit/entry_price приходят пустыми.
+        # Источник правды — БРОКЕР (реальные позиции). Стрим — только кэш entry_price,
+        # НЕ источник факта позиции (иначе фантом после закрытия оживает трейлинг).
+        pos = await self.broker.get_position(_lookup) or await self.broker.get_position(figi)
+        if pos is not None and self.stream_manager is not None:
             _srv_pos = self.stream_manager.get_position(_lookup) or self.stream_manager.get_position(figi)
-        # Fallback: broker poll (paper mode or stream unavailable)
-        pos = None
-        if _srv_pos is not None:
-            # Convert ServerPosition → LivePosition for intrabar_exit compatibility
-            from app.bot.live_broker import LivePosition
-            pos = LivePosition(
-                figi=_srv_pos.figi,
-                ticker=_srv_pos.ticker,
-                side=_srv_pos.side,
-                qty=_srv_pos.qty,
-                entry_price=_srv_pos.entry_price,
-                entry_time=datetime.now(timezone.utc),
-                stop_loss=None,
-                take_profit=None,
-            )
-        elif self.stream_manager is None or self.mode != "sandbox":
-            pos = await self.broker.get_position(_lookup) or await self.broker.get_position(figi)
-        if pos is not None:
-            state = PositionState.LONG if pos.side == "LONG" else PositionState.SHORT
-            stop = float(pos.stop_loss) if pos.stop_loss is not None else None
-            target = float(pos.take_profit) if pos.take_profit is not None else None
-            if figi.endswith("N88"):
-                self._log(f"DEBUG {figi[-6:]} state={state} sl={pos.stop_loss} tp={pos.take_profit} stop_calc={stop} target_calc={target} bar_o={c.open:.2f} bar_l={c.low:.2f} bar_h={c.high:.2f}")
-            price, reason = intrabar_exit(c, state, stop, target)
-            if price is not None:
-                trade = await self.broker.close_position(figi, price, reason)
-                self._held.discard(figi)
-                self._exit_plans.pop(figi, None)
-                _exit_meta_sl = {
-                    "exit_reason": reason,
-                    "exit_price": float(price),
-                    "sl": stop, "tp": target,
-                    "bars_held": self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter),
-                }
-                await self._st_close(figi, price, reason=reason,
-                                      net=float(trade.net_pnl) if trade else None,
-                                      meta=_exit_meta_sl)
-                pnl = float(trade.net_pnl) if trade else 0
-                self._log(f"ВЫХОД {figi[-6:]} ({reason}) pnl={pnl:+.2f}")
-                self._opposite_count.pop(figi, None)
-                self._last_exit_bar[figi] = self._bar_counter
-                self.events.log("POSITION_CLOSED", figi=figi, ticker=pos.ticker,
-                                reason=reason, net_pnl=float(trade.net_pnl) if trade else None)
-                await self._check_circuit_breaker()
+            if _srv_pos is not None and not pos.entry_price:
+                from app.bot.live_broker import LivePosition
+                pos = LivePosition(
+                    figi=pos.figi, ticker=pos.ticker, side=pos.side,
+                    qty=pos.qty, entry_price=_srv_pos.entry_price,
+                    entry_time=pos.entry_time, stop_loss=None, take_profit=None,
+                    strategy_id=pos.strategy_id,
+                )
 
-        # --- Trailing stop: DISABLED (ATR SL/TP is static) ---
+        # --- Единый механизм выхода (зеркалит движок EngineRunner) ---
+        # Пока трейлинг не активирован: стандартный SL/TP (защита от разворота).
+        # При pnl >= комиссия_входа × 4 трейлинг активируется: TP и сигнальные
+        # выходы отключаются, стоп начинает идти за ценой (ratchet).
+        _closed = False
+        if pos is not None and figi in self._exit_plans:
+            _closed = await self._step_exit(figi, c, pos)
+        elif pos is not None and figi not in self._exit_plans:
+            # Позиция у брокера есть, но учёта выхода нет (рестарт/ручное открытие).
+            await self._ensure_exit_state(figi, c, pos)
+            if figi in self._exit_plans:
+                _closed = await self._step_exit(figi, c, pos)
 
         # --- Overnight: force close at session end ---
-        if self.config.overnight:
+        if not _closed and self.config.overnight:
             
             if not _sessions_allowed(c.ts, self.config.sessions):
                 trade = await self.broker.close_position(figi, float(c.open), "overnight_force_close")
                 self._held.discard(figi)
                 self._opposite_count.pop(figi, None)
                 self._last_exit_bar[figi] = self._bar_counter
+                self._clear_exit_state(figi)
                 _bh_overnight = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
                 if trade:
                     await self._st_close(figi, float(c.open), reason="overnight_force_close",
@@ -1037,8 +1309,10 @@ class PaperBotRuntime:
         self.events.log("SIGNAL_CREATED", figi=figi, ticker=ticker,
                         side=sig.side.value)
 
-        pos_now = None
-        if self.stream_manager is not None:
+        pos_now = await self.broker.get_position(figi)
+        # Стрим НЕ используем как источник позиции — он держит «фантомную» позицию после
+        # реального закрытия, из-за чего confirm_flip крутится вхолостую (ОППОЗИТ каждые 30с).
+        if pos_now is None and self.stream_manager is not None:
             _srv_now = self.stream_manager.get_position(figi)
             if _srv_now is not None:
                 from app.bot.live_broker import LivePosition
@@ -1047,8 +1321,6 @@ class PaperBotRuntime:
                     qty=_srv_now.qty, entry_price=_srv_now.entry_price,
                     entry_time=datetime.now(timezone.utc), stop_loss=None, take_profit=None,
                 )
-        if pos_now is None:
-            pos_now = await self.broker.get_position(figi)
         state_now = PositionState.LONG if (pos_now and pos_now.side == "LONG") else (
             PositionState.SHORT if (pos_now and pos_now.side == "SHORT") else PositionState.FLAT
         )
@@ -1091,6 +1363,22 @@ class PaperBotRuntime:
                 return
             await self._submit_order(figi, ticker, "open", sig.side.value, meta=dict(sig.features or {}))
         elif action is DecisionAction.ACCEPT_EXIT:
+            # Закрываем ТОЛЬКО позиции из нашего учёта (_held). pos_now со стрима/брокера
+            # отстаёт на десятки секунд после реального закрытия → без этой защиты бот
+            # «закрывает» уже закрытую позицию ещё раз (продаёт в пустоту) и создаёт
+            # лишний SHORT: так и родился цикл ОППОЗИТ каждые ~30с.
+            if figi not in self._held:
+                self._opposite_count.pop(figi, None)
+                self._log_no_trade(figi, "exit_no_held",
+                                   "позиции нет в _held (уже закрыта/лаг источника)")
+                return
+            # --- Trailing active: сигнальные выходы и flip отключены ---
+            if self._trail_active.get(figi, False):
+                self.events.log("HOLD_TRAILING", figi=figi, ticker=ticker,
+                                reason="signal exit ignored, trailing stop active")
+                self._log(f"ИГНОР ВЫХОДА {ticker}: трейлинг активен, ждём стоп")
+                self._opposite_count[figi] = 0
+                return
             # --- Opposite-hold / confirm_flip ---
             cf = self.config.confirm_flip
             if cf > 0 and pos_now is not None:
@@ -1127,9 +1415,12 @@ class PaperBotRuntime:
             budget = cfg.ensemble_capital
             if isinstance(self.broker, LiveBroker):
                 try:
-                    # Модель как в бэктесте: позиция = POS_PCT (20%) от текущего equity
+                    # Бюджет на ОДИН слот = 20% от equity (собственные деньги на позицию).
+                    # Плечо маржи доводит размер позиции до максимума, который разрешит
+                    # брокер (см. блок MARGIN ниже) — НЕ до максимума портфеля.
                     _eq = await self.broker.equity()
-                    budget = _eq * POS_PCT
+                    _free = await self.broker.free_cash()
+                    budget = min(_eq * POS_PCT, _free) if _free > 0 else _eq * POS_PCT
                 except Exception:
                     try:
                         live_cash = await self.broker.cash()
@@ -1142,20 +1433,44 @@ class PaperBotRuntime:
                 self._log(f"ПРОПУСК СДЕЛКИ {ticker}: цена={price} лот={lot}")
                 return
             own_per_lot = lot_cost / lev
+            # --- Маржинальное плечо: запрашиваем у брокера ДО входа, ответ в лог ---
+            if isinstance(self.broker, LiveBroker):
+                try:
+                    ml = await self.broker.get_max_lots(figi)
+                    from app.bot.session import session_state
+                    _ss = session_state()
+                    use_margin = _ss == "TRADING"  # маржа только в дневную сессию
+                    _cash_lots = ml.buy_cash if side == "BUY" else ml.sell_cash
+                    _mrgn_lots = ml.buy_margin if side == "BUY" else ml.sell_margin
+                    self._log(
+                        f"MARGIN {ticker}: cash_lots={_cash_lots} margin_lots={_mrgn_lots} "
+                        f"leverage={ml.leverage:.2f} session={_ss} use_margin={use_margin} "
+                        f"budget={budget:.0f} lot_cost={lot_cost:.0f}"
+                    )
+                    if use_margin and _mrgn_lots > 0:
+                        # Покупаем по максимально разрешённому плечу (маржинальный лимит)
+                        lev = ml.leverage
+                        own_per_lot = lot_cost / lev
+                except Exception as e:
+                    self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed at cfg.leverage={lev:.1f}")
             if budget < own_per_lot:
                 self._log(f"ПРОПУСК СДЕЛКИ {ticker}: бюджет {budget:.0f} < own/лот {own_per_lot:.0f}")
                 return
             qty = max(1, int(budget / own_per_lot))
-        # --- Margin cap: check max lots from broker ---
+        # --- Margin cap: не превышать max lots брокера (ответ уже в логе MARGIN) ---
         if action == "open" and isinstance(self.broker, LiveBroker) and cfg.use_margin:
             try:
+                from app.bot.session import session_state
+                _ss = session_state()
+                use_margin = _ss == "TRADING"  # маржа только в дневную сессию, утро/вечер — свои деньги
                 ml = await self.broker.get_max_lots(figi)
-                max_lots = ml.buy_margin if side == "BUY" else ml.sell_margin
+                max_lots = (ml.buy_margin if side == "BUY" else ml.sell_margin) if use_margin \
+                    else (ml.buy_cash if side == "BUY" else ml.sell_cash)
                 if max_lots <= 0:
-                    self._log(f"ПРОПУСК СДЕЛКИ {ticker}: маржинальный лимит = 0")
+                    self._log(f"ПРОПУСК СДЕЛКИ {ticker}: лимит ({'маржа' if use_margin else 'свои деньги'}) = 0")
                     return
                 if qty > max_lots:
-                    self._log(f"QTY CAP {ticker}: {qty} → {max_lots} (margin limit)")
+                    self._log(f"QTY CAP {ticker}: {qty} → {max_lots} ({'margin' if use_margin else 'cash'} limit, {_ss})")
                     qty = max_lots
             except Exception as e:
                 self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed without cap")
@@ -1186,6 +1501,7 @@ class PaperBotRuntime:
             order.filled_at = datetime.now(timezone.utc)
             order.price = actual_exit
             self._held.discard(figi)
+            self._clear_exit_state(figi)
             _bars_held = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
             _exit_meta_sig = {"bars_held": _bars_held, "signal_note": "signal_exit"}
             await self._st_close(figi, actual_exit, reason="signal_exit",
@@ -1201,24 +1517,25 @@ class PaperBotRuntime:
         side = Side(order.side)
         if cfg.use_ensemble:
             from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy
-            # SL/TP: берём из optuna-параметров стратегии figi (EnsembleParams),
+            # SL/TP: из optuna-параметров стратегии figi (EnsembleParams),
             # НЕ из cfg.atr_multiplier (иначе UI перезапишет optuna).
             strat = self.strategies.get(figi)
             _sl_mult = getattr(strat.p, "sl_mult", None) if strat is not None else None
             _rr = getattr(strat.p, "rr", None) if strat is not None else None
             if _sl_mult is None:
-                _sl_mult = cfg.atr_multiplier
+                _sl_mult = cfg.initial_sl_atr
             if _rr is None:
                 _rr = cfg.atr_risk_reward
             if cfg.sl_mode == "fixed":
                 exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
                 plan = exit_policy.plan_entry(side, c.open, [])
             else:
-                exit_policy = AtrStopPolicy(period=cfg.atr_period, multiplier=_sl_mult, risk_reward=_rr)
-                from app.services.ensemble import resample as _resample5
-                buf_raw = list(self.buffers.get(figi, []))
-                buf_5m = _resample5(buf_raw, 300) if buf_raw else []
-                plan = exit_policy.plan_entry(side, c.open, buf_5m)
+                exit_policy = AtrStopPolicy(period=cfg.atr_period, multiplier=_sl_mult,
+                                            risk_reward=_rr,
+                                            trail_activation_comm_mult=cfg.trail_activation_comm_mult,
+                                            trail_distance_r=cfg.trail_distance_atr)
+                buf_raw = self._get_5m_bars(figi, list(self.buffers.get(figi, [])))
+                plan = exit_policy.plan_entry(side, c.open, buf_raw)
         else:
             exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
             plan = exit_policy.plan_entry(side, c.open, [])
@@ -1237,16 +1554,171 @@ class PaperBotRuntime:
         order.filled_at = datetime.now(timezone.utc)
         order.price = entry_px
         self._held.add(figi)
+        self._held_since.setdefault(figi, __import__("time").monotonic())
         await self._st_open(figi, order.ticker, order.side, order.qty, entry_px,
                             plan.stop_loss, plan.take_profit, meta=order.meta,
                             leverage=max(1.0, float(self.config.leverage or 1.0)))
         self._exit_plans[figi] = exit_policy
+        self._exit_side[figi] = order.side
+        self._exit_entry_px[figi] = float(entry_px)
+        _lot_entry = next((u.get("lot") for u in self.universe if u.get("figi") == figi), 1) or 1
+        self._exit_qty[figi] = int(order.qty) * int(_lot_entry)
+        self._trail_active[figi] = False
+        self._trail_stop[figi] = float(plan.stop_loss) if plan.stop_loss is not None else 0.0
+        if plan.take_profit is not None:
+            self._exit_target[figi] = float(plan.take_profit)
         self._entry_bar_index[figi] = self._bar_counter
         self._log(f"СДЕЛКА ВХОД {order.ticker} {order.side} qty={order.qty} @ {entry_px:.2f} (candle={c.open:.2f})")
         self.events.log("ORDER_FILLED", figi=figi, ticker=order.ticker,
                         order_id=order.id, price=entry_px, action="open")
         self.events.log("POSITION_OPENED", figi=figi, ticker=order.ticker,
                         side=order.side, qty=order.qty, entry_price=entry_px)
+        return True
+
+    def _clear_exit_state(self, figi: str) -> None:
+        """Полная очистка локального учёта выхода позиции (все поля)."""
+        self._exit_plans.pop(figi, None)
+        self._exit_side.pop(figi, None)
+        self._exit_entry_px.pop(figi, None)
+        self._exit_qty.pop(figi, None)
+        self._trail_active.pop(figi, None)
+        self._trail_stop.pop(figi, None)
+        self._exit_target.pop(figi, None)
+
+    async def _ensure_exit_state(self, figi: str, c, pos) -> None:
+        """Ленивая инициализация учёта выхода, если позиция есть у брокера,
+        но её нет в _exit_plans (рестарт/ручное открытие/reconcile).
+
+        Уровни считаем от текущего ATR (5m), entry — из фактической позиции.
+        """
+        if figi in self._exit_plans:
+            return
+        if pos is None:
+            return
+        try:
+            cfg = self.config
+            _side = getattr(pos, "side", "LONG")
+            _side_enum = Side.BUY if _side == "LONG" else Side.SELL
+            _entry_px = self._exit_entry_px.get(figi) or float(getattr(pos, "entry_price", 0) or c.open)
+            if cfg.sl_mode == "fixed":
+                _pol = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
+                _pl = _pol.plan_entry(_side_enum, _entry_px, [])
+            else:
+                _strat = self.strategies.get(figi)
+                _slm = getattr(_strat.p, "sl_mult", None) if _strat is not None else None
+                _rrc = getattr(_strat.p, "rr", None) if _strat is not None else None
+                _pol = AtrStopPolicy(period=cfg.atr_period,
+                                     multiplier=float(_slm) if _slm else cfg.initial_sl_atr,
+                                     risk_reward=float(_rrc) if _rrc else cfg.atr_risk_reward,
+                                     trail_activation_comm_mult=cfg.trail_activation_comm_mult,
+                                     trail_distance_r=cfg.trail_distance_atr)
+                _buf = self.buffers.get(figi)
+                _bars1 = self._get_5m_bars(figi, list(_buf)) if _buf else [c]
+                _pl = _pol.plan_entry(_side_enum, _entry_px, _bars1)
+            self._exit_plans[figi] = _pol
+            self._exit_side[figi] = _side
+            self._exit_entry_px[figi] = float(_entry_px)
+            self._exit_qty[figi] = int(getattr(pos, "qty", 0) or 0)
+            self._trail_active[figi] = False
+            self._trail_stop[figi] = float(_pl.stop_loss) if _pl.stop_loss is not None else 0.0
+            if _pl.take_profit is not None:
+                self._exit_target[figi] = float(_pl.take_profit)
+            self._entry_bar_index.setdefault(figi, self._bar_counter)
+            self._log(f"EXIT-INIT {figi[-6:]} {_side} entry={_entry_px:.2f} sl={self._trail_stop[figi]:.2f}")
+        except Exception as _ei_e:
+            self._log(f"exit-init error {figi[-6:]}: {_ei_e}")
+
+    async def _step_exit(self, figi: str, c, pos) -> bool:
+        """Единый шаг управления выходом позиции на одном баре.
+
+        Зеркалит движок EngineRunner.run():
+          1) пока трейлинг НЕ активирован — действует СТАНДАРТНЫЙ SL/TP
+             (защита от разворота; уровни из нашего учёта, не из брокера);
+          2) при pnl >= комиссия_входа × 4 трейлинг АКТИВИРУЕТСЯ:
+             TP и сигнальные выходы отключаются;
+          3) после активации стоп идёт за ценой (update_stop, ratchet),
+             выход — только по трейлинговому стопу.
+        Возвращает True, если позиция закрыта на этом баре.
+        """
+        from app.engine.exits import intrabar_exit as _ibe
+        policy = self._exit_plans[figi]
+        side_str = self._exit_side.get(figi) or getattr(pos, "side", "LONG")
+        state = PositionState.LONG if side_str == "LONG" else PositionState.SHORT
+        trail_side = Side.BUY if state == PositionState.LONG else Side.SELL
+        entry_px = self._exit_entry_px.get(figi)
+        if not entry_px or entry_px <= 0:
+            entry_px = float(getattr(pos, "entry_price", 0) or 0)
+        qty_sh = int(self._exit_qty.get(figi) or getattr(pos, "qty", 0) or 0)
+        comm = float(entry_px) * qty_sh * self.config.commission_rate
+        # ATR/активация/ratchet — на 1m-барах, как в движке EngineRunner (test=bot).
+        # Буфер уже содержит текущий бар (добавлен до вызова _step_exit).
+        buf = self.buffers.get(figi)
+        act_bars = list(buf) if buf else [c]
+
+        upd = getattr(policy, "update_stop", None)
+        act = getattr(policy, "trailing_activated", None)
+        trail_active = bool(self._trail_active.get(figi, False))
+
+        # 1) Если трейлинг уже активен — подтягиваем стоп за ценой (ratchet).
+        new_stop = None
+        if trail_active and upd is not None:
+            try:
+                new_stop = upd(trail_side, float(entry_px), self._trail_stop.get(figi),
+                               act_bars, qty=qty_sh, commission=comm)
+            except Exception as _te:
+                self._log(f"update_stop error {figi[-6:]}: {_te}")
+            if new_stop is not None:
+                old_stop = self._trail_stop.get(figi)
+                if old_stop is None or abs(new_stop - old_stop) > 1e-9:
+                    direction = "вверх" if (trail_side == Side.BUY and new_stop > (old_stop or 0)) else ("вниз" if trail_side == Side.SELL and new_stop < (old_stop or float("inf")) else "=")
+                    _dist_pct = abs(float(c.close) - new_stop) / float(c.close) * 100 if c.close else 0
+                    self._log(f"ТРЕЙЛИНГ {figi[-6:]} стоп {old_stop if old_stop is not None else '-':.2f}→{new_stop:.2f} ({direction}) цена={c.close:.2f} дист={_dist_pct:.2f}%")
+                    self.events.log("TRAILING_STOP", figi=figi, ticker=pos.ticker,
+                                    stop=new_stop, prev_stop=old_stop)
+                    self._trail_stop[figi] = new_stop
+                    await self._st_update_sl(figi, new_stop, trail_active=True)
+
+        # 2) Активация трейлинга при pnl >= комиссия_входа × 4.
+        if not trail_active and act is not None:
+            try:
+                if act(trail_side, float(entry_px), qty_sh, comm, act_bars):
+                    self._trail_active[figi] = True
+                    trail_active = True
+                    self._exit_target.pop(figi, None)  # TP выключается
+                    self._log(f"ТРЕЙЛИНГ ВКЛ. {figi[-6:]} pnl>=комиссия*4 (0.05%*4=0.2%); сигнальные выходы и TP отключены")
+                    self.events.log("TRAILING_ACTIVATED", figi=figi, ticker=pos.ticker,
+                                    reason=f"pnl>=comm_x4 qty={qty_sh} comm={comm:.2f}")
+                    _cur_sl = self._trail_stop.get(figi)
+                    await self._st_update_sl(figi, _cur_sl if _cur_sl is not None else None, trail_active=True)
+            except Exception as _trail_e:
+                self._log(f"трейлинг-активация oshibka {figi[-6:]}: {_trail_e}")
+
+        # 3) Выход на этом баре. TP активен только до активации трейлинга.
+        tp = None if (trail_active or self._trail_active.get(figi, False)) else self._exit_target.get(figi)
+        stop = self._trail_stop.get(figi)
+        price, reason = _ibe(c, state, stop, tp)
+        if price is None:
+            return False
+
+        trade = await self.broker.close_position(figi, price, reason)
+        self._held.discard(figi)
+        self._clear_exit_state(figi)
+        _bh = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
+        await self._st_close(figi, price, reason=reason,
+                              net=float(trade.net_pnl) if trade else None,
+                              meta={"exit_reason": reason, "exit_price": float(price),
+                                    "sl": stop, "tp": tp,
+                                    "trailing": bool(trail_active),
+                                    "bars_held": _bh})
+        pnl = float(trade.net_pnl) if trade else 0
+        tag = "ВЫХОД-ТРЕЙЛИНГ" if trail_active else "ВЫХОД"
+        self._log(f"{tag} {figi[-6:]} ({reason}) pnl={pnl:+.2f}")
+        self._opposite_count.pop(figi, None)
+        self._last_exit_bar[figi] = self._bar_counter
+        self.events.log("POSITION_CLOSED", figi=figi, ticker=pos.ticker,
+                        reason=reason, net_pnl=float(trade.net_pnl) if trade else None,
+                        trailing=bool(trail_active))
+        await self._check_circuit_breaker()
         return True
 
     async def _check_circuit_breaker(self) -> None:

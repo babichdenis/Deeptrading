@@ -17,6 +17,7 @@ import {
   type LineData,
   type SeriesMarker,
   type Time,
+  TickMarkType,
   type UTCTimestamp,
 } from "lightweight-charts";
 import "./style.css";
@@ -35,17 +36,22 @@ import {
 import { initBot, pollOnce } from "./bot";
 import { initLab, refreshConfigs } from "./lab";
 import { initTest } from "./test";
+import type { SyncReport } from "./api";
 import { initEnsLab } from "./enslab";
 import { OracleZones } from "./test";
 
 declare global {
   interface Window {
     FIGI: string;
+    __setTradeLines?: (trade: Record<string, unknown>) => void;
+    __chartOverlay?: ((trade: Record<string, unknown>) => void) | null;
+    __tradeFocus?: Record<string, unknown> | null;
   }
 }
 window.FIGI = "BBG004730N88";
 
 let FIGI = "BBG004730N88";
+let _renderedFigi = "";
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const money = (n: number | null | undefined): string =>
   n == null ? "—" : new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(n);
@@ -62,6 +68,37 @@ const ENSURE_DAYS: Record<string, number> = {
   week: 260,
   month: 730,
 };
+
+// Сколько баров показывать по умолчанию (1min=1.5ч, 5min=5ч, 10min=10ч, …):
+const WINDOW_BARS: Record<string, number> = {
+  "1min": 90,
+  "5min": 60,
+  "10min": 60,
+  "15min": 60,
+  hour: 60,
+  "2h": 60,
+  "4h": 60,
+  day: 60,
+  week: 60,
+  month: 60,
+};
+
+// Барам сверх окна (warmup) — чтобы индикаторы (SMA/EMA/MACD) были корректны у правого края
+const TF_LIMIT: Record<string, number> = {
+  "1min": 150,
+  "5min": 120,
+  "10min": 120,
+  "15min": 120,
+  hour: 120,
+  "2h": 120,
+  "4h": 120,
+  day: 120,
+  week: 120,
+  month: 120,
+};
+function windowLimit(tf: string): number {
+  return TF_LIMIT[tf] ?? (WINDOW_BARS[tf] ?? 60) + 40;
+}
 
 const TIMEFRAMES: { label: string; interval: string; days: number }[] = [
   { label: "1М", interval: "1min", days: ENSURE_DAYS["1min"] },
@@ -114,7 +151,8 @@ if (IS_EMBEDDED) {
   const botBtn = document.querySelector('.nav-btn[data-page="bot"]');
   if (chartBtn) chartBtn.classList.add("active");
   if (botBtn) botBtn.classList.remove("active");
-  document.getElementById("page-title")!.textContent = "График";
+  const _pt = document.getElementById("page-title");
+  if (_pt) _pt.textContent = "График";
 }
 const lk = (k: string) => (IS_EMBEDDED ? "bote_" : "") + k;
 
@@ -128,7 +166,8 @@ function initNav() {
       const page = b.dataset.page!;
       document.querySelectorAll(".page").forEach((p) => p.classList.remove("active"));
       document.getElementById(`page-${page}`)!.classList.add("active");
-      $("page-title").textContent = PAGE_TITLES[page] ?? page;
+      const _pt = $("page-title");
+      if (_pt) _pt.textContent = PAGE_TITLES[page] ?? page;
       if (page === "lab") void refreshConfigs();
       if (page === "bot") void pollOnce();
     }),
@@ -159,6 +198,45 @@ let oraclePrim: ReturnType<typeof makeOraclePrim> | null = null;
 let _overlayLines: IPriceLine[] = [];
 let oracleBusy = false;
 let analysis: AnalysisDto | null = null;
+
+// ---- CDBG: диагностика графика (временный харнесс) ----
+const __CDBG: string[] = [];
+let _cdbgEl: HTMLElement | null = null;
+let _cdbgCount = 0;
+function cdbg(...args: unknown[]) {
+  const line = `[${new Date().toISOString().slice(11, 23)}] ${args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")}`;
+  __CDBG.push(line);
+  if (__CDBG.length > 1500) __CDBG.splice(0, __CDBG.length - 1500);
+  _cdbgCount++;
+  try { console.log(line); } catch { /* noop */ }
+  let el = _cdbgEl;
+  if (!el) {
+    el = document.getElementById("cdbg") as HTMLElement | null;
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "cdbg";
+      el.style.cssText = "display:none;white-space:pre;font:10px monospace;";
+      document.body.appendChild(el);
+    }
+    _cdbgEl = el;
+  }
+  el.textContent = __CDBG.join("\n");
+  try {
+    const lines = __CDBG.slice(-6);
+    document.title = "G|" + lines.join("§").replace(/"/g, "'").slice(-170);
+  } catch { /* noop */ }
+}
+(window as any).__CDBG = __CDBG;
+(window as any).cdbg = cdbg;
+function cdbgView(tag: string) {
+  if (!refs) { cdbg(tag, "no-refs"); return; }
+  try {
+    const lg = refs.chart.timeScale().getVisibleLogicalRange();
+    const vr = refs.chart.timeScale().getVisibleRange();
+    cdbg(tag, "lg=" + (lg ? `${lg.from.toFixed(1)}..${lg.to.toFixed(1)}` : "null"), "vr=" + (vr ? `${Math.floor(Number(vr.from))}..${Math.floor(Number(vr.to))}` : "null"));
+  } catch (e) { cdbg(tag, "view-err", String(e)); }
+}
+// ---------------------------------------------
 const savedTf = localStorage.getItem(lk("sklad_tf"));
 const defTf = IS_EMBEDDED ? "1min" : "day";
 let currentTf = TIMEFRAMES.find((t) => t.interval === savedTf) ?? TIMEFRAMES.find((t) => t.interval === defTf)!;
@@ -234,11 +312,16 @@ function buildChart(): ChartRefs {
       horzLine: { labelBackgroundColor: "#363a45" },
     },
     rightPriceScale: { borderColor: COLORS.grid },
-    timeScale: { borderColor: COLORS.grid, timeVisible: true, secondsVisible: false },
+    timeScale: {
+      borderColor: COLORS.grid,
+      timeVisible: true,
+      secondsVisible: false,
+      tickMarkFormatter: (t: Time, type: TickMarkType) => axisTickLabel(t, type),
+    },
     localization: {
       locale: "ru-RU",
       priceFormatter: (p: number) => priceFmt.format(p),
-      timeFormatter: (t) => axisTimeLabel(t as never),
+      timeFormatter: (t: Time) => axisTimeLabel(t as never),
     },
   });
 
@@ -365,10 +448,17 @@ function buildChart(): ChartRefs {
 }
 
 function renderData(data: AnalysisDto, keepView = false) {
-  if (!keepView && refs) { try { refs.markers.setMarkers([]); } catch { /* noop */ } }
+  cdbg("renderData", "keepView=" + keepView, "n=" + data.candles.length, "first=" + (data.candles[0]?.ts ?? "-"), "last=" + (data.candles[data.candles.length - 1]?.ts ?? "-"));
   if (!refs) refs = buildChart();
   const r = refs;
   const n = data.candles.length;
+  const dataFigi = data.figi ?? FIGI;
+  const figiChanged = dataFigi !== _renderedFigi && _renderedFigi !== "";
+  if (figiChanged && keepView) {
+    cdbg("renderData", "figi сменился (" + _renderedFigi + "→" + dataFigi + ") — принудительный reset вместо keepView");
+    keepView = false;
+  }
+  if (!keepView && refs) { try { refs.markers.setMarkers([]); } catch { /* noop */ } }
 
   const candlePoints: CandlestickData[] = [];
   const volumePoints: HistogramData[] = [];
@@ -431,10 +521,27 @@ function renderData(data: AnalysisDto, keepView = false) {
     ensuredFrom = toUnix(data.candles[0].ts);
     ensuredTo = toUnix(data.candles[n - 1].ts);
   }
+  _renderedFigi = dataFigi;
 
   if (!keepView) {
-    r.chart.timeScale().fitContent();
+    const want = WINDOW_BARS[currentTf.interval] ?? 60;
+    try {
+      const ps = r.chart.priceScale('right');
+      ps.applyOptions({ autoScale: false });
+      ps.applyOptions({ autoScale: true });
+    } catch { /* noop */ }
+    try {
+      r.chart.timeScale().applyOptions({ rightOffset: 0 });
+      const lastIdx = Math.max(0, candlePoints.length - 1);
+      const fromIdx = Math.max(0, lastIdx - want + 1);
+      cdbg("renderData-reset", "want=" + want, "lastIdx=" + lastIdx, "fromIdx=" + fromIdx);
+      r.chart.timeScale().setVisibleLogicalRange({
+        from: Math.min(fromIdx, lastIdx),
+        to: Math.max(fromIdx, lastIdx),
+      });
+    } catch { /* noop */ }
   }
+  cdbgView("renderData-end keepView=" + keepView);
 
   document.getElementById("symbol-ticker")!.textContent = data.ticker || FIGI;
   document.getElementById("symbol-name")!.textContent = data.name || "";
@@ -448,9 +555,48 @@ function fmtDateTime(ts: string): string {
   return _dtMSKFull.format(new Date(ts));
 }
 
+function fmtUTC(sec: number): string {
+  return _dtMSKFull.format(new Date(sec * 1000));
+}
+
 function axisTimeLabel(t: unknown): string {
-  const num = typeof t === "number" ? t : Number(t);
-  return Number.isFinite(num) ? _dtMSK.format(new Date(num * 1000)) : String(t ?? "");
+  try {
+    const num = typeof t === "number" ? t : Number(t);
+    return Number.isFinite(num) ? _dtMSK.format(new Date(num * 1000)) : String(t ?? "");
+  } catch { return String(t ?? ""); }
+}
+
+const _dtMSKYear = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, year: "numeric" });
+const _dtMSKMonth = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, month: "short", year: "numeric" });
+const _dtMSKDay = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, day: "2-digit", month: "2-digit" });
+const _dtMSKSec = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+
+function _mskDateOf(t: Time): Date | null {
+  if (typeof t === "number") return new Date(t * 1000);
+  if (typeof t === "string") {
+    const ms = Date.parse(t);
+    return Number.isFinite(ms) ? new Date(ms) : null;
+  }
+  if (t && typeof t === "object" && "year" in t && "month" in t && "day" in t) {
+    const b = t as { year: number; month: number; day: number };
+    return new Date(Date.UTC(b.year, b.month - 1, b.day));
+  }
+  return null;
+}
+
+function axisTickLabel(t: Time, type: TickMarkType): string {
+  try {
+    const d = _mskDateOf(t);
+    if (!d) return String(t);
+    switch (type) {
+      case TickMarkType.Year: return _dtMSKYear.format(d);
+      case TickMarkType.Month: return _dtMSKMonth.format(d);
+      case TickMarkType.DayOfMonth: return _dtMSKDay.format(d);
+      case TickMarkType.TimeWithSeconds: return _dtMSKSec.format(d);
+      case TickMarkType.Time:
+      default: return _dtMSK.format(d);
+    }
+  } catch { return String(t); }
 }
 
 function updateLegend(idx: number | null) {
@@ -481,8 +627,10 @@ function setupTooltip() {
 
   const resetView = () => {
     try {
+      cdbg("resetView", "dblclick");
       refs!.chart.timeScale().resetTimeScale();
       refs!.chart.timeScale().scrollToRealTime();
+      cdbgView("resetView-done");
     } catch { /* noop */ }
   };
   wrap.addEventListener("dblclick", resetView);
@@ -700,6 +848,7 @@ let latestLogical: { from: number; to: number } | null = null;
 function onVisibleRangeChanged(range: { from: number; to: number } | null) {
   if (!refs || !analysis || panBusy || !range) return;
   latestLogical = range;
+  cdbg("visrange", "from=" + range.from.toFixed(1), "to=" + range.to.toFixed(1), "bars=" + analysis.candles.length, "lastDel=" + (analysis.candles.length - 1 - range.to).toFixed(1));
   if (panTimer) clearTimeout(panTimer);
   panTimer = setTimeout(() => {
     void ensureForViewport();
@@ -799,6 +948,7 @@ async function ensureForViewport() {
   if (!logical) return;
   const bars = analysis.candles.length;
   if (bars === 0) return;
+  cdbg("ensure", "logical=" + logical.from.toFixed(1) + ".." + logical.to.toFixed(1), "bars=" + bars, "ensured=" + String(ensuredFrom) + ".." + String(ensuredTo));
 
   const stepSec = STEP_SEC[currentTf.interval] ?? 300;
   let wantFromSec: number | null = null;
@@ -827,9 +977,11 @@ async function ensureForViewport() {
         ? Math.round((Number(ensuredFrom) - Number(prevFirst)) / stepSec)
         : 0;
     if (addedLeft !== 0 && latestLogical) {
+      const nf = latestLogical.from + addedLeft;
+      const nt = latestLogical.to + addedLeft;
       refs!.chart.timeScale().setVisibleLogicalRange({
-        from: latestLogical.from + addedLeft,
-        to: latestLogical.to + addedLeft,
+        from: Math.min(nf, nt),
+        to: Math.max(nf, nt),
       });
     }
     redrawMarkers();
@@ -850,13 +1002,13 @@ async function load(showLoader: boolean) {
     if (showLoader) loader!.classList.remove("hidden");
     btn?.classList.add("busy");
 
-    setStatus(`Проверка кеша ${currentTf.label}…`);
-    const report = await syncCandles(FIGI, currentTf.interval, currentTf.days);
-    if (report.downloaded > 0) {
-      setStatus(`Докачано из биржи: ${report.downloaded} свечей`);
+    let report: SyncReport | null = null;
+    analysis = await fetchAnalysis(FIGI, currentTf.interval, windowLimit(currentTf.interval));
+    if (analysis.candles.length === 0) {
+      setStatus(`Докачиваю свежие ${currentTf.label}…`);
+      report = await syncCandles(FIGI, currentTf.interval, currentTf.days);
+      analysis = await fetchAnalysis(FIGI, currentTf.interval, windowLimit(currentTf.interval));
     }
-
-    analysis = await fetchAnalysis(FIGI, currentTf.interval);
     if (analysis.candles.length === 0) {
       setStatus(`${currentTf.label}: данных нет ни в базе, ни на бирже`);
     }
@@ -867,7 +1019,7 @@ async function load(showLoader: boolean) {
     if (analysis.candles.length > 0) {
       setStatus(
         `${analysis.ticker} ${currentTf.label}: ${analysis.candles.length} свечей` +
-          (report.downloaded > 0 ? ` (докачано ${report.downloaded})` : " (из кеша)"),
+          (report?.downloaded ? ` (докачано ${report.downloaded})` : " (из кеша)"),
       );
     }
   } catch (e) {
@@ -991,8 +1143,15 @@ window.__chartOverlay = (trade: Record<string, unknown>) => {
     }
     window.__setTradeLines?.(trade);
     refs.markers.setMarkers(markers);
+    cdbg("chartOverlay", "entry=" + fmtUTC(entryTime), "exit=" + (exitTime != null ? fmtUTC(exitTime) : "-"), "side=" + side);
     if (exitTime != null) {
-      refs.chart.timeScale().setVisibleLogicalRange({ from: Number(entryTime), to: Number(exitTime) } as never);
+      const ef = Number(entryTime), et = Number(exitTime);
+      try {
+        const all = refs.chart.timeScale().getVisibleRange();
+        cdbg("chartOverlay-range", "before=" + (all ? `${Math.floor(Number(all.from))}..${Math.floor(Number(all.to))}` : "null"));
+      } catch { /* noop */ }
+      refs.chart.timeScale().setVisibleRange({ from: ef as UTCTimestamp, to: et as UTCTimestamp });
+      cdbgView("chartOverlay-range after");
     }
     setStatus(`Сделка ${side}${pnl != null ? " " + money(pnl) + " ₽" : ""} — отмечена на графике`);
   } catch (e) {
@@ -1343,7 +1502,7 @@ async function refreshRunsTable() {
     tbody.innerHTML = "";
     for (const r of runs) {
       const tr = document.createElement("tr");
-      const created = r.created_at ? new Date(r.created_at).toLocaleString("ru-RU") : "—";
+      const created = r.created_at ? new Date(r.created_at).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
       const paramsStr = Object.entries(r.params)
         .map(([k, v]) => `${k}=${v}`)
         .join(", ");
@@ -1458,10 +1617,26 @@ function initSidebarResize() {
 
 initSidebarResize();
 if (IS_EMBEDDED) {
+  try {
+    const ov = document.createElement("div");
+    ov.id = "cdbg-ov";
+    ov.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:99999;background:rgba(10,12,20,0.82);color:#7fd1a5;font:10px/1.35 'Menlo',monospace;padding:4px 6px;border-radius:4px;max-width:46vw;pointer-events:none;white-space:pre-wrap;";
+    document.body.appendChild(ov);
+    const upd = () => {
+      ov.textContent = "#" + _cdbgCount + " • " + (__CDBG.length ? __CDBG.slice(-4).join("\n") : "(пусто)");
+    };
+    if ((window as any).__CDBG) {
+      const iv = setInterval(upd, 1000);
+      (window as any).__cdbgUpd = upd;
+      void iv;
+    }
+  } catch { /* noop */ }
   let curFigi = FIGI;
   let _liveFigi = "";
   let _lastFocusMks: SeriesMarker<Time>[] = [];
   let _lastFocusTrade: Record<string, unknown> | null = null;
+  let _lastTradeSig = "";
+  const _tradeSigOf = (t: Record<string, unknown>) => `${String(t.entry_time ?? "")}|${String(t.entry_price ?? "")}|${String(t.stop_loss ?? "")}|${String(t.take_profit ?? "")}`;
   const syncBtn = document.getElementById("btn-sync");
   if (syncBtn) {
     syncBtn.addEventListener("click", () => {
@@ -1482,8 +1657,55 @@ if (IS_EMBEDDED) {
     });
   }
 
-  // HMR-FIX: auto-refresh графика ОТКЛЮЧЁН
-  window.setInterval(() => { /* disabled */ }, 8000);
+  // auto-refresh: свежие свечи каждые 8с, правая кромка прилипает к now
+  window.setInterval(() => {
+    void (async () => {
+      if (!_liveFigi) return;
+      const wantFigi = _liveFigi;
+      try {
+        const nd = await fetchAnalysis(wantFigi, currentTf.interval, windowLimit(currentTf.interval));
+        if (!nd || nd.figi !== wantFigi) {
+          cdbg("auto", "figi mismatch — SKIP (" + (nd?.figi ?? "none") + ")");
+          return;
+        }
+        if (nd && nd.candles && nd.candles.length) {
+          analysis = nd;
+          renderData(nd, true);
+          if (_lastFocusMks.length) refs?.markers.setMarkers(_lastFocusMks);
+          if (_lastFocusTrade && _lastTradeSig !== _tradeSigOf(_lastFocusTrade)) {
+            _lastTradeSig = _tradeSigOf(_lastFocusTrade);
+            window.__setTradeLines?.(_lastFocusTrade);
+          }
+          try {
+            const lastT = nd.candles[nd.candles.length - 1].ts;
+            const lastSec = new Date(lastT).getTime() / 1000;
+            const age = Date.now() / 1000 - lastSec;
+            const lg = refs?.chart.timeScale().getVisibleLogicalRange();
+            const bars = nd.candles.length;
+            const pinned = lg != null && lg.to >= bars - 5 && lg.to >= 0;
+            const broken = lg == null || lg.from < -2 || lg.to < -2 || lg.to >= bars + 50 || lg.from >= bars + 50;
+            cdbg("auto", "age=" + Math.round(age) + "s", "pinned=" + pinned, "lg.to=" + (lg ? lg.to.toFixed(1) : "null"), "bars=" + bars, "broken=" + broken);
+            if (broken) {
+              cdbg("auto", "broken view — reset к последним " + (WINDOW_BARS[currentTf.interval] ?? 60) + " барам");
+              const want = WINDOW_BARS[currentTf.interval] ?? 60;
+              const lastIdx = Math.max(0, bars - 1);
+              const fromIdx = Math.max(0, lastIdx - want + 1);
+              refs?.chart.timeScale().setVisibleLogicalRange({ from: fromIdx, to: lastIdx });
+              cdbgView("auto-broken-reset");
+            } else if (age < 180 && pinned) {
+              const before = refs?.chart.timeScale().getVisibleLogicalRange();
+              refs?.chart.timeScale().scrollToRealTime();
+              const after = refs?.chart.timeScale().getVisibleLogicalRange();
+              cdbg("auto", "scrollToRealTime", "before=" + (before ? `${before.from.toFixed(1)}..${before.to.toFixed(1)}` : "null"), "after=" + (after ? `${after.from.toFixed(1)}..${after.to.toFixed(1)}` : "null"));
+            }
+          } catch { /* noop */ }
+          cdbgView("auto-end");
+        } else {
+          cdbg("auto", "пустые данные — НЕ перерисовываю (сохраняю текущий график)");
+        }
+      } catch { /* noop */ }
+    })();
+  }, 8000);
   window.addEventListener("message", (ev) => {
     const d = ev.data as { type?: string; figi?: string; ticker?: string; trade?: Record<string, unknown> };
     if (!d || d.type !== "focus") return;
@@ -1495,12 +1717,12 @@ if (IS_EMBEDDED) {
           FIGI = f;
           window.FIGI = f;
           _liveFigi = f;
-          let data = await fetchAnalysis(f, currentTf.interval, 2000);
+          let data = await fetchAnalysis(f, currentTf.interval, windowLimit(currentTf.interval));
           if (!(data && data.candles && data.candles.length)) {
             try {
-              await syncCandles(f, currentTf.interval, ENSURE_DAYS[currentTf.interval] ?? 7);
+              await syncCandles(f, currentTf.interval, currentTf.days);
             } catch { /* noop */ }
-            data = await fetchAnalysis(f, currentTf.interval, 2000);
+            data = await fetchAnalysis(f, currentTf.interval, windowLimit(currentTf.interval));
           }
           if (data && data.candles && data.candles.length) {
             renderData(data);
@@ -1508,9 +1730,18 @@ if (IS_EMBEDDED) {
           } else {
             setStatus("нет свечей в базе для " + (d.ticker || f));
           }
+        } else if (f === curFigi) {
+          // тот же инструмент — тихо обновляем свечи, не трогая масштаб
+          try {
+            const nd = await fetchAnalysis(f, currentTf.interval, windowLimit(currentTf.interval));
+            if (nd && nd.candles && nd.candles.length) {
+              analysis = nd;
+              renderData(nd, true);
+            }
+          } catch { /* noop */ }
         }
         if (refs) {
-          const hist = (d.trades || []) as Record<string, unknown>[];
+          const hist = ((d as { trades?: unknown[] }).trades || []) as Record<string, unknown>[];
           const mks: SeriesMarker<Time>[] = [];
           for (const tr of hist) {
             const et = tr.entry_time ? toUnix(String(tr.entry_time)) : null;
@@ -1521,14 +1752,46 @@ if (IS_EMBEDDED) {
           }
           _lastFocusMks = mks;
           refs.markers.setMarkers(mks);
-          if (d.trade) { _lastFocusTrade = d.trade as Record<string, unknown>; window.__setTradeLines?.(d.trade); }
-          try { refs.chart.timeScale().scrollToRealTime(); } catch { /* noop */ }
+          const fHist = (d as unknown as { trades?: unknown[] }).trades ?? [];
+          cdbg("focus", "figi=" + f, "curFigi=" + curFigi, "trades=" + fHist.length, "mks=" + mks.length, "hasTrade=" + (d.trade ? "yes" : "no"));
+          if (d.trade) {
+            _lastFocusTrade = d.trade as Record<string, unknown>;
+            _lastTradeSig = _tradeSigOf(_lastFocusTrade);
+            window.__setTradeLines?.(d.trade);
+            cdbgView("focus-trade");
+          }
         }
       } catch (e) {
         console.warn("embed focus error", e);
       }
     })();
   });
+  const autof = new URLSearchParams(window.location.search).get("autofocus");
+  if (autof) {
+    cdbg("AUTOFOCUS", autof);
+    const send = (msg: Record<string, unknown>) => window.dispatchEvent(new MessageEvent("message", { data: msg }));
+    send({ type: "focus", figi: autof, ticker: autof, trade: { side: "LONG", entry_time: "2026-09-08T03:00:00+00:00", entry_price: 100, stop_loss: 98, take_profit: 104 }, trades: [
+      { side: "LONG", entry_time: "2026-09-08T03:00:00+00:00", ts: "2026-09-08T03:30:00+00:00", entry_price: 100, exit_price: 103 },
+    ] });
+    setTimeout(() => send({ type: "focus", figi: "BBG004730RP0", ticker: "GAZP", trade: null, trades: [] }), 6000);
+    setTimeout(() => send({ type: "focus", figi: "BBG004730N88", ticker: "SBER", trade: { side: "SHORT", entry_time: "2026-09-08T03:10:00+00:00", entry_price: 250, stop_loss: 255, take_profit: 240 }, trades: [
+      { side: "SHORT", entry_time: "2026-09-08T03:10:00+00:00", ts: "2026-09-08T03:40:00+00:00", entry_price: 250, exit_price: 244 },
+    ] }), 12000);
+    let snap = 0;
+    const iv = setInterval(() => {
+      snap += 1;
+      try {
+        const lg = refs?.chart.timeScale().getVisibleLogicalRange();
+        const vr = refs?.chart.timeScale().getVisibleRange();
+        const pr = refs?.chart.priceScale?.(COLORS.down ? "right" : "right")?.getVisibleRange?.();
+        cdbg("SNAP", `#${snap}`, "lg=" + (lg ? `${lg.from.toFixed(1)}..${lg.to.toFixed(1)}` : "null"),
+          "vr=" + (vr ? fmtUTC(Math.floor(vr.from as number)) + ".." + fmtUTC(Math.floor(vr.to as number)) : "null"),
+          "pr=" + (pr ? pr.from.toFixed(2) + ".." + pr.to.toFixed(2) : "null"),
+          "bars=" + (refs?.chart.timeScale().getVisibleLogicalRange() ? analysis?.candles?.length ?? 0 : 0));
+      } catch { cdbg("SNAP", `#${snap}`, "err"); }
+    }, 3000);
+    setTimeout(() => clearInterval(iv), 45000);
+  }
 }
 
 initNav();

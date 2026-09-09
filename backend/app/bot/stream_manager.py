@@ -87,6 +87,7 @@ class StreamManager:
         self._trades: dict[str, ServerTrade] = {}        # trade_id -> ServerTrade
         self._orders: dict[str, ServerOrder] = {}        # order_id -> ServerOrder
         self._pending_orders: dict[str, asyncio.Future] = {}  # order_id -> Future
+        self._uid_to_figi: dict[str, str] = {}           # instrument_uid -> figi
 
         # Tasks
         self._tasks: list[asyncio.Task] = []
@@ -204,6 +205,7 @@ class StreamManager:
                             instrument_uid=sec.instrument_uid,
                         )
                         self._positions[sec.figi] = sp
+                        self._uid_to_figi[sec.instrument_uid] = sec.figi
                         logger.info(f"PositionsSnapshot: {sec.figi} {side} qty={abs(qty)}")
                 self._last_positions_update = time.monotonic()
                 logger.info(f"PositionsSnapshot: {len(self._positions)} positions loaded")
@@ -237,6 +239,7 @@ class StreamManager:
                             instrument_uid=sec.instrument_uid,
                         )
                         self._positions[sec.figi] = sp
+                        self._uid_to_figi[sec.instrument_uid] = sec.figi
                         logger.debug(f"PositionsStream: initial {sec.figi} {side} qty={abs(int(qty))}")
                     self._last_positions_update = time.monotonic()
 
@@ -248,20 +251,23 @@ class StreamManager:
                         side = "LONG" if qty > 0 else "SHORT"
                         if abs(qty) < 1:
                             self._positions.pop(sec.figi, None)
-                        else:
-                            old = self._positions.get(sec.figi)
-                            entry = old.entry_price if old else 0.0
-                            sp = ServerPosition(
-                                figi=sec.figi,
-                                ticker=sec.ticker or sec.figi[:8],
-                                side=side,
-                                qty=abs(qty),
-                                entry_price=entry,
-                                blocked=sec.blocked,
-                                instrument_uid=sec.instrument_uid,
-                            )
-                            self._positions[sec.figi] = sp
-                    self._last_positions_update = time.monotonic()
+                            self._uid_to_figi.pop(sec.instrument_uid, None)
+                            self._last_positions_update = time.monotonic()
+                            continue
+                        old = self._positions.get(sec.figi)
+                        entry = old.entry_price if old else 0.0
+                        sp = ServerPosition(
+                            figi=sec.figi,
+                            ticker=sec.ticker or sec.figi[:8],
+                            side=side,
+                            qty=abs(qty),
+                            entry_price=entry,
+                            blocked=sec.blocked,
+                            instrument_uid=sec.instrument_uid,
+                        )
+                        self._positions[sec.figi] = sp
+                        self._uid_to_figi[sec.instrument_uid] = sec.figi
+                        self._last_positions_update = time.monotonic()
 
                 # Ping keepalive
                 if response.ping:
@@ -368,22 +374,36 @@ class StreamManager:
                     logger.info(f"OrderStateStream: subscription status={response.subscription}")
 
                 if response.order_state:
-                    os_data = response.order_state
-                    status = self._map_order_status(os_data.execution_report_status)
-                    so = ServerOrder(
-                        order_id=os_data.order_id,
-                        figi=os_data.figi,
-                        direction="BUY" if os_data.direction == 1 else "SELL",
-                        status=status,
-                        quantity=os_data.lots_requested,
-                        filled_quantity=os_data.lots_executed,
-                        price=self._q(os_data.price) if os_data.price else 0.0,
-                    )
-                    self._orders[os_data.order_id] = so
-                    logger.info(
-                        f"OrderStateStream: {os_data.figi} {so.direction} "
-                        f"status={status} order={os_data.order_id[:12]}"
-                    )
+                    try:
+                        os_data = response.order_state
+                        status = self._map_order_status(os_data.execution_report_status)
+                        # OrderStateStreamOrderState НЕ имеет поля figi/price:
+                        # figi резолвим через instrument_uid (из PositionsStream),
+                        # price берём из initial_order_price / executed_order_price.
+                        figi = self._uid_to_figi.get(os_data.instrument_uid, "")
+                        price = 0.0
+                        for p in (os_data.initial_order_price, os_data.order_price,
+                                  os_data.executed_order_price):
+                            if p is not None:
+                                price = self._q(p)
+                                break
+                        so = ServerOrder(
+                            order_id=os_data.order_id,
+                            figi=figi,
+                            direction="BUY" if os_data.direction == 1 else "SELL",
+                            status=status,
+                            quantity=os_data.lots_requested,
+                            filled_quantity=os_data.lots_executed,
+                            price=price,
+                        )
+                        self._orders[os_data.order_id] = so
+                        logger.info(
+                            f"OrderStateStream: figi={figi or os_data.ticker} {so.direction} "
+                            f"status={status} order={os_data.order_id[:12]}"
+                        )
+                    except Exception as e:
+                        # Битое сообщение ордера не должно ронять весь стрим
+                        logger.warning(f"OrderStateStream: skip bad message {type(e).__name__}: {str(e)[:120]}")
 
                 if response.ping:
                     logger.debug("OrderStateStream: ping")

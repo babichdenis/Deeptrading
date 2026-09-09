@@ -244,7 +244,7 @@ class RegimeExitPolicy(ExitPolicy):
         policy = self.per_regime.get(regime["state"]) if regime else None
         return (policy or self.default).plan_entry(side, entry_price, bars)
 
-    def update_stop(self, side, entry_price, current_stop, bars):
+    def update_stop(self, side, entry_price, current_stop, bars, qty=None, commission=None):
         """Трейлинг делегируется в подполитику режима текущего бара (как plan_entry)."""
         regime = regime_at(self.regime_bars, bars[-1].ts) if bars else None
         policy = self.per_regime.get(regime["state"]) if regime else None
@@ -252,7 +252,10 @@ class RegimeExitPolicy(ExitPolicy):
         upd = getattr(target, "update_stop", None)
         if upd is None:
             return current_stop
-        return upd(side, entry_price, current_stop, bars)
+        try:
+            return upd(side, entry_price, current_stop, bars, qty=qty, commission=commission)
+        except (TypeError, ValueError):
+            return upd(side, entry_price, current_stop, bars)
 
 
 def _oracle_fixed_qty(candles: list[EngineCandle], threshold_pct: float, fee_rate: float,
@@ -813,6 +816,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         signal_policy=SignalPolicyConfig(min_hold_bars=int(req.get("min_hold_bars", 0)),
                                          same_side_reentry_cooldown_bars=int(req.get("same_side_reentry_cooldown_bars", 0)),
                                          exit_confirm_window_bars=int(req.get("exit_confirm_window_bars", 0)),
+                                         entry_confirm_bars=int(req.get("entry_confirm_bars", 0)),
                                          opposite_hold=bool(req.get("opposite_hold", False)),
                                          confirm_flip=bool(req.get("confirm_flip", False))),
         session_policy=_build_session_policy(req),

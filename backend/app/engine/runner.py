@@ -47,6 +47,7 @@ class EngineRunner:
             SessionPolicy(self.cfg.session_policy) if self.cfg.session_policy else None
         )
         self._regime_bars = self.cfg.regime_bars or []
+        self._trailing_active = False
         self.exit_coverage: dict = {
             "opposite_received": 0,
             "exit_ignored_flat": 0,
@@ -76,6 +77,7 @@ class EngineRunner:
         last_exit_side: Side | None = None
         last_exit_bar = -10**9
         exit_candidate: dict | None = None
+        entry_confirm: dict | None = None  # {signal, side, confirm_needed} — ожидание N подряд подтверждающих свечей
         warmup = self.strategy.warmup_bars()
         total = len(candles)
 
@@ -155,6 +157,7 @@ class EngineRunner:
                         last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
                         last_exit_bar = i
                         exit_candidate = None
+                        entry_confirm = None
                         self._close(
                             i, bar.ts, position, bar.open, ExitReason.SIGNAL_EXIT.value, ledger,
                         )
@@ -177,15 +180,33 @@ class EngineRunner:
 
             if position is not None:
                 update_stop = getattr(self.exit_policy, "update_stop", None)
+                _side_for_pol = Side.BUY if position.state is PositionState.LONG else Side.SELL
                 if update_stop is not None:
                     position.initial_stop = update_stop(
-                        position.state,
+                        _side_for_pol,
                         position.entry_price,
                         position.initial_stop,
                         candles[: i + 1],
+                        qty=position.qty,
+                        commission=position.entry_commission,
                     )
+                if not self._trailing_active:
+                    activate = getattr(self.exit_policy, "trailing_activated", None)
+                    _act_res = activate(
+                        _side_for_pol,
+                        position.entry_price,
+                        position.qty,
+                        position.entry_commission,
+                        candles[: i + 1],
+                    ) if activate is not None else False
+                    if _act_res:
+                        self._trailing_active = True
+                        position.target = None
+                        ledger.log(i, bar.ts, "DECISION",
+                                   "TRAILING_ACTIVATED pnl>=comm*4, signal/tp выходят отключены")
+                tp = None if self._trailing_active else position.target
                 price, reason = intrabar_exit(
-                    bar, position.state, position.initial_stop, position.target
+                    bar, position.state, position.initial_stop, tp
                 )
                 if price is not None:
                     last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
@@ -196,8 +217,40 @@ class EngineRunner:
             if position is not None:
                 position.bars_held += 1
 
+            if entry_confirm is not None and position is None:
+                n_conf = max(0, int(self.cfg.signal_policy.entry_confirm_bars))
+                if n_conf > 0:
+                    bullish = (entry_confirm["side"] is Side.BUY and bar.close > bar.open)
+                    bearish = (entry_confirm["side"] is Side.SELL and bar.close < bar.open)
+                    if bullish or bearish:
+                        entry_confirm["confirm_needed"] -= 1
+                        ledger.log(
+                            i, bar.ts, "DECISION",
+                            f"ENTRY_CONFIRM {bar.close:.4f} {entry_confirm['side'].value} "
+                            f"{entry_confirm['confirm_needed']} left",
+                        )
+                        if entry_confirm["confirm_needed"] <= 0:
+                            pending, pending_kind = entry_confirm["signal"], "entry"
+                            entry_confirm = None
+                    else:
+                        entry_confirm["confirm_needed"] = n_conf
+                        ledger.log(
+                            i, bar.ts, "DECISION",
+                            f"ENTRY_CONFIRM_RESET {bar.close:.4f} не в сторону {entry_confirm['side'].value}",
+                        )
+
             if i + 1 < total and i >= warmup - 1:
                 signal = self.strategy.on_bar(candles[: i + 1])
+                if signal is not None and position is not None and self._trailing_active:
+                    # Трейлинг активен: любые противоположные сигналы (и entry-флипы,
+                    # и явные exit) игнорируются — позиция живёт до подтянутого стопа.
+                    opp = (position.state is PositionState.LONG and signal.side is Side.SELL) or (
+                        position.state is PositionState.SHORT and signal.side is Side.BUY
+                    )
+                    if opp:
+                        self.exit_coverage["held"] += 1
+                        ledger.log(i, bar.ts, "DECISION", "HOLD_TRAILING opposite signal ignored")
+                        continue
                 if signal is not None and signal.kind == "exit":
                     # === поток выхода: противоположный сигнал, отдельно от входа ===
                     if position is None:
@@ -268,9 +321,9 @@ class EngineRunner:
                             entry_allowed = False
                             ledger.log(i, bar.ts, "DECISION",
                                        f"REJECT_SESSION_CUTOFF {cutoff_note}")
-                    if self.cfg.mode == "long" and signal.side is Side.SELL:
-                        entry_allowed = False
-                        ledger.log(i, bar.ts, "DECISION", "SKIP_ENTRY mode=long")
+                        if self.cfg.mode == "long" and signal.side is Side.SELL:
+                            entry_allowed = False
+                            ledger.log(i, bar.ts, "DECISION", "SKIP_ENTRY mode=long")
                     elif self.cfg.mode == "short" and signal.side is Side.BUY:
                         entry_allowed = False
                         ledger.log(i, bar.ts, "DECISION", "SKIP_ENTRY mode=short")
@@ -278,7 +331,17 @@ class EngineRunner:
                         entry_allowed = False
                         ledger.log(i, bar.ts, "DECISION", "REJECT_SHORT short not allowed")
                     if entry_allowed:
-                        pending, pending_kind = signal, "entry"
+                        n_conf = max(0, int(self.cfg.signal_policy.entry_confirm_bars))
+                        if n_conf > 0:
+                            if entry_confirm is None or entry_confirm["side"] != signal.side:
+                                entry_confirm = {"signal": signal, "side": signal.side,
+                                                 "confirm_needed": n_conf}
+                                ledger.log(
+                                    i, bar.ts, "DECISION",
+                                    f"ENTRY_WAIT_CONFIRM {n_conf} следующих свечей в сторону {signal.side.value}",
+                                )
+                        else:
+                            pending, pending_kind = signal, "entry"
                 elif action is DecisionAction.ACCEPT_EXIT:
                     policy = self.cfg.signal_policy
                     if policy.opposite_hold:
@@ -327,6 +390,7 @@ class EngineRunner:
         position: Position | None,
         ledger: TradeLedger,
     ) -> Position:
+        self._trailing_active = False
         side = signal.side
         base = bar.open
         fill = self.cfg.cost_model.fill_price(base, side)

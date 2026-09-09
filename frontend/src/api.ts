@@ -267,6 +267,25 @@ export async function fetchExperiments(limit = 30): Promise<ExperimentListRow[]>
   return d.experiments;
 }
 
+export interface PortfolioDigest {
+  cash: number;
+  initial_cash: number;
+  equity: number;
+  market_value: number;
+  pnl: number;
+  positions_open: number;
+  own_in_positions?: number;
+  positions_value?: number;
+  tinkoff_currencies?: number;
+  tinkoff_shares?: number;
+  trades?: { total: number; wins: number; winrate: number };
+  reconcile?: {
+    cash_calc: number; cash_tinkoff: number; delta_cash: number;
+    accounting_pnl: number; tinkoff_pnl: number; delta_pnl: number;
+    closed_net: number; unrealized: number; ok: boolean;
+  };
+}
+
 export interface BotStatus {
   running: boolean;
   mode: string;
@@ -276,7 +295,7 @@ export interface BotStatus {
   signals_seen: number;
   pending_orders?: number;
   universe: Array<{ figi: string; ticker: string; atr_pct: number }>;
-  portfolio: { cash: number; initial_cash: number; equity: number; pnl: number; positions_open: number };
+  portfolio: PortfolioDigest;
   session?: string;
   data?: { health: string; source: string; last_candle_ts: string | null };
   risk?: { state: string; daily_pnl: number; daily_loss_limit: number; entries_paused: boolean };
@@ -401,7 +420,7 @@ export interface SandboxStatus {
   running: boolean;
   mode: string;
   error?: string;
-  portfolio: { cash: number; initial_cash: number; equity: number; market_value: number; pnl: number; positions_open: number };
+  portfolio: PortfolioDigest;
 }
 
 export async function sandboxStatus(): Promise<SandboxStatus> {
@@ -415,6 +434,7 @@ export interface SandboxPositionRow {
   entry_price: number; current_price: number; prev_close: number | null;
   unrealized_pnl: number; roi_pct: number; sell_value: number;
   entry_time: string; stop_loss: number | null; take_profit: number | null;
+  trail_active?: boolean;
   strategy_id: string;
   leverage: number; own_money: number; leveraged: number;
   regime: string;

@@ -14,6 +14,7 @@ class SignalPolicyConfig:
     allow_flip: bool = False
     same_side_reentry_cooldown_bars: int = 0
     exit_confirm_window_bars: int = 0
+    entry_confirm_bars: int = 0  # N подряд подтверждающих свечей (close>open для LONG, close<open для SHORT) перед входом; 0 = без подтверждения
     opposite_hold: bool = False
     confirm_flip: bool = False
 

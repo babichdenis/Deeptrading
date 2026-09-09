@@ -269,7 +269,7 @@ export function createLabChart(
 
   function fmt(iso: unknown): string {
     const d = new Date(String(iso));
-    return d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    return d.toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
   }
   function money(n: number): string {
     return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(n);

@@ -22,7 +22,7 @@
 
 **Токены/аккаунты (sandbox):**
 - Токен: `t.Qhvl9v-...` (в `live_broker.py:TOKEN`, закомментирован в `.env` строка 7 как `#sandbox=`)
-- Account: `413306e6-f634-4aef-a553-c84e764b298a`
+- Account: `5e4d9c6f-b777-410f-abb3-95794fde0d99`
 - Target: `sandbox-invest-public-api.tbank.ru`
 - Боевой live-токен в `.env` `TINKOFF_TOKEN` (t.LwZSK...) — **НЕ ТРОГАТЬ**, не смешивать с sandbox
 

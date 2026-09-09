@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import math
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -26,6 +25,20 @@ _INTERVAL_STEP = {
     "day": timedelta(days=2),
     "week": timedelta(days=15),
     "month": timedelta(days=45),
+}
+
+# Шаг агрегации каждого интервала в секундах (для ресэмплинга из 1m):
+_INTERVAL_STEP_SEC = {
+    "1min": 60,
+    "5min": 300,
+    "10min": 600,
+    "15min": 900,
+    "hour": 3600,
+    "2h": 7200,
+    "4h": 14400,
+    "day": 86400,
+    "week": 604800,
+    "month": 2592000,
 }
 
 
@@ -58,6 +71,76 @@ def missing_ranges(
     return ranges
 
 
+async def resample_from_1m(
+    db: AsyncSession,
+    figi: str,
+    interval_name: str,
+    want_from: datetime,
+    want_to: datetime,
+) -> int:
+    """Заполнить старшие ТФ агрегацией минутных свечей из БД.
+
+    Метка сваггерированного бара = время закрытия (как у T-Invest):
+    bucket = ceil(unix_ts / step) * step. open=первая 1m, high=max,
+    low=min, close=последняя 1m, volume=sum.
+    Возвращает число записанных баров.
+    """
+    if interval_name == "1min":
+        return 0
+    step_sec = _INTERVAL_STEP_SEC.get(interval_name)
+    if step_sec is None:
+        return 0
+    target_interval = INTERVAL_NAMES[interval_name]
+    target_interval_value = int(target_interval.value)
+
+    rows = (
+        await db.execute(
+            select(Candle.ts, Candle.open, Candle.high, Candle.low, Candle.close, Candle.volume)
+            .where(
+                Candle.figi == figi,
+                Candle.interval == 1,
+                Candle.ts >= want_from,
+                Candle.ts <= want_to,
+            )
+            .order_by(Candle.ts)
+        )
+    ).all()
+
+    if not rows:
+        return 0
+
+    buckets: dict[int, dict] = {}
+    for ts, open_, high, low, close, volume in rows:
+        unix = int(ts.replace(tzinfo=timezone.utc).timestamp())
+        bucket_ts = math.ceil(unix / step_sec) * step_sec
+        b = buckets.setdefault(bucket_ts, {
+            "ts": bucket_ts, "open": open_, "high": high, "low": low, "close": close, "volume": 0,
+        })
+        b["high"] = max(b["high"], high)
+        b["low"] = min(b["low"], low)
+        b["close"] = close  # по возрастанию ts — последняя перезапишет
+        b["volume"] = b["volume"] + volume
+
+    from decimal import Decimal
+    candles = []
+    for bucket_ts in sorted(buckets):
+        b = buckets[bucket_ts]
+        candles.append({
+            "figi": figi,
+            "interval": target_interval_value,
+            "ts": datetime.fromtimestamp(b["ts"], tz=timezone.utc),
+            "open": Decimal(b["open"]),
+            "high": Decimal(b["high"]),
+            "low": Decimal(b["low"]),
+            "close": Decimal(b["close"]),
+            "volume": b["volume"],
+        })
+
+    if not candles:
+        return 0
+    return await upsert_candles(db, candles)
+
+
 async def ensure_candles(
     db: AsyncSession,
     figi: str,
@@ -79,9 +162,19 @@ async def ensure_candles(
 
     cov_min, cov_max, cached = await candle_coverage(db, figi, interval_value)
     step = _INTERVAL_STEP[interval_name]
-    ranges = missing_ranges(cov_min, cov_max, want_from, want_to, step)
 
     downloaded = 0
+    # Сначала пробуем добить из минутных свечей (быстро, без API)
+    if interval_name != "1min":
+        tail_from = cov_max + step if cov_max else want_from
+        if tail_from < want_to:
+            resampled = await resample_from_1m(db, figi, interval_name, tail_from, want_to)
+            if resampled:
+                downloaded += resampled
+                cov_min, cov_max, _ = await candle_coverage(db, figi, interval_value)
+
+    ranges = missing_ranges(cov_min, cov_max, want_from, want_to, step)
+
     for range_from_, range_to_ in ranges:
         rows = await to_thread(fetch_candles, figi, interval, range_from_, range_to_)
         if rows:

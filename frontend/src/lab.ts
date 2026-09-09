@@ -856,9 +856,11 @@ function funnelBlock(funnel: Record<string, unknown>): string {
     <span class="mini-hint">если мало — стратегии редко соглашаются на этом ТФ/периоде</span></div>`;
 }
 
+const _dtMSK = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+
 const fmtT = (iso: unknown): string => {
   const d = new Date(String(iso));
-  return isNaN(d.getTime()) ? "—" : d.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return isNaN(d.getTime()) ? "—" : _dtMSK.format(d);
 };
 
 function tradesTable(trades: Array<Record<string, unknown>>): string {

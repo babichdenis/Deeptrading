@@ -15,6 +15,7 @@ from app.engine import (
     SignalPolicyConfig,
     Side,
 )
+from app.engine.exits import AtrStopPolicy
 
 T0 = datetime(2026, 6, 15, 10, 0, tzinfo=timezone.utc)
 
@@ -181,5 +182,127 @@ def test_macd_cross_produces_signals_on_trend():
     ledger = run(rows, MacdCrossStrategy(), exit_policy=FixedSlTpPolicy(0.02, 0.04))
     entries = [a for a in ledger.audit if "ACCEPT_ENTRY" in a.detail]
     assert len(entries) >= 1
+
+
+def test_entry_confirm_delays_and_fills():
+    # сигнал BUY на баре 1; entry_confirm_bars=2 должны ждать 2 подряд восходящих
+    # свечи (close>open), вход по open после подтверждения
+    rows = flat(2)
+    rows += [(100.0, 100.5, 99.8, 100.4)]  # бар 2: свеча 1-я подтверждающая
+    rows += [(100.4, 100.9, 100.2, 100.7)]  # бар 3: свеча 2-я подтверждающая
+    rows += [(100.7, 101.2, 100.6, 101.0)]  # бар 4: исполнение по open
+    rows += flat(4, 101.0)
+    cfg = EngineConfig(
+        figi="TEST",
+        signal_policy=SignalPolicyConfig(entry_confirm_bars=2),
+    )
+    ledger = run(rows, scripted({1: "BUY"}), cfg=cfg)
+    assert len(ledger.trades) == 1
+    t = ledger.trades[0]
+    assert t.entry_index == 4
+    base_open = rows[4][0]
+    assert abs(t.entry_price - (base_open + base_open * 0.0002)) < 0.001
+    details = [a.detail for a in ledger.audit]
+    assert any("ENTRY_WAIT_CONFIRM" in d for d in details)
+    assert any("ENTRY_CONFIRM" in d for d in details)
+
+
+def test_entry_confirm_reset_on_bad_candle():
+    # сигнал BUY на баре 1; свеча 2 восходящая, свеча 3 нисходящая -> сброс,
+    # нужна пара восходящих заново
+    rows = flat(2)
+    rows += [(100.0, 100.5, 99.8, 100.4)]  # бар 2: подтверждающая
+    rows += [(100.4, 100.2, 99.5, 99.6)]   # бар 3: против -> reset
+    rows += [(99.6, 100.0, 99.4, 99.9)]    # бар 4: подтверждающая
+    rows += [(99.9, 100.4, 99.7, 100.2)]   # бар 5: подтверждающая -> confirm done
+    rows += [(100.2, 100.7, 100.0, 100.5)]  # бар 6: исполнение по open
+    rows += flat(4, 100.5)
+    cfg = EngineConfig(
+        figi="TEST",
+        signal_policy=SignalPolicyConfig(entry_confirm_bars=2),
+    )
+    ledger = run(rows, scripted({1: "BUY"}), cfg=cfg)
+    assert len(ledger.trades) == 1
+    t = ledger.trades[0]
+    assert t.entry_index == 6
+    base_open = rows[6][0]
+    assert abs(t.entry_price - (base_open + base_open * 0.0002)) < 0.001
+    details = [a.detail for a in ledger.audit]
+    assert any("ENTRY_CONFIRM_RESET" in d for d in details)
+
+
+def test_entry_confirm_no_noop_when_zero():
+    # entry_confirm_bars=0 (по умолчанию): вход на open следующего бара
+    rows = flat(3)
+    rows += [(100.0, 100.5, 99.9, 100.3), (100.3, 101.0, 100.1, 100.8)]
+    ledger = run(rows, scripted({1: "BUY"}))
+    assert len(ledger.trades) == 1
+    t = ledger.trades[0]
+    assert t.entry_index == 2
+    base_open = rows[2][0]
+    assert abs(t.entry_price - (base_open + base_open * 0.0002)) < 0.001
+    details = [a.detail for a in ledger.audit]
+    assert not any("ENTRY_WAIT_CONFIRM" in d for d in details)
+
+
+# --- Trailing stop (активация при pnl>=комиссия*4, стоп только за ценой) ---
+
+TRAILING_POLICY = AtrStopPolicy(
+    period=14,
+    multiplier=1.0,
+    risk_reward=1.0,
+    trail_activation_comm_mult=4.0,
+    trail_distance_r=1.0,
+)
+
+
+def test_trailing_activates_and_exits_by_stop():
+    # qty=1, entry=100, комиссия=0.05 -> активация pnl>=0.20 (close>=100.20).
+    # После активации TP (100.40, было бы закрыто) отключается: цена до 101.4,
+    # но выходит только по подтянутому стопу (нисходящий разворот).
+    rows = flat(3)
+    rows += [(100.0, 100.6, 99.9, 100.5)]  # бар3 вход open 100 -> close 100.50 => активация
+    rows += [(100.5, 101.0, 100.5, 100.8)]  # бар4 ратчет вверх
+    rows += [(100.8, 101.4, 100.8, 101.2)]  # бар5 ратчет вверх (highest 101.4)
+    rows += [(101.2, 101.2, 100.3, 100.5)]  # бар6 low 100.30 < стоп (100.40) -> выход по стопу
+    ledger = run(rows, scripted({2: "BUY"}), exit_policy=TRAILING_POLICY)
+    assert len(ledger.trades) == 1
+    t = ledger.trades[0]
+    assert t.exit_reason == "stop_loss"
+    assert t.net_pnl > 0
+    details = [a.detail for a in ledger.audit]
+    assert any("TRAILING_ACTIVATED" in d for d in details)
+
+
+def test_trailing_blocks_opposite_signal():
+    rows = flat(3)
+    rows += [(100.0, 100.6, 99.9, 100.5)]  # бар3 вход, close 100.50 -> активация
+    rows += [(100.5, 101.0, 100.5, 100.8)]  # бар4 ратчет вверх (highest 101.0)
+    rows += [(100.8, 101.4, 100.8, 101.2)]  # бар5 ратчет вверх (highest 101.4)
+    rows += [(101.2, 101.2, 100.3, 100.5)]  # бар6 low 100.30 < стоп (≈100.40) -> выход по стопу
+    ledger = run(rows, scripted({2: "BUY", 5: "SELL"}), exit_policy=TRAILING_POLICY)
+    assert len(ledger.trades) == 1
+    t = ledger.trades[0]
+    assert t.exit_reason == "stop_loss"  # сигнал SELL (бар5) проигнорирован
+    details = [a.detail for a in ledger.audit]
+    assert any("HOLD_TRAILING" in d for d in details)
+
+
+def test_trailing_short_mirrors():
+    # short: pnl=(entry-close)*qty >=0.20 -> close<=99.80; стоп подтягивается вниз,
+    # разворот вверх (high >= стоп) -> выход по стопу.
+    rows = flat(3)
+    rows += [(100.0, 100.1, 99.7, 99.8)]  # бар3 вход open 100, close 99.80 -> активация
+    rows += [(99.8, 99.9, 99.0, 99.2)]  # бар4 ратчет вниз (low 99.0)
+    rows += [(99.2, 99.3, 98.6, 98.8)]  # бар5 ратчет вниз (low 98.6)
+    rows += [(99.5, 100.0, 99.4, 99.9)]  # бар6 high 100.00 > стоп -> выход по стопу
+    ledger = run(rows, scripted({2: "SELL"}), exit_policy=TRAILING_POLICY)
+    assert len(ledger.trades) == 1
+    t = ledger.trades[0]
+    assert t.side == "SHORT"
+    assert t.exit_reason == "stop_loss"
+    assert t.net_pnl > 0
+    details = [a.detail for a in ledger.audit]
+    assert any("TRAILING_ACTIVATED" in d for d in details)
 
 

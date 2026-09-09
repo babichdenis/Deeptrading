@@ -8,7 +8,7 @@ router = APIRouter(prefix="/api/v1/sandbox", tags=["sandbox"])
 
 TOKEN = get_settings().sandbox or get_settings().tinkoff_token
 SB = "sandbox-invest-public-api.tbank.ru"
-ACC = "413306e6-f634-4aef-a553-c84e764b298a"
+ACC = "5e4d9c6f-b777-410f-abb3-95794fde0d99"
 
 CASH_FIGI = {"RUB000UTSTOM", "RUB000UT"}
 
@@ -233,7 +233,126 @@ def _portfolio_to_dict(p):
     }
 
 
-import subprocess
+_RECONCILE_LOGGER = None
+
+
+def _reconcile_logger():
+    global _RECONCILE_LOGGER
+    if _RECONCILE_LOGGER is None:
+        import logging
+        _RECONCILE_LOGGER = logging.getLogger("portfolio_reconcile")
+    return _RECONCILE_LOGGER
+
+
+async def _portfolio_digest() -> dict:
+    """Единый проверенный блок портфеля: источник истины — T-Invest.
+
+    Все цифры считаются из одного живого снимка портфеля T-Invest
+    (get_portfolio) + наши записи о плече (sandbox_trades.open). Дополнительно
+    тут же выполняется автоматическая СВЕРКА:
+      * cash:  total_amount_currencies (тиньков)  vs  equity - market_value
+      * pnl:   закрытые net_pnl из нашей таблицы + unrealized (тиньков)  vs  equity - initial
+    Расхождения логируются в 'portfolio_reconcile' при каждом опросе.
+    """
+    lg = _reconcile_logger()
+    try:
+        p = await asyncio.to_thread(_get_portfolio_cached)
+    except Exception as e:
+        lg.error("digest portfolio: %s", type(e).__name__)
+        return {}
+    base = _portfolio_to_dict(p)
+    tcur = _q(getattr(p, "total_amount_currencies", None) or 0.0)
+    ts_h = getattr(p, "total_amount_shares", None)
+    if ts_h is not None:
+        tshares = _q(ts_h)
+    else:
+        tshares = _q(getattr(p, "total_amount_portfolio", None) or 0.0) - tcur
+    cash_calc = float(base["cash"])
+    delta_cash = round(tcur - cash_calc, 2)
+
+    own = 0.0
+    unrealized = 0.0
+    lev_map: dict[str, float] = {}
+    try:
+        from app.database import SessionLocal as _SL
+        from app.models.sandbox_trade import SandboxTrade
+        from sqlalchemy import select as _sel
+        async with _SL() as db:
+            r = await db.execute(
+                _sel(SandboxTrade.figi, SandboxTrade.leverage)
+                .where(SandboxTrade.exit_time.is_(None))
+            )
+            for f, lev in r.all():
+                if f not in lev_map:
+                    lev_map[f] = float(lev) if lev else 1.0
+    except Exception:
+        pass
+
+    for pos in getattr(p, "positions", []):
+        if pos.figi in CASH_FIGI or pos.instrument_type == "currency":
+            continue
+        qty = _qty(pos.quantity)
+        if abs(qty) < 1:
+            continue
+        avg = _q(getattr(pos, "average_position_price", None))
+        cur = _q(pos.current_price)
+        lev = max(1.0, lev_map.get(pos.figi, 1.0))
+        own += avg * abs(qty) / lev
+        unrealized += (cur - avg) * qty
+
+    total = wins = 0
+    closed_net = 0.0
+    try:
+        from app.database import SessionLocal as _SL2
+        from app.models.sandbox_trade import SandboxTrade as _M
+        from sqlalchemy import select as _sel2
+        async with _SL2() as db2:
+            rows = (await db2.execute(
+                _sel2(_M.net_pnl).where(_M.exit_time.is_not(None))
+            )).all()
+            total = len(rows)
+            wins = sum(1 for r_ in rows if (r_[0] or 0) > 0)
+            closed_net = sum(float(r_[0] or 0) for r_ in rows)
+    except Exception as e:
+        lg.warning("digest trades: %s", type(e).__name__)
+
+    accounting_pnl = round(closed_net + unrealized, 2)
+    tinkoff_pnl = float(base["pnl"])
+    delta_pnl = round(accounting_pnl - tinkoff_pnl, 2)
+    ok = abs(delta_cash) <= 0.5 and abs(delta_pnl) <= 1.0
+    if ok:
+        lg.info("RECONCILE OK delta_cash=%.2f delta_pnl=%.2f equity=%.2f", delta_cash, delta_pnl, float(base["equity"]))
+    else:
+        lg.warning(
+            "RECONCILE MISMATCH delta_cash=%.2f delta_pnl=%.2f | tcur=%.2f cash_calc=%.2f | "
+            "closed_net=%.2f unrealized=%.2f vs tinkoff_pnl=%.2f",
+            delta_cash, delta_pnl, tcur, cash_calc, closed_net, unrealized, tinkoff_pnl,
+        )
+
+    return {
+        **base,
+        "own_in_positions": round(own, 2),
+        "positions_value": round(float(base["market_value"]), 2),
+        "tinkoff_currencies": round(tcur, 2),
+        "tinkoff_shares": round(tshares, 2),
+        "trades": {
+            "total": total,
+            "wins": wins,
+            "winrate": round(wins / total * 100, 1) if total else 0.0,
+        },
+        "reconcile": {
+            "cash_calc": round(cash_calc, 2),
+            "cash_tinkoff": round(tcur, 2),
+            "delta_cash": delta_cash,
+            "accounting_pnl": accounting_pnl,
+            "tinkoff_pnl": tinkoff_pnl,
+            "delta_pnl": delta_pnl,
+            "closed_net": round(closed_net, 2),
+            "unrealized": round(unrealized, 2),
+            "ok": bool(ok),
+        },
+    }
+
 
 def _bot_running():
     try:
@@ -246,11 +365,16 @@ def _bot_running():
 @router.get("/status")
 async def sandbox_status():
     try:
-        p = await asyncio.to_thread(_get_portfolio_cached)
-        return {"running": _bot_running(), "mode": "SANDBOX", "portfolio": _portfolio_to_dict(p)}
+        dig = await _portfolio_digest()
+        if not dig:
+            raise RuntimeError("digest empty")
+        return {"running": _bot_running(), "mode": "SANDBOX", "portfolio": dig}
     except Exception as e:
         return {"running": _bot_running(), "mode": "SANDBOX", "error": f"{type(e).__name__}: {e}",
-                "portfolio": {"cash": 0, "initial_cash": 10000, "equity": 0, "market_value": 0, "pnl": 0, "positions_open": 0}}
+                "portfolio": {"cash": 0, "initial_cash": 10000, "equity": 0, "market_value": 0, "pnl": 0, "positions_open": 0,
+                              "own_in_positions": 0, "positions_value": 0, "tinkoff_currencies": 0, "tinkoff_shares": 0,
+                              "trades": {"total": 0, "wins": 0, "winrate": 0},
+                              "reconcile": {"ok": False}}}
 
 
 @router.get("/positions")
@@ -306,11 +430,36 @@ async def sandbox_positions():
             cur = _q(pos.current_price)
             ticker = tmap.get(pos.figi, pos.figi[:8])
             atr, prev_close, last_close = await _atr_data(pos.figi)
+            side = "LONG" if qty > 0 else "SHORT"
+            # Актуальные уровни выхода — из учёта бота (переживает перезагрузку и
+            # подтягивается трейлингом). Fallback — локальный расчёт по ATR.
+            rt_stop = rt_target = None
+            rt_trail = False
+            try:
+                from app.bot.runtime import runtime as _rt2
+                rt_stop = getattr(_rt2, "_trail_stop", {}).get(pos.figi)
+                rt_trail = bool(getattr(_rt2, "_trail_active", {}).get(pos.figi))
+                rt_target = getattr(_rt2, "_exit_target", {}).get(pos.figi)
+                if not rt_trail and pos.figi not in getattr(_rt2, "_exit_plans", {}):
+                    rt_target = None
+            except Exception:
+                pass
             sl = tp = None
             if atr is not None and atr > 0:
                 dist = atr * ATR_MULT
-                sl = round(avg - dist, 6)
-                tp = round(avg + dist * RISK_REWARD, 6)
+                if side == "LONG":
+                    sl = round(avg - dist, 6)
+                    tp = round(avg + dist * RISK_REWARD, 6)
+                else:
+                    sl = round(avg + dist, 6)
+                    tp = round(avg - dist * RISK_REWARD, 6)
+            if rt_stop is not None and rt_stop > 0:
+                sl = round(float(rt_stop), 6)  # актуальный стоп (в т.ч. трейлинг)
+            if rt_trail:
+                tp = None  # TP выключен после активации трейлинга
+            elif rt_target is not None:
+                tp = round(float(rt_target), 6)
+            trail_active = rt_trail
             if prev_close is None:
                 prev_close = last_close
             lev = max(1.0, trade_lev.get(pos.figi, 1.0))
@@ -321,10 +470,11 @@ async def sandbox_positions():
             rg_vol = rg.get("vol")
             items.append({
                 "figi": pos.figi, "ticker": ticker,
-                "side": "LONG" if qty > 0 else "SHORT", "qty": abs(qty),
+                "side": side, "qty": abs(qty),
                 "entry_price": round(avg, 6),
                 "entry_time": trade_et.get(pos.figi) or etimes.get(pos.figi, ""),
                 "stop_loss": sl, "take_profit": tp,
+                "trail_active": trail_active,
                 "strategy_id": "v4_enhanced",
                 "current_price": round(cur, 6),
                 "prev_close": round(prev_close, 6) if prev_close is not None else None,

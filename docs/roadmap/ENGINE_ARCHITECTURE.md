@@ -1,6 +1,6 @@
 # ENGINE_ARCHITECTURE.md — Полная архитектура движка и тестов
 
-> **Дата аудита:** 2026-09-05
+> **Дата аудита:** 2026-09-08
 > **Версия движка:** trade_engine_v1
 > **Фреймворк тестов:** pytest + pytest-asyncio (asyncio_mode = auto)
 > **Всего строк:** ~16,800 (tests ~8,728 + engine ~4,500 + bot ~2,300 + ensemble ~1,275)
@@ -18,6 +18,8 @@
 7. [Как писать новые тесты](#7-как-писать-новые-тесты)
 8. [Валидация и оптимизация движка](#8-валидация-и-оптимизация-движка)
 9. [Quick Reference](#9-quick-reference)
+10. [SL / TP / Trailing Stop — единый механизм](#10-sl--tp--trailing-stop--единый-механизм)
+11. [Журнал багов и находок](#11-журнал-багов-и-находок)
 
 ---
 
@@ -139,13 +141,17 @@ atr(bars: list[Candle], period: int = 14) -> list[float | None]
 ```
 Wilder ATR. Зависимости: только models.Candle.
 
-### 2.5 exits.py (174 строки) — политики выхода
+### 2.5 exits.py (219 строк) — политики выхода
 
 | Policy | ID | plan_entry | update_stop |
 |--------|-----|-----------|-------------|
 | `AtrTrailingPolicy` | atr_trailing | ATR-based SL, activation + trail | trailing по ATR |
 | `FixedSlTpPolicy` | fixed_sl_tp | SL/TP % от entry | — |
 | `AtrStopPolicy` | atr_stop | ATR SL + optional TP + trail | trailActivation + trailDistance |
+
+`AtrStopPolicy` v1.2.0 — **два режима трейлинга**:
+- **Комиссионный** (`trail_activation_comm_mult`): активация при `pnl >= comm × mult`; дистанция трейла считается от **чистого ATR** (`trail_distance_atr`), независимо от ширины SL (`multiplier = sl_mult`). Используется ботом (`trail_activation_comm_mult=4.0`, `trail_distance_atr=2.5`).
+- **ATR-режим** (`trail_activation_r` / `trail_distance_r`): активация по ATR-порогу move; дистанция `trail_distance_r × risk`. Используется backtest (E5).
 
 ```python
 intrabar_exit(bar, state, stop_loss, take_profit) -> (price | None, reason | None)
@@ -207,6 +213,14 @@ merge_quorum(member_runs: list[dict], quorum: int) -> (list[Signal], dict)
 │  8. End-of-data: force close                         │
 └─────────────────────────────────────────────────────┘
 ```
+
+**Трейлинг в runner (`EngineRunner.run`):**
+- `self._trailing_active` сбрасывается в `False` **в `_open()` на каждый вход** (per-trade, не глобально).
+- Активация: `exit_policy.trailing_activated(entry_px, qty, comm, bars)` → `pnl >= comm × 4` → `_trailing_active=True`, `position.target=None` (TP выключается).
+- При `_trailing_active` **любой** противоположный сигнал (и `kind=="exit"`, и `kind=="entry"`-flip) игнорируется через `HOLD_TRAILING` — позиция живёт до подтянутого стопа.
+- Стоп обновляется каждый бар: `update_stop(...)` ratchet-логика (только в сторону прибыли).
+
+**Важно:** `update_stop` и `trailing_activated` вызываются с `qty=position.qty` и `commission=position.entry_commission` — это сумма, которую в движение считает и бот (`comm = entry_px × qty_sh × rate`). test=bot.
 
 ### 2.9 costs.py (27 строк)
 
@@ -312,7 +326,7 @@ OHLCV resampling. Поддерживает: 5m (300s), 15m (900s), 30m (1800s), 
 
 ## 4. Bot — runtime и брокеры
 
-### 4.1 runtime.py (1,055 строк) — PaperBotRuntime
+### 4.1 runtime.py (~1,697 строк) — PaperBotRuntime
 
 **Основной цикл:**
 ```
@@ -320,10 +334,10 @@ start() → _run() → CandleFeed stream → _process_candle(c)
 ```
 
 **_process_candle(c) — порядок действий:**
-1. Buffer candle (figi_buffers)
+1. Buffer candle (figi_buffers) — 1m
 2. Check circuit breaker (daily loss limit)
-3. Intrabar exit check (if position open)
-4. Trailing stop update (if ATR policy)
+3. Выход: `_step_exit(c)` (SL/TP/trailing по 1m, собственный учёт — см. §10)
+4. Trailing stop update (комиссионная активация, ratchet)
 5. Overnight close check
 6. Strategy signal (ensemble or single)
 7. Policy decide
@@ -331,14 +345,18 @@ start() → _run() → CandleFeed stream → _process_candle(c)
 9. Execute order (submit_order → _execute_pending → fill)
 
 **Ключевые методы:**
-- `_submit_order()` — sizing: `qty = max(int(capital / (price * lot)) * lot, lot)`
-- `_execute_pending()` — fill с exit plan (ATR or Fixed)
+- `_submit_order()` — sizing: `qty = max(1, int(budget / (lot_cost / lev)))` лотов; budget = min(equity×20%, free_cash); при марже `own_per_lot = lot_cost / lev`
+- `_execute_pending()` — fill с exit plan (ATR or Fixed), `sl_mult` из optuna `strat.p.sl_mult`
+- `_step_exit()` — выход: активация трейлинга `pnl >= comm×4`, update_stop, intrabar_exit (см. §10)
+- `_ensure_exit_state()` — lazy-инициализация exit state (позиция без плана после рестарта)
+- `_clear_exit_state()` — сброс state при закрытии
 - `close_all()` — kill switch
 - `set_entries_paused()` — manual pause
 - `_sync_held()` — reconciliation (every 30s)
 - `_hot_add_universe()` — hot-add new eligible tickers (every 60s)
 - `_reconcile_loop()` — StreamManager vs broker
 - `_flush_persist()` — batch candle persistence to DB
+- `_st_update_sl()` — персистенс стопа/TP/трейлинга в `sandbox_trades`
 
 ### 4.2 ensemble_strategy.py (155 строк) — EnsembleV4Strategy
 
@@ -445,7 +463,7 @@ Positions, trades, orders streams. Reconnect with exponential backoff.
 | 3 | `ensemble.py` | 961 | `len(member_runs)` → `len(setup_runs)` | **FIXED** |
 | 4 | `quorum.py` | 48 | `window_bars=0` захардкожен — нет multi-bar window quorum | **BY DESIGN** (расширять при необходимости) |
 | 5 | `ensemble.py _run_pipeline` | — | Нет unit-тестов на основной pipeline | **АКТИВЕН** (нужны тесты) |
-| 6 | `runtime.py` | 807-808 | `resample5u` вызывается на каждом баре для trailing | **FIXED** (кэширование: обновление раз в 5 баров через `_get_5m_bars()`) |
+| 6 | `runtime.py` | 807-808 | `resample5u` вызывается на каждом баре для trailing | **FIXED** (кэширование: обновление раз в 5 баров через `_get_5m_bars()`) — **заменено** на 1m stepping в сессии 2026-09-08 (§10) |
 | 7 | `exits.py` AtrTrailingPolicy | `update_stop` | `len(bars) < 3` возвращает current_stop без обновления | **FIXED** (acceptable design — ATR не определён на <3 барах) |
 | 8 | `ensemble.py` | 1085 | Логирование через `print()` вместо logging | **FIXED** (`logger.warning()`) |
 | 9 | Shadow тесты | — | Зависят от `reports/*.json` — если удалены, падают | **АКТИВЕН** (нужны фикстуры) |
@@ -454,6 +472,10 @@ Positions, trades, orders streams. Reconnect with exponential backoff.
 | 12 | brokers | — | PaperBroker/LiveBroker — нет unit-тестов | **АКТИВЕН** (нужны mock тесты) |
 | 13 | session logic | — | Дублирование в `runtime.py` и `ensemble_strategy.py` | **FIXED** (общий `is_session_active()` в `engine/sessions.py`) |
 | 14 | `V2_SETUPS` | — | Захардкожены, дублируют параметры из AGENTS.md | **АКТИВЕН** (low priority) |
+| 15 | `runtime.py` | SL/TP | Бот читал `stop_loss/take_profit` из пустых полей T-Invest (`ServerPosition.entry_price=0`, `LiveBroker positions stop_loss=None`) → стопы/трейлинг считались на нулевых данных | **FIXED** (собственный учёт выходов: `_exit_plans/_trail_stop/_exit_target`, персистенс в `sandbox_trades`, restore при старте) — см. §10 |
+| 16 | `runtime.py` | 5m→1m | Trailing/SL ATR считался на 5m ресемпле, а бэктест (`EngineRunner.run`) — на 1m → несовпадение дистанций | **FIXED** (все ATR для выходов на 1m `buffers`, ресемпл убран) — см. §10.6 |
+| 17 | `runner.py` | `_trailing_active` | Флаг был глобальный (не сбрасывался между сделками) → активация трейлинга в одной сделке «протекала» в следующую | **FIXED** (сброс в `_open()`, per-trade) — см. §10.3 |
+| 18 | `exits.py` | v1.2.0 | Дистанция трейла считалась `trail × risk = trail × ATR × sl_mult` → при sl_mult=4 стоп почти не двигался | **FIXED** (в comm-режиме дистанция от чистого ATR) — см. §10.4 |
 
 ---
 
@@ -745,9 +767,132 @@ py-spy top --pid <PID>
 ```
 ---
 
-## 10. Журнал багов и находок (2026-09-06)
+## 10. SL / TP / Trailing Stop — единый механизм (сессия 2026-09-08)
 
-### 10.1 БАГ: is_session_active вызывался через self (исправлен)
+> **Цель:** test=bot — бот вживую использует ту же логику стопов/трейлинга, что и движок в бэктесте.
+
+### 10.1 Проблема (до фикса)
+
+Бот (`runtime.py`) вычитывал `stop_loss`, `take_profit`, `entry_price` из объектов позиций
+T-Invest (`StreamManager.ServerPosition` / `LiveBroker.positions()`):
+- `ServerPosition` — `entry_price` всегда `0.0`, нет полей SL/TP
+- `LiveBroker.positions()` — `stop_loss=None, take_profit=None`
+
+**Итог:** стопы/трейлинг в боте считались на пустых данных. Вход «с нуля» давал ATR от
+текущего бара (не от реального входа), SL не защищал от разворота, трейлинг не активировался
+или активировался на неправильном расстоянии.
+
+### 10.2 Архитектура решения
+
+Вместо чтения из позиции брокера — **собственный учёт** в `runtime.py`:
+
+```
+┌─ Execute entry ─────────────────────────────────────────┐
+│ _execute_pending → order на биржу                       │
+│ _exit_plans[figi] = AtrStopPolicy(sl_mult, rr, ...)    │
+│ _exit_side[figi]   = "BUY" | "SELL"                     │
+│ _exit_entry_px[figi] = fill_price                       │
+│ _exit_qty[figi]    = order.qty × lot (штуки)            │
+│ _trail_active[figi] = False                             │
+│ _trail_stop[figi]  = plan.stop_loss                     │
+│ _exit_target[figi] = plan.take_profit                   │
+└─────────────────────────────────────────────────────────┘
+
+┌─ Every candle ──────────────────────────────────────────┐
+│ _step_exit(figi, candle, pos):                          │
+│  1. comm = entry_px × qty_sh × commission_rate          │
+│  2. if trail_active:                                    │
+│       → update_stop (ratchet only)                      │
+│  3. elif trailing_activated(pnl >= comm×4):             │
+│       → activate trail, disable signal exits & TP       │
+│  4. intrabar_exit(bar, stop_loss, take_profit)          │
+│  5. if triggered: broker.close → _clear_exit_state()    │
+└─────────────────────────────────────────────────────────┘
+
+┌─ Restart / lazy init ───────────────────────────────────┐
+│ _startup: restore from sandbox_trades (DB):             │
+│   entry_price, stop_loss, take_profit, trailing_active  │
+│ _ensure_exit_state: fallback plan_entry from 1m buffer  │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 10.3 Ключевые файлы
+
+| Файл | Изменения |
+|------|-----------|
+| `engine/exits.py` | `AtrStopPolicy.update_stop()`: commission-режим дистанции считает от **чистого ATR** (не `ATR×sl_mult`). Комментарий v1.2.0 |
+| `engine/runner.py` | `_trailing_active = False` сбрасывается **per-trade** в `_open()`. `HOLD_TRAILING` блокирует **любой** противоположный сигнал (и exit, и entry), не только exit-kind |
+| `bot/runtime.py` | `_step_exit()`, `_clear_exit_state()`, `_ensure_exit_state()`, exit state dicts, DB persistence |
+| `bot/runtime.py` | `_startup`: restore из `sandbox_trades` (entry, sl, tp, trailing_active) вместо рекомпьюта плана |
+| `bot/runtime.py` | `_execute_pending`: `sl_mult` из optuna `strat.p.sl_mult`, не из `cfg.initial_sl_atr` |
+| `bot/runtime.py` | ATR для стопа/трейлинга считается на **1m** барах (buffers), не 5m |
+| `bot/runtime.py` | `_process_candle`: stepping по `self.buffers` (1m) вместо `self.candle_cache_5m` |
+| `bot/runtime.py` | `_open_position_from_order`: тестовая запись с `trail_active=False` |
+| `models/sandbox_trade.py` | Добавлено поле `trailing_active: bool` (DB column) |
+| `api/routes/sandbox.py` | `/positions` читает `stop_loss`, `trail_active`, `take_profit` из runtime state dicts |
+
+### 10.4 Механика трейлинга
+
+**Активация:** `pnl >= comm × trail_activation_comm_mult`
+```
+comm    = entry_price × qty_sh × commission_rate  (0.05% × notional)
+pnl     = (close − entry) × qty_sh                (для BUY)
+порог   = 4 × comm = 0.2% от цены (независимо от qty/плеча)
+```
+При марже: `qty` больше за счёт leverage → `comm` и `pnl` пропорциональны `qty` → `qty` сокращается → порог = **фиксированный % от цены**.
+
+**Дистанция трейла:** `trail_distance_atr × ATR(1m)` (по умолчанию 2.5×ATR, настраивается через `trail_distance_atr`).
+- В **comm-режиме** (бот): дистанция от **чистого ATR** (не `risk = ATR × sl_mult`)
+- В **ATR-режиме** (backtest E5): дистанция от `risk` (ATR × multiplier)
+
+**Поведение после активации:**
+1. Стоп следет за ценой (ratchet: только в сторону прибыли)
+2. Сигнальные выходы (opposite signal) **блокируются** — позиция живёт до стопа
+3. Take-profit **отключается**
+4. Нет SL на графике при неактивированном трейлинге (комментарий: "SL deprecated, trail_stopped")
+
+### 10.5 Тесты
+
+Все golden-тесты проходят (30 passed):
+
+| Тест | Сценарий |
+|------|----------|
+| `test_trailing_block_exit_after_activation` | После активации трейлинга exit-сигналы игнорируются, позиция закрывается только по стопу |
+| `test_trailing_blocks_opposite_signal` | Противоположный entry-сигнал блокируется, пока трейлинг активен |
+
+### 10.6 ATR timeframe: 1m vs 5m
+
+| Параметр | Было (бот) | Стало (бот) | Бэктест (runner) |
+|----------|-----------|-------------|-------------------|
+| ATR для SL | 5m resample | **1m** (buffers) | 1m (candles) |
+| ATR для trailing | 5m resample | **1m** (buffers) | 1m (candles) |
+| Порог активации | 5m close | **1m** close | 1m close |
+| Ресемпл | `resample(candles, 300)` | **не используется** | — |
+
+**Причина:** в бэктесте `EngineRunner.run(candles)` получает **1m свечи**, ATR считается по ним.
+До фикса бот использовал 5m → ATR был в ~√5× больше → SL шире, трейлинг активировался
+раньше, дистанция трейла была другой. После фикса test=bot.
+
+### 10.7 Персистентность (per-trade)
+
+| Ключ | Тип | Описание |
+|------|-----|----------|
+| `_exit_plans[figi]` | ExitPolicy | Политика (ATR/Fixed) |
+| `_exit_side[figi]` | str | "BUY" / "SELL" |
+| `_exit_entry_px[figi]` | float | Цена входа |
+| `_exit_qty[figi]` | int | Штуки |
+| `_trail_active[figi]` | bool | Трейлинг активирован |
+| `_trail_stop[figi]` | float | Текущий стоп |
+| `_exit_target[figi]` | float | TP (None после активации) |
+
+При рестарте читает из `sandbox_trades` (entry_price, stop_loss, take_profit, trailing_active).
+Сохранение при каждом `_step_exit` через `_st_update_sl()`.
+
+---
+
+## 11. Журнал багов и находок (2026-09-06)
+
+### 11.1 БАГ: is_session_active вызывался через self (исправлен)
 
 **Файл:** `backend/app/bot/ensemble_strategy.py`
 
@@ -768,17 +913,17 @@ def on_bar(self, candles):
 
 **Урок:** импорты внутри тела класса + вызов через `self.` = TypeError. Не ловить такие исключения молча (`except Exception: sig=None` маскирует баги). Добавлять логирование.
 
-### 10.2 НАБЛЮДЕНИЕ: confirm_flip в compute_ensemble != confirm_flip в боте
+### 11.2 НАБЛЮДЕНИЕ: confirm_flip в compute_ensemble != confirm_flip в боте
 
 - В `compute_ensemble` (ensemble.py:742) `confirm_flip` приводится к **bool** (`bool(req.get("confirm_flip", False))`), а `exit_confirm_window_bars=0`. Итог: `confirm_flip=True` при нулевом окне = **мгновенный переворот** на каждый встречный сигнал (runner.py:180) — агрессивный скальпер, 93.8% сделок = signal_exit.
 - В runtime бота `confirm_flip: int` = **счётчик N встречных сигналов перед закрытием** (runtime.py:939 `_opposite_count`). Это РАЗНЫЕ механики.
 - Тесты с `confirm_flip=2` через compute_ensemble проверяли НЕ то, что делает бот. Учтено в Серии 5 roadmap.
 
-### 10.3 НАБЛЮДЕНИЕ: RegimeDetector не влияет на решения без adaptive
+### 11.3 НАБЛЮДЕНИЕ: RegimeDetector не влияет на решения без adaptive
 
 - RegimeDetector считается на каждом 5m баре (ensemble.py:1135) но используется только в `adaptive` (выключен по умолчанию) и в RegimeExitPolicy (только если adaptive). Без adaptive = чистый расход CPU. Учтено в Серии 5 (этап 5.0-5.4).
 
-### 10.4 РЕЗУЛЬТАТ: портфельный бэктест с маржой (real leverage, 0.05%)
+### 11.4 РЕЗУЛЬТАТ: портфельный бэктест с маржой (real leverage, 0.05%)
 
 **Скрипт:** `backend/scripts/bt_portfolio_margin.py` (копия backtest_full_bot.py + per-side leverage)
 **Конфиг:** top-10 (SMLT, NLMK, ASTR, MAGN, GMKN, NVTK, SNGSP, GAZP, LENT, CHMF), 10К общий пул, 10 акций одновременно (merged timeline), comm 0.05%, ATR 4/4, flip=2, leverage per-side из instrument_margin (long_lev/short_lev), август 2026.

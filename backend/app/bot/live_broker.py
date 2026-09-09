@@ -17,10 +17,6 @@ from app.config import get_settings
 
 DEFAULT_ACCOUNT = "default"
 
-TOKEN = get_settings().sandbox or get_settings().tinkoff_token
-SB = "sandbox-invest-public-api.tbank.ru"
-ACC = "413306e6-f634-4aef-a553-c84e764b298a"
-
 
 @dataclass
 class LivePosition:
@@ -44,15 +40,27 @@ class LiveFill:
 
 
 class LiveBroker:
-    """Брокер поверх T-Invest (sandbox), тот же интерфейс, что PaperBroker."""
+    """Брокер поверх T-Invest (sandbox или live по config.settings().bot_mode).
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession], cost_model: CostModel | None = None, config=None):
+    Переключение профилей — через переменные в .env (BOT_MODE + соответствующие
+    токен/аккаунт), без правки кода.
+    """
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], cost_model: CostModel | None = None, config=None, mode: str | None = None):
         self.config = config
         self.sessions = session_factory
         self.costs = cost_model or CostModel()
         if self.config is None:
             from app.bot.runtime import BotConfig
             self.config = BotConfig()
+        _cfg_mode = getattr(self.config, "mode", None)
+        _s = get_settings()
+        self.mode = mode or (_cfg_mode if _cfg_mode in ("sandbox", "live") else _s.bot_mode)
+        if self.mode not in ("sandbox", "live"):
+            self.mode = "sandbox"
+        self._token = _s.get_token(self.mode)
+        self._target = _s.get_target(self.mode)
+        self._account = _s.get_account(self.mode)
         self._services = None
         self._portfolio_snapshot = None
         self._portfolio_ts = 0.0
@@ -64,7 +72,7 @@ class LiveBroker:
         if self._services is None:
             from t_tech.invest import Client
 
-            client = Client(TOKEN, target=SB)
+            client = Client(self._token, target=self._target)
             self._services = client.__enter__()
         return self._services
 
@@ -97,7 +105,7 @@ class LiveBroker:
         return float(v)
 
     def _get_portfolio_sync(self):
-        return self._get_services().operations.get_portfolio(account_id=ACC)
+        return self._get_services().operations.get_portfolio(account_id=self._account)
 
     def _is_rate_exhausted(self, exc) -> bool:
         from grpc import StatusCode
@@ -138,6 +146,16 @@ class LiveBroker:
                 self._portfolio_ts = time.monotonic()
             return self._portfolio_snapshot
 
+    def _flush_portfolio(self):
+        """Принудительно сбросить кэш портфеля — следующий вызов problems() перечитает данные."""
+        with self._portfolio_lock:
+            self._portfolio_snapshot = None
+            self._portfolio_ts = 0.0
+
+    async def flush_portfolio(self):
+        """Async-обёртка над _flush_portfolio() для вызова из runtime."""
+        await asyncio.to_thread(self._flush_portfolio)
+
     async def cash(self) -> float:
         """Свободные денежные средства на счёте (руб)."""
         import asyncio
@@ -159,6 +177,33 @@ class LiveBroker:
             return cur + shares
 
         return await asyncio.to_thread(_f)
+
+    async def market_value(self) -> float:
+        """Стоимость открытых позиций (сумма |qty × current| по non-currency)."""
+        import asyncio
+
+        def _f():
+            p = self._get_portfolio_safe()
+            total = 0.0
+            for pos in p.positions:
+                if pos.instrument_type == "currency":
+                    continue
+                qty = pos.quantity.units + pos.quantity.nano / 1e9
+                px = self._q(pos.current_price)
+                total += abs(qty) * px
+            return total
+
+        return await asyncio.to_thread(_f)
+
+    async def free_cash(self) -> float:
+        """Свободные собственные деньги = equity − стоимость позиций (для гейта входа)."""
+        eq = await self.equity()
+        mv = await self.market_value()
+        return max(0.0, eq - mv)
+
+    async def verify_position(self, figi: str) -> LivePosition | None:
+        """Фактическая позиция в T-Invest (для сверки входа/выхода). None — позиции нет."""
+        return await self.get_position(figi)
 
     async def positions(self) -> list[LivePosition]:
         import asyncio
@@ -221,7 +266,7 @@ class LiveBroker:
         def _fetch():
             from t_tech.invest.schemas import GetMaxLotsRequest
             services = self._get_services()
-            req = GetMaxLotsRequest(account_id=ACC, instrument_id=figi)
+            req = GetMaxLotsRequest(account_id=self._account, instrument_id=figi)
             ml = services.sandbox.get_sandbox_max_lots(request=req)
             bc = ml.buy_limits
             bm = ml.buy_margin_limits
@@ -240,6 +285,44 @@ class LiveBroker:
                 leverage=lev,
             )
         return await asyncio.to_thread(_fetch)
+
+    async def get_trading_status(self, figi: str) -> str:
+        """Текущий статус торгов инструмента из API (SecurityTradingStatus enum name).
+        Возвращает имя константы, например SECURITY_TRADING_STATUS_NORMAL_TRADING."""
+        import asyncio
+
+        def _fetch():
+            services = self._get_services()
+            return services.market_data.get_trading_status(instrument_id=figi)
+
+        try:
+            resp = await asyncio.to_thread(_fetch)
+            return str(resp.trading_status)
+        except Exception:
+            return ""
+
+    async def main_session_active(self) -> bool:
+        """Основная торговая сессия идёт (по живым статусам API, без привязки к акции).
+        Истина, когда большинство инструментов в NORMAL_TRADING — это и есть основная
+        сессия Мосбиржи. Расписания не используем — позари на статусы в моменте."""
+        import asyncio
+
+        def _fetch():
+            services = self._get_services()
+            return services.market_data.get_trading_statuses()
+
+        try:
+            resp = await asyncio.to_thread(_fetch)
+            total = len(resp.trading_statuses)
+            if total == 0:
+                return False
+            n_trading = sum(
+                1 for x in resp.trading_statuses
+                if int(x.trading_status) == 5  # SECURITY_TRADING_STATUS_NORMAL_TRADING
+            )
+            return n_trading / total > 0.5
+        except Exception:
+            return False
 
     async def open_position(
         self,
@@ -263,7 +346,7 @@ class LiveBroker:
                 instrument_id=figi,
                 quantity=qty,
                 direction=direction,
-                account_id=ACC,
+                account_id=self._account,
                 order_type=OrderType.ORDER_TYPE_MARKET,
                 order_id=str(uuid4()),
             )
@@ -299,7 +382,7 @@ class LiveBroker:
                 instrument_id=figi,
                 quantity=order_qty,
                 direction=direction,
-                account_id=ACC,
+                account_id=self._account,
                 order_type=OrderType.ORDER_TYPE_MARKET,
                 order_id=str(uuid4()),
             )

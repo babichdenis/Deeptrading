@@ -16,6 +16,34 @@ class Settings(BaseSettings):
     tinkoff_token: str = ""
     tinkoff_live_token: str = ""
     sandbox: str = ""
+    bot_mode: str = "sandbox"  # sandbox | live
+    sandbox_account: str = ""
+    live_account: str = ""
+
+    @property
+    def feed_token(self) -> str:
+        return self.tinkoff_live_token or self.tinkoff_token
+
+    def get_token(self, mode: str | None = None) -> str:
+        """Токен для режима ('sandbox' | 'live'). По умолчанию bot_mode."""
+        mode = mode or self.bot_mode
+        if mode == "live":
+            return self.tinkoff_live_token or self.tinkoff_token
+        return self.sandbox or self.tinkoff_token
+
+    def get_account(self, mode: str | None = None) -> str:
+        """Account id для режима ('sandbox' | 'live')."""
+        mode = mode or self.bot_mode
+        if mode == "live":
+            return self.live_account
+        return self.sandbox_account
+
+    def get_target(self, mode: str | None = None) -> str | None:
+        """gRPC endpoint target. None = production (live)."""
+        mode = mode or self.bot_mode
+        if mode == "live":
+            return None
+        return "sandbox-invest-public-api.tbank.ru"
 
     @property
     def database_url(self) -> str:

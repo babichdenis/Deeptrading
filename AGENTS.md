@@ -46,6 +46,21 @@ cd frontend && npm install && npm run dev    # :5173
 BACKEND_URL=http://<ip>:8000 npm run dev     # если бэк не локальный
 ```
 
+## Сброс sandbox-счёта (1 команда)
+
+```bash
+cd backend
+.venv/bin/python3 scripts/reset_sandbox_account.py              # 10 000 ₽, имя V4_Bot_10k
+.venv/bin/python3 scripts/reset_sandbox_account.py --cash 20000
+.venv/bin/python3 scripts/reset_sandbox_account.py --name NewBot
+```
+
+Удаляет старый счёт (с позициями) → открывает новый → пополняет → переписывает
+ACC в `app/api/routes/sandbox.py:11` и `app/bot/live_broker.py:22` → перезапускает
+uvicorn → ждёт автостарт бота. Актуальный sandbox-аккаунт: `5e4d9c6f-b777-410f-abb3-95794fde0d99`.
+Позиции НЕ переносятся; sandbox вне торговых часов отклоняет ордера (ошибка 30079),
+закрывать позиции вручную ночью нельзя — просто удаляйте счёт целиком.
+
 ## Структура
 
 ```

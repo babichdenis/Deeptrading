@@ -42,6 +42,8 @@ class AtrTrailingPolicy(ExitPolicy):
         entry_price: float,
         current_stop: float | None,
         bars: Sequence[Candle],
+        qty: int | None = None,
+        commission: float | None = None,
     ) -> float | None:
         if len(bars) < 3:
             return current_stop
@@ -93,8 +95,9 @@ class AtrStopPolicy(ExitPolicy):
     risk_reward: float | None = None
     trail_activation_r: float | None = None
     trail_distance_r: float | None = None
+    trail_activation_comm_mult: float | None = None  # активация трейлинга при PnL >= комиссия_входа * mult
     policy_id: str = "atr_stop"
-    version: str = "1.1.0"
+    version: str = "1.2.0"
 
     def _risk(self, entry_price: float, bars: Sequence[Candle]) -> float:
         values = atr(bars, self.period)
@@ -111,36 +114,78 @@ class AtrStopPolicy(ExitPolicy):
             target = entry_price - distance * self.risk_reward if self.risk_reward else None
         return ExitPlan(stop_loss=stop, take_profit=target)
 
+    def trailing_activated(
+        self,
+        side: Side,
+        entry_price: float,
+        qty: int | None,
+        commission: float | None,
+        bars: Sequence[Candle],
+    ) -> bool:
+        """Комиссионная активация трейлинга: PnL (по последнему close) >= комиссия входа × mult.
+        Без qty/комиссии (бэктесты-аналитика) никогда не активируется."""
+        if self.trail_activation_comm_mult is None or not bars:
+            return False
+        if qty is None or qty <= 0 or commission is None or commission <= 0:
+            return False
+        close = bars[-1].close
+        pnl = (close - entry_price) * qty if side is Side.BUY else (entry_price - close) * qty
+        return pnl >= self.trail_activation_comm_mult * commission
+
     def update_stop(
         self,
         side: Side,
         entry_price: float,
         current_stop: float | None,
         bars: Sequence[Candle],
+        qty: int | None = None,
+        commission: float | None = None,
     ) -> float | None:
-        """Трейлинг-стоп (активация на trail_activation_r × risk, дистанция
-        trail_distance_r × risk). Вызывается движком, только если заданы
-        trail_activation_r и trail_distance_r."""
-        if self.trail_activation_r is None or self.trail_distance_r is None:
+        """Трейлинг-стоп. Два режима активации:
+        - комиссионный (trail_activation_comm_mult): активация при PnL >= комиссия×mult,
+          дальше стоп следует за ценой (дистанция trail_distance_r × risk);
+        - ATR-режим (trail_activation_r/trail_distance_r): активация по move >= ATR-порога.
+        Движение только в сторону прибыли (ratchet), никогда назад."""
+        if not bars:
             return current_stop
         if len(bars) < 2:
+            return current_stop
+        trail = self.trail_distance_r
+        if trail is None or trail <= 0:
+            return current_stop
+        if self.trail_activation_comm_mult is not None:
+            if not self.trailing_activated(side, entry_price, qty, commission, bars):
+                return current_stop
+        elif self.trail_activation_r is None:
             return current_stop
         risk = self._risk(entry_price, bars)
         if risk <= 0:
             return current_stop
+        # Дистанция трейла. Комиссионный режим (бот) задаёт trail_distance_r как
+        # множитель ЧИСТОГО ATR (trail_distance_atr): стоп идёт за ценой на N×ATR
+        # независимо от ширины SL (multiplier = sl_mult). ATR-режим (E5/бэктест)
+        # остаётся в R: дистанция trail_distance_r × risk.
+        if self.trail_activation_comm_mult is not None:
+            _atr_vals = atr(bars, self.period)
+            _last_atr = _atr_vals[-1] if _atr_vals else None
+            dist_unit = _last_atr if _last_atr else entry_price * 0.01
+        else:
+            dist_unit = risk
         window = bars[-self.period :]
         if side is Side.BUY:
             highest = max(b.high for b in window)
-            move = highest - entry_price
-            if move < self.trail_activation_r * risk:
-                return current_stop
-            candidate = highest - self.trail_distance_r * risk
+            if self.trail_activation_comm_mult is None:
+                move = highest - entry_price
+                if move < self.trail_activation_r * risk:
+                    return current_stop
+            candidate = highest - trail * dist_unit
             return max(current_stop or candidate, candidate)
         lowest = min(b.low for b in window)
-        move = entry_price - lowest
-        if move < self.trail_activation_r * risk:
-            return current_stop
-        candidate = lowest + self.trail_distance_r * risk
+        if self.trail_activation_comm_mult is None:
+            move = entry_price - lowest
+            if move < self.trail_activation_r * risk:
+                return current_stop
+        candidate = lowest + trail * dist_unit
         stop = current_stop if current_stop is not None else candidate
         return min(stop, candidate)
 

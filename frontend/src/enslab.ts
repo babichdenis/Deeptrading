@@ -188,7 +188,7 @@ function collectBody(): Record<string, unknown> {
 
 function fmtTs(iso: string | null): string {
   if (!iso) return "—";
-  return new Date(iso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return new Date(iso).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
 async function refreshQueue() {

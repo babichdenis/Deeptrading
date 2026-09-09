@@ -188,7 +188,7 @@ function renderTrades(d: TestMaxProfitResponse) {
   const tbody = $("test-trades-tbody");
   tbody.innerHTML = "";
   const fmt = (ts: string) =>
-    new Date(ts).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    new Date(ts).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
   const hold = (a: string, b: string) => {
     const h = (new Date(b).getTime() - new Date(a).getTime()) / 3600e3;
     return h < 24 ? `${h.toFixed(1)} ч` : `${(h / 24).toFixed(1)} дн`;
@@ -442,7 +442,7 @@ function renderEnsembleChart(
 }
 
 function fmtDT(ts: string): string {
-  return new Date(ts).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return new Date(ts).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
 function renderEnsembleTables(d: EnsembleResponse) {
