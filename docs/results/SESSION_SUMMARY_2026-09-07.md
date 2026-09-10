@@ -9,7 +9,7 @@
 
 | Что | Где |
 |-----|-----|
-| **Код проекта** | `/Volumes/Dev/Deeptrading` (SMB-шара = репозиторий .54, git на месте) |
+| **Код проекта** | `/Volumes/Dev/Deeptrading` (SMB-шара = репозиторий .3, git на месте) |
 | **Реестр всех скриптов** | `docs/roadmap/SCRIPTS_INDEX.md` |
 | **План развития движка** | `docs/roadmap/DEV_PLAN.md` |
 | **Архитектура + аудит** | `docs/roadmap/ENGINE_ARCHITECTURE.md` |

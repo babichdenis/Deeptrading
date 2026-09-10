@@ -347,6 +347,8 @@ export interface BotTradeRow {
   ts?: string;
   price?: number;
   net_pnl: number; commission: number; exit_reason: string;
+  stop_loss?: number | null; take_profit?: number | null;
+  exit_meta?: string | null;
 }
 
 export async function botTrades(limit = 50): Promise<BotTradeRow[]> {
@@ -463,6 +465,24 @@ export async function sandboxOrders(limit = 30): Promise<BotOrderRow[]> {
   if (!res.ok) throw new Error(`sandbox orders ${res.status}`);
   const d = await res.json();
   return d.orders;
+}
+
+export interface ScreenerRow {
+  figi: string;
+  ticker: string;
+  name: string;
+  lot: number;
+  price: number | null;
+  turnover: number | null;
+  rng_pct: number | null;
+  in_universe: boolean;
+}
+
+export async function fetchScreener(): Promise<ScreenerRow[]> {
+  const res = await fetch(`${API}/api/v1/screener`);
+  if (!res.ok) throw new Error(`screener ${res.status}`);
+  const d = await res.json();
+  return d.items;
 }
 
 export interface ConfigurationDto {

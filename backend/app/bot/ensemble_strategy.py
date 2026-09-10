@@ -34,6 +34,11 @@ class EnsembleParams:
     session: str = "main"
     sessions: list = field(default_factory=lambda: ["day"])
     setups: list = field(default_factory=lambda: V2_SETUPS)
+    # --- Таймфреймы ансамбля (быстро менять, не трогая код) ---
+    bias_tf: str = "5min"        # направление (bias): "5min" | "15min" | "hour"
+    bias_period: int = 50        # период EMA для bias
+    entry_tf: str = "1min"       # микро-вход: "1min" | "5min"
+    entry_lookback: int = 1      # окно микро-брейкаута (бары entry_tf)
     # --- per-ticker optuna-параметры (расширение; дефолты == прежний хардкод) ---
     sl_mult: float = 2.0
     rr: float = 2.0
@@ -74,9 +79,9 @@ class EnsembleV4Strategy:
             req = {
                 "figi": self.p.figi,
                 "bias_mode": "info",
-                "bias": {"tf": "hour", "period": 50},
-                "entry_tf": "5min",
-                "entry": {"tf": "5min", "lookback": 1},
+                "bias": {"tf": "5min", "period": 50},
+                "entry_tf": "1min",
+                "entry": {"tf": "1min", "lookback": 1},
                 "entry_session": self.p.session,
                 "quorum": self.p.quorum,
                 "same_side_reentry_cooldown_bars": 15,

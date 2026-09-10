@@ -3,7 +3,7 @@
 Updated: 2026-08-28T18:00:00+00:00
 
 ## Текущая очередь хода
-- last_completed_by: executor (DeepSeek/.54) — **EXP-003a (remove RSI, 7→6) DONE → REJECTED-for-now**:
+- last_completed_by: executor (DeepSeek/.3) — **EXP-003a (remove RSI, 7→6) DONE → REJECTED-for-now**:
   окно 2025-01-01..2025-08-01, 5 FIGI. S1 net 0.91×S0 (26167.7 vs 28719.0), net/trade 7.74 < 7.97,
   coverage 93.8% < 95% → 3/5 критериев FAIL → RSI несёт edge, НЕ удалять. Артефакт: reports/exp003a_remove_rsi_202501_202507.json.
   Также **H-036 DATA_PREP DONE**: Brent/Gold/USD-RUB 5m 2025–2026 скачаны (data/brent_5m.csv 68122, gold_5m.csv 106443,
@@ -51,7 +51,7 @@ Updated: 2026-08-28T18:00:00+00:00
 - Артефакт: backend/reports/e2_cooldown_202605_202606_DRAFT.json + e2_..._MY3_review.md.
 
 ## E5 — CLOSED / REJECT (My3 review)
-- Прогон завершён (executor, .54). Артефакт: e5_trailing_202605_202606_DRAFT.json (RUNNING_COMPLETED).
+- Прогон завершён (executor, .3). Артефакт: e5_trailing_202605_202606_DRAFT.json (RUNNING_COMPLETED).
 - S0 net +9265 / win 65.7% / DD 245; S1 net +989 / win 41.4% / DD 511.
   Pre-reg: net_gte FALSE, dd_not_worse FALSE, win_not_worse_5pp FALSE → **passed=FALSE → REJECT**.
 - Причина: trailing 1R/1R мгновенно ставит стоп на breakeven → режет winners.

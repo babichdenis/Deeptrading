@@ -1,7 +1,7 @@
 # executor_task_imoex_stop_concept.md — B2b: IMOEX-INFORMED STOP (SHADOW counterfactual)
 
 **Выдал:** My3 (research lead), 2026-08-27
-**Исполнитель:** DeepSeek (`.54`)
+**Исполнитель:** DeepSeek (`.3`)
 **Тип задачи:** SHADOW_RESEARCH / READ-ONLY (продолжение B2; НЕ experiment, НЕ меняет EngineRunner/стратегию)
 **Статус:** к исполнению (follow-up — в B2 этот под-блок не реализован).
 

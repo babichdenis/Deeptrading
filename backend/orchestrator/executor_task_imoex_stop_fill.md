@@ -1,7 +1,7 @@
 # executor_task_imoex_stop_fill.md — B2b-II: IMOEX-INFORMED STOP (fill simulation)
 
 **Выдал:** My3 (research lead), 2026-08-27
-**Исполнитель:** DeepSeek (`.54`)
+**Исполнитель:** DeepSeek (`.3`)
 **Тип задачи:** SHADOW_RESEARCH / READ-ONLY (продолжение B2b; НЕ меняет EngineRunner/стратегию)
 **Статус:** к исполнению (B2b дал частоты, но НЕ экономический эффект).
 

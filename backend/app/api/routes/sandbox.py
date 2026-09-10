@@ -6,9 +6,21 @@ from app.config import get_settings
 
 router = APIRouter(prefix="/api/v1/sandbox", tags=["sandbox"])
 
-TOKEN = get_settings().sandbox or get_settings().tinkoff_token
-SB = "sandbox-invest-public-api.tbank.ru"
-ACC = "5e4d9c6f-b777-410f-abb3-95794fde0d99"
+
+def _active_creds():
+    """Активный контур (sandbox|live) из .env: (token, target, account_id)."""
+    s = get_settings()
+    mode = s.bot_mode if s.bot_mode in ("sandbox", "live") else "sandbox"
+    token = s.get_token(mode)
+    target = s.get_target(mode)
+    acc = s.get_account(mode) or s.get_account("sandbox")
+    return token, target, acc
+
+
+def _active_mode() -> str:
+    s = get_settings()
+    return s.bot_mode if s.bot_mode in ("sandbox", "live") else "sandbox"
+
 
 CASH_FIGI = {"RUB000UTSTOM", "RUB000UT"}
 
@@ -90,22 +102,26 @@ def _qty(v):
 
 
 _client = None
+_client_key = None
 
 def _get_client():
-    global _client
-    if _client is None:
+    global _client, _client_key
+    token, target, _ = _active_creds()
+    key = (token, target)
+    if _client is None or _client_key != key:
         from t_tech.invest import Client
-        _client = Client(TOKEN, target=SB).__enter__()
+        _client = Client(token, target=target).__enter__()
+        _client_key = key
     return _client
 
 def _get_portfolio():
     c = _get_client()
-    return c.operations.get_portfolio(account_id=ACC)
+    return c.operations.get_portfolio(account_id=_active_creds()[2])
 
 def _get_operations(from_days=60):
     c = _get_client()
     return c.operations.get_operations(
-        account_id=ACC,
+        account_id=_active_creds()[2],
         from_=datetime.now(timezone.utc) - timedelta(days=from_days),
         to=datetime.now(timezone.utc),
     )
@@ -113,7 +129,7 @@ def _get_operations(from_days=60):
 
 def _get_orders():
     c = _get_client()
-    return c.orders.get_orders(account_id=ACC)
+    return c.orders.get_orders(account_id=_active_creds()[2])
 
 
 async def _tickers_for(figis):
@@ -280,7 +296,8 @@ async def _portfolio_digest() -> dict:
         async with _SL() as db:
             r = await db.execute(
                 _sel(SandboxTrade.figi, SandboxTrade.leverage)
-                .where(SandboxTrade.exit_time.is_(None))
+                .where(SandboxTrade.exit_time.is_(None),
+                       SandboxTrade.mode == _active_mode())
             )
             for f, lev in r.all():
                 if f not in lev_map:
@@ -308,7 +325,8 @@ async def _portfolio_digest() -> dict:
         from sqlalchemy import select as _sel2
         async with _SL2() as db2:
             rows = (await db2.execute(
-                _sel2(_M.net_pnl).where(_M.exit_time.is_not(None))
+                _sel2(_M.net_pnl).where(_M.exit_time.is_not(None),
+                                        _M.mode == _active_mode())
             )).all()
             total = len(rows)
             wins = sum(1 for r_ in rows if (r_[0] or 0) > 0)
@@ -317,6 +335,11 @@ async def _portfolio_digest() -> dict:
         lg.warning("digest trades: %s", type(e).__name__)
 
     accounting_pnl = round(closed_net + unrealized, 2)
+    # Для live «начальный депозит» из paper_accounts (10000) не относится к счёту —
+    # PnL считаем как результат сделок бота: closed_net + unrealized.
+    if _active_mode() == "live":
+        base = {**base, "pnl": accounting_pnl,
+                "initial_cash": round(float(base["equity"]) - accounting_pnl, 2)}
     tinkoff_pnl = float(base["pnl"])
     delta_pnl = round(accounting_pnl - tinkoff_pnl, 2)
     ok = abs(delta_cash) <= 0.5 and abs(delta_pnl) <= 1.0
@@ -368,9 +391,9 @@ async def sandbox_status():
         dig = await _portfolio_digest()
         if not dig:
             raise RuntimeError("digest empty")
-        return {"running": _bot_running(), "mode": "SANDBOX", "portfolio": dig}
+        return {"running": _bot_running(), "mode": _active_mode().upper(), "portfolio": dig}
     except Exception as e:
-        return {"running": _bot_running(), "mode": "SANDBOX", "error": f"{type(e).__name__}: {e}",
+        return {"running": _bot_running(), "mode": _active_mode().upper(), "error": f"{type(e).__name__}: {e}",
                 "portfolio": {"cash": 0, "initial_cash": 10000, "equity": 0, "market_value": 0, "pnl": 0, "positions_open": 0,
                               "own_in_positions": 0, "positions_value": 0, "tinkoff_currencies": 0, "tinkoff_shares": 0,
                               "trades": {"total": 0, "wins": 0, "winrate": 0},
@@ -398,7 +421,8 @@ async def sandbox_positions():
             async with _SL2() as db:
                 r = await db.execute(
                     _sel2(SandboxTrade.figi, SandboxTrade.leverage, SandboxTrade.entry_time)
-                    .where(SandboxTrade.exit_time.is_(None))
+                    .where(SandboxTrade.exit_time.is_(None),
+                           SandboxTrade.mode == _active_mode())
                 )
                 for f, lev, et in r.all():
                     if f not in trade_lev:
@@ -592,7 +616,8 @@ async def sandbox_trades(limit: int = 50):
                 async with _SL() as db:
                     res = await db.execute(
                         _sel(SandboxTrade)
-                        .where(SandboxTrade.exit_time.is_(None))
+                        .where(SandboxTrade.exit_time.is_(None),
+                               SandboxTrade.mode == _active_mode())
                         .order_by(SandboxTrade.entry_time.desc())
                     )
                     for r in res.scalars().all():
@@ -644,7 +669,8 @@ async def sandbox_trades(limit: int = 50):
             async with _SL() as db:
                 res = await db.execute(
                     _sel(SandboxTrade)
-                    .where(SandboxTrade.exit_time.is_not(None))
+                    .where(SandboxTrade.exit_time.is_not(None),
+                           SandboxTrade.mode == _active_mode())
                     .order_by(SandboxTrade.exit_time.desc())
                     .limit(200)
                 )
@@ -669,8 +695,10 @@ async def sandbox_trades(limit: int = 50):
                     })
         except Exception:
             closed_stored = []
-        closed_src = closed_stored if closed_stored else done
-        merged = open_items + closed_src
+        # Показываем ТОЛЬКО сделки бота из нашей таблицы (mode активного контура).
+        # FIFO-реконструкция из операций брокера (done) не используется — иначе в live
+        # подмешивается ручная/старая история счёта, не относящаяся к боту.
+        merged = open_items + closed_stored
         return {"count": len(merged), "trades": merged[:limit]}
     except Exception as e:
         return {"count": 0, "trades": [], "error": f"{type(e).__name__}: {e}"}

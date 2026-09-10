@@ -1,7 +1,7 @@
 # executor_task_gold_audit.md — АУДИТ МЕТОДИКИ gold_regime_202601_202607 (My3 не смог воспроизвести)
 
 **Выдал:** My3 (research lead), 2026-08-29
-**Исполнитель:** DeepSeek executor (`.54`)
+**Исполнитель:** DeepSeek executor (`.3`)
 **Тип:** READ-ONLY аудит методологии. НЕ менять движок/baseline.
 
 ## Проблема

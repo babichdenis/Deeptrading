@@ -130,7 +130,22 @@ async def get_analysis(
     ema50_series = ema(closes, 50)
     rsi14 = rsi(closes, 14)
     bb_upper, bb_lower = _bollinger(closes, 20, 2.0)
-    m_line, s_line, hist = macd(closes)
+    # MACD: параметры из optuna (strategy_params.macd_cross) для конкретного тикера,
+    # иначе дефолт 12/26/9. Данные лежат в instruments.optuna_params (JSONB).
+    m_fast, m_slow, m_sig = 12, 26, 9
+    try:
+        _opt_row = (await db.execute(
+            _text("SELECT optuna_params FROM instruments WHERE figi = :f"),
+            {"f": resolved_figi},
+        )).first()
+        _opt = (_opt_row[0] if _opt_row else None) or {}
+        _sp = (_opt.get("strategy_params") or {}).get("macd_cross") or {}
+        m_fast = int(_sp.get("fast", 12))
+        m_slow = int(_sp.get("slow", 26))
+        m_sig = int(_sp.get("signal_period", 9))
+    except Exception:
+        pass
+    m_line, s_line, hist = macd(closes, fast=m_fast, slow=m_slow, signal_period=m_sig)
 
     return {
         "figi": figi,
@@ -154,4 +169,5 @@ async def get_analysis(
         "bb_upper": bb_upper,
         "bb_lower": bb_lower,
         "macd": {"macd": m_line, "signal": s_line, "hist": hist},
+        "macd_params": {"fast": m_fast, "slow": m_slow, "signal_period": m_sig},
     }

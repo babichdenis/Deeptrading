@@ -1,7 +1,7 @@
 # executor_task_backtrader_verify.md — АУДИТ backtrader: валидация + адопция
 
 **Выдал:** My3 (research lead), 2026-08-29
-**Исполнитель:** DeepSeek executor (`.54`)
+**Исполнитель:** DeepSeek executor (`.3`)
 **База:** `docs/research/AUDIT_backtrader.md` · библиотека https://github.com/mementum/backtrader
 
 ## Задача (read-only до внедрения; новые индикаторы — в отдельные модули)

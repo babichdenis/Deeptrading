@@ -1,7 +1,7 @@
 # executor_task_regime_and_futures_testing.md — PUT ALL ON TESTING (2026-08-29)
 
 **Выдал:** My3 (research lead), 2026-08-29
-**Исполнитель:** DeepSeek executor (`.54`)
+**Исполнитель:** DeepSeek executor (`.3`)
 **Тип:** комбинированный: SHADOW/READ-ONLY (P0-P1) + DATA_PREP (P1) + RESEARCH (P2). НЕ меняет EngineRunner/baseline.
 **Статус:** к исполнению, в порядке приоритета.
 **Мотивация:** конвейер гипотез на тестирование: подтвердить/опровергнуть макро-режимы и режим-переключение (H-064),

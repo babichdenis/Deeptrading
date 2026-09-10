@@ -18,6 +18,8 @@ import {
   sandboxPositions,
   sandboxTrades,
   sandboxOrders,
+  fetchScreener,
+  type ScreenerRow,
   type SandboxPositionRow,
 } from "./api";
 
@@ -128,6 +130,15 @@ function initBotResizer() {
   });
 }
 
+const MARGIN_LEV_STEPS = [2, 3, 4, 5, 0]; // 0 = Max (как одобрит брокер)
+function levSliderToValue(i: number): number { return MARGIN_LEV_STEPS[i] ?? 0; }
+function levValueToSlider(v: number): number {
+  const i = MARGIN_LEV_STEPS.indexOf(v);
+  if (i >= 0) return i;
+  return 4; // не из списка → Max
+}
+function levLabel(v: number): string { return v > 0 ? `×${v}` : "Max"; }
+
 function sendBotConfigPatch(extra?: Record<string, unknown>) {
   const sessMap: Record<string, string> = {
     "sg-morning": "morning", "sg-day": "day", "sg-evening": "evening"
@@ -136,12 +147,21 @@ function sendBotConfigPatch(extra?: Record<string, unknown>) {
   const sessions = sessKeys.filter((x) => ($(x) as HTMLInputElement).checked).map((x) => sessMap[x]);
   const longOn = ($("dg-long") as HTMLInputElement)?.checked ?? true;
   const shortOn = ($("dg-short") as HTMLInputElement)?.checked ?? false;
-  const lev = ($("sg-lev") as HTMLInputElement)?.checked ?? false;
+  const mgMap: Record<string, string> = {
+    "mg-morning": "morning", "mg-day": "day", "mg-evening": "evening"
+  };
+  const mgKeys = ["mg-morning", "mg-day", "mg-evening"];
+  const margin_sessions = mgKeys
+    .filter((x) => ($(x) as HTMLInputElement | null)?.checked)
+    .map((x) => mgMap[x]);
+  const levEl = $("mg-lev") as HTMLInputElement | null;
+  const margin_leverage = levEl ? levSliderToValue(Number(levEl.value)) : 0;
   const body: Record<string, unknown> = {
     sessions: sessions.length ? sessions : ["day"],
     long_allowed: longOn,
     short_allowed: shortOn,
-    leverage: lev ? 2 : 1,
+    margin_sessions,
+    margin_leverage,
   };
   if (extra) Object.assign(body, extra);
   fetch(`${API}/api/v1/bot/config`, {
@@ -152,7 +172,7 @@ function sendBotConfigPatch(extra?: Record<string, unknown>) {
 }
 
 function initSessChips() {
-  const ids = ["sg-morning", "sg-day", "sg-evening", "sg-lev"];
+  const ids = ["sg-morning", "sg-day", "sg-evening"];
   let saved: string[] = [];
   try {
     saved = JSON.parse(localStorage.getItem("bot_sess") || "[]");
@@ -171,13 +191,37 @@ function initSessChips() {
       sendBotConfigPatch();
     });
   }
-  const lev = $("sg-lev") as HTMLInputElement | null;
-  if (lev) {
-    lev.checked = localStorage.getItem("bot_lev") === "1";
-    lev.closest("label")?.classList.toggle("on", lev.checked);
-    lev.addEventListener("change", () => {
-      lev.closest("label")?.classList.toggle("on", lev.checked);
-      localStorage.setItem("bot_lev", lev.checked ? "1" : "0");
+  // Блок «Маржа»: сессии, где торговля идёт с плечом.
+  const mgKeys = ["mg-morning", "mg-day", "mg-evening"];
+  let mgSaved: string[] = [];
+  try { mgSaved = JSON.parse(localStorage.getItem("bot_margin") || "[]"); } catch { mgSaved = []; }
+  const defMg = mgSaved.length ? mgSaved : ["mg-day"];
+  for (const id of mgKeys) {
+    const cb = $(id) as HTMLInputElement | null;
+    if (!cb) continue;
+    cb.checked = defMg.includes(id);
+    cb.closest("label")?.classList.toggle("on", cb.checked);
+    cb.addEventListener("change", () => {
+      cb.closest("label")?.classList.toggle("on", cb.checked);
+      const on = mgKeys.filter((x) => ($(x) as HTMLInputElement).checked);
+      localStorage.setItem("bot_margin", JSON.stringify(on));
+      sendBotConfigPatch();
+    });
+  }
+  // Ползунок плеча при марже: 2-3-4-5-Max.
+  const levEl = $("mg-lev") as HTMLInputElement | null;
+  if (levEl) {
+    const updLabel = () => {
+      const v = levSliderToValue(Number(levEl.value));
+      const lbl = $("mg-lev-label");
+      if (lbl) lbl.textContent = levLabel(v);
+    };
+    const savedLev = localStorage.getItem("bot_margin_lev");
+    if (savedLev != null) levEl.value = String(levValueToSlider(Number(savedLev)));
+    updLabel();
+    levEl.addEventListener("input", () => {
+      localStorage.setItem("bot_margin_lev", String(levSliderToValue(Number(levEl.value))));
+      updLabel();
       sendBotConfigPatch();
     });
   }
@@ -210,14 +254,20 @@ export async function initBot(onStateChange?: (running: boolean) => void) {
     if (!tr) return;
     const idx = Array.from(tr.parentElement!.children).indexOf(tr);
     const p = _lastPositions[idx];
-    if (p) sendEmbedFocus(p.figi, p.ticker, positionAsTrade(p));
+    if (p) {
+      _focusPos = { figi: p.figi, ticker: p.ticker };
+      sendEmbedFocus(p.figi, p.ticker, positionAsTrade(p));
+    }
   });
   document.querySelector("#bot-trades-table tbody")?.addEventListener("click", (e) => {
     const tr = (e.target as HTMLElement).closest("tr") as HTMLElement | null;
     if (!tr) return;
     const idx = Array.from(tr.parentElement!.children).indexOf(tr);
     const t = _lastTrades[idx];
-    if (t) sendEmbedFocus(t.figi, t.ticker, tradeAsTrade(t));
+    if (t) {
+      _focusPos = null; // закрытая сделка — линии статичны, не обновляем
+      sendEmbedFocus(t.figi, t.ticker, tradeAsTrade(t));
+    }
   });
 
   void pollOnce();
@@ -225,6 +275,7 @@ export async function initBot(onStateChange?: (running: boolean) => void) {
   setInterval(() => void pollLogs(), 1000);
   setupLogFilters();
   initBotResizer();
+  initScreener();
 }
 
 function _loadLGF() {
@@ -238,6 +289,10 @@ let _allLogs: string[] = [];
 let _lastPositions: SandboxPositionRow[] = [];
 let _lastTrades: BotTradeRow[] = [];
 let _chartInit = false;
+// Позиция, на которую сейчас смотрит график (клик по таблице позиций). При poll,
+// если стоп/TP/trailing изменились — пересылаем обновлённый trade в iframe.
+let _focusPos: { figi: string; ticker: string } | null = null;
+let _lastFocusSig = "";
 
 function botEmbedFrame(): HTMLIFrameElement | null {
   return document.getElementById("bot-chart-frame") as HTMLIFrameElement | null;
@@ -644,10 +699,14 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     modeChip.classList.add("hidden");
   }
 
-  const bsMode = $("bs-mode");
-  if (bsMode) {
-    if (bst && bst.error) bsMode.textContent = "ошибка";
-    else bsMode.textContent = bst && bst.running ? bst.mode : "—";
+  const envBadge = $("env-badge");
+  if (envBadge) {
+    const em = bst && bst.config && (bst.config as { mode?: string }).mode;
+    const isLive = String(em).toLowerCase() === "live";
+    envBadge.textContent = isLive ? "LIVE" : "SANDBOX";
+    envBadge.classList.toggle("env-live", isLive);
+    envBadge.classList.toggle("env-sandbox", !isLive);
+    envBadge.title = isLive ? "Боевой счёт (реальные деньги)" : "Песочница (тестовый счёт)";
   }
   const sessEl = $("bs-session");
   if (sessEl) {
@@ -656,6 +715,32 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     sessEl.classList.remove("pos", "neg");
     if (s === "TRADING") sessEl.classList.add("pos");
     else if (s === "OPENING" || s === "EVENING") sessEl.classList.add("pos");
+  }
+
+  // Синхронизация чекбоксов «Маржа» с сервером (margin_sessions из конфига бота).
+  const mgMap: Record<string, string> = { morning: "mg-morning", day: "mg-day", evening: "mg-evening" };
+  const ms = (bst && bst.config && (bst.config as { margin_sessions?: string[] }).margin_sessions) || null;
+  if (Array.isArray(ms)) {
+    for (const [s, id] of Object.entries(mgMap)) {
+      const cb = $(id) as HTMLInputElement | null;
+      if (!cb) continue;
+      const on = ms.includes(s);
+      if (cb.checked !== on) {
+        cb.checked = on;
+        cb.closest("label")?.classList.toggle("on", on);
+      }
+    }
+  }
+  // Синхронизация ползунка плеча маржи с сервером.
+  const mlv = (bst && bst.config && (bst.config as { margin_leverage?: number }).margin_leverage);
+  const levElSync = $("mg-lev") as HTMLInputElement | null;
+  if (levElSync && typeof mlv === "number") {
+    const idx = levValueToSlider(mlv);
+    if (Number(levElSync.value) !== idx) {
+      levElSync.value = String(idx);
+      const lbl = $("mg-lev-label");
+      if (lbl) lbl.textContent = levLabel(mlv);
+    }
   }
 
   if (lastRunning !== engineRunning) {
@@ -698,6 +783,18 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   try {
   const positions: SandboxPositionRow[] = await sandboxPositions().catch(() => []);
   _lastPositions = positions;
+  // График смотрит на открытую позицию — при изменении SL/TP/trailing пересылаем
+  // обновлённый trade в iframe, чтобы линия SL двигалась за трейлингом.
+  if (_focusPos) {
+    const fp = positions.find((x) => x.figi === _focusPos!.figi);
+    if (fp) {
+      const sig = `${fp.side}|${fp.entry_price}|${fp.stop_loss}|${fp.take_profit}|${fp.trail_active ? 1 : 0}`;
+      if (sig !== _lastFocusSig) {
+        _lastFocusSig = sig;
+        sendEmbedFocus(fp.figi, fp.ticker, positionAsTrade(fp));
+      }
+    }
+  }
   const totalOwn = positions.reduce((s, p) => s + p.entry_price * p.qty / (p.leverage || 1), 0);
   const bsPosVal = $("bs-positions-value");
   const ownPos = (st?.portfolio as any)?.own_in_positions;
@@ -743,10 +840,10 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   const trades: BotTradeRow[] = await sandboxTrades(500).catch(() => []);
   _lastTrades = trades;
   renderTrades(trades);
-  renderPortfolioSummary(st, trades, positions);
   if (!_chartInit && positions.length > 0) {
     _chartInit = true;
     const first = positions[0];
+    _focusPos = { figi: first.figi, ticker: first.ticker };
     sendEmbedFocus(first.figi, first.ticker, positionAsTrade(first));
   }
   } catch (err) {
@@ -828,6 +925,11 @@ function renderTrades(trades: BotTradeRow[]) {
           const pnlCell = isOpen
             ? `<b style="color:#ffd740">на торгах</b>`
             : `<b class="${t.net_pnl >= 0 ? "pos" : "neg"}">${t.net_pnl >= 0 ? "+" : ""}${money(t.net_pnl)}</b>`;
+          const reasonCell = isOpen
+            ? "открыта · ждём выхода"
+            : t.exit_reason === "stop_loss"
+              ? `stop_loss${t.stop_loss != null ? ` · SL <span style="color:#ff6b6b">${price(t.stop_loss)}</span>` : ""}`
+              : t.exit_reason;
           return `<tr>` +
             `<td style="font-size:10px;color:var(--text-dim)">${timeCell}</td>` +
             `<td><b>${t.ticker}</b></td>` +
@@ -836,7 +938,7 @@ function renderTrades(trades: BotTradeRow[]) {
             `<td class="num">${pxCell}</td>` +
             `<td class="num">${pnlCell}</td>` +
             `<td class="num" style="color:var(--text-dim)">${!isOpen && t.commission != null ? money(t.commission) : "—"}</td>` +
-            `<td>${isOpen ? "открыта · ждём выхода" : t.exit_reason}</td>` +
+            `<td>${reasonCell}</td>` +
             `</tr>`;
         }
       )
@@ -844,29 +946,181 @@ function renderTrades(trades: BotTradeRow[]) {
 
 }
 
-function renderPortfolioSummary(
-  st: { portfolio: { cash: number; equity: number; pnl: number; initial_cash: number; own_in_positions?: number; trades?: { total: number; wins: number; winrate: number } } },
-  trades: BotTradeRow[],
-  positions: SandboxPositionRow[],
-) {
-  const p = st.portfolio;
-  const tr = p.trades ?? {
-    total: trades.length,
-    wins: trades.filter((t) => t.net_pnl > 0).length,
-    winrate: trades.length ? Math.round(trades.filter((t) => t.net_pnl > 0).length / trades.length * 100) : 0,
-  };
-  const totalOwn = p.own_in_positions != null
-    ? p.own_in_positions
-    : positions.reduce((s, pos) => s + pos.entry_price * pos.qty / (pos.leverage || 1), 0);
-  const wins = tr.wins; const tradeTotal = tr.total; const wr = tr.winrate;
-  $("portfolio-summary").innerHTML = `
-    <div class="metrics-grid">
-      <div class="metric"><span class="k">Equity (gross)</span><span class="v">${money(p.equity)} ₽</span></div>
-      <div class="metric"><span class="k">Свободные</span><span class="v">${money(p.cash)} ₽</span></div>
-      <div class="metric"><span class="k">Мои в позициях</span><span class="v">${money(totalOwn)} ₽</span></div>
-      <div class="metric"><span class="k">P&L всего</span><span class="v ${p.pnl >= 0 ? "pos" : "neg"}">${p.pnl >= 0 ? "+" : ""}${money(p.pnl)} ₽</span></div>
-      <div class="metric"><span class="k">Сделок</span><span class="v">${tradeTotal}</span></div>
-      <div class="metric"><span class="k">Прибыльных</span><span class="v">${wins}</span></div>
-      <div class="metric"><span class="k">Win rate</span><span class="v">${Math.round(wr)}%</span></div>
-    </div>`;
+// ===== правый сайдбар: рынок TQBR (скринер) =====
+let _srRows: ScreenerRow[] = [];
+let _srSortKey: keyof ScreenerRow = (localStorage.getItem("deeptrading_sr_sort") as keyof ScreenerRow) || "turnover";
+let _srSortAsc = localStorage.getItem("deeptrading_sr_sort_asc") === "1";
+let _srLoading = false;
+let _srQuery = localStorage.getItem("deeptrading_sr_q") ?? "";
+let _srMinTurnoverM = Number(localStorage.getItem("deeptrading_sr_min_t") ?? 0) || 0;
+const _srPrevPrice = new Map<string, number>();
+
+function _srCmpNum(v: number | null | undefined): number {
+  return v == null ? -Infinity : v;
 }
+
+function _srCompare(a: ScreenerRow, b: ScreenerRow): number {
+  const k = _srSortKey;
+  if (k === "ticker") return _srSortAsc
+    ? a.ticker.localeCompare(b.ticker, "ru")
+    : b.ticker.localeCompare(a.ticker, "ru");
+  if (k === "name") return _srSortAsc
+    ? a.name.localeCompare(b.name, "ru")
+    : b.name.localeCompare(a.name, "ru");
+  const x = _srCmpNum(a[k] as number | null);
+  const y = _srCmpNum(b[k] as number | null);
+  return _srSortAsc ? x - y : y - x;
+}
+
+function _renderScreenerTable() {
+  const tbody = $("sr-tbody");
+  if (!tbody) return;
+  const q = _srQuery.trim().toLowerCase();
+  const minT = _srMinTurnoverM * 1e6;
+  const filtered = _srRows.filter((r) => {
+    if (minT > 0 && (r.turnover ?? 0) < minT) return false;
+    if (q && !r.ticker.toLowerCase().includes(q) && !r.name.toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const sorted = filtered.sort(_srCompare);
+  tbody.innerHTML = sorted
+    .map((r) => {
+      const prev = _srPrevPrice.get(r.ticker);
+      const flash = prev != null && r.price != null && prev > 0
+        ? (r.price > prev ? " sr-up" : r.price < prev ? " sr-down" : "")
+        : "";
+      const arrows = prev != null && r.price != null && prev > 0
+        ? (r.price > prev ? " ▲" : r.price < prev ? " ▼" : "")
+        : "";
+      const uni = r.in_universe ? " sr-universe" : "";
+      const priceTxt = r.price != null ? price(r.price) + " ₽" : "—";
+      const turnTxt = r.turnover != null ? "₽" + money(r.turnover) : "—";
+      const volTxt = r.rng_pct != null ? r.rng_pct.toFixed(2) + "%" : "—";
+      return `<tr class="sr-row${uni}" title="${r.name}">` +
+        `<td class="ticker-cell">${r.ticker}</td>` +
+        `<td class="sr-num${flash}">${r.price != null ? priceTxt + arrows : `<span class="sr-dim">—</span>`}</td>` +
+        `<td class="sr-num">${r.turnover != null ? turnTxt : `<span class="sr-dim">—</span>`}</td>` +
+        `<td class="sr-num">${r.rng_pct != null ? `<span style="color:${r.rng_pct >= 3 ? "var(--gold)" : "var(--text)"}">${volTxt}</span>` : `<span class="sr-dim">—</span>`}</td>` +
+        `</tr>`;
+    })
+    .join("") || `<tr><td colspan=4 class="sr-empty">ничего не найдено</td></tr>`;
+  const countEl = $("sr-count");
+  if (countEl) countEl.textContent = `${sorted.length} / ${_srRows.length}`;
+  const tsEl = $("sr-ts");
+  if (tsEl) tsEl.textContent = `обнов. ${fmtTimeOnly(new Date().toISOString())}`;
+  document.querySelectorAll("#sr-table thead th").forEach((th) => {
+    const el = th as HTMLElement;
+    const key = el.dataset.sort as keyof ScreenerRow | undefined;
+    const sortedNow = key === _srSortKey;
+    el.classList.toggle("sorted", sortedNow === true);
+    const arrow = el.querySelector(".sr-arrow");
+    if (arrow) arrow.textContent = sortedNow ? (_srSortAsc ? "▲" : "▼") : "";
+  });
+}
+
+async function _loadScreener(silent = false) {
+  if (_srLoading) return;
+  _srLoading = true;
+  try {
+    _srRows = await fetchScreener();
+    _renderScreenerTable();
+    _srPrevPrice.clear();
+    for (const r of _srRows) if (r.price != null) _srPrevPrice.set(r.ticker, r.price);
+  } catch {
+    if (!silent) {
+      const tbody = $("sr-tbody");
+      if (tbody) tbody.innerHTML = `<tr><td colspan=4 class="sr-empty">ошибка загрузки рынка</td></tr>`;
+    }
+  } finally {
+    _srLoading = false;
+  }
+}
+
+function initScreener() {
+  document.querySelectorAll("#sr-table thead th").forEach((th) => {
+    th.addEventListener("click", () => {
+      const key = (th as HTMLElement).dataset.sort as keyof ScreenerRow | undefined;
+      if (!key) return;
+      if (_srSortKey === key) _srSortAsc = !_srSortAsc;
+      else {
+        _srSortKey = key;
+        _srSortAsc = key === "ticker" || key === "name";
+      }
+      try {
+        localStorage.setItem("deeptrading_sr_sort", _srSortKey);
+        localStorage.setItem("deeptrading_sr_sort_asc", _srSortAsc ? "1" : "0");
+      } catch { /* noop */ }
+      _renderScreenerTable();
+    });
+  });
+  const qEl = $("sr-query") as HTMLInputElement | null;
+  if (qEl) {
+    qEl.value = _srQuery;
+    qEl.addEventListener("input", () => {
+      _srQuery = qEl.value;
+      try { localStorage.setItem("deeptrading_sr_q", _srQuery); } catch { /* noop */ }
+      _renderScreenerTable();
+    });
+  }
+  const tEl = $("sr-min-t") as HTMLInputElement | null;
+  if (tEl) {
+    tEl.value = String(_srMinTurnoverM);
+    tEl.addEventListener("input", () => {
+      _srMinTurnoverM = Number(tEl.value) || 0;
+      try { localStorage.setItem("deeptrading_sr_min_t", String(_srMinTurnoverM)); } catch { /* noop */ }
+      _renderScreenerTable();
+    });
+  }
+  const btn = $("sr-refresh");
+  if (btn) btn.addEventListener("click", () => void _loadScreener(false));
+  initSidebarRightResize();
+  void _loadScreener(true);
+  setInterval(() => void _loadScreener(false), 15000);
+}
+
+function initSidebarRightResize() {
+  const sb = document.getElementById("sidebar-right");
+  if (!sb) return;
+  const MIN = 240, MAX = 460;
+  const KEY = "deeptrading_sidebar_r_w";
+  try {
+    const saved = localStorage.getItem(KEY);
+    if (saved) {
+      const w = Math.max(MIN, Math.min(MAX, Number(saved)));
+      if (w > 0) sb.style.width = w + "px";
+    }
+  } catch { /* noop */ }
+
+  let dragging = false;
+  let startX = 0;
+  let startW = 0;
+
+  const onMove = (e: PointerEvent) => {
+    if (!dragging) return;
+    const w = Math.max(MIN, Math.min(MAX, startW + (startX - e.clientX)));
+    sb.style.width = `${w}px`;
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("sb-resizing");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    try {
+      localStorage.setItem(KEY, String(Math.round(sb.getBoundingClientRect().width)));
+    } catch { /* noop */ }
+  };
+  const grip = document.querySelector("#sidebar-right .sidebar-grip") as HTMLElement | null;
+  (grip ?? sb).addEventListener("pointerdown", (e) => {
+    const rect = sb.getBoundingClientRect();
+    if (!grip && e.clientX > rect.left + 8) return;
+    e.preventDefault();
+    dragging = true;
+    startX = e.clientX;
+    startW = rect.width;
+    document.body.classList.add("sb-resizing");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
+}
+

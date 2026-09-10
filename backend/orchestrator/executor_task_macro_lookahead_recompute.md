@@ -1,7 +1,7 @@
 # executor_task_macro_lookahead_recompute.md — ПЕРЕСЧЁТ макро-атрибуций (lookahead-баг)
 
 **Выдал:** My3 (research lead), 2026-08-29
-**Исполнитель:** DeepSeek executor (`.54`)
+**Исполнитель:** DeepSeek executor (`.3`)
 **Тип:** READ-ONLY пересчёт. НЕ менять движок/baseline/стратегию.
 
 ## Контекст (аудит завершён)

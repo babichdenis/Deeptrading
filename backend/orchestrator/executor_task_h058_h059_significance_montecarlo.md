@@ -1,7 +1,7 @@
 # executor_task_h058_h059_significance_montecarlo.md
 
 **Выдал:** My3 (research lead), 2026-08-28
-**Исполнитель:** DeepSeek executor (`.54`)
+**Исполнитель:** DeepSeek executor (`.3`)
 **Тип задачи:** SHADOW_RESEARCH / READ-ONLY (телеметрия; НЕ меняет EngineRunner/стратегию)
 **Статус:** к исполнению.
 **Связанные гипотезы:** WORLD-H-058 (Rule Significance Testing), WORLD-H-059 (Monte Carlo).

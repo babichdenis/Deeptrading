@@ -107,7 +107,7 @@ Phase2 swing pack → Phase3 ML-shadow. Всё discovery; ML только SHADOW
 
 ## [2026-08-26] DeepSeek — data-integrity patch A–F ГОТОВ (canonical July 2026)
 
-Результат на .54 (reports/5b44f3b383df/):
+Результат на .3 (reports/5b44f3b383df/):
 - **Reconciliation 100%**: 2 720 intents = 517 EXECUTED_TRADE + 1 766 REJECTED_SESSION +
   212 REJECTED_COOLDOWN + 183 REJECTED_IN_POSITION + 40 CANCELLED_BEFORE_FILL +
   2 REJECTED_DUPLICATE_EPISODE. generic_gates_left = 0.
@@ -120,7 +120,7 @@ Phase2 swing pack → Phase3 ML-shadow. Всё discovery; ML только SHADOW
 - **Session boundary**: 14 сделок у границы main (session_boundary_audit.csv).
 - Performance July (10k): net +11 190 ₽, net PF 3.68, win 71.4%, break_even 14 bps.
 - Тесты: 66 passed (18 research + 15 audit + 33 engine).
-- Ресурсоёмкие прогоны перенесены на .54 (в 5-8× быстрее).
+- Ресурсоёмкие прогоны перенесены на .3 (в 5-8× быстрее).
 
 ## [2026-08-26] My3 (research lead) — GLOBAL_DISCOVERY: 4 документа готовы
 
@@ -141,14 +141,14 @@ Phase2 swing pack → Phase3 ML-shadow. Всё discovery; ML только SHADOW
 - **STRATEGY_FAMILIES.md** — 8 семей (MR/Trend/Breakout/StatArb/MetaLabeling/Regime/
   Execution/Portfolio) с MOEX-fit и первым кандидатом.
 
-Координация с DeepSeek: судя по блоку выше, data-integrity patch A–F на .54 закрыл
+Координация с DeepSeek: судя по блоку выше, data-integrity patch A–F на .3 закрыл
 T1-T7 (reconciliation 100%, capital 10k, MTM equity, functions_mask заполнены).
 Это СНИМАЕТ blocked_by_audit для WORLD-H-003/H-009/H-034 и прочих SHADOW-методов.
 Однако P0-эксперименты всё ещё блокированы отсутствием **G2 daily history 2025-08..2026-06**
 (нужна для swing WORLD-H-016 и честного walk-forward WORLD-H-027) и G3 (30-240m бары
-агрегируются из 1m после подтверждения audit на .54).
+агрегируются из 1m после подтверждения audit на .3).
 
-Следующий шаг для DeepSeek: подтвердить audit-патч на .54 воспроизводит July baseline
+Следующий шаг для DeepSeek: подтвердить audit-патч на .3 воспроизводит July baseline
 (F=gross 18286.73/net 11189.52/PF 3.68/517 сделок) и собрать G2 daily history; затем
 открыть P0 SHADOW-эксперименты по pre-registration дизайнам из RESEARCH_MAP.md.
 
@@ -365,7 +365,7 @@ Baseline (signal_exit=on) подтверждён на disjoint-окне март
 
 ## [2026-08-26] My3 — E1 done → REVIEW; начато "производство бота" (orchestrator Phase C)
 
-DeepSeek сообщил: E1 (signal_exit on/off) завершён на .54 (март-апрель, 5 акций, 10k);
+DeepSeek сообщил: E1 (signal_exit on/off) завершён на .3 (март-апрель, 5 акций, 10k);
 параллельно anti-idle A5 (инварианты на др. периоде). STATUS.md обновлён:
 next_action_owner = My3, задача = REVIEW E1 (нужен артефакт прогона: run_id E1,
 research_pack/manifest, trades). My3 запросит у DeepSeek эти данные для честного вердикта.
@@ -472,7 +472,7 @@ E2 cooldown15->8 (очередь), E5 trailing +1R/1R (ПРИОРИТЕТ), E6 R
 
 ## [2026-08-27] My3 — E2 REVIEW (REJECT) + handoff E5
 
-- Получил отчёт E2 (backend/reports/e2_cooldown_202605_202606_DRAFT.json, прогнан на .54).
+- Получил отчёт E2 (backend/reports/e2_cooldown_202605_202606_DRAFT.json, прогнан на .3).
 - Результат: S0(cd15) net 9265.2 / 973 сделки / DD 245.5; S1(cd8) net 10349.8 / 1069 / DD 265.2.
 - net +11.7%, trades +9.9%, win ~65.6% обе руки; per-FIGI net S1>=S0 везде.
 - НО max DD +8% (~20₽ на 10k) => pre-reg критерий "DD не хуже" не выполнен => **REJECT**.
@@ -503,7 +503,7 @@ E2 cooldown15->8 (очередь), E5 trailing +1R/1R (ПРИОРИТЕТ), E6 R
 - Владелец подтвердил: "да конечно" — аппрув будущего эксперимента REGIME-GATED EXIT по
   волатильности (поверх E5, см. REGIME_DIAGNOSTIC.md §10).
 - E5 уже разблокирован код-фиксом (владелец ранее аппрувнул добавление trail_* в AtrStopPolicy).
-- My3 передал ход executor (DeepSeek, .54): (1) код-фикс AtrStopPolicy; (2) прогон E5 на
+- My3 передал ход executor (DeepSeek, .3): (1) код-фикс AtrStopPolicy; (2) прогон E5 на
   2026-05-01..2026-06-30 (executor_task.md). После прогона — REVIEW My3.
 -   Статусы: STATUS.md next_action_owner=executor; E5=RUNNING_EXPERIMENT; REGIME-GATED EXIT=APPROVED.
 
@@ -571,7 +571,7 @@ E2 cooldown15->8 (очередь), E5 trailing +1R/1R (ПРИОРИТЕТ), E6 R
 - 2026-08-27 (owner): «2025 год целый свободный» — подтверждение, что 2025 доступен как validation window.
 - 2026-08-27 (owner, подтверждение): «2025 — out-of-sample» → EXP-002 валиден, блокер снят.
   Статус EXP-002: PRE-REGISTERED → ready to run на 2025-08-01..2025-12-31. next_action_owner = executor
-  (DeepSeek, .54): реализовать entry_volatility_gate + прогнать S0/S1, выдать packs + MY3_review.md.
+  (DeepSeek, .3): реализовать entry_volatility_gate + прогнать S0/S1, выдать packs + MY3_review.md.
 - 2026-08-27 (My3, watch): executor запустил EXP-002 (PID 4896), но на «год данных», а не на замороженное
   окно 2025-08-01..2025-12-31. Риск contamination с used/in-sample 2026. Директива: остановить, перезапустить
   strictly на 2025-08-01..2025-12-31 (без загрузки вне окна). executor_task.md уточнён (жёсткие границы).
@@ -682,5 +682,5 @@ E2 cooldown15->8 (очередь), E5 trailing +1R/1R (ПРИОРИТЕТ), E6 R
 - 2026-08-27 (owner: «поставь все в очередь»): все shadow-задачи переведены в QUEUED — B2b (IMOEX stop fill-sim),
   B5 (IMOEX trend regime), B5b (ensemble vote behavior at entry/exit) — параллельно, read-only. EXP-002b QUEUED как
   primary RUNNING_EXPERIMENT. STATUS/EXPERIMENT_QUEUE/EVIDENCE_LEDGER/PROJECT_STATE обновлены: next_action_owner
-  перечисляет очередь; B2b/B5/B5b помечены QUEUED. C1 prepare-only (НЕ run). Исполнитель (DeepSeek, .54) берёт
+  перечисляет очередь; B2b/B5/B5b помечены QUEUED. C1 prepare-only (НЕ run). Исполнитель (DeepSeek, .3) берёт
   задачи по next_action_owner.

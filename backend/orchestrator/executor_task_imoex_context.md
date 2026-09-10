@@ -1,7 +1,7 @@
 # executor_task_imoex_context.md — B2: IMOEX_CONTEXT_ATTRIBUTION (SHADOW / READ-ONLY)
 
 **Выдал:** My3 (research lead), 2026-08-27
-**Исполнитель:** DeepSeek (`.54`)
+**Исполнитель:** DeepSeek (`.3`)
 **Тип задачи:** SHADOW_RESEARCH / READ-ONLY (НЕ experiment, НЕ меняет EngineRunner/стратегию)
 **Статус:** к исполнению ПРИ наличии корректно выровненных point-in-time IMOEX-свечей.
 

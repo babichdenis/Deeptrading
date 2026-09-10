@@ -1,7 +1,7 @@
 # executor_task_exit_oracle.md — EXIT ORACLE AUDIT (DIAGNOSTIC_ONLY)
 
 **Выдал:** My3 (research lead), 2026-08-27
-**Исполнитель:** DeepSeek (`.54`)
+**Исполнитель:** DeepSeek (`.3`)
 **Тип задачи:** DATA_PREP / DIAGNOSTIC_ONLY (НЕ experiment, НЕ меняет EngineRunner/стратегию)
 **Статус:** готово к исполнению после EXP-002 (текущий EXP-002 перезапустить строго на 2025-08-01..2025-12-31).
 **Источник:** immutable canonical July 2026 baseline `5b44f3b383df` (не трогать, не перезаписывать).

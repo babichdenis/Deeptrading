@@ -88,7 +88,7 @@ textdocs/PROJECT_STATE.md удалены — этот файл ЕДИНСТВЕ�
 
 ## Approved next action
 - EXP-002 (volatility entry gate) PRE-REGISTERED; окно 2025-08-01..2025-12-31 (ждёт подтверждения
-  владельца, что 2025 — OOS). После подтверждения — executor (DeepSeek, .54) реализует
+  владельца, что 2025 — OOS). После подтверждения — executor (DeepSeek, .3) реализует
   entry_volatility_gate и прогоняет S0/S1; My3 верифицирует по критериям успеха. Одновременно ≤1 RUNNING_EXPERIMENT.
 - Не менять стратегические параметры без явного утверждения.
 

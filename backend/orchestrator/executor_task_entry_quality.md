@@ -1,7 +1,7 @@
 # executor_task_entry_quality.md — B4: ENTRY-QUALITY MICRO-ANALYSIS (SHADOW/READ-ONLY)
 
 **Выдал:** My3 (research lead), 2026-08-27
-**Исполнитель:** DeepSeek (`.54`)
+**Исполнитель:** DeepSeek (`.3`)
 **Тип задачи:** SHADOW_RESEARCH / READ-ONLY (заменяет B1; НЕ меняет EngineRunner/стратегию)
 **Статус:** к исполнению.
 

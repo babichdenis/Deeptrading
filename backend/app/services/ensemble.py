@@ -201,13 +201,13 @@ def _ema(values: list[float], span: int) -> list[float]:
     return out
 
 
-def compute_bias(hourly: list[EngineCandle], period: int) -> dict[int, int]:
-    """Направление тренда по EMA(period) на 1h ЗАКРЫТИЕМ ПРЕДЫДУЩЕГО часа."""
-    closes = [c.close for c in hourly]
+def compute_bias(bars: list[EngineCandle], period: int, tf_seconds: int = 3600) -> dict[int, int]:
+    """Направление тренда по EMA(period) на барах tf ЗАКРЫТИЕМ ПРЕДЫДУЩЕГО бара."""
+    closes = [c.close for c in bars]
     ema = _ema(closes, period)
     bias: dict[int, int] = {}
-    for i in range(1, len(hourly)):
-        bucket = int(hourly[i].ts.timestamp()) // 3600
+    for i in range(1, len(bars)):
+        bucket = int(bars[i].ts.timestamp()) // tf_seconds
         bias[bucket] = 1 if closes[i - 1] >= ema[i - 1] else -1
     return bias
 
@@ -711,7 +711,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
 
     for e in entries_raw:
         ts, side = e["ts"], e["side"]
-        bucket = int(ts.timestamp()) // 3600
+        bucket = int(ts.timestamp()) // bias_tf_sec
         bias_ok = (side == "BUY" and bias.get(bucket, 0) >= 0) or (side == "SELL" and bias.get(bucket, 0) <= 0)
         if not bias_ok:
             if bias_mode == "veto":
@@ -1214,8 +1214,9 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
         setups_cfg = [{"strategy_id": sid, "tf": default_tf, "params": {}} for sid in ALL_STRATEGY_IDS]
 
     # --- bias ---
-    hourly = cached_resample(candles, 3600)
-    bias = compute_bias(hourly, int(bias_cfg.get("period", 50)))
+    bias_tf_sec = TF_SECONDS.get(str(bias_cfg.get("tf", "hour")), 3600)
+    bias_bars = cached_resample(candles, bias_tf_sec)
+    bias = compute_bias(bias_bars, int(bias_cfg.get("period", 50)), tf_seconds=bias_tf_sec)
 
     # --- regime timeline (на режимном ТФ) ---
     regime_tf_sec = TF_SECONDS.get(regime_cfg.get("tf", "5min"), 300)

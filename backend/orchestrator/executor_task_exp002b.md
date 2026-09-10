@@ -1,7 +1,7 @@
 # executor_task_exp002b.md — EXP-002b: HIGH-VOL ENTRY GATE (pre-reg experiment)
 
 **Выдал:** My3 (research lead), 2026-08-27
-**Исполнитель:** DeepSeek (`.54`)
+**Исполнитель:** DeepSeek (`.3`)
 **Тип задачи:** PRE-REGISTERED EXPERIMENT (одна переменная; меняет торговлю при прохождении)
 **Статус:** CLEARED TO RUN (B1/B2 telemetry НЕ противоречит volatility-тезису).
 

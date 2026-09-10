@@ -1,7 +1,7 @@
 # executor_task_vote_attribution_recompute.md — VOTE_ATTRIBUTION completion / recompute
 
 **Выдал:** My3 (research lead), 2026-08-27 — на основе явной спецификации владельца.
-**Исполнитель:** DeepSeek (`.54`)
+**Исполнитель:** DeepSeek (`.3`)
 **Тип задачи:** AUDIT_ONLY / DATA_RECOMPUTE (НЕ experiment, НЕ меняет EngineRunner/стратегию)
 **Статус:** к исполнению. Исходный VOTE_ATTRIBUTION run дал PARTIAL (per_function/by_*/exact_combos/
 totals + shadow k=20 готовы; НЕТ pair_present, dataset dir, report md; shadow на k=20 вместо k=200).

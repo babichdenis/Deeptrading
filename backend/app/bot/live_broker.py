@@ -76,6 +76,21 @@ class LiveBroker:
             self._services = client.__enter__()
         return self._services
 
+    # --- API-ветвление sandbox/live (одни и те же схемы, разные сервисы) ---
+    def _api_post_order(self, **kwargs):
+        """Выставить ордер: live → orders.post_order (+confirm_margin), sandbox → sandbox.post_sandbox_order."""
+        services = self._get_services()
+        if self.mode == "live":
+            return services.orders.post_order(confirm_margin_trade=True, **kwargs)
+        return services.sandbox.post_sandbox_order(**kwargs)
+
+    def _api_get_max_lots(self, request):
+        """Макс. лотов: live → orders.get_max_lots, sandbox → sandbox.get_sandbox_max_lots."""
+        services = self._get_services()
+        if self.mode == "live":
+            return services.orders.get_max_lots(request=request)
+        return services.sandbox.get_sandbox_max_lots(request=request)
+
     async def ensure_account(self, initial_cash: float = 100_000.0) -> PaperAccount | None:
         async with self.sessions() as db:
             acc = await db.scalar(select(PaperAccount).where(PaperAccount.name == DEFAULT_ACCOUNT))
@@ -265,9 +280,8 @@ class LiveBroker:
 
         def _fetch():
             from t_tech.invest.schemas import GetMaxLotsRequest
-            services = self._get_services()
             req = GetMaxLotsRequest(account_id=self._account, instrument_id=figi)
-            ml = services.sandbox.get_sandbox_max_lots(request=req)
+            ml = self._api_get_max_lots(req)
             bc = ml.buy_limits
             bm = ml.buy_margin_limits
             sc = ml.sell_limits
@@ -340,9 +354,8 @@ class LiveBroker:
         from t_tech.invest import OrderDirection, OrderType
 
         def _place():
-            services = self._get_services()
             direction = OrderDirection.ORDER_DIRECTION_BUY if side == "BUY" else OrderDirection.ORDER_DIRECTION_SELL
-            resp = services.sandbox.post_sandbox_order(
+            resp = self._api_post_order(
                 instrument_id=figi,
                 quantity=qty,
                 direction=direction,
@@ -377,8 +390,7 @@ class LiveBroker:
         order_qty = max(pos.qty // lot, 1) if lot > 0 else pos.qty
 
         def _place():
-            services = self._get_services()
-            resp = services.sandbox.post_sandbox_order(
+            resp = self._api_post_order(
                 instrument_id=figi,
                 quantity=order_qty,
                 direction=direction,

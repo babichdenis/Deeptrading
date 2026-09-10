@@ -1,7 +1,7 @@
 # executor_task_vote_attribution.md — VOTE ATTRIBUTION & SHADOW SCORING
 
 **Выдал:** My3 (research lead), 2026-08-27
-**Исполнитель:** DeepSeek (`.54`)
+**Исполнитель:** DeepSeek (`.3`)
 **Тип задачи:** DATA_PREP + TELEMETRY (НЕ experiment, НЕ меняет EngineRunner/стратегию)
 **Статус:** готово к исполнению после завершения EXP-002 (текущий EXP-002 перезапустить строго на 2025-08-01..2025-12-31).
 

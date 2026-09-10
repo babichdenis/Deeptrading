@@ -1,7 +1,7 @@
 # executor_task_vol_sizing.md — C1: HIGH_VOL_CONVICTION_SIZING (PRE-REGISTERED, ПОДГОТОВИТЬ, НЕ ЗАПУСКАТЬ)
 
 **Выдал:** My3 (research lead), 2026-08-27
-**Исполнитель:** DeepSeek (`.54`)
+**Исполнитель:** DeepSeek (`.3`)
 **Тип задачи:** PRE-REGISTERED EXPERIMENT — ПОДГОТОВИТЬ конфиг + выбор окна; **НЕ ВЫПОЛНЯТЬ прогон**.
 **Статус:** prepare-only. Запуск — позже, после готовой attribution/MTM telemetry и подтверждения окна My3.
 

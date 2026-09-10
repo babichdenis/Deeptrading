@@ -14,26 +14,26 @@
 | Машина | IP | Роль |
 |---|---|---|
 | MacBook «код» | 192.168.1.7 | Здесь правим код (opencode) |
-| MacBook «сервер» | 192.168.1.54 | Postgres + FastAPI backend + Vite frontend |
+| MacBook «сервер» | 192.168.1.3 | Postgres + FastAPI backend + Vite frontend |
 
-Папка проекта `/Volumes/Dev/Deeptrading` — это сетевой диск с машины .54.
+Папка проекта `/Volumes/Dev/Deeptrading` — это сетевой диск с машины .3.
 **Правила:**
 - НЕ устанавливать node_modules/venv на сетевой диск с этой машины (SMB бьёт тысячи мелких файлов).
   - venv Python: `~/.venvs/deeptrading` (локально на каждой машине свой)
   - npm install запускать только на машине, где диск локальный
-- Код правим здесь — он сразу виден на .54; фронт перезагружается сам (HMR),
+- Код правим здесь — он сразу виден на .3; фронт перезагружается сам (HMR),
   бэк запущен с --reload.
 
 ## Стек
 
-- Backend: Python 3.11, FastAPI, SQLAlchemy 2 async, asyncpg, PostgreSQL 16 (.54:5432)
+- Backend: Python 3.11, FastAPI, SQLAlchemy 2 async, asyncpg, PostgreSQL 16 (.3:5432)
 - SDK: `t-tech-investments` → импорт `from t_tech.invest import Client` (НЕ tinkoff.invest!)
 - Frontend: Vite + TypeScript + lightweight-charts v5
 
 ## Команды
 
 ```bash
-# Backend (на .54 или локально для отладки)
+# Backend (на .3 или локально для отладки)
 cd backend && zsh dev.sh            # venv + uvicorn --reload на :8000
 # локальный запуск из macOS:
 ~/.venvs/deeptrading/bin/uvicorn app.main:app --reload   # из папки backend/
@@ -41,7 +41,7 @@ cd backend && zsh dev.sh            # venv + uvicorn --reload на :8000
 # Тесты движка (golden scenarios)
 cd backend && ~/.venvs/deeptrading/bin/python -m pytest tests -q
 
-# Frontend (на .54)
+# Frontend (на .3)
 cd frontend && npm install && npm run dev    # :5173
 BACKEND_URL=http://<ip>:8000 npm run dev     # если бэк не локальный
 ```

@@ -11,7 +11,7 @@
 > 2. Архитектор пишет **ЗАДАЧА: <что сделать>**. Билдер отвечает **ОТЧЁТ: <что сделано>**.
 > 3. Билдер перед началом ОБЯЗАТЕЛЬНО читает: `MEMORY.md` → `docs/results/SESSION_SUMMARY_2026-09-07.md`
 >    → `AGENTS.md` → `docs/roadmap/SCRIPTS_INDEX.md`.
-> 4. Изменения в коде → git commit на .54 (проект = репо `/Users/Denis/Dev/Deeptrading`).
+> 4. Изменения в коде → git commit на .3 (проект = репо `/Users/Denis/Dev/Deeptrading`).
 > 5. Вопросы/неясности → писать сюда, НЕ гадать.
 > 6. Отчёты по тестам — «золотой формат» (см. MEMORY «Отчёты по тестам»), не одна строка net.
 
@@ -19,7 +19,7 @@
 
 ## Первичная настройка (для билдера)
 
-- Доступ к коду: `/Volumes/Dev/Deeptrading` (= `/Users/Denis/Dev/Deeptrading` на .54).
+- Доступ к коду: `/Volumes/Dev/Deeptrading` (= `/Users/Denis/Dev/Deeptrading` на .3).
 - Инфраструктура/БД/машины: см. MEMORY.md → «Инфраструктура».
 - Тесты движка: `cd backend && .venv/bin/python3 -m pytest tests/ -q` (~206 зелёных).
 - Реестр скриптов (не изобретать заново): `docs/roadmap/SCRIPTS_INDEX.md`.
@@ -136,7 +136,7 @@ Backend отдаёт корректно (sandbox/positions: SBER entry=278.3 cur
 
 ### [2026-09-07] Билдер — ПЛАН СТРУКТУРЫ DeeptradingV2 (на согласование)
 
-Путь: `/Users/Denis/Dev/DeeptradingV2` (рядом с текущим проектом, на .54 локально).
+Путь: `/Users/Denis/Dev/DeeptradingV2` (рядом с текущим проектом, на .3 локально).
 
 ```
 DeeptradingV2/

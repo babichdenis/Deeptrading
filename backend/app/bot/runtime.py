@@ -58,7 +58,7 @@ class BotConfig:
     atr_multiplier: float = 4.0
     atr_risk_reward: float = 4.0
     # --- Trailing stop ---
-    initial_sl_atr: float = 1.0  # начальный SL = 1×ATR
+    initial_sl_atr: float = 2.5  # стандартный SL = 2.5×ATR (фикс; не optuna sl_mult)
     trail_activation_comm_mult: float = 4.0  # активация при pnl >= комиссия_входа × mult
     trail_distance_atr: float = 2.5  # дистанция трейлинга за ценой = 2.5×ATR
     allow_short: bool = False
@@ -84,6 +84,8 @@ class BotConfig:
     overnight: bool = False  # закрывать позиции в конце сессии
     # --- Margin ---
     use_margin: bool = True  # использовать маржинальное кредитование
+    margin_sessions: list = field(default_factory=lambda: ["day"])  # сессии с маржой: morning/day/evening
+    margin_leverage: float = 0.0  # потолок плеча: 0 = Max (как одобрит брокер), иначе 2/3/4/5...
     max_margin_pct: float = 80.0  # макс % от доступного маржинального лимита на сделку
 
 
@@ -394,6 +396,7 @@ class PaperBotRuntime:
                     entry_reason=(meta or {}).get("entry", {}).get("reason") if isinstance(meta, dict) else None,
                     meta=_json.dumps(meta, ensure_ascii=False, default=str) if meta else None,
                     leverage=float(leverage),
+                    mode=self.broker_mode,
                 ))
                 await db.commit()
         except Exception:
@@ -407,7 +410,8 @@ class PaperBotRuntime:
             async with SessionLocal() as db:
                 res = await db.execute(
                     select(SandboxTrade)
-                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None))
+                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
+                           SandboxTrade.mode == self.broker_mode)
                     .order_by(SandboxTrade.entry_time.desc())
                     .limit(1)
                 )
@@ -433,7 +437,8 @@ class PaperBotRuntime:
             async with SessionLocal() as db:
                 res = await db.execute(
                     select(SandboxTrade)
-                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None))
+                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
+                           SandboxTrade.mode == self.broker_mode)
                     .order_by(SandboxTrade.entry_time.desc())
                     .limit(1)
                 )
@@ -485,6 +490,8 @@ class PaperBotRuntime:
                 "ensemble_session": self.config.ensemble_session,
                 "sessions": self.config.sessions,
                 "leverage": self.config.leverage,
+                "margin_sessions": list(self.config.margin_sessions),
+                "margin_leverage": float(self.config.margin_leverage or 0.0),
                 "commission_rate": self.config.commission_rate,
                 "slippage_bps": self.config.slippage_bps,
                 "confirm_flip": self.config.confirm_flip,
@@ -547,6 +554,7 @@ class PaperBotRuntime:
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS meta TEXT"))
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS exit_meta TEXT"))
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS trailing_active BOOLEAN DEFAULT FALSE"))
+                await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS mode VARCHAR(8) DEFAULT 'sandbox'"))
                 await _db.commit()
         except Exception:
             pass
@@ -714,19 +722,18 @@ class PaperBotRuntime:
                             _row = _open_rows.get(_f)
                             _entry_px = float(_row.entry_price) if (_row is not None and _row.entry_price) else float(_p.entry_price or 0)
                             _strat_r = self.strategies.get(_f)
-                            _slm_r = getattr(_strat_r.p, "sl_mult", None) if _strat_r is not None else None
                             _rr_r = getattr(_strat_r.p, "rr", None) if _strat_r is not None else None
                             if cfg.sl_mode == "fixed":
                                 _pol = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
                                 _pl = _pol.plan_entry(_st, _entry_px, [])
                             else:
                                 _pol = AtrStopPolicy(period=cfg.atr_period,
-                                                     multiplier=float(_slm_r) if _slm_r else cfg.initial_sl_atr,
+                                                     multiplier=cfg.initial_sl_atr,
                                                      risk_reward=float(_rr_r) if _rr_r else cfg.atr_risk_reward,
                                                      trail_activation_comm_mult=cfg.trail_activation_comm_mult,
                                                      trail_distance_r=cfg.trail_distance_atr)
-                                _buf_raw = self._get_5m_bars(_f, list(self.buffers.get(_f, [])))
-                                _pl = _pol.plan_entry(_st, _entry_px, _buf_raw)
+                                _buf_raw = list(self.buffers.get(_f, [])) or None
+                                _pl = _pol.plan_entry(_st, _entry_px, _buf_raw or [])
                             # Сохранённые уровни важнее пересчитанного плана:
                             # трейлинг мог уже подтянуть стоп / отключить TP.
                             _sl = float(_row.stop_loss) if (_row is not None and _row.stop_loss) else (
@@ -946,7 +953,8 @@ class PaperBotRuntime:
         broker_pos = {p.figi: p for p in await self.broker.positions()}
         async with SessionLocal() as db:
             rows = (await db.execute(_sel_r(SandboxTrade)
-                                     .where(SandboxTrade.exit_time.is_(None)))).scalars().all()
+                                     .where(SandboxTrade.exit_time.is_(None),
+                                            SandboxTrade.mode == self.broker_mode))).scalars().all()
             local_by_figi: dict[str, list] = {}
             for r in rows:
                 local_by_figi.setdefault(r.figi, []).append(r)
@@ -966,6 +974,7 @@ class PaperBotRuntime:
                     stop_loss=None, take_profit=None,
                     entry_reason="rebuilt_from_tinkoff",
                     leverage=1.0,
+                    mode=self.broker_mode,
                 ))
                 created += 1
                 self._log(f"RECONCILE: создана строка {ticker} ({figi[-6:]}) {bp.side} {bp.qty} @{getattr(bp, 'entry_price', 0.0):.2f}")
@@ -1335,7 +1344,9 @@ class PaperBotRuntime:
                 self._log_no_trade(figi, "already_held")
                 return
             if not _sessions_allowed(datetime.now(timezone.utc), self.config.sessions):
-                self._log(f"ПРОПУСК ВХОДА {ticker}: вне торговых сессий")
+                from app.bot.session import trading_session as _ts
+                self._log(f"ПРОПУСК ВХОДА {ticker}: вне торговых сессий "
+                          f"(сейчас {_ts() or '—'}, разрешены {'/'.join(self.config.sessions) or '—'})")
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="SESSION")
                 self._log_no_trade(figi, "session_filter")
                 return
@@ -1345,11 +1356,13 @@ class PaperBotRuntime:
                 self._log_no_trade(figi, "entries_paused")
                 return
             if sig.side.value == "BUY" and not self.config.long_allowed:
+                self._log(f"ПРОПУСК ВХОДА {ticker}: Long запрещён (Направление)")
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                 reason="LONG_DISABLED")
                 self._log_no_trade(figi, "long_disabled")
                 return
             if sig.side.value == "SELL" and not self.config.short_allowed:
+                self._log(f"ПРОПУСК ВХОДА {ticker}: Short запрещён (Направление)")
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                 reason="SHORT_DISABLED")
                 self._log_no_trade(figi, "short_disabled")
@@ -1437,20 +1450,29 @@ class PaperBotRuntime:
             if isinstance(self.broker, LiveBroker):
                 try:
                     ml = await self.broker.get_max_lots(figi)
-                    from app.bot.session import session_state
+                    from app.bot.session import session_state, trading_session
                     _ss = session_state()
-                    use_margin = _ss == "TRADING"  # маржа только в дневную сессию
+                    _tss = trading_session()
+                    use_margin = bool(cfg.margin_sessions) and _tss in cfg.margin_sessions
                     _cash_lots = ml.buy_cash if side == "BUY" else ml.sell_cash
                     _mrgn_lots = ml.buy_margin if side == "BUY" else ml.sell_margin
                     self._log(
                         f"MARGIN {ticker}: cash_lots={_cash_lots} margin_lots={_mrgn_lots} "
-                        f"leverage={ml.leverage:.2f} session={_ss} use_margin={use_margin} "
+                        f"leverage={ml.leverage:.2f} session={_ss} margin_session={_tss or '—'} "
+                        f"use_margin={use_margin} margin_sessions={'/'.join(cfg.margin_sessions) or '—'} "
                         f"budget={budget:.0f} lot_cost={lot_cost:.0f}"
                     )
                     if use_margin and _mrgn_lots > 0:
-                        # Покупаем по максимально разрешённому плечу (маржинальный лимит)
-                        lev = ml.leverage
+                        # Плечо: не выше одобренного брокером (ml.leverage) и не выше
+                        # выбранного ползунком (margin_leverage; 0 = Max).
+                        _max_lev = ml.leverage
+                        _want = float(cfg.margin_leverage or 0.0)
+                        lev = _max_lev if _want <= 0 else min(_max_lev, _want)
+                        if lev < 1.0:
+                            lev = 1.0
                         own_per_lot = lot_cost / lev
+                        self._log(f"MARGIN LEV {ticker}: брокер ×{_max_lev:.2f} · "
+                                  f"выбрано {'Max' if _want <= 0 else '×'+format(_want, 'g')} → ×{lev:.2f}")
                 except Exception as e:
                     self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed at cfg.leverage={lev:.1f}")
             if budget < own_per_lot:
@@ -1458,19 +1480,35 @@ class PaperBotRuntime:
                 return
             qty = max(1, int(budget / own_per_lot))
         # --- Margin cap: не превышать max lots брокера (ответ уже в логе MARGIN) ---
+        # Развилка: если в этой сессии плечо запрещено (вечер/утро), но инструмент
+        # в принципе торгуется (есть маржинальный лимит в нужную сторону), НЕ блокируем —
+        # qty уже посчитан по собственному бюджету без плеча (own_per_lot при lev=1).
+        # Свои деньги = 0 бывает у шортов в sandbox (шорт требует маржи), при этом
+        # cash-бюджет на qty есть — значит ордер без плеча допустим.
         if action == "open" and isinstance(self.broker, LiveBroker) and cfg.use_margin:
             try:
-                from app.bot.session import session_state
-                _ss = session_state()
-                use_margin = _ss == "TRADING"  # маржа только в дневную сессию, утро/вечер — свои деньги
+                from app.bot.session import trading_session
+                _tss = trading_session()
+                use_margin = bool(cfg.margin_sessions) and _tss in cfg.margin_sessions
                 ml = await self.broker.get_max_lots(figi)
-                max_lots = (ml.buy_margin if side == "BUY" else ml.sell_margin) if use_margin \
-                    else (ml.buy_cash if side == "BUY" else ml.sell_cash)
+                cash_max = ml.buy_cash if side == "BUY" else ml.sell_cash
+                margin_max = ml.buy_margin if side == "BUY" else ml.sell_margin
+                if use_margin:
+                    max_lots = margin_max
+                    _lim_kind = "маржа"
+                elif cash_max > 0:
+                    max_lots = cash_max
+                    _lim_kind = "свои деньги"
+                else:
+                    # Без плеча, но инструмент торгуется вообще (шорт через марж. лимит):
+                    # потолок — маржинальный лимит, реальный размер уже ограничен бюджетом.
+                    max_lots = margin_max
+                    _lim_kind = "свои деньги (без плеча, потолок марж. лимита)"
                 if max_lots <= 0:
-                    self._log(f"ПРОПУСК СДЕЛКИ {ticker}: лимит ({'маржа' if use_margin else 'свои деньги'}) = 0")
+                    self._log(f"ПРОПУСК СДЕЛКИ {ticker}: лимит ({_lim_kind}) = 0")
                     return
                 if qty > max_lots:
-                    self._log(f"QTY CAP {ticker}: {qty} → {max_lots} ({'margin' if use_margin else 'cash'} limit, {_ss})")
+                    self._log(f"QTY CAP {ticker}: {qty} → {max_lots} ({_lim_kind}, {_tss or '—'})")
                     qty = max_lots
             except Exception as e:
                 self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed without cap")
@@ -1517,13 +1555,11 @@ class PaperBotRuntime:
         side = Side(order.side)
         if cfg.use_ensemble:
             from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy
-            # SL/TP: из optuna-параметров стратегии figi (EnsembleParams),
-            # НЕ из cfg.atr_multiplier (иначе UI перезапишет optuna).
+            # SL: стандартный = cfg.initial_sl_atr (2×ATR, фикс вместо optuna sl_mult 4-5).
+            # TP: из optuna-параметров rr стратегии figi (EnsembleParams).
             strat = self.strategies.get(figi)
-            _sl_mult = getattr(strat.p, "sl_mult", None) if strat is not None else None
+            _sl_mult = cfg.initial_sl_atr
             _rr = getattr(strat.p, "rr", None) if strat is not None else None
-            if _sl_mult is None:
-                _sl_mult = cfg.initial_sl_atr
             if _rr is None:
                 _rr = cfg.atr_risk_reward
             if cfg.sl_mode == "fixed":
@@ -1534,7 +1570,7 @@ class PaperBotRuntime:
                                             risk_reward=_rr,
                                             trail_activation_comm_mult=cfg.trail_activation_comm_mult,
                                             trail_distance_r=cfg.trail_distance_atr)
-                buf_raw = self._get_5m_bars(figi, list(self.buffers.get(figi, [])))
+                buf_raw = list(self.buffers.get(figi, []))
                 plan = exit_policy.plan_entry(side, c.open, buf_raw)
         else:
             exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
@@ -1559,7 +1595,7 @@ class PaperBotRuntime:
                             plan.stop_loss, plan.take_profit, meta=order.meta,
                             leverage=max(1.0, float(self.config.leverage or 1.0)))
         self._exit_plans[figi] = exit_policy
-        self._exit_side[figi] = order.side
+        self._exit_side[figi] = "LONG" if order.side == "BUY" else "SHORT"
         self._exit_entry_px[figi] = float(entry_px)
         _lot_entry = next((u.get("lot") for u in self.universe if u.get("figi") == figi), 1) or 1
         self._exit_qty[figi] = int(order.qty) * int(_lot_entry)
@@ -1605,15 +1641,14 @@ class PaperBotRuntime:
                 _pl = _pol.plan_entry(_side_enum, _entry_px, [])
             else:
                 _strat = self.strategies.get(figi)
-                _slm = getattr(_strat.p, "sl_mult", None) if _strat is not None else None
                 _rrc = getattr(_strat.p, "rr", None) if _strat is not None else None
                 _pol = AtrStopPolicy(period=cfg.atr_period,
-                                     multiplier=float(_slm) if _slm else cfg.initial_sl_atr,
+                                     multiplier=cfg.initial_sl_atr,
                                      risk_reward=float(_rrc) if _rrc else cfg.atr_risk_reward,
                                      trail_activation_comm_mult=cfg.trail_activation_comm_mult,
                                      trail_distance_r=cfg.trail_distance_atr)
                 _buf = self.buffers.get(figi)
-                _bars1 = self._get_5m_bars(figi, list(_buf)) if _buf else [c]
+                _bars1 = list(_buf) if _buf else [c]
                 _pl = _pol.plan_entry(_side_enum, _entry_px, _bars1)
             self._exit_plans[figi] = _pol
             self._exit_side[figi] = _side
@@ -1696,6 +1731,10 @@ class PaperBotRuntime:
         # 3) Выход на этом баре. TP активен только до активации трейлинга.
         tp = None if (trail_active or self._trail_active.get(figi, False)) else self._exit_target.get(figi)
         stop = self._trail_stop.get(figi)
+        self._log(f"DBG-EXIT {figi[-6:]} {state.value} entry={entry_px:.2f} qty={qty_sh} "
+                  f"bar_ts={c.ts.strftime('%H:%M:%S')} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} "
+                  f"stop={stop if stop is not None else '-'} tp={tp if tp is not None else '-'} "
+                  f"trail={trail_active} pnl_rub={(c.close - entry_px) * qty_sh if state == PositionState.LONG else (entry_px - c.close) * qty_sh:+.2f}")
         price, reason = _ibe(c, state, stop, tp)
         if price is None:
             return False

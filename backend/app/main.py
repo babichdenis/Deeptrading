@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import models  # noqa: F401
-from app.api.routes import analysis, bot as bot_routes, catalog, candles, instruments, lab, ml as ml_routes, orchestrator_route, quorum, research, sandbox, signals, test as test_routes, warehouse, ws
+from app.api.routes import analysis, bot as bot_routes, catalog, candles, instruments, lab, ml as ml_routes, orchestrator_route, quorum, research, sandbox, screener, signals, test as test_routes, warehouse, ws
 from app.config import get_settings
 from app.database import Base, engine
 
@@ -14,6 +14,13 @@ from app.database import Base, engine
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Миграция: признак контура сделки (sandbox|live) в реестре сделок.
+        from sqlalchemy import text as _text
+        try:
+            await conn.execute(_text(
+                "ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS mode VARCHAR(8) DEFAULT 'sandbox'"))
+        except Exception:
+            pass
     from app.services.test_queue import queue_dispatcher
     from app.services.ensemble_queue import queue_dispatcher as ens_dispatcher
 
@@ -23,13 +30,16 @@ async def lifespan(app: FastAPI):
     # Auto-start paper bot on backend startup
     try:
         from app.bot.runtime import runtime, BotConfig
+        from app.config import get_settings
+        _s = get_settings()
+        _mode = _s.bot_mode if _s.bot_mode in ("sandbox", "live") else "sandbox"
         if not runtime.running:
             cfg = BotConfig(
                 strategy_id="ensemble_v4",
                 interval_name="1min",
                 top_n=20,
                 use_ensemble=True,
-                mode="sandbox",
+                mode=_mode,
                 sessions=["morning", "day", "evening"],
                 long_allowed=True,
                 short_allowed=True,
@@ -86,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(ml_routes.router)
     app.include_router(warehouse.router)
     app.include_router(ws.router)
+    app.include_router(screener.router)
 
     @app.get("/api/health", tags=["system"])
     async def health() -> dict:

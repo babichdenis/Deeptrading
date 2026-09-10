@@ -1,7 +1,7 @@
 # executor_task_time_of_day.md — B1: TIME_OF_DAY_ATTRIBUTION (SHADOW / READ-ONLY)
 
 **Выдал:** My3 (research lead), 2026-08-27
-**Исполнитель:** DeepSeek (`.54`)
+**Исполнитель:** DeepSeek (`.3`)
 **Тип задачи:** SHADOW_RESEARCH / READ-ONLY (НЕ experiment, НЕ меняет EngineRunner/стратегию)
 **Статус:** к исполнению.
 

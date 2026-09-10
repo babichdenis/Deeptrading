@@ -50,6 +50,8 @@ class StartRequest(BaseModel):
     confirm_flip: int = 2
     reentry_cooldown_bars: int = 15
     use_margin: bool = True
+    margin_sessions: list[str] = Field(default_factory=lambda: ["day"])  # сессии с маржой
+    margin_leverage: float = 0.0  # потолок плеча: 0 = Max
     max_margin_pct: float = 80.0
     overnight: bool = False
 
@@ -92,6 +94,8 @@ async def bot_start(req: StartRequest) -> dict:
         confirm_flip=req.confirm_flip,
         reentry_cooldown_bars=req.reentry_cooldown_bars,
         overnight=req.overnight,
+        margin_sessions=[s for s in req.margin_sessions if s in ("morning", "day", "evening")],
+        margin_leverage=max(0.0, float(req.margin_leverage)),
     )
     try:
         result = await runtime.start(cfg)
@@ -105,6 +109,8 @@ class BotConfigPatch(BaseModel):
     long_allowed: bool | None = None
     short_allowed: bool | None = None
     leverage: float | None = None
+    margin_sessions: list[str] | None = None
+    margin_leverage: float | None = None
     stop_pct: float | None = None
     target_pct: float | None = None
     sl_mode: str | None = None
@@ -141,6 +147,20 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.leverage is not None and req.leverage != cfg.leverage:
         changes.append(f"плечо: ×{cfg.leverage} → ×{req.leverage}")
         cfg.leverage = req.leverage
+    if req.margin_sessions is not None:
+        new_ms = [s for s in req.margin_sessions if s in valid_sessions]
+        if new_ms != list(cfg.margin_sessions):
+            _old = '/'.join(sess_names.get(s, s) for s in cfg.margin_sessions) or '—'
+            _new = '/'.join(sess_names.get(s, s) for s in new_ms) or '—'
+            changes.append(f"маржа: {_old} → {_new}")
+        cfg.margin_sessions = new_ms
+    if req.margin_leverage is not None:
+        new_ml = max(0.0, float(req.margin_leverage))
+        if new_ml != float(cfg.margin_leverage or 0.0):
+            _old = 'Max' if (cfg.margin_leverage or 0) <= 0 else f"×{cfg.margin_leverage:g}"
+            _new = 'Max' if new_ml <= 0 else f"×{new_ml:g}"
+            changes.append(f"плечо маржи: {_old} → {_new}")
+        cfg.margin_leverage = new_ml
     if req.stop_pct is not None:
         new_sl = max(0.001, req.stop_pct)
         if new_sl != cfg.stop_pct:
@@ -197,6 +217,8 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         "long_allowed": cfg.long_allowed,
         "short_allowed": cfg.short_allowed,
         "leverage": cfg.leverage,
+        "margin_sessions": list(cfg.margin_sessions),
+        "margin_leverage": float(cfg.margin_leverage or 0.0),
         "stop_pct": cfg.stop_pct,
         "target_pct": cfg.target_pct,
         "sl_mode": cfg.sl_mode,
@@ -413,8 +435,9 @@ async def bot_trading_status() -> dict:
     """Возвращает реальный торговый статус MOEX через market_data.get_trading_status."""
     from t_tech.invest import Client, SecurityTradingStatus
     from app.config import get_settings
-    TOKEN = get_settings().sandbox or get_settings().tinkoff_token
-    SB = "sandbox-invest-public-api.tbank.ru"
+    _s = get_settings()
+    TOKEN = _s.get_token(_s.bot_mode)
+    SB = _s.get_target(_s.bot_mode)
     
     from t_tech.invest import SecurityTradingStatus as STS
     STATUS_MAP = {
