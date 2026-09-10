@@ -27,11 +27,12 @@
               <b>MOEX</b>
               <span id="bs-trading-status">—</span>
             </span>
-            <span class="env-badge" id="env-badge" title="Активный торговый контур">—</span>
+            <button class="env-badge" id="env-badge" title="Активный контур — нажмите, чтобы переключить sandbox/live">—</button>
           </div>
           <div class="hdr-bot-ctrl">
             <button class="btn-primary start btn-xs" id="btn-bot-start">▶ Запустить</button>
             <button class="btn-primary stop hidden btn-xs" id="btn-bot-stop">■ Остановить</button>
+            <button class="btn-secondary btn-xs hidden" id="btn-bot-pause" title="Остановить НОВЫЕ входы; открытые позиции продолжают жить (SL/TP работают)">⏸ Пауза входов</button>
             <button class="btn-secondary btn-xs" id="btn-bot-settings" title="Настройки бота">⚙</button>
           </div>
           <div id="bot-pill-top" class="bot-pill off"><span class="dot"></span><span id="bot-state-text">Бот выключен</span><span id="bot-mode" class="mode-chip hidden"></span></div>
@@ -56,8 +57,8 @@
         <header class="topbar">
           <div class="hdr-stats">
             <span class="hdr-stat" title="Equity — если закрыть всё"><b>Eq</b><span id="bs-equity">—</span></span>
-            <span class="hdr-stat" title="Свободные деньги (собственные)"><b>Cash</b><span id="bs-cash">—</span></span>
-            <span class="hdr-stat" title="Мои деньги в позициях"><b>В поз</b><span id="bs-positions-value">—</span></span>
+            <span class="hdr-stat" title="Свободные средства (ликвидный портфель − начальная маржа)"><b>Свободно</b><span id="bs-cash">—</span></span>
+            <span class="hdr-stat" title="Обеспечение под позиции (начальная маржа)"><b>Обеспеч</b><span id="bs-positions-value">—</span></span>
             <span class="hdr-stat" title="P&L"><b>P&L</b><span id="bs-pnl">—</span></span>
             <span class="hdr-stat" title="Все деньги на счёте (total_amount_currencies)"><b>Деньги</b><span id="bs-currencies">—</span></span>
             <span class="hdr-stat" title="Нетто-стоимость акций — минус = долг по шортам"><b>Шорты</b><span id="bs-shares">—</span></span>
@@ -68,6 +69,7 @@
               <label class="lg-chip"><input type="checkbox" id="sg-morning"><span>Утро</span></label>
               <label class="lg-chip"><input type="checkbox" id="sg-day" checked><span>День</span></label>
               <label class="lg-chip"><input type="checkbox" id="sg-evening"><span>Вечер</span></label>
+              <label class="lg-chip" title="Держать позиции через ночь (вне торговых сессий)"><input type="checkbox" id="sg-overnight"><span>Overnight</span></label>
             </div>
             <div class="hdr-dir" title="Направления торговли (хотя бы одно)">
               <label class="lg-chip on" title="Покупать (вход BUY)"><input type="checkbox" id="dg-long" checked><span>Long</span></label>
@@ -83,6 +85,13 @@
                 <input type="range" id="mg-lev" min="0" max="4" step="1" value="4">
                 <span class="lev-slider-val" id="mg-lev-label">Max</span>
               </span>
+            </div>
+            <div class="hdr-regime" title="Режимы рынка, в которых разрешены входы">
+              <label class="lg-chip on" title="Нейтральный"><input type="checkbox" id="rg-neutral" checked><span>Нейтр</span></label>
+              <label class="lg-chip on" title="Восходящий тренд"><input type="checkbox" id="rg-trendup" checked><span>Тренд↑</span></label>
+              <label class="lg-chip on" title="Нисходящий тренд"><input type="checkbox" id="rg-trenddown" checked><span>Тренд↓</span></label>
+              <label class="lg-chip on" title="Высокая волатильность"><input type="checkbox" id="rg-highvol" checked><span>Волат</span></label>
+              <label class="lg-chip on" title="Флэт/боковик"><input type="checkbox" id="rg-range" checked><span>Флэт</span></label>
             </div>
           </div>
         </header>
@@ -530,9 +539,6 @@
           <label>Top-N акций<input type="number" id="bs-topn" value="20" min="2" max="30" /></label>
           <label>Комиссия, %<input type="number" id="bs-commission" value="0.3" step="0.05" min="0" max="1" /></label>
           <label>Re-entry cooldown (баров)<input type="number" id="bs-reentry" value="15" step="1" min="0" max="100" /></label>
-        </div>
-        <div class="bs-grid" style="margin-top:8px">
-          <label class="lg-chip" title="Закрывать все позиции в конце торговой сессии"><input type="checkbox" id="bs-overnight"><span>Overnight (закрытие EOD)</span></label>
         </div>
         <div class="bs-grid" style="margin-top:8px">
           <label>Confirm flip (встречных перед закрытием)<input type="number" id="bs-confirm-flip" value="2" step="1" min="0" max="10" /></label>

@@ -35,9 +35,9 @@ class EnsembleParams:
     sessions: list = field(default_factory=lambda: ["day"])
     setups: list = field(default_factory=lambda: V2_SETUPS)
     # --- Таймфреймы ансамбля (быстро менять, не трогая код) ---
-    bias_tf: str = "5min"        # направление (bias): "5min" | "15min" | "hour"
+    bias_tf: str = "15min"      # направление (bias): "5min" | "15min" | "hour"
     bias_period: int = 50        # период EMA для bias
-    entry_tf: str = "1min"       # микро-вход: "1min" | "5min"
+    entry_tf: str = "5min"       # микро-вход: "1min" | "5min"
     entry_lookback: int = 1      # окно микро-брейкаута (бары entry_tf)
     # --- per-ticker optuna-параметры (расширение; дефолты == прежний хардкод) ---
     sl_mult: float = 2.0
@@ -45,6 +45,11 @@ class EnsembleParams:
     vol_thr: float = 0.0
     neutral_mode: str | None = None
     entry_confirm_bars: int = 0  # ждать N подряд подтверждающих свечей в сторону входа; 0 = без подтверждения
+    # --- EXP-008: минуточный MACD-фильтр (гистограмма 1m в сторону входа) ---
+    entry_macd_1m: bool = False
+    entry_macd_fast: int = 12
+    entry_macd_slow: int = 26
+    entry_macd_signal: int = 9
 
 
 class EnsembleV4Strategy:
@@ -79,9 +84,9 @@ class EnsembleV4Strategy:
             req = {
                 "figi": self.p.figi,
                 "bias_mode": "info",
-                "bias": {"tf": "5min", "period": 50},
-                "entry_tf": "1min",
-                "entry": {"tf": "1min", "lookback": 1},
+                "bias": {"tf": self.p.bias_tf, "period": self.p.bias_period},
+                "entry_tf": self.p.entry_tf,
+                "entry": {"tf": self.p.entry_tf, "lookback": self.p.entry_lookback},
                 "entry_session": self.p.session,
                 "quorum": self.p.quorum,
                 "same_side_reentry_cooldown_bars": 15,
@@ -106,6 +111,11 @@ class EnsembleV4Strategy:
                 req["volume_filter_threshold"] = self.p.vol_thr
             if self.p.neutral_mode:
                 req["neutral_mode"] = self.p.neutral_mode
+            if self.p.entry_macd_1m:
+                req["entry_macd_1m"] = True
+                req["entry_macd_fast"] = self.p.entry_macd_fast
+                req["entry_macd_slow"] = self.p.entry_macd_slow
+                req["entry_macd_signal"] = self.p.entry_macd_signal
             res = compute_ensemble(list(candles), req)
         except Exception:
             return None

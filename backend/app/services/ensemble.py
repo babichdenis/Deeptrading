@@ -104,6 +104,7 @@ from app.engine.sessions import SessionPolicyConfig
 from app.engine.wave1 import ReplayStrategy
 from app.services.ceiling import zigzag_swings
 from app.services.experiments import build_exit_policy
+from app.services.indicators import macd
 from app.services.ml_ensemble_filter import MlEnsembleFilter, resample_to_5m
 from app.services.regime import RegimeDetector, regime_at
 from app.services.signals import generate_signals
@@ -608,6 +609,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   oracle_points: dict[str, list[datetime]], lot: int,
                   capital: float, label: str,
                   oracle_swings_detail: list[dict] | None = None,
+                  bias_tf_sec: int = 3600,
                   ml_filter_obj=None) -> dict:
     """Один прогон (static или adaptive) через единый конвейер."""
     setup_runs: list[tuple[str, list[dict]]] = []
@@ -709,6 +711,42 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         def _pull_pass(ts_dt: datetime, side: str) -> tuple[bool, str]:
             return entry_pullback_deep_pass(_c5, _atr5, ts_dt, side, thr_mult=_thr_mult)
 
+    # EXP-008: MACD-подтверждение на минутных свечах (entry_macd_1m).
+    # Для каждого входа (5m/1m) требует, чтобы гистограмма MACD на 1m была
+    # в сторону входа в момент сигнала: BUY -> histogram > 0, SELL -> histogram < 0.
+    _macd_1m_hist: list[float | None] | None = None
+    _macd_1m_ts: list[datetime] | None = None
+    if req.get("entry_macd_1m"):
+        try:
+            _macd_fast = int(req.get("entry_macd_fast", 12))
+            _macd_slow = int(req.get("entry_macd_slow", 26))
+            _macd_sig = int(req.get("entry_macd_signal", 9))
+            _macd_l, _macd_s, _macd_h = macd([c.close for c in candles],
+                                             _macd_fast, _macd_slow, _macd_sig)
+            _macd_1m_hist = list(_macd_h)
+            _macd_1m_ts = list(c.ts for c in candles)
+        except Exception:
+            _macd_1m_hist = None
+            _macd_1m_ts = None
+
+    def _macd_1m_ok(ts_dt: datetime, side: str) -> bool | None:
+        """True/False если направление известно, None если недостаточно данных."""
+        if req.get("entry_macd_1m") is False or not _macd_1m_hist or not _macd_1m_ts:
+            return None
+        idx = None
+        # последняя 1m свеча, закрывшаяся НЕ ПОЗЖЕ момента входа
+        for i, c in enumerate(_macd_1m_ts):
+            if c <= ts_dt:
+                idx = i
+            else:
+                break
+        if idx is None:
+            return None
+        h = _macd_1m_hist[idx]
+        if h is None:
+            return None
+        return h > 0 if side == "BUY" else h < 0
+
     for e in entries_raw:
         ts, side = e["ts"], e["side"]
         bucket = int(ts.timestamp()) // bias_tf_sec
@@ -802,6 +840,11 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                 if _vf_ratio < vol_filter_thr:
                     rejected.append({**e, "ts": ts.isoformat(), "reason": f"VOL_FILTER:{_vf_ratio:.2f}<{vol_filter_thr}"})
                     continue
+        # EXP-008: минуточный MACD — гистограмма 1m должна быть в сторону входа
+        _macd_ok = _macd_1m_ok(ts, side)
+        if _macd_ok is False:
+            rejected.append({**e, "ts": ts.isoformat(), "reason": "MACD_1M_AGAINST"})
+            continue
         accepted.append({**e, "ts": ts.isoformat(), "quorum_event_id": quorum_ev["event_id"]})
 
     if adaptive is not None:
@@ -1324,13 +1367,15 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
                            regime_row,
                            adaptive_map if req.get("regime_gate") else None,
                            oracle, o_points, lot, capital, "static",
-                           o_swings_detail, ml_filter_obj=ml_filter_obj)
+                           o_swings_detail, bias_tf_sec=bias_tf_sec,
+                           ml_filter_obj=ml_filter_obj)
 
     if adaptive_map is not None:
         adaptive = _run_pipeline(candles, req, bias, setups_cfg, quorum_k, entry_window_min,
                                  int(entry_cfg.get("lookback", 1)), static_exit, qty_shares,
                                  regime_row, adaptive_map, oracle, o_points, lot, capital,
-                                 "adaptive", ml_filter_obj=ml_filter_obj)
+                                 "adaptive", bias_tf_sec=bias_tf_sec,
+                                 ml_filter_obj=ml_filter_obj)
     else:
         adaptive = None
 

@@ -4,7 +4,48 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.runtime import BotConfig, runtime, save_bot_settings
+from app.bot.runtime import BotConfig, BOT_PERSIST_FIELDS, load_bot_settings, runtime, save_bot_settings
+
+
+async def _cfg_from_saved() -> BotConfig:
+    """Собрать конфиг из сохранённых настроек (файл/БД) — для работы без запущенного бота."""
+    cfg = _build_autostart_cfg("sandbox")
+    saved = await load_bot_settings()
+    for f in BOT_PERSIST_FIELDS:
+        if f in saved:
+            try:
+                setattr(cfg, f, saved[f])
+            except Exception:
+                pass
+    return cfg
+
+
+def _config_payload(cfg: BotConfig) -> dict:
+    return {
+        "ok": True,
+        "sessions": list(cfg.sessions),
+        "long_allowed": cfg.long_allowed,
+        "short_allowed": cfg.short_allowed,
+        "leverage": cfg.leverage,
+        "margin_sessions": list(cfg.margin_sessions),
+        "margin_leverage": float(cfg.margin_leverage or 0.0),
+        "margin_sizing": cfg.margin_sizing,
+        "trade_regimes": list(cfg.trade_regimes),
+        "trend_alignment": bool(cfg.trend_alignment),
+        "stop_pct": cfg.stop_pct,
+        "target_pct": cfg.target_pct,
+        "sl_mode": cfg.sl_mode,
+        "atr_period": cfg.atr_period,
+        "atr_multiplier": cfg.atr_multiplier,
+        "atr_risk_reward": cfg.atr_risk_reward,
+        "top_n": cfg.top_n,
+        "ensemble_quorum": cfg.ensemble_quorum,
+        "commission_rate": cfg.commission_rate,
+        "overnight": cfg.overnight,
+        "reentry_cooldown_bars": cfg.reentry_cooldown_bars,
+        "confirm_flip": cfg.confirm_flip,
+        "source": "file",
+    }
 
 _sandbox_broker = None
 
@@ -52,6 +93,9 @@ class StartRequest(BaseModel):
     use_margin: bool = True
     margin_sessions: list[str] = Field(default_factory=lambda: ["day"])  # сессии с маржой
     margin_leverage: float = 0.0  # потолок плеча: 0 = Max
+    margin_sizing: str = "divide"  # divide | multiply
+    trade_regimes: list[str] = Field(default_factory=lambda: ["NEUTRAL", "TREND_UP", "TREND_DOWN", "HIGH_VOLATILITY", "RANGE"])
+    trend_alignment: bool = True
     max_margin_pct: float = 80.0
     overnight: bool = False
 
@@ -96,6 +140,9 @@ async def bot_start(req: StartRequest) -> dict:
         overnight=req.overnight,
         margin_sessions=[s for s in req.margin_sessions if s in ("morning", "day", "evening")],
         margin_leverage=max(0.0, float(req.margin_leverage)),
+        margin_sizing=req.margin_sizing if req.margin_sizing in ("divide", "multiply") else "divide",
+        trade_regimes=[r for r in req.trade_regimes if r in ("NEUTRAL", "TREND_UP", "TREND_DOWN", "HIGH_VOLATILITY", "RANGE")],
+        trend_alignment=bool(req.trend_alignment),
     )
     try:
         result = await runtime.start(cfg)
@@ -111,6 +158,9 @@ class BotConfigPatch(BaseModel):
     leverage: float | None = None
     margin_sessions: list[str] | None = None
     margin_leverage: float | None = None
+    margin_sizing: str | None = None
+    trade_regimes: list[str] | None = None
+    trend_alignment: bool | None = None
     stop_pct: float | None = None
     target_pct: float | None = None
     sl_mode: str | None = None
@@ -127,9 +177,8 @@ class BotConfigPatch(BaseModel):
 
 @router.patch("/config")
 async def bot_config_patch(req: BotConfigPatch) -> dict:
-    if not runtime.running and not runtime.starting:
-        raise HTTPException(400, "бот не запущен")
-    cfg = runtime.config
+    """Применить настройки. Работает и при остановленном боте — значения пишутся в config-файл."""
+    cfg = runtime.config if (runtime.running or runtime.starting) else await _cfg_from_saved()
     changes: list[str] = []
     valid_sessions = {"morning", "day", "evening"}
     sess_names = {"morning": "утро", "day": "день", "evening": "вечер"}
@@ -161,6 +210,21 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
             _new = 'Max' if new_ml <= 0 else f"×{new_ml:g}"
             changes.append(f"плечо маржи: {_old} → {_new}")
         cfg.margin_leverage = new_ml
+    if req.margin_sizing is not None and req.margin_sizing in ("divide", "multiply"):
+        if req.margin_sizing != cfg.margin_sizing:
+            changes.append(f"размер позиции: {cfg.margin_sizing} → {req.margin_sizing}")
+        cfg.margin_sizing = req.margin_sizing
+    if req.trade_regimes is not None:
+        _valid_reg = {"NEUTRAL", "TREND_UP", "TREND_DOWN", "HIGH_VOLATILITY", "RANGE"}
+        new_tr = [r for r in req.trade_regimes if r in _valid_reg]
+        if new_tr != list(cfg.trade_regimes):
+            _old = '/'.join(cfg.trade_regimes) or '—'
+            _new = '/'.join(new_tr) or '—'
+            changes.append(f"режимы: {_old} → {_new}")
+        cfg.trade_regimes = new_tr
+    if req.trend_alignment is not None and req.trend_alignment != cfg.trend_alignment:
+        changes.append(f"trend-alignment: {'вкл' if cfg.trend_alignment else 'выкл'} → {'вкл' if req.trend_alignment else 'выкл'}")
+        cfg.trend_alignment = req.trend_alignment
     if req.stop_pct is not None:
         new_sl = max(0.001, req.stop_pct)
         if new_sl != cfg.stop_pct:
@@ -212,28 +276,99 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if changes:
         runtime._log("⚙ КОНФИГ: " + " | ".join(changes))
     await save_bot_settings(cfg)
-    return {
-        "ok": True,
-        "sessions": cfg.sessions,
-        "long_allowed": cfg.long_allowed,
-        "short_allowed": cfg.short_allowed,
-        "leverage": cfg.leverage,
-        "margin_sessions": list(cfg.margin_sessions),
-        "margin_leverage": float(cfg.margin_leverage or 0.0),
-        "stop_pct": cfg.stop_pct,
-        "target_pct": cfg.target_pct,
-        "sl_mode": cfg.sl_mode,
-        "atr_period": cfg.atr_period,
-        "atr_multiplier": cfg.atr_multiplier,
-        "atr_risk_reward": cfg.atr_risk_reward,
-        "top_n": cfg.top_n,
-        "ensemble_quorum": cfg.ensemble_quorum,
-    }
+    return _config_payload(cfg)
+
+
+@router.get("/config")
+async def bot_config_get() -> dict:
+    """Вернуть текущие настройки бота (из файла даже когда бот не запущен)."""
+    if runtime.running or runtime.starting:
+        _payload = _config_payload(runtime.config)
+    else:
+        _payload = _config_payload(await _cfg_from_saved())
+    _payload.pop("ok", None)
+    return _payload
 
 
 @router.post("/stop")
 async def bot_stop() -> dict:
     return await runtime.stop()
+
+
+class ModeRequest(BaseModel):
+    mode: str  # sandbox | live
+
+
+def _write_env_mode(mode: str) -> None:
+    """Обновить BOT_MODE в backend/.env (чтобы режим пережил рестарт uvicorn)."""
+    import os
+    from pathlib import Path
+    env_path = Path(__file__).resolve().parents[3] / ".env"
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+        out, found = [], False
+        for ln in lines:
+            if ln.strip().startswith("BOT_MODE="):
+                out.append(f"BOT_MODE={mode}")
+                found = True
+            else:
+                out.append(ln)
+        if not found:
+            out.append(f"BOT_MODE={mode}")
+        env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        os.environ["BOT_MODE"] = mode
+    except Exception:
+        pass
+
+
+def _build_autostart_cfg(mode: str) -> BotConfig:
+    return BotConfig(
+        strategy_id="ensemble_v4",
+        interval_name="1min",
+        top_n=20,
+        use_ensemble=True,
+        mode=mode,
+        sessions=["morning", "day", "evening"],
+        long_allowed=True,
+        short_allowed=True,
+        ensemble_session="all",
+        atr_period=14,
+        atr_multiplier=4.0,
+        atr_risk_reward=4.0,
+        leverage=1.0,
+        commission_rate=0.0005,
+        slippage_bps=2.0,
+        confirm_flip=2,
+        reentry_cooldown_bars=15,
+        overnight=True,
+    )
+
+
+@router.post("/mode")
+async def bot_set_mode(req: ModeRequest) -> dict:
+    """Переключить контур sandbox/live: обновить .env, перезапустить бота."""
+    import asyncio
+    mode = req.mode if req.mode in ("sandbox", "live") else None
+    if not mode:
+        raise HTTPException(400, "mode must be 'sandbox' or 'live'")
+    _write_env_mode(mode)
+    try:
+        from app.config import get_settings
+        get_settings.cache_clear()
+    except Exception:
+        pass
+    was_running = runtime.running or runtime.starting
+    if was_running:
+        await runtime.stop()
+        for _ in range(40):
+            if not runtime.running and not runtime.starting:
+                break
+            await asyncio.sleep(0.5)
+    try:
+        await runtime.start(_build_autostart_cfg(mode))
+    except Exception as e:
+        raise HTTPException(500, f"restart failed: {e}")
+    return {"mode": mode, "restarted": was_running}
 
 
 class PauseRequest(BaseModel):

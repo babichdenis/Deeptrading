@@ -101,6 +101,13 @@ class RegimeDetector:
         """Режим на каждом баре (по закрытию бара i)."""
         if len(candles) < max(self.ema_slow, self.atr_period) + 5:
             return []
+        # Нормализуем числовые поля к float (свечи из БД приходят как Decimal).
+        candles = [
+            EngineCandle(ts=c.ts, open=float(c.open), high=float(c.high),
+                         low=float(c.low), close=float(c.close),
+                         volume=float(c.volume or 0))
+            for c in candles
+        ]
         closes = [c.close for c in candles]
         ema_f = _ema(closes, self.ema_fast)
         ema_s = _ema(closes, self.ema_slow)

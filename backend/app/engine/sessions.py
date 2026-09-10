@@ -78,6 +78,43 @@ SESSION_WINDOWS: dict[str, tuple[int, int]] = {
 }
 
 _MSK_TZ = ZoneInfo("Europe/Moscow")
+# Клиринговый разрыв между дневной (day) и вечерней (evening) сессиями.
+_CLEARING: tuple[int, int] = (18 * 60 + 45, 19 * 60 + 5)
+
+
+def is_clearing_gap(ts, sessions: list[str] | None = None) -> bool:
+    """True, если ts попадает в клиринг day→evening (18:45–19:05 MSK).
+
+    Разрыв выдерживается только когда торгуются ОБЕ сессии: day и evening.
+    Если evening выключена — в 18:45 для бота уже конец торгов, клиринга нет.
+    """
+    if not sessions:
+        sessions = ["day"]
+    if "day" not in sessions or "evening" not in sessions:
+        return False
+    msk = ts.astimezone(_MSK_TZ)
+    if msk.weekday() >= 5:
+        return False
+    mins = msk.hour * 60 + msk.minute
+    a, b = _CLEARING
+    return a <= mins < b
+
+
+def should_force_close(ts, sessions: list[str] | None = None, overnight: bool = False) -> bool:
+    """Закрывать ли позицию сейчас принудительно (EOD/ночь).
+
+    Не закрываем:
+      - внутри любой активной сессии;
+      - в клиринге day→evening (18:45–19:05), когда day и evening активны;
+      - если включено держание через ночь (overnight=True).
+    """
+    if is_session_active(ts, sessions):
+        return False
+    if is_clearing_gap(ts, sessions):
+        return False
+    if overnight:
+        return False
+    return True
 
 
 def is_session_active(ts, sessions: list[str] | None = None) -> bool:

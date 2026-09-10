@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
                 slippage_bps=2.0,
                 confirm_flip=2,
                 reentry_cooldown_bars=15,
-                overnight=True,
+                overnight=False,  # закрывать позиции в конце торгового дня (клиринг между день/вечер выдерживается)
             )
             asyncio.create_task(runtime.start(cfg))
     except Exception as e:

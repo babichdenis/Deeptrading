@@ -323,6 +323,16 @@ export async function botStop(): Promise<void> {
   if (!res.ok) throw new Error(`bot stop ${res.status}`);
 }
 
+export async function botSetMode(mode: "sandbox" | "live"): Promise<{ mode: string }> {
+  const res = await fetch(`${API}/api/v1/bot/mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) throw new Error(`bot mode ${res.status}`);
+  return res.json();
+}
+
 export async function botReset(cash: number): Promise<void> {
   const res = await fetch(`${API}/api/v1/bot/reset?initial_cash=${cash}`, { method: "POST" });
   if (!res.ok) throw new Error(`bot reset ${res.status}`);

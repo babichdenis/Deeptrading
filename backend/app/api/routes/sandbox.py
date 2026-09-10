@@ -352,12 +352,30 @@ async def _portfolio_digest() -> dict:
             delta_cash, delta_pnl, tcur, cash_calc, closed_net, unrealized, tinkoff_pnl,
         )
 
+    # Маржинальные показатели (реальные свободные средства = ликвидный портфель − начальная маржа).
+    _liquid = float(base["equity"])
+    _start_margin = 0.0
+    _min_margin = 0.0
+    _suff = 0.0
+    try:
+        _ma = _get_client().users.get_margin_attributes(account_id=_active_creds()[2])
+        _liquid = _q(_ma.liquid_portfolio)
+        _start_margin = _q(_ma.starting_margin)
+        _min_margin = _q(_ma.minimal_margin)
+        _suff = float(_ma.funds_sufficiency_level.units + _ma.funds_sufficiency_level.nano / 1e9)
+    except Exception:
+        pass
+
     return {
         **base,
         "own_in_positions": round(own, 2),
         "positions_value": round(float(base["market_value"]), 2),
         "tinkoff_currencies": round(tcur, 2),
         "tinkoff_shares": round(tshares, 2),
+        "free_funds": round(_liquid - _start_margin, 2),
+        "starting_margin": round(_start_margin, 2),
+        "minimal_margin": round(_min_margin, 2),
+        "funds_sufficiency": round(_suff, 2),
         "trades": {
             "total": total,
             "wins": wins,

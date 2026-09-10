@@ -26,9 +26,12 @@ TQBR_URL = (
     "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR"
     "/securities.json?iss.only=marketdata"
 )
-CACHE_TTL = 15  # сек — MOEX ISS обновляет TQBR quotes каждые 2-5с в сессию
+CACHE_TTL = 30  # сек — MOEX ISS обновляет TQBR quotes каждые 2-5с в сессию
+STALE_TTL = 600  # сек — старый кэш отдаём как fallback при сбое MOEX
 MICRO_CACHE_TTL = 2
 _cached: dict = {"ts": 0.0, "quotes": None}
+_refresh_lock = asyncio.Lock()
+_refresh_task: asyncio.Task | None = None
 
 # журнал последних действий с eligible (add/remove) — показывается в сайдбаре
 _carousel_log: deque[dict] = deque(maxlen=40)
@@ -75,13 +78,38 @@ def _fetch_quotes_uncached() -> dict:
     return out
 
 
+def _schedule_refresh() -> None:
+    """Фоновая перезарядка кэша quotes (не блокирующая in-flight запрос)."""
+    global _refresh_task
+    if _refresh_task is not None and not _refresh_task.done():
+        return
+    async def _worker() -> None:
+        async with _refresh_lock:
+            try:
+                quotes = await asyncio.to_thread(_fetch_quotes_uncached)
+                _cached.update(ts=time.monotonic(), quotes=quotes)
+            except Exception:
+                pass
+    _refresh_task = asyncio.create_task(_worker())
+
+
 def fetch_tqbr_market() -> dict:
+    """Кэшированные TQBR quotes. Не блокирует запрос: при просрочке кэша
+    обновление запускается в фоне, наружу отдаётся старое значение
+    (stale). При отсутствии кэша вообще — fallback на пустой dict,
+    никогда не бросает исключение."""
     now = time.monotonic()
     if _cached["quotes"] is not None and now - _cached["ts"] < CACHE_TTL:
         return _cached["quotes"]
-    quotes = _fetch_quotes_uncached()
-    _cached.update(ts=now, quotes=quotes)
-    return quotes
+    if _cached["quotes"] is not None and now - _cached["ts"] < STALE_TTL:
+        _schedule_refresh()
+        return _cached["quotes"]
+    try:
+        quotes = _fetch_quotes_uncached()
+        _cached.update(ts=now, quotes=quotes)
+        return quotes
+    except Exception:
+        return {}
 
 
 async def _carousel_status(db: AsyncSession) -> dict:
@@ -135,7 +163,10 @@ async def _carousel_status(db: AsyncSession) -> dict:
 
 @router.get("")
 async def screener(db: AsyncSession = Depends(get_db)) -> dict:
-    quotes = fetch_tqbr_market()
+    try:
+        quotes = fetch_tqbr_market()
+    except Exception:
+        quotes = {}
     result = await db.execute(select(Instrument).where(Instrument.class_code == "TQBR"))
     universe = set(
         row[0] for row in (await db.execute(

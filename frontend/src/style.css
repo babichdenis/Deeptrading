@@ -1285,7 +1285,10 @@ body.sb-resizing .sidebar { cursor: col-resize; }
   display: inline-flex; align-items: center; justify-content: center;
   padding: 2px 9px; border-radius: 7px; font-size: 10px; font-weight: 800;
   letter-spacing: 0.06em; border: 1px solid var(--border-soft);
+  cursor: pointer; font-family: inherit;
 }
+.env-badge:hover { filter: brightness(1.2); }
+.env-badge:disabled { opacity: 0.6; cursor: default; }
 .env-badge.env-sandbox { color: var(--gold); background: rgba(244,185,66,0.12); border-color: rgba(244,185,66,0.4); }
 .env-badge.env-live { color: #ff5c5c; background: rgba(255,92,92,0.14); border-color: rgba(255,92,92,0.5); }
 
@@ -1345,6 +1348,8 @@ body.embedded #page-chart .chart-wrap { flex: 1; height: auto; min-height: 0; }
 .hdr-dir .lg-chip { padding: 3px 9px; font-size: 10px; }
 
 .hdr-margin { display: inline-flex; flex-direction: column; align-items: stretch; gap: 4px; padding-left: 10px; border-left: 1px solid var(--border); }
+.hdr-regime { display: flex; align-items: center; gap: 4px; padding-left: 10px; border-left: 1px solid var(--border); }
+.hdr-regime .lg-chip { padding: 3px 9px; font-size: 10px; }
 .hdr-margin-chips { display: flex; align-items: center; gap: 4px; }
 .hdr-margin .lg-chip { padding: 3px 9px; font-size: 10px; }
 .hdr-block-label { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); margin-right: 2px; }

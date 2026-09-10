@@ -195,22 +195,49 @@ def intrabar_exit(
     state: PositionState,
     stop_loss: float | None,
     take_profit: float | None,
+    close_based: bool = False,
 ) -> tuple[float | None, str]:
+    """Выход по стопу/TP на баре.
+
+    close_based=False (по умолчанию, движок/бэктест): классический стоп на
+    касание — срабатывает по bar.low (LONG) / bar.high (SHORT), т.е. любой
+    хвост, дошедший до уровня, закрывает позицию.
+
+    close_based=True (бот, после активации трейлинга): трейлинг-стоп
+    срабатывает только если бар ЗАКРЫЛСЯ за уровнем (или открылся за ним —
+    гэп через стоп). Хвост, который коснулся стопа и вернулся, НЕ закрывает
+    позицию. Используется для трейлинг-стопа, чтобы не выбивать из сделки
+    ложными пробоями.
+    """
     if state is PositionState.LONG:
-        if stop_loss is not None and bar.open <= stop_loss:
-            return bar.open, ExitReason.STOP_LOSS.value
-        if stop_loss is not None and bar.low <= stop_loss:
-            return stop_loss, ExitReason.STOP_LOSS.value
+        if stop_loss is not None:
+            if close_based:
+                if bar.open <= stop_loss:
+                    return bar.open, ExitReason.STOP_LOSS.value
+                if bar.close <= stop_loss:
+                    return bar.close, ExitReason.STOP_LOSS.value
+            else:
+                if bar.open <= stop_loss:
+                    return bar.open, ExitReason.STOP_LOSS.value
+                if bar.low <= stop_loss:
+                    return stop_loss, ExitReason.STOP_LOSS.value
         if take_profit is not None and bar.high >= take_profit:
             if bar.open >= take_profit:
                 return bar.open, ExitReason.TARGET.value
             return take_profit, ExitReason.TARGET.value
         return None, ""
     if state is PositionState.SHORT:
-        if stop_loss is not None and bar.open >= stop_loss:
-            return bar.open, ExitReason.STOP_LOSS.value
-        if stop_loss is not None and bar.high >= stop_loss:
-            return stop_loss, ExitReason.STOP_LOSS.value
+        if stop_loss is not None:
+            if close_based:
+                if bar.open >= stop_loss:
+                    return bar.open, ExitReason.STOP_LOSS.value
+                if bar.close >= stop_loss:
+                    return bar.close, ExitReason.STOP_LOSS.value
+            else:
+                if bar.open >= stop_loss:
+                    return bar.open, ExitReason.STOP_LOSS.value
+                if bar.high >= stop_loss:
+                    return stop_loss, ExitReason.STOP_LOSS.value
         if take_profit is not None and bar.low <= take_profit:
             if bar.open <= take_profit:
                 return bar.open, ExitReason.TARGET.value

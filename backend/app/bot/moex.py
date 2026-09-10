@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -26,23 +27,31 @@ def moex_candles(ticker: str, from_date: str, till_date: str) -> list[dict]:
     """1-мин свечи из свободного MOEX ISS (без T-Invest лимитов)."""
     url = (f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR"
            f"/securities/{ticker}/candles.json?from={from_date}&till={till_date}&interval=1")
-    data = json.loads(urllib.request.urlopen(url, timeout=15).read())
-    candles = data["candles"]
-    cols = {n: i for i, n in enumerate(candles["columns"])}
-    out = []
-    for r in candles["data"]:
-        ts = r[cols["begin"]]
-        if isinstance(ts, str):
-            ts = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
-        out.append({
-            "open": r[cols["open"]],
-            "high": r[cols["high"]],
-            "low": r[cols["low"]],
-            "close": r[cols["close"]],
-            "volume": r[cols["volume"]],
-            "ts": ts,
-        })
-    return out
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            data = json.loads(urllib.request.urlopen(url, timeout=20).read())
+            candles = data["candles"]
+            cols = {n: i for i, n in enumerate(candles["columns"])}
+            out = []
+            for r in candles["data"]:
+                ts = r[cols["begin"]]
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+                out.append({
+                    "open": r[cols["open"]],
+                    "high": r[cols["high"]],
+                    "low": r[cols["low"]],
+                    "close": r[cols["close"]],
+                    "volume": r[cols["volume"]],
+                    "ts": ts,
+                })
+            return out
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(1 + attempt)  # 1с, 2с паузы между попытками
+    raise last_err if last_err else RuntimeError("MOEX fetch failed")
 
 
 def sync_moex_sync(figi: str, ticker: str, days: int = 10) -> int:
@@ -78,4 +87,8 @@ async def ensure_moex_candles(figi: str, ticker: str, days: int = 10) -> int:
 
     if await asyncio.to_thread(_fresh):
         return 0
-    return await asyncio.to_thread(sync_moex_sync, figi, ticker, days)
+    try:
+        return await asyncio.to_thread(sync_moex_sync, figi, ticker, days)
+    except Exception as e:
+        print(f"[moex] ensure_moex_candles {ticker} failed: {e}")
+        return 0

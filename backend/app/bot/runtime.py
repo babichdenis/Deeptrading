@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time as _time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -43,6 +46,9 @@ ENSEMBLE_BUFFER = 4320  # 3 дня 1m-свечей (~72 часовых бара 
 DAILY_PNL_TTL = timedelta(seconds=30)
 POS_PCT = 0.20  # доля портфеля на одну позицию (модель portfolio_merge)
 
+# Файл, где хранятся настройки бота (единственный источник правды; БД — только резерв).
+_BOT_CONFIG_FILE = str(Path(__file__).resolve().parents[2] / "data" / "bot_config.json")
+
 
 @dataclass
 class BotConfig:
@@ -58,7 +64,7 @@ class BotConfig:
     atr_multiplier: float = 4.0
     atr_risk_reward: float = 4.0
     # --- Trailing stop ---
-    initial_sl_atr: float = 2.5  # стандартный SL = 2.5×ATR (фикс; не optuna sl_mult)
+    initial_sl_atr: float = 4.0  # стандартный SL = 4×ATR (фикс; не optuna sl_mult)
     trail_activation_comm_mult: float = 4.0  # активация при pnl >= комиссия_входа × mult
     trail_distance_atr: float = 2.5  # дистанция трейлинга за ценой = 2.5×ATR
     allow_short: bool = False
@@ -81,18 +87,23 @@ class BotConfig:
     # --- Re-entry cooldown ---
     reentry_cooldown_bars: int = 15  # баров между выходом и повторным входом (0=отключено)
     # --- Overnight ---
-    overnight: bool = False  # закрывать позиции в конце сессии
+    overnight: bool = False  # по умолчанию закрывать на конец торгового дня; True = держать через ночь
     # --- Margin ---
     use_margin: bool = True  # использовать маржинальное кредитование
     margin_sessions: list = field(default_factory=lambda: ["day"])  # сессии с маржой: morning/day/evening
     margin_leverage: float = 0.0  # потолок плеча: 0 = Max (как одобрит брокер), иначе 2/3/4/5...
+    margin_sizing: str = "divide"  # divide: позиция=бюджет (свои=бюджет/плечо); multiply: позиция=бюджет×плечо
+    # --- Торговые режимы (regime gate): в каких режимах рынка разрешены входы ---
+    trade_regimes: list = field(default_factory=lambda: ["NEUTRAL", "TREND_UP", "TREND_DOWN", "HIGH_VOLATILITY", "RANGE"])
+    trend_alignment: bool = True  # не входить против тренда (TREND_UP→BUY, TREND_DOWN→SELL)
     max_margin_pct: float = 80.0  # макс % от доступного маржинального лимита на сделку
 
 
 # Поля BotConfig, которые сохраняются в БД и восстанавливаются при старте бота.
 BOT_PERSIST_FIELDS = (
     "sessions", "long_allowed", "short_allowed", "leverage",
-    "margin_sessions", "margin_leverage",
+    "margin_sessions", "margin_leverage", "margin_sizing",
+    "trade_regimes", "trend_alignment",
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
     "overnight", "reentry_cooldown_bars", "confirm_flip",
@@ -100,8 +111,17 @@ BOT_PERSIST_FIELDS = (
 
 
 async def load_bot_settings() -> dict:
-    """Прочитать сохранённые настройки бота из bot_settings (key='runtime_config')."""
+    """Прочитать сохранённые настройки бота из файла bot_config.json (и БД как фолбэк)."""
     from app.models.bot_setting import BotSetting
+    # Файл — источник правды. БД оставляем как резерв для старых версий/тестов.
+    try:
+        _p = Path(_BOT_CONFIG_FILE)
+        if _p.exists():
+            _data = json.loads(_p.read_text(encoding="utf-8"))
+            if isinstance(_data, dict) and _data:
+                return _data
+    except Exception:
+        pass
     try:
         async with SessionLocal() as db:
             row = await db.get(BotSetting, "runtime_config")
@@ -111,7 +131,7 @@ async def load_bot_settings() -> dict:
 
 
 async def save_bot_settings(cfg) -> None:
-    """Сохранить изменяемые настройки BotConfig в bot_settings."""
+    """Сохранить изменяемые настройки BotConfig в файл bot_config.json (+ БД для совместимости)."""
     from app.models.bot_setting import BotSetting
     data = {}
     for f in BOT_PERSIST_FIELDS:
@@ -120,12 +140,52 @@ async def save_bot_settings(cfg) -> None:
             v = list(v)
         data[f] = v
     try:
+        _p = Path(_BOT_CONFIG_FILE)
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        _tmp = _p.with_suffix(".json.tmp")
+        _tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        _tmp.replace(_p)
+    except Exception:
+        pass
+    try:
         async with SessionLocal() as db:
             row = await db.get(BotSetting, "runtime_config")
             if row is None:
                 db.add(BotSetting(key="runtime_config", value=data))
             else:
                 row.value = data
+            await db.commit()
+    except Exception:
+        pass
+
+
+# Флаг-состояние runtime, которое должно переживать рестарты бота (ключ='bot_flags').
+_BOT_FLAGS_KEY = "bot_flags"
+
+
+async def load_bot_flags() -> dict:
+    """Прочитать персистентные runtime-флаги (entries_paused и т.п.) из bot_settings."""
+    from app.models.bot_setting import BotSetting
+    try:
+        async with SessionLocal() as db:
+            row = await db.get(BotSetting, _BOT_FLAGS_KEY)
+            return dict(row.value) if (row is not None and row.value) else {}
+    except Exception:
+        return {}
+
+
+async def save_bot_flags(flags: dict) -> None:
+    """Сохранить отдельный флаг (merge) в bot_settings."""
+    from app.models.bot_setting import BotSetting
+    try:
+        async with SessionLocal() as db:
+            row = await db.get(BotSetting, _BOT_FLAGS_KEY)
+            cur = dict(row.value) if (row is not None and row.value) else {}
+            cur.update(flags)
+            if row is None:
+                db.add(BotSetting(key=_BOT_FLAGS_KEY, value=cur))
+            else:
+                row.value = cur
             await db.commit()
     except Exception:
         pass
@@ -164,7 +224,7 @@ def _new_order_id() -> str:
     return f"paper-{uuid.uuid4().hex[:12]}"
 
 
-from app.engine.sessions import is_session_active as _sessions_allowed
+from app.engine.sessions import is_session_active as _sessions_allowed, should_force_close as _should_force_close, is_clearing_gap as _is_clearing_gap
 
 
 class PaperBotRuntime:
@@ -213,6 +273,15 @@ class PaperBotRuntime:
         }
         self._persist_queue: deque = deque(maxlen=2000)
         self._persist_queue_5m: deque = deque(maxlen=2000)  # (figi, ts, o, h, l, c, v) для 5m
+        # --- Метрики движка (для мониторинга/автореакции в status) ---
+        self.metrics: dict = {
+            "started_ts": None,
+            "bar_ms_total": 0.0, "bar_ms_n": 0, "bar_ms_max": 0.0,
+            "ensemble_ms_total": 0.0, "ensemble_ms_n": 0, "ensemble_ms_max": 0.0,
+            "persist_ms_total": 0.0, "persist_ms_n": 0, "persist_ms_max": 0.0,
+            "last_alert": None,
+            "alerts": [],
+        }
         # --- Closed-bar gates ---
         self._last_closed_bar: dict[str, datetime] = {}  # figi -> ts последней обработанной ЗАКРЫТОЙ свечи
         self._last_persist_bar: dict[str, datetime] = {}  # figi -> ts последней записанной в БД ЗАКРЫТОЙ свечи
@@ -351,6 +420,7 @@ class PaperBotRuntime:
                 quorum=2, session="all", sessions=sessions,
                 setups=V2_SETUPS, sl_mult=4.0, rr=4.0, vol_thr=0.0,
                 neutral_mode="semi_flip",
+                entry_macd_1m=True,
             )
 
         active = list(opt.get("active_sids", ALL_SIDS))
@@ -365,6 +435,7 @@ class PaperBotRuntime:
             rr=float(opt.get("rr", 4.0)),
             vol_thr=float(opt.get("vol_thr", 0.0) or 0.0),
             neutral_mode="semi_flip",
+            entry_macd_1m=True,
         )
 
     def _log_no_trade(self, figi: str, reason: str, detail: str = "") -> None:
@@ -543,6 +614,9 @@ class PaperBotRuntime:
                 "leverage": self.config.leverage,
                 "margin_sessions": list(self.config.margin_sessions),
                 "margin_leverage": float(self.config.margin_leverage or 0.0),
+                "margin_sizing": self.config.margin_sizing,
+                "trade_regimes": list(self.config.trade_regimes),
+                "trend_alignment": bool(self.config.trend_alignment),
                 "commission_rate": self.config.commission_rate,
                 "slippage_bps": self.config.slippage_bps,
                 "confirm_flip": self.config.confirm_flip,
@@ -566,6 +640,7 @@ class PaperBotRuntime:
                 "entries_paused": risk.entries_paused,
             },
             "carousel": self.carousel_diag,
+            "metrics": dict(self.metrics),
         }
 
     def risk_snapshot(self) -> RiskSnapshot:
@@ -609,6 +684,14 @@ class PaperBotRuntime:
                             pass
         except Exception:
             pass
+        # Восстанавливаем персистентные runtime-флаги (entries_paused переживает рестарт).
+        try:
+            _flags = await load_bot_flags()
+            self.entries_paused = bool(_flags.get("entries_paused", False))
+            if self.entries_paused:
+                self._log("ВОССТАНОВЛЕНО: пауза новых входов (entries_paused=true) сохранена между рестартами")
+        except Exception:
+            pass
         if cfg.use_ensemble:
             cfg.interval_name = "1min"
         self._log(
@@ -631,6 +714,14 @@ class PaperBotRuntime:
         self.error = None
         self.candles_seen = 0
         self.signals_seen = 0
+        self.metrics = {
+            "started_ts": None,
+            "bar_ms_total": 0.0, "bar_ms_n": 0, "bar_ms_max": 0.0,
+            "ensemble_ms_total": 0.0, "ensemble_ms_n": 0, "ensemble_ms_max": 0.0,
+            "persist_ms_total": 0.0, "persist_ms_n": 0, "persist_ms_max": 0.0,
+            "last_alert": None,
+            "alerts": [],
+        }
         self.strategies = {}
         self.buffers = {}
         self.pending_orders = {}
@@ -659,11 +750,13 @@ class PaperBotRuntime:
                 self._log(f"STREAM MANAGER не запущен: {str(e)[:80]}")
                 self.stream_manager = None
             try:
-                real_cash = await self.broker.cash()
+                # Капитал = equity (ликвидный портфель), НЕ свободные деньги:
+                # деньги на счёте искажены шортами/позициями, equity — реальная стоимость.
+                real_cash = await self.broker.equity()
                 if real_cash and real_cash > 0:
                     cfg.initial_cash = real_cash
                     cfg.ensemble_capital = real_cash * POS_PCT
-                    self._log(f"КАПИТАЛ со счёта: {real_cash:.0f} ₽ · позиция до {cfg.ensemble_capital:.0f} ({POS_PCT*100:.0f}%)")
+                    self._log(f"КАПИТАЛ со счёта (equity): {real_cash:.0f} ₽ · позиция до {cfg.ensemble_capital:.0f} ({POS_PCT*100:.0f}%)")
             except Exception as e:
                 self._log(f"КАПИТАЛ не получен: {str(e)[:80]}")
         else:
@@ -721,34 +814,38 @@ class PaperBotRuntime:
             from app.engine.models import Candle as EC
 
             async def _load_one(u):
-                async with SessionLocal() as db:
-                    if cfg.use_ensemble:
-                        from app.bot.ensemble_strategy import EnsembleV4Strategy
-                        proto = EnsembleV4Strategy(await self._build_ensemble_params(
-                            db, u["figi"], u.get("ticker", ""), u.get("lot_size", 10),
-                            cfg.ensemble_capital, cfg.sessions))
-                    else:
-                        proto = build_strategy(cfg.strategy_id, cfg.params)
-                buf = deque(maxlen=ENSEMBLE_BUFFER if cfg.use_ensemble else MAX_BUFFER)
-                async with SessionLocal() as db:
-                    if cfg.use_ensemble:
-                        from app.bot.moex import ensure_moex_candles
-                        await ensure_moex_candles(u["figi"], u.get("ticker", ""), days=10)
-                        candles = await _lc(db, u["figi"], 1,
-                                            date_from=datetime.now(timezone.utc) - timedelta(days=3))
-                        for row in candles:
-                            buf.append(EC(ts=row.ts, open=row.open, high=row.high,
-                                          low=row.low, close=row.close, volume=row.volume))
-                    else:
-                        from app.services.candle_cache import ensure_candles
-                        await ensure_candles(db, u["figi"], cfg.interval_name, days=7)
-                        interval_value = self._interval_value()
-                        candles = await _lc(db, u["figi"], interval_value,
-                                            date_from=datetime.now(timezone.utc) - timedelta(days=3))
-                        for row in candles[-MAX_BUFFER:]:
-                            buf.append(EC(ts=row.ts, open=row.open, high=row.high,
-                                          low=row.low, close=row.close, volume=row.volume))
-                return u["figi"], proto, buf
+                try:
+                    async with SessionLocal() as db:
+                        if cfg.use_ensemble:
+                            from app.bot.ensemble_strategy import EnsembleV4Strategy
+                            proto = EnsembleV4Strategy(await self._build_ensemble_params(
+                                db, u["figi"], u.get("ticker", ""), u.get("lot_size", 10),
+                                cfg.ensemble_capital, cfg.sessions))
+                        else:
+                            proto = build_strategy(cfg.strategy_id, cfg.params)
+                    buf = deque(maxlen=ENSEMBLE_BUFFER if cfg.use_ensemble else MAX_BUFFER)
+                    async with SessionLocal() as db:
+                        if cfg.use_ensemble:
+                            from app.bot.moex import ensure_moex_candles
+                            await ensure_moex_candles(u["figi"], u.get("ticker", ""), days=10)
+                            candles = await _lc(db, u["figi"], 1,
+                                                date_from=datetime.now(timezone.utc) - timedelta(days=3))
+                            for row in candles:
+                                buf.append(EC(ts=row.ts, open=row.open, high=row.high,
+                                              low=row.low, close=row.close, volume=row.volume))
+                        else:
+                            from app.services.candle_cache import ensure_candles
+                            await ensure_candles(db, u["figi"], cfg.interval_name, days=7)
+                            interval_value = self._interval_value()
+                            candles = await _lc(db, u["figi"], interval_value,
+                                                date_from=datetime.now(timezone.utc) - timedelta(days=3))
+                            for row in candles[-MAX_BUFFER:]:
+                                buf.append(EC(ts=row.ts, open=row.open, high=row.high,
+                                              low=row.low, close=row.close, volume=row.volume))
+                    return u["figi"], proto, buf
+                except Exception as e:
+                    self._log(f"⚠ LOAD-ERROR {u.get('ticker', u['figi'][-6:])}: {str(e)[:120]}")
+                    return None
 
             sem = asyncio.Semaphore(3)
 
@@ -757,9 +854,15 @@ class PaperBotRuntime:
                     return await _load_one(u)
 
             results = await asyncio.gather(*[_load_bounded(u) for u in self.universe])
-            for figi, proto, buf in results:
+            for res in results:
+                if res is None:
+                    continue
+                figi, proto, buf = res
                 self.strategies[figi] = proto
                 self.buffers[figi] = buf
+            if not self.strategies:
+                raise RuntimeError("no strategies loaded (all tickers failed)")
+            self.universe = [u for u in self.universe if u["figi"] in self.strategies]
 
             try:
                 held_now = await self.broker.positions()
@@ -877,6 +980,7 @@ class PaperBotRuntime:
     async def set_entries_paused(self, paused: bool) -> dict:
         prev = self.entries_paused
         self.entries_paused = paused
+        await save_bot_flags({"entries_paused": paused})
         if paused != prev:
             self.events.log("PAUSE_NEW_ENTRIES" if paused else "RESUME_NEW_ENTRIES",
                             reason="manual")
@@ -948,10 +1052,11 @@ class PaperBotRuntime:
                 async with SessionLocal() as db:
                     # Ищем eligible тикеры которые ещё НЕ в universe
                     current_figi = {u["figi"] for u in self.universe}
+                    _skip = list(current_figi) if current_figi else ["__none__"]
                     rows = (await db.execute(
                         _text("SELECT figi, ticker, lot_size FROM universe "
-                              "WHERE eligible_tier = 'eligible' AND figi NOT IN :skip"),
-                        {"skip": list(current_figi) if current_figi else ["__none__"]}
+                              "WHERE eligible_tier = 'eligible' AND NOT (figi = ANY(:skip))"),
+                        {"skip": _skip}
                     )).all()
 
                     # Диагностика: считаем все eligible + их свечи
@@ -1023,8 +1128,9 @@ class PaperBotRuntime:
 
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass
+            except Exception as _e:
+                self._log(f"⚠ HOT-ADD: ошибка — {type(_e).__name__}: {_e}")
+                self.carousel_diag["last_error"] = str(_e)
 
     async def _session_monitor(self) -> None:
         """Фоновая задача: логирует состояние при смене торговой сессии.
@@ -1062,6 +1168,91 @@ class PaperBotRuntime:
             except Exception:
                 pass
             await asyncio.sleep(20.0)
+
+    async def _metrics_loop(self) -> None:
+        """Фоновая задача: каждые 30с собирает метрики движка, считает rate свечей,
+        реагирует на аномалии (нет свечей в торговое время, очередь персиста растёт,
+        ensemble тормозит) и пишет их в status. Если всё ОК — короткая TECHINFO-строка.
+
+        Ответ «здоровья» хранится в self.metrics и отдаётся в GET /api/v1/bot/status
+        (поле metrics), чтобы UI и внешние проверки видели живое состояние без парсинга лога.
+        """
+        from app.bot.session import session_state, trading_session
+
+        prev_received = self._candles_received
+        prev_time = _time.monotonic()
+        self.metrics["started_ts"] = datetime.now(timezone.utc).isoformat()
+        while self.running:
+            await asyncio.sleep(30.0)
+            try:
+                now = _time.monotonic()
+                dt = now - prev_time
+                if dt <= 0:
+                    dt = 1.0
+                recv = self._candles_received - prev_received
+                cps = recv / dt
+                prev_received = self._candles_received
+                prev_time = now
+
+                m = self.metrics
+                bar_avg = m["bar_ms_total"] / m["bar_ms_n"] if m["bar_ms_n"] else 0.0
+                ens_avg = m["ensemble_ms_total"] / m["ensemble_ms_n"] if m["ensemble_ms_n"] else 0.0
+                ps_avg = m["persist_ms_total"] / m["persist_ms_n"] if m["persist_ms_n"] else 0.0
+
+                m.update({
+                    "candles_per_sec": round(cps, 3),
+                    "received": self._candles_received,
+                    "seen": self.candles_seen,
+                    "rejected": self._candles_rejected,
+                    "signals": self.signals_seen,
+                    "bar_ms_avg": round(bar_avg, 1),
+                    "ensemble_ms_avg": round(ens_avg, 1),
+                    "persist_ms_avg": round(ps_avg, 1),
+                    "persist_q": len(self._persist_queue),
+                    "persist_q5": len(self._persist_queue_5m),
+                    "universe_active": len(self.strategies),
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                })
+
+                alerts: list[str] = []
+                # 1. Свежесть данных (в рабочую сессию свечи ДОЛЖНЫ идти)
+                try:
+                    _tss = trading_session()
+                    _ss = session_state()
+                    _trade_ok = _ss in ("trading", "pre_open") and _tss in (self.config.sessions or [])
+                except Exception:
+                    _trade_ok = True
+                if self.last_candle_ts is None:
+                    alerts.append("НЕТ свечей с момента старта")
+                elif _trade_ok:
+                    age = (datetime.now(timezone.utc) - self.last_candle_ts).total_seconds()
+                    if age > 90:
+                        alerts.append(f"НЕТ свечей {age:.0f}с (сессия активна, cps={cps:.2f})")
+                # 2. Очередь персиста растёт
+                if len(self._persist_queue) > 1900 or len(self._persist_queue_5m) > 1900:
+                    alerts.append(f"очередь персиста почти полна q={len(self._persist_queue)} q5={len(self._persist_queue_5m)}")
+                # 3. Ensemble медленный (полный compute_ensemble на 5м-закрытии)
+                if m["ensemble_ms_n"] > 0 and ens_avg > 2000:
+                    alerts.append(f"ensemble медленный avg={ens_avg:.0f}ms max={m['ensemble_ms_max']:.0f}ms")
+                # 4. Обработка бара в целом не должна простаивать event loop
+                if m["bar_ms_n"] > 0 and bar_avg > 500:
+                    alerts.append(f"бар обрабатывается avg={bar_avg:.0f}ms max={m['bar_ms_max']:.0f}ms")
+
+                m["last_alert"] = None
+                m["alerts"] = alerts[-5:]
+                if alerts:
+                    self._log("⚠ MЕТРИКИ: " + " · ".join(alerts))
+                    for a in alerts[-3:]:
+                        self.events.log("METRICS_ALERT", reason=a)
+                else:
+                    self._log(
+                        f"TECHINFO метрики cps={cps:.2f} bar={bar_avg:.0f}ms "
+                        f"ens={ens_avg:.0f}ms persist={ps_avg:.0f}ms "
+                        f"q={len(self._persist_queue)}/{len(self._persist_queue_5m)} "
+                        f"сигналов={self.signals_seen}"
+                    )
+            except Exception as e:
+                self._log(f"METRICS_LOOP_ERR {type(e).__name__}: {str(e)[:120]}")
 
     async def _reconcile_loop(self) -> None:
         """Фоновая задача: каждые 60с.
@@ -1106,9 +1297,36 @@ class PaperBotRuntime:
                 local_by_figi.setdefault(r.figi, []).append(r)
 
             created = closed = 0
+            now = datetime.now(timezone.utc)
+            # Grace-период: строки, открытые/закрытые в последние 2 минуты, НЕ трогаем —
+            # брокер (sandbox/биржа) может отражать позицию с лагом после ордера.
+            _grace = 120.0
             # 1) Позиции брокера без локальной строки -> создать.
             for figi, bp in broker_pos.items():
                 if figi in local_by_figi:
+                    continue
+                # Grace-период против «двойняшек orphan»: если по figi НЕДАВНО
+                # была локально закрыта строка (напр. только что сработал
+                # stop_loss, а брокер ещё держит позицию с лагом отражения) —
+                # НЕ создаём rebuilt. Иначе: строку создали, брокер отразил
+                # закрытие, позиция исчезла, строка осталась orphan =>
+                # следующий цикл пометит её orphan_cleanup (+0₽, дубликат).
+                # Ждём поэтому grace-секунд: брокер либо уберёт позицию
+                # (всё сходится), либо она останется — тогда rebuilt создастся
+                # на следующем цикле уже без потери реальной позиции.
+                _recently_closed = (await db.execute(
+                    _sel_r(SandboxTrade)
+                    .where(SandboxTrade.figi == figi,
+                           SandboxTrade.mode == self.broker_mode,
+                           SandboxTrade.exit_time.is_not(None),
+                           SandboxTrade.exit_time >= now - timedelta(seconds=_grace))
+                    .order_by(SandboxTrade.exit_time.desc())
+                    .limit(1)
+                )).scalar_one_or_none()
+                if _recently_closed is not None:
+                    _tk = self.tickers.get(figi, figi[:8])
+                    self._log(f"RECONCILE: position {_tk} ({figi[-6:]}) не пересоздаю — "
+                              f"локально закрыта {(_grace - (now - _recently_closed.exit_time).total_seconds()):.0f}с назад, жду отражения брокера")
                     continue
                 ticker = self.tickers.get(figi, figi[:8])
                 db.add(SandboxTrade(
@@ -1126,10 +1344,6 @@ class PaperBotRuntime:
                 self._log(f"RECONCILE: создана строка {ticker} ({figi[-6:]}) {bp.side} {bp.qty} @{getattr(bp, 'entry_price', 0.0):.2f}")
 
             # 2) Локальные строки без позиции брокера -> закрыть (orphan).
-            now = datetime.now(timezone.utc)
-            # Grace-период: строки, открытые в последние 2 минуты, НЕ трогаем —
-            # брокер (sandbox/биржа) может отражать позицию с лагом после ордера.
-            _grace = 120.0
             for figi, lst in local_by_figi.items():
                 if figi in broker_pos:
                     continue
@@ -1195,6 +1409,7 @@ class PaperBotRuntime:
             batch = _drain(self._persist_queue)
             batch5 = _drain(self._persist_queue_5m)
             try:
+                _tp0 = _time.perf_counter()
                 sql = _text(
                     "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
                     "VALUES (:f, 1, :ts, :o, :h, :l, :c, :v) "
@@ -1215,6 +1430,11 @@ class PaperBotRuntime:
                     for f, ts, o, h, l, cl, v in batch5:
                         await db.execute(sql5, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
                     await db.commit()
+                _pt = (_time.perf_counter() - _tp0) * 1000
+                self.metrics["persist_ms_total"] += _pt
+                self.metrics["persist_ms_n"] += 1
+                if _pt > self.metrics["persist_ms_max"]:
+                    self.metrics["persist_ms_max"] = _pt
                 self._persist_flushes += 1
                 if batch or batch5:
                     _s = (batch[0] if batch else batch5[0])
@@ -1253,13 +1473,20 @@ class PaperBotRuntime:
         self._hot_add_task = asyncio.create_task(self._hot_add_universe())
         self._reconcile_task = asyncio.create_task(self._reconcile_loop())
         self._session_task = asyncio.create_task(self._session_monitor())
+        self._metrics_task = asyncio.create_task(self._metrics_loop())
         try:
             async for candle in feed.stream():
                 if not self.running:
                     exited = "running_flag_false"
                     break
                 self.mode = feed.mode
+                _t1 = _time.perf_counter()
                 await self._process_candle(candle)
+                _dt = (_time.perf_counter() - _t1) * 1000
+                self.metrics["bar_ms_total"] += _dt
+                self.metrics["bar_ms_n"] += 1
+                if _dt > self.metrics["bar_ms_max"]:
+                    self.metrics["bar_ms_max"] = _dt
         except asyncio.CancelledError:
             exited = "cancelled"
             raise
@@ -1276,7 +1503,7 @@ class PaperBotRuntime:
                     await self._persist_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task'):
+            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task', '_metrics_task'):
                 task = getattr(self, t, None)
                 if task:
                     task.cancel()
@@ -1288,6 +1515,7 @@ class PaperBotRuntime:
             self.events.log("BOT_LOOP_EXITED", reason=exited)
 
     async def _process_candle(self, c) -> None:
+        _t0 = _time.perf_counter()
         figi = c.figi
         figi = self.tcs_to_bbg.get(c.figi, c.figi)
 
@@ -1419,20 +1647,21 @@ class PaperBotRuntime:
             if figi in self._exit_plans:
                 _closed = await self._step_exit(figi, c, pos)
 
-        # --- Overnight: force close at session end ---
-        if not _closed and self.config.overnight:
-            
-            if not _sessions_allowed(c.ts, self.config.sessions):
-                trade = await self.broker.close_position(figi, float(c.open), "overnight_force_close")
-                self._held.discard(figi)
-                self._opposite_count.pop(figi, None)
-                self._last_exit_bar[figi] = self._bar_counter
-                self._clear_exit_state(figi)
-                _bh_overnight = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
-                if trade:
-                    await self._st_close(figi, float(c.open), reason="overnight_force_close",
-                                          net=float(trade.net_pnl), meta={"bars_held": _bh_overnight})
-                    self._log(f"ВЫХОД {figi[-6:]} (overnight) pnl={float(trade.net_pnl):+.2f}")
+        # --- Overnight / EOD: force close outside trading sessions ---
+        # overnight=True  = держать позиции через ночь (не закрывать)
+        # overnight=False = закрывать на конец торгового дня, но клиринг day→evening
+        #                   и активные сессии всегда выдерживаются
+        if not _closed and _should_force_close(c.ts, self.config.sessions, self.config.overnight):
+            trade = await self.broker.close_position(figi, float(c.open), "overnight_force_close")
+            self._held.discard(figi)
+            self._opposite_count.pop(figi, None)
+            self._last_exit_bar[figi] = self._bar_counter
+            self._clear_exit_state(figi)
+            _bh_overnight = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
+            if trade:
+                await self._st_close(figi, float(c.open), reason="overnight_force_close",
+                                      net=float(trade.net_pnl), meta={"bars_held": _bh_overnight})
+                self._log(f"ВЫХОД {figi[-6:]} (overnight) pnl={float(trade.net_pnl):+.2f}")
 
         # --- Re-entry cooldown check ---
         cooldown = self.config.reentry_cooldown_bars
@@ -1446,17 +1675,43 @@ class PaperBotRuntime:
             return
         self._signal_busy.add(figi)
         try:
+            _t2 = _time.perf_counter()
             sig = await asyncio.to_thread(strategy.on_bar, list(buffer))
+            _et = (_time.perf_counter() - _t2) * 1000
+            self.metrics["ensemble_ms_total"] += _et
+            self.metrics["ensemble_ms_n"] += 1
+            if _et > self.metrics["ensemble_ms_max"]:
+                self.metrics["ensemble_ms_max"] = _et
         except Exception as e:
             self.events.log("SIGNAL_ERROR", figi=figi, reason=str(e)[:200])
             sig = None
         finally:
             self._signal_busy.discard(figi)
-        self._regimes[figi] = {
-            "state": getattr(strategy, "_last_regime", None),
-            "vol": getattr(strategy, "_last_vol", None),
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
+        _reg_state = getattr(strategy, "_last_regime", None)
+        _reg_vol = getattr(strategy, "_last_vol", None)
+        # Fallback: если стратегия не вернула regime timeline (новые/hot-add тикеры),
+        # считаем режим сами по 5m-барам — чтобы UI всегда показывал режим и Vol.
+        # Дорого, поэтому только на 5m-границе и пока нет данных.
+        if _reg_state is None and c.ts.minute % 5 == 0:
+            try:
+                from app.services.regime import RegimeDetector
+                from app.services.ensemble import resample as _resample5
+                _c5 = _resample5(list(buffer), 300)
+                _tl = RegimeDetector().compute(_c5)
+                if _tl:
+                    _r = _tl[-1]
+                    _reg_state = {"state": _r.get("state"), "reason": _r.get("reason"),
+                                  "features": _r.get("features")}
+                    _feats = _r.get("features") or {}
+                    _reg_vol = _feats.get("volume_ratio")
+            except Exception:
+                pass
+        if _reg_state is not None:
+            self._regimes[figi] = {
+                "state": _reg_state,
+                "vol": _reg_vol,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
         if sig is None:
             return
         self.signals_seen += 1
@@ -1514,6 +1769,27 @@ class PaperBotRuntime:
                                 reason="SHORT_DISABLED")
                 self._log_no_trade(figi, "short_disabled")
                 return
+            # Regime gate: режим рынка должен быть в разрешённых trade_regimes.
+            _allowed_reg = self.config.trade_regimes or []
+            _reg = (self._regimes.get(figi) or {}).get("state")
+            _reg_name = _reg.get("state") if isinstance(_reg, dict) else None
+            if _reg_name and _allowed_reg and _reg_name not in _allowed_reg:
+                self._log(f"ПРОПУСК ВХОДА {ticker}: режим {_reg_name} отключён "
+                          f"(разрешены {'/'.join(_allowed_reg) or '—'})")
+                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                reason=f"REGIME_{_reg_name}")
+                self._log_no_trade(figi, f"regime_{_reg_name.lower()}")
+                return
+            # Trend-alignment: не входим против тренда (TREND_UP → только BUY, TREND_DOWN → только SELL).
+            if getattr(self.config, "trend_alignment", True) and _reg_name in ("TREND_UP", "TREND_DOWN"):
+                _against = (_reg_name == "TREND_UP" and sig.side.value == "SELL") or \
+                           (_reg_name == "TREND_DOWN" and sig.side.value == "BUY")
+                if _against:
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: {sig.side.value} против тренда {_reg_name}")
+                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                    reason=f"TREND_ALIGN_{_reg_name}")
+                    self._log_no_trade(figi, "trend_alignment")
+                    return
             risk = self.risk_snapshot()
             if not risk.entries_allowed():
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
@@ -1564,6 +1840,7 @@ class PaperBotRuntime:
     async def _submit_order(self, figi: str, ticker: str, action: str, side: str, meta: dict | None = None) -> None:
         cfg = self.config
         qty = cfg.qty_per_trade
+        _used_lev = 1.0
         if action == "open" and cfg.use_ensemble:
             buf = self.buffers.get(figi)
             price = float(buf[-1].close) if buf else 0.0
@@ -1579,7 +1856,7 @@ class PaperBotRuntime:
                     # Плечо маржи доводит размер позиции до максимума, который разрешит
                     # брокер (см. блок MARGIN ниже) — НЕ до максимума портфеля.
                     _eq = await self.broker.equity()
-                    _free = await self.broker.free_cash()
+                    _free = await self.broker.free_funds()
                     budget = min(_eq * POS_PCT, _free) if _free > 0 else _eq * POS_PCT
                 except Exception:
                     try:
@@ -1592,7 +1869,16 @@ class PaperBotRuntime:
             if price <= 0 or lot <= 0 or lot_cost <= 0:
                 self._log(f"ПРОПУСК СДЕЛКИ {ticker}: цена={price} лот={lot}")
                 return
-            own_per_lot = lot_cost / lev
+            own_per_lot = lot_cost  # divide: позиция = бюджет (свои = бюджет / плечо)
+            # Ранняя проверка достаточности бюджета. В divide-режиме плечо НЕ
+            # уменьшает требуемые свои на 1 лот (own_per_lot == lot_cost),
+            # поэтому если денег нет даже на лот — пропускаем СРАЗУ, без
+            # запроса max.lots у брокера (Log: «зачем просить маржу,
+            # если даже на одну акцию не хватает»). В multiply-режиме плечо
+            # может спасти лот (own_per_lot = lot_cost/lev) — идём в блок MARGIN.
+            if budget < lot_cost and str(cfg.margin_sizing).lower() != "multiply":
+                self._log(f"ПРОПУСК СДЕЛКИ {ticker}: бюджет {budget:.0f} < стоимость лота {lot_cost:.0f} (divide)")
+                return
             # --- Маржинальное плечо: запрашиваем у брокера ДО входа, ответ в лог ---
             if isinstance(self.broker, LiveBroker):
                 try:
@@ -1617,15 +1903,25 @@ class PaperBotRuntime:
                         lev = _max_lev if _want <= 0 else min(_max_lev, _want)
                         if lev < 1.0:
                             lev = 1.0
-                        own_per_lot = lot_cost / lev
+                        # Режим размера позиции:
+                        #   divide   — позиция = бюджет (свои = бюджет / плечо)  [1-й счёт]
+                        #   multiply — позиция = бюджет × плечо (свои = бюджет)  [2-й счёт]
+                        if str(cfg.margin_sizing).lower() == "multiply":
+                            own_per_lot = lot_cost / lev
+                            _pos, _own = budget * lev, budget
+                        else:
+                            own_per_lot = lot_cost
+                            _pos, _own = budget, budget / lev
                         self._log(f"MARGIN LEV {ticker}: брокер ×{_max_lev:.2f} · "
-                                  f"выбрано {'Max' if _want <= 0 else '×'+format(_want, 'g')} → ×{lev:.2f}")
+                                  f"выбрано {'Max' if _want <= 0 else '×'+format(_want, 'g')} → ×{lev:.2f} · "
+                                  f"режим={cfg.margin_sizing} (позиция {_pos:.0f}₽ = свои {_own:.0f}₽ + заём {_pos-_own:.0f}₽)")
                 except Exception as e:
                     self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed at cfg.leverage={lev:.1f}")
             if budget < own_per_lot:
-                self._log(f"ПРОПУСК СДЕЛКИ {ticker}: бюджет {budget:.0f} < own/лот {own_per_lot:.0f}")
+                self._log(f"ПРОПУСК СДЕЛКИ {ticker}: бюджет {budget:.0f} < стоимость лота {own_per_lot:.0f}")
                 return
             qty = max(1, int(budget / own_per_lot))
+            _used_lev = lev
         # --- Margin cap: не превышать max lots брокера (ответ уже в логе MARGIN) ---
         # Развилка: если в этой сессии плечо запрещено (вечер/утро), но инструмент
         # в принципе торгуется (есть маржинальный лимит в нужную сторону), НЕ блокируем —
@@ -1666,7 +1962,7 @@ class PaperBotRuntime:
             action=action,
             side=side,
             qty=qty,
-            meta=dict(meta or {}),
+            meta={**dict(meta or {}), "leverage": float(_used_lev)},
         )
         self.pending_orders[figi] = order
         self.orders.append(order)
@@ -1702,7 +1998,7 @@ class PaperBotRuntime:
         side = Side(order.side)
         if cfg.use_ensemble:
             from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy
-            # SL: стандартный = cfg.initial_sl_atr (2×ATR, фикс вместо optuna sl_mult 4-5).
+            # SL: стандартный = cfg.initial_sl_atr (4×ATR, фикс вместо optuna sl_mult 4-5).
             # TP: из optuna-параметров rr стратегии figi (EnsembleParams).
             strat = self.strategies.get(figi)
             _sl_mult = cfg.initial_sl_atr
@@ -1740,7 +2036,7 @@ class PaperBotRuntime:
         self._held_since.setdefault(figi, __import__("time").monotonic())
         await self._st_open(figi, order.ticker, order.side, order.qty, entry_px,
                             plan.stop_loss, plan.take_profit, meta=order.meta,
-                            leverage=max(1.0, float(self.config.leverage or 1.0)))
+                            leverage=max(1.0, float((order.meta or {}).get("leverage") or self.config.leverage or 1.0)))
         self._exit_plans[figi] = exit_policy
         self._exit_side[figi] = "LONG" if order.side == "BUY" else "SHORT"
         self._exit_entry_px[figi] = float(entry_px)
@@ -1882,7 +2178,7 @@ class PaperBotRuntime:
                   f"bar_ts={c.ts.strftime('%H:%M:%S')} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} "
                   f"stop={stop if stop is not None else '-'} tp={tp if tp is not None else '-'} "
                   f"trail={trail_active} pnl_rub={(c.close - entry_px) * qty_sh if state == PositionState.LONG else (entry_px - c.close) * qty_sh:+.2f}")
-        price, reason = _ibe(c, state, stop, tp)
+        price, reason = _ibe(c, state, stop, tp, close_based=bool(trail_active))
         if price is None:
             return False
 

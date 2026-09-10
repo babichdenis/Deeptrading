@@ -216,6 +216,32 @@ class LiveBroker:
         mv = await self.market_value()
         return max(0.0, eq - mv)
 
+    async def free_funds(self) -> float:
+        """Реально свободные средства для сделок = ликвидный портфель − начальная маржа.
+        (Свободные деньги на счёте искажены шортами; начальная маржа — замороженное обеспечение.)"""
+        import asyncio
+
+        def _f():
+            try:
+                services = self._get_services()
+                ma = services.users.get_margin_attributes(account_id=self._account)
+                liquid = self._q(ma.liquid_portfolio)
+                start = self._q(ma.starting_margin)
+                return max(0.0, liquid - start)
+            except Exception:
+                # fallback: equity − стоимость позиций
+                p = self._get_portfolio_safe()
+                eq = self._q(p.total_amount_currencies) + (self._q(p.total_amount_shares) if hasattr(p, "total_amount_shares") else 0.0)
+                mv = 0.0
+                for pos in p.positions:
+                    if pos.instrument_type == "currency":
+                        continue
+                    q = pos.quantity.units + pos.quantity.nano / 1e9
+                    mv += abs(q) * self._q(pos.current_price)
+                return max(0.0, eq - mv)
+
+        return await asyncio.to_thread(_f)
+
     async def verify_position(self, figi: str) -> LivePosition | None:
         """Фактическая позиция в T-Invest (для сверки входа/выхода). None — позиции нет."""
         return await self.get_position(figi)

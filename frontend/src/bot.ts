@@ -8,6 +8,7 @@ import {
   type BotOrderRow,
   botPause,
   botReset,
+  botSetMode,
   botStart,
   botStatus,
   botStop,
@@ -159,12 +160,21 @@ function sendBotConfigPatch(extra?: Record<string, unknown>) {
     .map((x) => mgMap[x]);
   const levEl = $("mg-lev") as HTMLInputElement | null;
   const margin_leverage = levEl ? levSliderToValue(Number(levEl.value)) : 0;
+  const rgMap: Record<string, string> = {
+    "rg-neutral": "NEUTRAL", "rg-trendup": "TREND_UP", "rg-trenddown": "TREND_DOWN",
+    "rg-highvol": "HIGH_VOLATILITY", "rg-range": "RANGE",
+  };
+  const trade_regimes = Object.keys(rgMap)
+    .filter((x) => ($(x) as HTMLInputElement | null)?.checked)
+    .map((x) => rgMap[x]);
   const body: Record<string, unknown> = {
     sessions: sessions.length ? sessions : ["day"],
     long_allowed: longOn,
     short_allowed: shortOn,
     margin_sessions,
     margin_leverage,
+    trade_regimes,
+    overnight: ($("sg-overnight") as HTMLInputElement | null)?.checked ?? false,
   };
   if (extra) Object.assign(body, extra);
   fetch(`${API}/api/v1/bot/config`, {
@@ -174,13 +184,21 @@ function sendBotConfigPatch(extra?: Record<string, unknown>) {
   }).catch(() => {});
 }
 
+function applyChip(cb: HTMLInputElement | null, on: boolean) {
+  if (!cb) return;
+  if (cb.checked !== on) {
+    cb.checked = on;
+    cb.closest("label")?.classList.toggle("on", on);
+  }
+}
+
 function initSessChips() {
-  const ids = ["sg-morning", "sg-day", "sg-evening"];
+  const sessMap: Record<string, string> = { morning: "sg-morning", day: "sg-day", evening: "sg-evening" };
   let saved: string[] = [];
   try {
     saved = JSON.parse(localStorage.getItem("bot_sess") || "[]");
   } catch { saved = []; }
-  const sessKeys = ["sg-morning", "sg-day", "sg-evening"];
+  const sessKeys = Object.values(sessMap);
   const defaultSess = saved.length ? saved : ["sg-morning", "sg-day", "sg-evening"];
   for (const id of sessKeys) {
     const cb = $(id) as HTMLInputElement | null;
@@ -191,6 +209,94 @@ function initSessChips() {
       cb.closest("label")?.classList.toggle("on", cb.checked);
       const on = sessKeys.filter((x) => ($(x) as HTMLInputElement).checked);
       localStorage.setItem("bot_sess", JSON.stringify(on.length ? on : ["sg-morning", "sg-day", "sg-evening"]));
+      sendBotConfigPatch();
+    });
+  }
+
+  // Загружаем настройки с сервера (config-файл) и применяем ко всем чипам.
+  void (async () => {
+    try {
+      const resp = await fetch(`${API}/api/v1/bot/config`);
+      if (!resp.ok) return;
+      const cfg = await resp.json() as Record<string, unknown>;
+      // Сессии.
+      const sArr = Array.isArray(cfg.sessions) ? cfg.sessions as string[] : null;
+      if (sArr && sArr.length) {
+        for (const [s, id] of Object.entries(sessMap)) {
+          const cb = $(id) as HTMLInputElement | null;
+          if (!cb) continue;
+          const on = sArr.includes(s);
+          if (cb.checked !== on) {
+            cb.checked = on;
+            cb.closest("label")?.classList.toggle("on", on);
+          }
+        }
+        localStorage.setItem("bot_sess", JSON.stringify(sArr.map((x) => sessMap[x]).filter(Boolean)));
+      }
+      // Направления.
+      const lOn = (cfg as { long_allowed?: boolean }).long_allowed;
+      const sOn = (cfg as { short_allowed?: boolean }).short_allowed;
+      const dLong = $("dg-long") as HTMLInputElement | null;
+      const dShort = $("dg-short") as HTMLInputElement | null;
+      if (typeof lOn === "boolean" && dLong) applyChip(dLong, lOn);
+      if (typeof sOn === "boolean" && dShort) applyChip(dShort, sOn);
+      // Маржа.
+      const msArr = Array.isArray(cfg.margin_sessions) ? cfg.margin_sessions as string[] : null;
+      if (msArr) {
+        for (const [s, id] of Object.entries({ morning: "mg-morning", day: "mg-day", evening: "mg-evening" })) {
+          const cb = $(id) as HTMLInputElement | null;
+          if (!cb) continue;
+          const on = msArr.includes(s);
+          if (cb.checked !== on) {
+            cb.checked = on;
+            cb.closest("label")?.classList.toggle("on", on);
+          }
+        }
+      } else { sendBotConfigPatch(); }
+      const mlv = (cfg as { margin_leverage?: number }).margin_leverage;
+      const levEl = $("mg-lev") as HTMLInputElement | null;
+      if (typeof mlv === "number" && levEl) {
+        const idx = levValueToSlider(mlv);
+        if (Number(levEl.value) !== idx) {
+          levEl.value = String(idx);
+          const lbl = $("mg-lev-label");
+          if (lbl) lbl.textContent = levLabel(mlv);
+        }
+      }
+      // Режимы.
+      const trArr = Array.isArray(cfg.trade_regimes) ? cfg.trade_regimes as string[] : null;
+      const trMap: Record<string, string> = {
+        NEUTRAL: "rg-neutral", TREND_UP: "rg-trendup", TREND_DOWN: "rg-trenddown",
+        HIGH_VOLATILITY: "rg-highvol", RANGE: "rg-range",
+      };
+      if (trArr) {
+        for (const [k, id] of Object.entries(trMap)) {
+          const cb = $(id) as HTMLInputElement | null;
+          if (!cb) continue;
+          const on = trArr.includes(k);
+          if (cb.checked !== on) {
+            cb.checked = on;
+            cb.closest("label")?.classList.toggle("on", on);
+          }
+        }
+      }
+      // Overnight.
+      const ov = (cfg as { overnight?: boolean }).overnight;
+      const ovEl = $("sg-overnight") as HTMLInputElement | null;
+      if (typeof ov === "boolean" && ovEl) applyChip(ovEl, ov);
+    } catch { /* бэкенд недоступен — остаёмся на localStorage */ }
+  })();
+
+  // Overnight: держать позиции через ночь.
+  const ovEl = $("sg-overnight") as HTMLInputElement | null;
+  if (ovEl) {
+    let ovSaved = false;
+    try { ovSaved = localStorage.getItem("bot_overnight") === "1"; } catch { ovSaved = false; }
+    ovEl.checked = ovSaved;
+    ovEl.closest("label")?.classList.toggle("on", ovSaved);
+    ovEl.addEventListener("change", () => {
+      ovEl.closest("label")?.classList.toggle("on", ovEl.checked);
+      localStorage.setItem("bot_overnight", ovEl.checked ? "1" : "0");
       sendBotConfigPatch();
     });
   }
@@ -228,6 +334,23 @@ function initSessChips() {
       sendBotConfigPatch();
     });
   }
+  // Блок «Режимы»: в каких режимах рынка разрешены входы.
+  const rgIds = ["rg-neutral", "rg-trendup", "rg-trenddown", "rg-highvol", "rg-range"];
+  let rgSaved: string[] = [];
+  try { rgSaved = JSON.parse(localStorage.getItem("bot_regimes") || "[]"); } catch { rgSaved = []; }
+  const defRg = rgSaved.length ? rgSaved : rgIds;
+  for (const id of rgIds) {
+    const cb = $(id) as HTMLInputElement | null;
+    if (!cb) continue;
+    cb.checked = defRg.includes(id);
+    cb.closest("label")?.classList.toggle("on", cb.checked);
+    cb.addEventListener("change", () => {
+      cb.closest("label")?.classList.toggle("on", cb.checked);
+      const on = rgIds.filter((x) => ($(x) as HTMLInputElement).checked);
+      localStorage.setItem("bot_regimes", JSON.stringify(on));
+      sendBotConfigPatch();
+    });
+  }
   const dirIds = ["dg-long", "dg-short"];
   let dirSaved: string[] = [];
   try { dirSaved = JSON.parse(localStorage.getItem("bot_dir") || "[]"); } catch { dirSaved = []; }
@@ -251,6 +374,10 @@ export async function initBot(onStateChange?: (running: boolean) => void) {
   initBotSettings();
   $("btn-bot-start").addEventListener("click", () => void doStart());
   $("btn-bot-stop").addEventListener("click", () => void doStop());
+  $("btn-bot-pause").addEventListener("click", () => void doPause());
+
+  // Переключение контура sandbox/live (кнопка-плашка в сайдбаре).
+  $("env-badge")?.addEventListener("click", () => void doToggleMode());
 
   document.querySelector("#bot-positions-table tbody")?.addEventListener("click", (e) => {
     const tr = (e.target as HTMLElement).closest("tr") as HTMLElement | null;
@@ -291,6 +418,8 @@ let _logDateFilter = localStorage.getItem("log_date_filter") ?? new Date().toLoc
 let _allLogs: string[] = [];
 let _lastPositions: SandboxPositionRow[] = [];
 let _lastTrades: BotTradeRow[] = [];
+let _prevVol: Record<string, number> = {};  // ticker -> предыдущий Vol (для стрелки направления)
+let _curMode = "sandbox";  // текущий контур (из bot.status.config.mode)
 let _chartInit = false;
 // Позиция, на которую сейчас смотрит график (клик по таблице позиций). При poll,
 // если стоп/TP/trailing изменились — пересылаем обновлённый trade в iframe.
@@ -553,7 +682,6 @@ function initBotSettings() {
     toggleSlSections(cfg.slMode);
     ($("bs-commission") as HTMLInputElement).value = String(cfg.commission);
     ($("bs-reentry") as HTMLInputElement).value = String(cfg.reentry);
-    ($("bs-overnight") as HTMLInputElement).checked = cfg.overnight;
     ($("bs-confirm-flip") as HTMLInputElement).value = String(cfg.confirmFlip);
     ($("bs-quorum") as HTMLInputElement).value = String(cfg.ensembleQuorum);
     overlay.classList.remove("hidden");
@@ -575,10 +703,9 @@ function initBotSettings() {
     const atrRr = Math.max(0.5, Number(($("bs-atr-rr") as HTMLInputElement).value) || 4.0);
     const commission = Math.max(0, Number(($("bs-commission") as HTMLInputElement).value) || 0.3);
     const reentry = Math.max(0, Number(($("bs-reentry") as HTMLInputElement).value) || 15);
-    const overnight = ($("bs-overnight") as HTMLInputElement).checked;
     const confirmFlip = Math.max(0, Number(($("bs-confirm-flip") as HTMLInputElement).value) || 2);
     const ensembleQuorum = Math.max(1, Number(($("bs-quorum") as HTMLInputElement).value) || 2);
-    localStorage.setItem("bot_cfg", JSON.stringify({ stop: sl, target: tp, topn, slMode, atrPeriod, atrMult, atrRr, commission, reentry, overnight, confirmFlip, ensembleQuorum }));
+    localStorage.setItem("bot_cfg", JSON.stringify({ stop: sl, target: tp, topn, slMode, atrPeriod, atrMult, atrRr, commission, reentry, confirmFlip, ensembleQuorum }));
     sendBotConfigPatch({
       stop_pct: sl / 100,
       target_pct: tp / 100,
@@ -589,7 +716,7 @@ function initBotSettings() {
       atr_risk_reward: atrRr,
       commission_rate: commission,
       reentry_cooldown_bars: reentry,
-      overnight: overnight,
+      overnight: ($("sg-overnight") as HTMLInputElement | null)?.checked ?? false,
       confirm_flip: confirmFlip,
       ensemble_quorum: ensembleQuorum,
     });
@@ -614,7 +741,7 @@ async function doStart() {
       top_n: cfg.topn,
       commission_rate: cfg.commission,
       reentry_cooldown_bars: cfg.reentry,
-      overnight: cfg.overnight,
+      overnight: ($("sg-overnight") as HTMLInputElement | null)?.checked ?? cfg.overnight,
       qty_per_trade: 1,
       stop_pct: cfg.stop / 100,
       target_pct: cfg.target / 100,
@@ -650,6 +777,25 @@ async function doStop() {
   }
 }
 
+async function doToggleMode() {
+  const next = _curMode === "live" ? "sandbox" : "live";
+  const warn = next === "live"
+    ? "Переключить на LIVE (реальные деньги)?\nБот будет ОСТАНОВЛЕН и перезапущен на боевом счёте."
+    : "Переключить на SANDBOX (тестовый счёт)?\nБот будет остановлен и перезапущен.";
+  if (!confirm(warn)) return;
+  const btn = $("env-badge") as HTMLButtonElement | null;
+  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+  try {
+    await botSetMode(next);
+    _curMode = next;
+  } catch (e) {
+    alert("Ошибка переключения: " + (e instanceof Error ? e.message : String(e)));
+  } finally {
+    if (btn) btn.disabled = false;
+    await pollOnce();
+  }
+}
+
 async function doReset() {
   try {
     await botReset(10000);
@@ -680,6 +826,7 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   const backendAlive = !!bst;
   const engineRunning = bst ? !!bst.running : false;
   const botErr = bst && bst.error ? bst.error : null;
+  if (bst && typeof bst.entries_paused === "boolean") entriesPaused = bst.entries_paused;
 
   if (pillTop) {
     pillTop.classList.remove("warn");
@@ -693,6 +840,8 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
 
   $("btn-bot-start").classList.toggle("hidden", engineRunning);
   $("btn-bot-stop").classList.toggle("hidden", !engineRunning);
+  $("btn-bot-pause").classList.toggle("hidden", !engineRunning);
+  updatePauseButton();
 
   const modeChip = $("bot-mode");
   if (bst && bst.running && bst.mode !== "—") {
@@ -706,6 +855,7 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   if (envBadge) {
     const em = bst && bst.config && (bst.config as { mode?: string }).mode;
     const isLive = String(em).toLowerCase() === "live";
+    _curMode = isLive ? "live" : "sandbox";
     envBadge.textContent = isLive ? "LIVE" : "SANDBOX";
     envBadge.classList.toggle("env-live", isLive);
     envBadge.classList.toggle("env-sandbox", !isLive);
@@ -734,6 +884,15 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
       }
     }
   }
+  // Синхронизация чекбокса «Overnight» с сервером.
+  const ovCfg = (bst && bst.config && (bst.config as { overnight?: boolean }).overnight);
+  const ovElSync = $("sg-overnight") as HTMLInputElement | null;
+  if (ovElSync && typeof ovCfg === "boolean") {
+    if (ovElSync.checked !== ovCfg) {
+      ovElSync.checked = ovCfg;
+      ovElSync.closest("label")?.classList.toggle("on", ovCfg);
+    }
+  }
   // Синхронизация ползунка плеча маржи с сервером.
   const mlv = (bst && bst.config && (bst.config as { margin_leverage?: number }).margin_leverage);
   const levElSync = $("mg-lev") as HTMLInputElement | null;
@@ -743,6 +902,23 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
       levElSync.value = String(idx);
       const lbl = $("mg-lev-label");
       if (lbl) lbl.textContent = levLabel(mlv);
+    }
+  }
+  // Синхронизация режимов рынка с сервером.
+  const trMap: Record<string, string> = {
+    NEUTRAL: "rg-neutral", TREND_UP: "rg-trendup", TREND_DOWN: "rg-trenddown",
+    HIGH_VOLATILITY: "rg-highvol", RANGE: "rg-range",
+  };
+  const tr = (bst && bst.config && (bst.config as { trade_regimes?: string[] }).trade_regimes) || null;
+  if (Array.isArray(tr)) {
+    for (const [k, id] of Object.entries(trMap)) {
+      const cb = $(id) as HTMLInputElement | null;
+      if (!cb) continue;
+      const on = tr.includes(k);
+      if (cb.checked !== on) {
+        cb.checked = on;
+        cb.closest("label")?.classList.toggle("on", on);
+      }
     }
   }
 
@@ -764,7 +940,11 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   const eqChip = $("equity-chip");
   if (eqChip) eqChip.textContent = `${money(st.portfolio.equity)} ₽`;
   const bsCash = $("bs-cash");
-  if (bsCash) bsCash.textContent = `${money(st.portfolio.cash)} ₽`;
+  if (bsCash) {
+    const ff = (st.portfolio as { free_funds?: number }).free_funds;
+    bsCash.textContent = `${money(ff != null ? ff : st.portfolio.cash)} ₽`;
+    bsCash.title = "Свободные средства = ликвидный портфель − начальная маржа (реально доступно для сделок)";
+  }
   const bsEq = $("bs-equity");
   if (bsEq) bsEq.textContent = `${money(st.portfolio.equity)} ₽`;
   const pnlEl = $("bs-pnl");
@@ -801,7 +981,11 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   const totalOwn = positions.reduce((s, p) => s + p.entry_price * p.qty / (p.leverage || 1), 0);
   const bsPosVal = $("bs-positions-value");
   const ownPos = (st?.portfolio as any)?.own_in_positions;
-  if (bsPosVal) bsPosVal.textContent = `${money(ownPos != null ? ownPos : totalOwn)} ₽`;
+  const startMargin = (st?.portfolio as { starting_margin?: number })?.starting_margin;
+  if (bsPosVal) {
+    bsPosVal.textContent = `${money(startMargin != null ? startMargin : (ownPos != null ? ownPos : totalOwn))} ₽`;
+    bsPosVal.title = "Обеспечение под позиции (начальная маржа, заморожено брокером)";
+  }
   _lastPositions = positions;
   document.querySelector("#bot-positions-table tbody")!.innerHTML =
     positions
@@ -816,8 +1000,17 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
         const roi = own > 0 ? (pnl / own * 100) : 0;
         const reg = p.regime || "";
         const regColor = reg === "TREND_UP" ? "#2ecc71" : reg === "TREND_DOWN" ? "#e74c3c" : reg === "HIGH_VOLATILITY" ? "#f39c12" : reg === "RANGE" ? "#3498db" : "var(--text-dim)";
-        const regChip = reg ? `<span style="font-size:10px;color:${regColor};font-weight:600">${reg.replace('_', ' ')}</span>` : "—";
-        const volTxt = p.vol != null ? `×${p.vol.toFixed(2)}` : "—";
+        const regLabel: Record<string, string> = {
+          HIGH_VOLATILITY: "HV", TREND_UP: "Trend↑", TREND_DOWN: "Trend↓",
+          RANGE: "Range", NEUTRAL: "Neutral",
+        };
+        const regChip = reg ? `<span style="font-size:10px;color:${regColor};font-weight:600">${regLabel[reg] || reg}</span>` : "—";
+        const v = p.vol;
+        // Стрелка направления объёма относительно среднего: ×≥1 — повышенный (↑), <1 — пониженный (↓).
+        const vArrow = v != null ? (v >= 1 ? "↑" : "↓") : "";
+        const volCell = v != null
+          ? `<span style="color:${vArrow === "↑" ? "var(--up)" : "var(--down)"}">${vArrow}</span>×${v.toFixed(2)}`
+          : "—";
         return `<tr>` +
           `<td class="num" style="font-size:10px;color:var(--text-dim)">${fmtTime(p.entry_time)}</td>` +
           `<td><b>${p.ticker}</b></td>` +
@@ -830,8 +1023,8 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
           `<td class="num ${roi >= 0 ? "pos" : "neg"}">${roi >= 0 ? "+" : ""}${roi.toFixed(1)}%</td>` +
           `<td class="num">×${lev}</td>` +
           `<td class="num" title="${p.regime_reason || ""}${p.regime_atr_pct != null ? " | ATR " + p.regime_atr_pct + "%" : ""}${p.regime_adx != null ? " | ADX " + p.regime_adx : ""}">${regChip}</td>` +
-          `<td class="num${p.vol != null && p.vol >= 1 ? " pos" : ""}">${volTxt}</td>` +
-          `<td class="num" style="color:${p.trail_active ? "#f39c12" : "var(--text-dim)"}" title="${p.trail_active ? "трейлинг активен" : "статичный SL"}">${p.stop_loss != null ? price(p.stop_loss) : "—"}${p.trail_active ? " ◆" : ""}</td>` +
+          `<td class="num${p.vol != null && p.vol >= 1 ? " pos" : ""}" title="Vol = объём бара / средний объём (×50 бар). ↑ — выше среднего, ↓ — ниже">${volCell}</td>` +
+          `<td class="num" style="color:${p.trail_active ? "#f39c12" : "var(--text-dim)"}" title="${p.trail_active ? "трейлинг активен" : "статичный SL"}">${p.stop_loss != null ? Number(p.stop_loss).toFixed(4) : "—"}${p.trail_active ? " ◆" : ""}</td>` +
           `<td class="num" title="${p.trail_active ? "P&L при выходе по стопу" : ""}">${p.trail_active && p.stop_loss != null
               ? `<span style="color:#3b82f6">${pnlAtStop(p) >= 0 ? "+" : ""}${money(pnlAtStop(p))}₽</span>`
               : p.take_profit != null ? price(p.take_profit) : "—"}</td>` +
@@ -1033,10 +1226,12 @@ async function _loadScreener(silent = false) {
     _srPrevPrice.clear();
     for (const r of _srRows) if (r.price != null) _srPrevPrice.set(r.ticker, r.price);
   } catch {
-    if (!silent) {
+    if (!silent && _srRows.length === 0) {
       const tbody = $("sr-tbody");
       if (tbody) tbody.innerHTML = `<tr><td colspan=5 class="sr-empty">ошибка загрузки рынка</td></tr>`;
     }
+    const tsEl = $("sr-ts");
+    if (tsEl) tsEl.textContent = `обнов. ${fmtTimeOnly(new Date().toISOString())} (устарело)`;
   } finally {
     _srLoading = false;
   }
@@ -1149,7 +1344,7 @@ function initScreener() {
   }
   initSidebarRightResize();
   void _loadScreener(true);
-  setInterval(() => void _loadScreener(false), 15000);
+  setInterval(() => void _loadScreener(false), 45000);
 }
 
 function initSidebarRightResize() {
