@@ -89,6 +89,48 @@ class BotConfig:
     max_margin_pct: float = 80.0  # макс % от доступного маржинального лимита на сделку
 
 
+# Поля BotConfig, которые сохраняются в БД и восстанавливаются при старте бота.
+BOT_PERSIST_FIELDS = (
+    "sessions", "long_allowed", "short_allowed", "leverage",
+    "margin_sessions", "margin_leverage",
+    "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
+    "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
+    "overnight", "reentry_cooldown_bars", "confirm_flip",
+)
+
+
+async def load_bot_settings() -> dict:
+    """Прочитать сохранённые настройки бота из bot_settings (key='runtime_config')."""
+    from app.models.bot_setting import BotSetting
+    try:
+        async with SessionLocal() as db:
+            row = await db.get(BotSetting, "runtime_config")
+            return dict(row.value) if (row is not None and row.value) else {}
+    except Exception:
+        return {}
+
+
+async def save_bot_settings(cfg) -> None:
+    """Сохранить изменяемые настройки BotConfig в bot_settings."""
+    from app.models.bot_setting import BotSetting
+    data = {}
+    for f in BOT_PERSIST_FIELDS:
+        v = getattr(cfg, f, None)
+        if isinstance(v, (list, tuple)):
+            v = list(v)
+        data[f] = v
+    try:
+        async with SessionLocal() as db:
+            row = await db.get(BotSetting, "runtime_config")
+            if row is None:
+                db.add(BotSetting(key="runtime_config", value=data))
+            else:
+                row.value = data
+            await db.commit()
+    except Exception:
+        pass
+
+
 @dataclass
 class BotOrder:
     id: str
@@ -160,6 +202,15 @@ class PaperBotRuntime:
         self._held_since: dict[str, float] = {}  # figi -> время добавления в _held (для grace синка)
         self._live_logs: deque[str] = deque(maxlen=400)
         self.stream_manager: StreamManager | None = None
+        self.carousel_diag: dict = {
+            "eligible_count": 0,
+            "active_count": 0,
+            "hot_adds": 0,
+            "hot_skips": 0,
+            "last_hot_add_ts": None,
+            "last_error": None,
+            "instruments": [],
+        }
         self._persist_queue: deque = deque(maxlen=2000)
         self._persist_queue_5m: deque = deque(maxlen=2000)  # (figi, ts, o, h, l, c, v) для 5m
         # --- Closed-bar gates ---
@@ -514,6 +565,7 @@ class PaperBotRuntime:
                 "daily_loss_limit": risk.daily_loss_limit,
                 "entries_paused": risk.entries_paused,
             },
+            "carousel": self.carousel_diag,
         }
 
     def risk_snapshot(self) -> RiskSnapshot:
@@ -545,8 +597,26 @@ class PaperBotRuntime:
         if self.running or self.starting:
             raise RuntimeError("bot already running")
         self.config = cfg
+        # Восстанавливаем сохранённые настройки (переживают перезапуск/старт без фронта).
+        try:
+            _saved = await load_bot_settings()
+            if _saved:
+                for _f in BOT_PERSIST_FIELDS:
+                    if _f in _saved:
+                        try:
+                            setattr(cfg, _f, _saved[_f])
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         if cfg.use_ensemble:
             cfg.interval_name = "1min"
+        self._log(
+            f"НАСТРОЙКИ: торги={'/'.join(cfg.sessions) or '—'} · "
+            f"маржа={'/'.join(cfg.margin_sessions) or '—'} "
+            f"(плечо {'Max' if float(cfg.margin_leverage or 0) <= 0 else '×'+format(float(cfg.margin_leverage),'g')}) · "
+            f"long={'да' if cfg.long_allowed else 'нет'} short={'да' if cfg.short_allowed else 'нет'}"
+        )
         try:
             from sqlalchemy import text as _text
             async with SessionLocal() as _db:
@@ -566,6 +636,10 @@ class PaperBotRuntime:
         self.pending_orders = {}
         self.tickers = {}
         self.entries_paused = False
+        self.carousel_diag = {
+            "eligible_count": 0, "active_count": 0, "hot_adds": 0,
+            "hot_skips": 0, "last_hot_add_ts": None, "last_error": None, "instruments": [],
+        }
         self.last_candle_ts = None
         self.broker_mode = cfg.mode
         if cfg.mode == "sandbox" or cfg.mode == "live":
@@ -640,6 +714,9 @@ class PaperBotRuntime:
                 if u.get("ticker"):
                     self.tickers.setdefault(u["figi"], u["ticker"])
                     self.tickers.setdefault(self.tcs_to_bbg.get(u["figi"], u["figi"]), u["ticker"])
+            # Инициализируем диагностику карусели
+            self.carousel_diag["eligible_count"] = len(self.stream_universe)
+            self.carousel_diag["active_count"] = len(self.universe)
 
             from app.engine.models import Candle as EC
 
@@ -877,6 +954,25 @@ class PaperBotRuntime:
                         {"skip": list(current_figi) if current_figi else ["__none__"]}
                     )).all()
 
+                    # Диагностика: считаем все eligible + их свечи
+                    all_eligible = (await db.execute(
+                        _text("SELECT figi, ticker, lot_size FROM universe "
+                              "WHERE eligible_tier = 'eligible'")
+                    )).all()
+                    diag_instruments = []
+                    hot_adds_this_cycle = 0
+                    hot_skips_this_cycle = 0
+                    for afigi, aticker, alot in all_eligible:
+                        cnt = (await db.execute(
+                            _text("SELECT count(*) FROM candles WHERE figi = :f AND interval = 1"),
+                            {"f": afigi}
+                        )).scalar()
+                        in_active = afigi in current_figi
+                        diag_instruments.append({
+                            "figi": afigi, "ticker": aticker,
+                            "candle_count": cnt or 0, "active": in_active,
+                        })
+
                     for figi, ticker, lot in rows:
                         # Проверяем наличие данных (хотя бы 50 свечей 1min)
                         cnt = (await db.execute(
@@ -884,6 +980,7 @@ class PaperBotRuntime:
                             {"f": figi}
                         )).scalar()
                         if cnt < 50:
+                            hot_skips_this_cycle += 1
                             continue
 
                         # Создаём стратегию и буфер
@@ -910,12 +1007,61 @@ class PaperBotRuntime:
                             "atr_pct": 0, "avg_price": 0, "avg_turnover": 0, "sector": "",
                         })
                         self.tickers[figi] = ticker
+                        hot_adds_this_cycle += 1
                         self._log(f"➕ HOT-ADD: {ticker} ({figi[-6:]}) {cnt} bars")
+
+                    # Обновляем диагностику
+                    self.carousel_diag = {
+                        "eligible_count": len(all_eligible),
+                        "active_count": len(self.universe),
+                        "hot_adds": self.carousel_diag.get("hot_adds", 0) + hot_adds_this_cycle,
+                        "hot_skips": self.carousel_diag.get("hot_skips", 0) + hot_skips_this_cycle,
+                        "last_hot_add_ts": datetime.now(timezone.utc).isoformat(),
+                        "last_error": None,
+                        "instruments": diag_instruments,
+                    }
 
             except asyncio.CancelledError:
                 raise
             except Exception:
                 pass
+
+    async def _session_monitor(self) -> None:
+        """Фоновая задача: логирует состояние при смене торговой сессии.
+
+        Пишет в лог: текущая фаза, торговая сессия, разрешены ли торги, маржа
+        (с плечом) и активные направления.
+        """
+        from app.bot.session import session_state, trading_session
+        _last = None
+        while self.running:
+            try:
+                _ss = session_state()
+                _tss = trading_session()
+                if _ss != _last:
+                    _last = _ss
+                    _sess = self.config.sessions or []
+                    _msess = self.config.margin_sessions or []
+                    trade_ok = bool(_tss) and _tss in _sess
+                    margin_ok = bool(_tss) and _tss in _msess
+                    _mlv = float(self.config.margin_leverage or 0)
+                    _lev = "Max" if _mlv <= 0 else f"×{_mlv:g}"
+                    dirs = []
+                    if self.config.long_allowed:
+                        dirs.append("Long")
+                    if self.config.short_allowed:
+                        dirs.append("Short")
+                    self._log(
+                        f"🕒 СЕССИЯ {_ss} | торговая={_tss or '—'} | "
+                        f"торги={'ДА' if trade_ok else 'нет'} ({'/'.join(_sess) or '—'}) | "
+                        f"маржа={'ДА' if margin_ok else 'нет'} ({'/'.join(_msess) or '—'}, плечо {_lev}) | "
+                        f"направления={','.join(dirs) or '—'}"
+                    )
+                    self.events.log("SESSION_STATE", reason=_ss,
+                                    trading=trade_ok, margin=margin_ok)
+            except Exception:
+                pass
+            await asyncio.sleep(20.0)
 
     async def _reconcile_loop(self) -> None:
         """Фоновая задача: каждые 60с.
@@ -1106,6 +1252,7 @@ class PaperBotRuntime:
         self._held_sync_task = asyncio.create_task(self._sync_held())
         self._hot_add_task = asyncio.create_task(self._hot_add_universe())
         self._reconcile_task = asyncio.create_task(self._reconcile_loop())
+        self._session_task = asyncio.create_task(self._session_monitor())
         try:
             async for candle in feed.stream():
                 if not self.running:

@@ -470,6 +470,7 @@
           <input type="search" id="sr-query" class="sr-query" placeholder="Поиск…" />
           <label class="sr-min-t">Оборот ≥ <input type="number" id="sr-min-t" value="0" min="0" step="1"> М₽</label>
         </div>
+        <div class="sr-carousel-panel" id="sr-carousel-panel"></div>
         <div class="sr-table-wrap">
           <table class="sr-table" id="sr-table">
             <thead>
@@ -478,6 +479,7 @@
                 <th class="sr-num" data-sort="price">Цена <span class="sr-arrow"></span></th>
                 <th class="sr-num" data-sort="turnover">Оборот <span class="sr-arrow"></span></th>
                 <th class="sr-num" data-sort="rng_pct">Волат. <span class="sr-arrow"></span></th>
+                <th class="sr-num sr-col-action" title="Добавить в карусель">✦</th>
               </tr>
             </thead>
             <tbody id="sr-tbody"></tbody>

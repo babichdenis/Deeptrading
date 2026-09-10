@@ -3,10 +3,15 @@
 Данные MOEX ISS (0.7с на весь рынок) кэшируются на CACHE_TTL секунд.
 Волатильность = RNG% = (HIGH−LOW)/WAPRICE за день. Оборот = VALTODAY (₽).
 """
+import asyncio
 import time
 import urllib.request
 import json
+from collections import deque
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +20,8 @@ from app.models.instrument import Instrument
 
 router = APIRouter(prefix="/api/v1/screener", tags=["screener"])
 
+_MSK = ZoneInfo("Europe/Moscow")
+
 TQBR_URL = (
     "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR"
     "/securities.json?iss.only=marketdata"
@@ -22,6 +29,18 @@ TQBR_URL = (
 CACHE_TTL = 15  # сек — MOEX ISS обновляет TQBR quotes каждые 2-5с в сессию
 MICRO_CACHE_TTL = 2
 _cached: dict = {"ts": 0.0, "quotes": None}
+
+# журнал последних действий с eligible (add/remove) — показывается в сайдбаре
+_carousel_log: deque[dict] = deque(maxlen=40)
+
+
+def _carousel_log_add(action: str, ticker: str, msg: str) -> None:
+    _carousel_log.appendleft({
+        "ts": datetime.now(timezone.utc).astimezone(_MSK).strftime("%H:%M:%S"),
+        "action": action,
+        "ticker": ticker,
+        "msg": msg,
+    })
 
 
 def _fetch_quotes_uncached() -> dict:
@@ -65,6 +84,55 @@ def fetch_tqbr_market() -> dict:
     return quotes
 
 
+async def _carousel_status(db: AsyncSession) -> dict:
+    """Статус карусели бота, считанный из базы + рантайма. Работает всегда."""
+    eligible_rows = (await db.execute(
+        text("SELECT figi, ticker, lot_size FROM universe WHERE eligible_tier = 'eligible'")
+    )).all()
+
+    candle_rows: dict[str, int] = {}
+    if eligible_rows:
+        figis = [r[0] for r in eligible_rows]
+        rows = (await db.execute(
+            text("SELECT figi, count(*) FROM candles "
+                 "WHERE figi = ANY(:fs) AND interval = 1 GROUP BY figi"),
+            {"fs": figis},
+        )).all()
+        candle_rows = {f: int(c) for f, c in rows}
+
+    # активные тикеры в карусели рантайма (когда бот жив)
+    active_set: set[str] = set()
+    bot_running = False
+    try:
+        from app.bot.runtime import runtime
+        active_set = {u.get("figi") for u in runtime.universe}
+        bot_running = runtime.running
+    except Exception:
+        pass
+
+    pending = []
+    insufficient = 0
+    for f, t, lot in eligible_rows:
+        if f in active_set:
+            continue
+        pending.append({
+            "ticker": t,
+            "candle_count": candle_rows.get(f, 0),
+            "need_download": candle_rows.get(f, 0) < 50,
+        })
+        if candle_rows.get(f, 0) < 50:
+            insufficient += 1
+
+    return {
+        "bot_running": bot_running,
+        "eligible_count": len(eligible_rows),
+        "active_count": len(active_set),
+        "pending": pending,
+        "insufficient": insufficient,
+        "log": list(_carousel_log),
+    }
+
+
 @router.get("")
 async def screener(db: AsyncSession = Depends(get_db)) -> dict:
     quotes = fetch_tqbr_market()
@@ -88,4 +156,57 @@ async def screener(db: AsyncSession = Depends(get_db)) -> dict:
             "in_universe": inst.ticker in universe,
         })
     rows.sort(key=lambda x: (x["turnover"] or 0), reverse=True)
-    return {"count": len(rows), "items": rows}
+    carousel = await _carousel_status(db)
+    return {"count": len(rows), "items": rows, "carousel": carousel}
+
+
+class _EligibleReq(BaseModel):
+    ticker: str
+
+
+async def _download_candles(figi: str, ticker: str) -> None:
+    """Фоновая загрузка 3 дней 1min свечей (fire-and-forget)."""
+    from app.bot.moex import ensure_moex_candles
+    await asyncio.to_thread(ensure_moex_candles, figi, ticker, 3)
+    _carousel_log_add("ready", ticker, "свечи скачаны, ждёт hot-add бота")
+
+
+@router.post("/eligible")
+async def add_eligible(req: _EligibleReq, db: AsyncSession = Depends(get_db)) -> dict:
+    """Добавить тикер в eligible (елиту): вставляем в universe + запускаем скачку свечей."""
+    row = (await db.execute(
+        text("SELECT figi, lot FROM instruments WHERE ticker = :t AND class_code = 'TQBR'"),
+        {"t": req.ticker},
+    )).first()
+    if not row:
+        return {"ok": False, "error": "ticker not found in instruments"}
+    figi, lot = row
+    was_eligible = (await db.execute(
+        text("SELECT 1 FROM universe WHERE figi = :f AND eligible_tier = 'eligible'"),
+        {"f": figi},
+    )).first()
+    await db.execute(text(
+        "INSERT INTO universe (figi, ticker, eligible_tier, lot_size, updated_at) "
+        "VALUES (:figi, :ticker, 'eligible', :lot, now()) "
+        "ON CONFLICT (figi) DO UPDATE "
+        "SET eligible_tier = 'eligible', ticker = EXCLUDED.ticker, "
+        "lot_size = EXCLUDED.lot_size, updated_at = now()"
+    ), {"figi": figi, "ticker": req.ticker, "lot": lot})
+    await db.commit()
+    if was_eligible:
+        _carousel_log_add("add", req.ticker, "уже был в eligible")
+    else:
+        _carousel_log_add("add", req.ticker, "добавлен, скачиваются свечи за 3 дня…")
+    asyncio.create_task(_download_candles(figi, req.ticker))
+    return {"ok": True, "figi": figi, "ticker": req.ticker}
+
+
+@router.delete("/eligible/{ticker}")
+async def remove_eligible(ticker: str, db: AsyncSession = Depends(get_db)) -> dict:
+    """Убрать тикер из eligible."""
+    await db.execute(text(
+        "UPDATE universe SET eligible_tier = NULL WHERE ticker = :t"
+    ), {"t": ticker})
+    await db.commit()
+    _carousel_log_add("remove", ticker, "убран из eligible")
+    return {"ok": True, "ticker": ticker}

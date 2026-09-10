@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.runtime import BotConfig, runtime
+from app.bot.runtime import BotConfig, runtime, save_bot_settings
 
 _sandbox_broker = None
 
@@ -211,6 +211,7 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         cfg.confirm_flip = new_cf
     if changes:
         runtime._log("⚙ КОНФИГ: " + " | ".join(changes))
+    await save_bot_settings(cfg)
     return {
         "ok": True,
         "sessions": cfg.sessions,

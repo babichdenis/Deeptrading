@@ -19,8 +19,11 @@ import {
   sandboxTrades,
   sandboxOrders,
   fetchScreener,
+  screenerAddEligible,
+  screenerRemoveEligible,
   type ScreenerRow,
   type SandboxPositionRow,
+  type CarouselStatus,
 } from "./api";
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
@@ -1001,9 +1004,10 @@ function _renderScreenerTable() {
         `<td class="sr-num${flash}">${r.price != null ? priceTxt + arrows : `<span class="sr-dim">—</span>`}</td>` +
         `<td class="sr-num">${r.turnover != null ? turnTxt : `<span class="sr-dim">—</span>`}</td>` +
         `<td class="sr-num">${r.rng_pct != null ? `<span style="color:${r.rng_pct >= 3 ? "var(--gold)" : "var(--text)"}">${volTxt}</span>` : `<span class="sr-dim">—</span>`}</td>` +
+        `<td class="sr-num sr-col-action"><button class="${r.in_universe ? "sr-toggle sr-toggle-active" : "sr-toggle"}" data-ticker="${r.ticker}" title="${r.in_universe ? "Убрать из карусели" : "Добавить в карусель"}">${r.in_universe ? "●" : "○"}</button></td>` +
         `</tr>`;
     })
-    .join("") || `<tr><td colspan=4 class="sr-empty">ничего не найдено</td></tr>`;
+    .join("") || `<tr><td colspan=5 class="sr-empty">ничего не найдено</td></tr>`;
   const countEl = $("sr-count");
   if (countEl) countEl.textContent = `${sorted.length} / ${_srRows.length}`;
   const tsEl = $("sr-ts");
@@ -1022,18 +1026,75 @@ async function _loadScreener(silent = false) {
   if (_srLoading) return;
   _srLoading = true;
   try {
-    _srRows = await fetchScreener();
+    const d = await fetchScreener();
+    _srRows = d.items;
     _renderScreenerTable();
+    _renderCarouselStatus(d.carousel);
     _srPrevPrice.clear();
     for (const r of _srRows) if (r.price != null) _srPrevPrice.set(r.ticker, r.price);
   } catch {
     if (!silent) {
       const tbody = $("sr-tbody");
-      if (tbody) tbody.innerHTML = `<tr><td colspan=4 class="sr-empty">ошибка загрузки рынка</td></tr>`;
+      if (tbody) tbody.innerHTML = `<tr><td colspan=5 class="sr-empty">ошибка загрузки рынка</td></tr>`;
     }
   } finally {
     _srLoading = false;
   }
+}
+
+async function _toggleEligible(ticker: string, r: ScreenerRow) {
+  let ok = false;
+  try {
+    if (r.in_universe) ok = (await screenerRemoveEligible(ticker)).ok;
+    else ok = (await screenerAddEligible(ticker)).ok;
+  } catch {
+    ok = false;
+  }
+  if (ok) {
+    r.in_universe = !r.in_universe;
+    _renderScreenerTable();
+    void _loadScreener(true);
+  }
+}
+
+const _SR_ACT_COLORS: Record<string, string> = {
+  add: "#7ed67e",
+  remove: "#ff6b6b",
+  ready: "#9dbdff",
+};
+
+function _renderCarouselStatus(c: CarouselStatus | undefined) {
+  const el = $("sr-carousel-panel");
+  if (!el || !c) return;
+  const active = c.active_count ?? 0;
+  const eligible = c.eligible_count ?? 0;
+  const pending = c.pending ?? [];
+  const awaiting = pending.filter((p) => p.need_download);
+  const readyWait = pending.filter((p) => !p.need_download);
+  const botState = c.bot_running
+    ? `<span class="sr-cs-dot sr-cs-dot-on"></span>бот запущен`
+    : `<span class="sr-cs-dot sr-cs-dot-off"></span>бот остановлен`;
+  const pendingHtml = pending.length
+    ? `<div class="sr-cs-pending">` +
+      pending.map((p) =>
+        `<span class="sr-cs-tag${p.need_download ? " sr-cs-tag-wait" : ""}" title="${p.candle_count} свечей 1min">${p.ticker} <i>${p.candle_count}</i></span>`
+      ).join("") +
+      `</div>`
+    : "";
+  const logHtml = (c.log ?? []).slice(0, 6).map((l) =>
+    `<div class="sr-cs-log-row"><span class="sr-cs-log-ts">${l.ts}</span> <span class="sr-cs-log-act" style="color:${_SR_ACT_COLORS[l.action] ?? "var(--text-dim)"}">${l.msg}</span></div>`
+  ).join("");
+  el.innerHTML =
+    `<div class="sr-cs-title">🎠 Карусель бота <span class="sr-cs-bot">${botState}</span></div>` +
+    `<div class="sr-cs-grid">` +
+    `<span class="sr-cs-k">active</span><b class="sr-cs-v sr-cs-v-ok">${active} ${active === eligible ? "" : `/ ${eligible} eligible`}</b>` +
+    (pending.length
+      ? `<span class="sr-cs-k">pending</span><b class="sr-cs-v">${pending.length} <span class="sr-cs-sub">(${awaiting.length} без свечей, ${readyWait.length} ждут бота)</span></b>`
+      : `<span class="sr-cs-k">pending</span><b class="sr-cs-v">0</b>`) +
+    `<span class="sr-cs-k">eligible</span><b class="sr-cs-v">${eligible}</b>` +
+    `</div>` +
+    pendingHtml +
+    (logHtml ? `<div class="sr-cs-log">${logHtml}</div>` : "");
 }
 
 function initScreener() {
@@ -1073,6 +1134,19 @@ function initScreener() {
   }
   const btn = $("sr-refresh");
   if (btn) btn.addEventListener("click", () => void _loadScreener(false));
+  const tbodyEl = $("sr-tbody");
+  if (tbodyEl) {
+    tbodyEl.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest(".sr-toggle") as HTMLButtonElement | null;
+      if (!b) return;
+      const tk = b.dataset.ticker;
+      if (!tk) return;
+      const r = _srRows.find((x) => x.ticker === tk);
+      if (!r) return;
+      b.disabled = true;
+      void _toggleEligible(tk, r).finally(() => { b.disabled = false; });
+    });
+  }
   initSidebarRightResize();
   void _loadScreener(true);
   setInterval(() => void _loadScreener(false), 15000);

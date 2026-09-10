@@ -299,6 +299,7 @@ export interface BotStatus {
   session?: string;
   data?: { health: string; source: string; last_candle_ts: string | null };
   risk?: { state: string; daily_pnl: number; daily_loss_limit: number; entries_paused: boolean };
+  carousel?: CarouselStatus;
 }
 
 export async function botStatus(): Promise<BotStatus> {
@@ -478,11 +479,56 @@ export interface ScreenerRow {
   in_universe: boolean;
 }
 
-export async function fetchScreener(): Promise<ScreenerRow[]> {
+export async function fetchScreener(): Promise<{ items: ScreenerRow[]; carousel: CarouselStatus }> {
   const res = await fetch(`${API}/api/v1/screener`);
   if (!res.ok) throw new Error(`screener ${res.status}`);
   const d = await res.json();
-  return d.items;
+  return { items: d.items, carousel: d.carousel };
+}
+
+export async function screenerAddEligible(ticker: string): Promise<{ ok: boolean; figi?: string; error?: string }> {
+  const res = await fetch(`${API}/api/v1/screener/eligible`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticker }),
+  });
+  if (!res.ok) throw new Error(`eligible add ${res.status}`);
+  return res.json();
+}
+
+export async function screenerRemoveEligible(ticker: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API}/api/v1/screener/eligible/${encodeURIComponent(ticker)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`eligible remove ${res.status}`);
+  return res.json();
+}
+
+export interface CarouselInstrument {
+  figi: string;
+  ticker: string;
+  candle_count: number;
+  active: boolean;
+}
+
+export interface CarouselPendingItem {
+  ticker: string;
+  candle_count: number;
+  need_download: boolean;
+}
+
+export interface CarouselLogEntry {
+  ts: string;
+  action: string;
+  ticker: string;
+  msg: string;
+}
+
+export interface CarouselStatus {
+  bot_running: boolean;
+  eligible_count: number;
+  active_count: number;
+  insufficient: number;
+  pending: CarouselPendingItem[];
+  log: CarouselLogEntry[];
 }
 
 export interface ConfigurationDto {

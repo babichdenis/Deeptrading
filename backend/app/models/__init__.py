@@ -8,12 +8,14 @@ from app.models.experiments import Experiment, ExperimentTrade
 from app.models.ml import MlModel, MlPrediction
 from app.models.paper import PaperAccount, PaperPosition, PaperTrade
 from app.models.sandbox_trade import SandboxTrade
+from app.models.bot_setting import BotSetting
 from app.models.instrument import Instrument
 from app.models.signals import RunDependency, SignalDecision, StrategyRun, StrategySignal
 
 __all__ = [
     "Candle",
     "Configuration",
+    "BotSetting",
     "EnsembleRun",
     "LabSetting",
     "TestRun",

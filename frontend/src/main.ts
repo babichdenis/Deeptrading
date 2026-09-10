@@ -1660,8 +1660,9 @@ if (IS_EMBEDDED) {
   // auto-refresh: свежие свечи каждые 8с, правая кромка прилипает к now
   window.setInterval(() => {
     void (async () => {
-      if (!_liveFigi) return;
-      const wantFigi = _liveFigi;
+      // Обновляем всегда: текущий инструмент (_liveFigi из focus, иначе curFigi).
+      const wantFigi = _liveFigi || curFigi;
+      if (!wantFigi) return;
       try {
         const nd = await fetchAnalysis(wantFigi, currentTf.interval, windowLimit(currentTf.interval));
         if (!nd || nd.figi !== wantFigi) {
