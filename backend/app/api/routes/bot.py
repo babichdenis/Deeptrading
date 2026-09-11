@@ -98,6 +98,10 @@ class StartRequest(BaseModel):
     trend_alignment: bool = True
     max_margin_pct: float = 80.0
     overnight: bool = False
+    feed: str = "live"        # live | replay (источник свечей; реплей = БД)
+    replay_start: str = ""    # ISO UTC datetime начала окна реплея
+    replay_end: str = ""      # ISO UTC datetime конца окна (пусто = до конца данных)
+    replay_pace: str = "fast" # fast | wall
 
 
 @router.post("/start")
@@ -143,6 +147,10 @@ async def bot_start(req: StartRequest) -> dict:
         margin_sizing=req.margin_sizing if req.margin_sizing in ("divide", "multiply") else "divide",
         trade_regimes=[r for r in req.trade_regimes if r in ("NEUTRAL", "TREND_UP", "TREND_DOWN", "HIGH_VOLATILITY", "RANGE")],
         trend_alignment=bool(req.trend_alignment),
+        feed=req.feed if req.feed in ("live", "replay") else "live",
+        replay_start=req.replay_start,
+        replay_end=req.replay_end,
+        replay_pace=req.replay_pace if req.replay_pace in ("fast", "wall") else "fast",
     )
     try:
         result = await runtime.start(cfg)

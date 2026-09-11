@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -133,6 +134,154 @@ class DonchianBreakoutStrategy:
         return None
 
 
+@dataclass(frozen=True)
+class VolumeDropParams:
+    """V4: паника/набор на просадке (close<prev_close, объём ↑). SELL."""
+    ma_len: int = 20
+    drop_ratio: float = 1.5
+
+
+@dataclass(frozen=True)
+class VolumeClimaxParams:
+    """V3: всплеск объёма + длинная тень. climax_short (нижняя тень)→BUY,
+    climax_long (верхняя тень)→SELL. Симметрия из VOLUME_EXHAUSTION_2026.md §9 п.4."""
+    ma_len: int = 20
+    climax_ratio: float = 3.0
+    wick_frac: float = 0.5
+
+
+@dataclass(frozen=True)
+class VolumeDivergenceParams:
+    """V2/V5: цена новый экстремум, объём ниже среднего. V2(bear)→SELL, V5(bull)→BUY."""
+    div_n: int = 20
+
+
+class _VolumeBase:
+    """Общий движок: скользящее окно объёмов и цен (без look-ahead)."""
+
+    def __init__(self) -> None:
+        self._volumes: deque[float] = deque()
+        self._closes: deque[float] = deque()
+        self._highs: deque[float] = deque()
+        self._lows: deque[float] = deque()
+        self._count = 0
+
+    def _push(self, bar: Candle, maxlen: int) -> None:
+        self._volumes.append(float(bar.volume or 0.0))
+        self._closes.append(float(bar.close))
+        self._highs.append(float(bar.high))
+        self._lows.append(float(bar.low))
+        if len(self._volumes) > maxlen:
+            self._volumes.popleft()
+            self._closes.popleft()
+            self._highs.popleft()
+            self._lows.popleft()
+        self._count += 1
+
+    def _ma_vol(self, n: int) -> float:
+        w = list(self._volumes)[max(0, len(self._volumes) - n):]
+        if not w:
+            return 1.0
+        return sum(w) / len(w)
+
+    def _highs_n(self, n: int) -> float:
+        return max(list(self._highs)[-n:]) if self._highs else 0.0
+
+    def _lows_n(self, n: int) -> float:
+        return min(list(self._lows)[-n:]) if self._lows else 0.0
+
+
+class VolumeDropStrategy(_VolumeBase):
+    strategy_id = "volume_drop"
+    version = "1.0.0"
+
+    def __init__(self, params: VolumeDropParams | None = None):
+        super().__init__()
+        self.params = params or VolumeDropParams()
+        self._prev_close: float | None = None
+
+    def warmup_bars(self) -> int:
+        return self.params.ma_len + 2
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        bar = candles[-1]
+        out: Signal | None = None
+        if self._count >= self.params.ma_len + 1 and self._prev_close is not None and \
+                bar.close < self._prev_close:
+            vr = float(bar.volume or 0.0) / self._ma_vol(self.params.ma_len)
+            if vr > self.params.drop_ratio:
+                out = Signal(strategy_id=self.strategy_id, side=Side.SELL, time=bar.ts,
+                             reason="volume_on_drop",
+                             features={"vol_ratio": round(vr, 3)})
+        self._push(bar, maxlen=self.params.ma_len + 1)
+        self._prev_close = bar.close
+        return out
+
+
+class VolumeClimaxStrategy(_VolumeBase):
+    strategy_id = "volume_climax"
+    version = "1.0.0"
+
+    def __init__(self, params: VolumeClimaxParams | None = None):
+        super().__init__()
+        self.params = params or VolumeClimaxParams()
+
+    def warmup_bars(self) -> int:
+        return self.params.ma_len + 2
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        bar = candles[-1]
+        out: Signal | None = None
+        if self._count >= self.params.ma_len + 1:
+            vr = float(bar.volume or 0.0) / self._ma_vol(self.params.ma_len)
+            rng = bar.high - bar.low
+            if vr > self.params.climax_ratio and rng > 1e-9:
+                upper = max(0.0, bar.high - max(bar.open, bar.close)) / rng
+                lower = max(0.0, min(bar.open, bar.close) - bar.low) / rng
+                if upper > self.params.wick_frac and bar.close >= bar.open:
+                    out = Signal(strategy_id=self.strategy_id, side=Side.SELL,
+                                 time=bar.ts, reason="climax_long",
+                                 features={"vol_ratio": round(vr, 3)})
+                elif lower > self.params.wick_frac and bar.close <= bar.open:
+                    out = Signal(strategy_id=self.strategy_id, side=Side.BUY,
+                                 time=bar.ts, reason="climax_short",
+                                 features={"vol_ratio": round(vr, 3)})
+        self._push(bar, maxlen=self.params.ma_len + 1)
+        return out
+
+
+class VolumeDivergenceStrategy(_VolumeBase):
+    strategy_id = "volume_divergence"
+    version = "1.0.0"
+
+    def __init__(self, params: VolumeDivergenceParams | None = None):
+        super().__init__()
+        self.params = params or VolumeDivergenceParams()
+
+    def warmup_bars(self) -> int:
+        return self.params.div_n + 2
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        bar = candles[-1]
+        out: Signal | None = None
+        n = self.params.div_n
+        if self._count >= n + 1:
+            avg = self._ma_vol(n)
+            prev_high = self._highs_n(n)
+            prev_low = self._lows_n(n)
+            if avg > 0:
+                if bar.high > prev_high and float(bar.volume or 0.0) < avg:
+                    out = Signal(strategy_id=self.strategy_id, side=Side.SELL,
+                                 time=bar.ts, reason="divergence_bear",
+                                 features={"vol_avg": round(avg, 3)})
+                elif bar.low < prev_low and float(bar.volume or 0.0) < avg:
+                    out = Signal(strategy_id=self.strategy_id, side=Side.BUY,
+                                 time=bar.ts, reason="divergence_bull",
+                                 features={"vol_avg": round(avg, 3)})
+        self._push(bar, maxlen=n + 1)
+        return out
+
+
 STRATEGY_REGISTRY: dict[str, type] = {
     "macd_cross": MacdCrossStrategy,
     "donchian_breakout": DonchianBreakoutStrategy,
@@ -141,6 +290,9 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "pullback_ema": PullbackEmaStrategy,
     "vwap_reclaim": VwapReclaimStrategy,
     "range_compression_breakout": SqueezeBreakoutStrategy,
+    "volume_drop": VolumeDropStrategy,
+    "volume_climax": VolumeClimaxStrategy,
+    "volume_divergence": VolumeDivergenceStrategy,
 }
 
 _PARAMS_BY_STRATEGY: dict[str, type] = {
@@ -151,6 +303,9 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "pullback_ema": PullbackEmaParams,
     "vwap_reclaim": VwapReclaimParams,
     "range_compression_breakout": SqueezeBreakoutParams,
+    "volume_drop": VolumeDropParams,
+    "volume_climax": VolumeClimaxParams,
+    "volume_divergence": VolumeDivergenceParams,
 }
 
 

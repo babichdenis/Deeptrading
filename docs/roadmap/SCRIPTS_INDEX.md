@@ -29,6 +29,11 @@
 | `compare_capital.py` / `compare_v2.py` | 10000 vs 2000 на акцию |
 | `portfolio_merge.py` | **Сборка per-ticker сделок (jsonl) на общий пул, 20%, LONG+SHORT** (новый) |
 | `per_ticker_dump.py` | Дамп сделок compute_ensemble в jsonl для portfolio_merge (новый) |
+| `volume_exhaustion_stats.py` | Шаг 1 Volume Exhaustion: «сигнал на входе → side/exit_reason», delta WR/Net по V1–V5. Прогон Jul/Aug на 10 тикерах → §11 роадмапа |
+| `volume_gate_ab.py` | Шаг 2 Volume Exhaustion: A/B gate (require/block) vs baseline → §12 (gate не даёт edge) |
+| `volume_vote_ab.py` | Шаг 3: volume-стратегии как голоса кворума (volume_drop/climax/divergence) |
+| `score_gate_ab.py` | Series 3: A/B score_gate по порогам (gate режет Net) → §23.1 |
+| `score_binning.py` | Series 3: бининг сделок по score/компонентам (calibration check, нет монотонности) → §23.2-23.3 |
 
 ## 3. OPTUNA
 

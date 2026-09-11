@@ -108,10 +108,15 @@ from app.services.indicators import macd
 from app.services.ml_ensemble_filter import MlEnsembleFilter, resample_to_5m
 from app.services.regime import RegimeDetector, regime_at
 from app.services.signals import generate_signals
+from app.services.volume import volume_at, volume_features
 
 ENGINE_VERSION = "ensemble_v2"
 ALL_STRATEGY_IDS = ["rsi_reversal", "bollinger_reclaim", "pullback_ema", "vwap_reclaim",
                     "range_compression_breakout", "macd_cross", "donchian_breakout"]
+# Volume-стратегии (VOLUME_EXHAUSTION_2026.md Шаг 3) — это continuation/context evidence,
+# а не reversal-сигналы. `drop_useless` оценивает совпадение с oracle-разворотами и
+# ошибочно удаляет их, поэтому они исключены из отсева.
+VOLUME_STRATEGY_IDS = {"volume_drop", "volume_climax", "volume_divergence"}
 TF_SECONDS = {"1min": 60, "5min": 300, "15min": 900, "hour": 3600}
 
 
@@ -601,6 +606,52 @@ def _build_session_policy(req: dict) -> SessionPolicyConfig | None:
     return SessionPolicyConfig(**cfg)
 
 
+def _signal_score(quorum_ev: dict, e: dict, side: str, ts: datetime,
+                  quorum_pool: list[dict], quorum_full: int,
+                  regime_bars: list[dict] | None, vol_series: list[dict] | None,
+                  macd_ok_fn, weights: dict | None = None) -> dict:
+    """Score уверенности входа (Series 3, evidence — не gate).
+
+    Собирается на момент входа из доступных фич без look-ahead:
+    quorum (голоса/все) + за-bias + regime TREND-совпадение + volume-подтверждение
+    + MACD 1m. Нормализуется в [-1, 1]. Возвращает score и компоненты.
+    """
+    w = weights or {}
+    s = 0.0
+    qf = quorum_ev.get("features", {}) if quorum_ev else {}
+    mv = float(qf.get("votes", 1) or 1)
+    mt = float(qf.get("total_members", 0) or 0) or float(len(quorum_pool) or 0) or float(quorum_full or 0)
+    if not mt:
+        mt = 1.0
+    s += min(1.0, mv / mt) * w.get("quorum", 1.0)
+    s += (0.0 if e.get("against_bias") else 1.0) * w.get("bias", 0.5)
+    st = regime_at(regime_bars, ts) if regime_bars else None
+    regime_name = st["state"] if st else "NEUTRAL"
+    if regime_name in ("TREND_UP", "TREND_DOWN"):
+        trend_ok = (regime_name == "TREND_UP" and side == "BUY") or \
+                   (regime_name == "TREND_DOWN" and side == "SELL")
+        s += (1.0 if trend_ok else -0.5) * w.get("regime", 0.5)
+    vf = volume_at(vol_series, ts) if vol_series else None
+    vol_drop = bool(vf and vf.get("volume_on_drop"))
+    if vf:
+        if side == "SELL" and vf.get("volume_on_drop"):
+            s += 1.0 * w.get("volume", 0.5)
+        elif side == "BUY" and vf.get("climax_short"):
+            s += 1.0 * w.get("volume", 0.5)
+    macd_against = bool(macd_ok_fn is not None and macd_ok_fn(ts, side) is False)
+    if macd_against:
+        s += -1.0 * w.get("macd", 0.5)
+    w_tot = max(w.get("quorum", 1.0) + w.get("bias", 0.5) + w.get("regime", 0.5) +
+                w.get("volume", 0.5) + w.get("macd", 0.5), 1e-9)
+    return {
+        "score": round(s / w_tot, 4),
+        "components": {
+            "votes": mv, "total": mt, "against_bias": bool(e.get("against_bias")),
+            "regime": regime_name, "vol_drop": vol_drop, "macd_against": macd_against,
+        },
+    }
+
+
 def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   setups_cfg: list[dict], quorum_k: int, entry_window_min: int,
                   entry_lookback: int, exit_obj: ExitPolicy, qty_shares: float,
@@ -632,6 +683,12 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     entry_candles = cached_resample(candles, TF_SECONDS.get(entry_tf, 60)) if entry_tf != "1min" else candles
     entries_raw = micro_breakout(entry_candles, entry_lookback)
     unique_raw_ts = len({s["ts"] for _, sigs in setup_runs for s in sigs})
+
+    # Volume Exhaustion (VOLUME_EXHAUSTION_2026.md Шаг 1): серия фич по закрытым 5m-барам.
+    # Торговлю не меняет — сигналы складываются в meta сделки и entry.volume_features.
+    vol_series: list[dict] | None = None
+    if req.get("volume_features") or req.get("volume_gate"):
+        vol_series = volume_features(cached_resample(candles, TF_SECONDS["5min"]))
 
     accepted: list[dict] = []
     rejected: list[dict] = []
@@ -840,12 +897,73 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                 if _vf_ratio < vol_filter_thr:
                     rejected.append({**e, "ts": ts.isoformat(), "reason": f"VOL_FILTER:{_vf_ratio:.2f}<{vol_filter_thr}"})
                     continue
-        # EXP-008: минуточный MACD — гистограмма 1m должна быть в сторону входа
+        # Volume Exhaustion gate (VOLUME_EXHAUSTION_2026.md §12, Шаг 2):
+        # пост-фильтр входов по сигналам объёма на закрытом 5m-баре. Ядро кворума не трогаем.
+        # ФОРМАТ: {"require": {"volume_on_drop": ["SELL"]}, "block": {"dryup": ["BUY"]}}
+        #   require — side без сигнала отбрасывается ("V4 подтверждает SHORT")
+        #   block   — side при наличии сигнала отбрасывается   ("dryup блокирует LONG")
+        _vol_gate = req.get("volume_gate")
+        if _vol_gate and vol_series:
+            _vf_now = volume_at(vol_series, ts)
+            if _vf_now is not None:
+                _gate_pass = True
+                _req_map = _vol_gate.get("require") or {}
+                for _sig, _sides in _req_map.items():
+                    if side in _sides and not _vf_now.get(_sig):
+                        rejected.append({**e, "ts": ts.isoformat(),
+                                         "reason": f"VOL_GATE_REQUIRE:{_sig}:{side}"})
+                        _gate_pass = False
+                        break
+                if _gate_pass:
+                    _blk_map = _vol_gate.get("block") or {}
+                    for _sig, _sides in _blk_map.items():
+                        if side in _sides and _vf_now.get(_sig):
+                            rejected.append({**e, "ts": ts.isoformat(),
+                                             "reason": f"VOL_GATE_BLOCK:{_sig}:{side}"})
+                            _gate_pass = False
+                            break
+                if _gate_pass:
+                    accepted.append({**e, "ts": ts.isoformat(),
+                                     "quorum_event_id": quorum_ev["event_id"],
+                                     "volume_features": _vf_now})
+                    continue
+                else:
+                    continue
+            else:
+                accepted.append({**e, "ts": ts.isoformat(), "quorum_event_id": quorum_ev["event_id"],
+                                 "volume_features": None})
+                continue
+        # SIGNAL_SCORE (SIGNAL_SCORE_2026.md п.3): score уверенности входа.
+        # Собираем на момент входа из доступных фич (без look-ahead) и либо
+        # используем как meta, либо как пост-фильтр (по контракту — НЕ gate,
+        # а evidence для sizing; gate оставлен только для обратной совместимости).
+        # ФОРМАТ: {"threshold": 0.7, "weights": {...}} — weights опциональны.
+        _score_cfg = req.get("score_gate")
+        _score_raw = None
+        if _score_cfg is not None or req.get("score_features"):
+            _score_raw = _signal_score(
+                quorum_ev, e, side, ts, quorum_pool, quorum_full,
+                regime_bars, vol_series, _macd_1m_ok,
+                (_score_cfg or {}).get("weights") or {},
+            )
+        if _score_cfg is not None and _score_raw is not None:
+            _s_norm = _score_raw["score"]
+            _thr = float(_score_cfg.get("threshold", 0.4))
+            if _s_norm < _thr:
+                rejected.append({**e, "ts": ts.isoformat(),
+                                 "reason": f"SCORE:{_s_norm:.2f}<{_thr}",
+                                 "score": _s_norm})
+                continue
         _macd_ok = _macd_1m_ok(ts, side)
         if _macd_ok is False:
             rejected.append({**e, "ts": ts.isoformat(), "reason": "MACD_1M_AGAINST"})
             continue
-        accepted.append({**e, "ts": ts.isoformat(), "quorum_event_id": quorum_ev["event_id"]})
+        _acc_entry = {**e, "ts": ts.isoformat(), "quorum_event_id": quorum_ev["event_id"],
+                      "volume_features": volume_at(vol_series, ts) if vol_series else None}
+        if _score_raw is not None:
+            _acc_entry["score"] = _score_raw["score"]
+            _acc_entry["score_components"] = _score_raw.get("components", {})
+        accepted.append(_acc_entry)
 
     if adaptive is not None:
         exit_obj = RegimeExitPolicy(exit_obj, adaptive["_exit_policies"], regime_bars)
@@ -992,6 +1110,11 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             cand = [x for x in accepted if x["side"] == want_side
                     and x["ts"] <= t.entry_time.isoformat()]
             a = max(cand, key=lambda x: x["ts"]) if cand else None
+        if a is not None and a.get("volume_features") is not None:
+            trades_out[-1]["volume_features"] = a["volume_features"]
+        if a is not None and a.get("score") is not None:
+            trades_out[-1]["score"] = a["score"]
+            trades_out[-1]["score_components"] = a.get("score_components", {})
         if a is not None:
             executed_signal_keys.add((a["ts"], a["side"]))
             ep = episode_map[(a["side"], a.get("quorum_event_id", "N/A"))]
@@ -1315,6 +1438,9 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
     if drop_useless and len(setups_cfg) > 1:
         keep: list[dict] = []
         for s in setups_cfg:
+            if s["strategy_id"] in VOLUME_STRATEGY_IDS:
+                keep.append(s)
+                continue
             sigs = generate_signals(s["strategy_id"], s.get("params"),
                                     cached_resample(candles, TF_SECONDS.get(s.get("tf", "5min"), 300)))
             q = _signal_quality("setup", s["strategy_id"], s.get("tf", "5min"), sigs,

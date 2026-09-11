@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from app.bot.events import EventLog
 from app.bot.feed import STEP_SEC, CandleFeed
+from app.bot.replay_feed import ReplayFeed
 from app.bot.paper_broker import PaperBroker
 from app.bot.live_broker import LiveBroker
 from app.bot.risk import RiskSnapshot
@@ -97,6 +98,11 @@ class BotConfig:
     trade_regimes: list = field(default_factory=lambda: ["NEUTRAL", "TREND_UP", "TREND_DOWN", "HIGH_VOLATILITY", "RANGE"])
     trend_alignment: bool = True  # не входить против тренда (TREND_UP→BUY, TREND_DOWN→SELL)
     max_margin_pct: float = 80.0  # макс % от доступного маржинального лимита на сделку
+    # --- Replay (V2): тест на исторических данных через те же runtime-пути, что и live ---
+    feed: str = "live"        # live | replay (источник свечей; реплей = БД)
+    replay_start: str = ""    # ISO UTC datetime начала окна реплея (обязателен при feed=replay)
+    replay_end: str = ""      # ISO UTC datetime конца окна (пусто = до конца данных)
+    replay_pace: str = "fast" # fast (макс. скорость) | wall (в реальном времени по барам)
 
 
 # Поля BotConfig, которые сохраняются в БД и восстанавливаются при старте бота.
@@ -257,6 +263,11 @@ class PaperBotRuntime:
         self.data_source = "—"
         self.feed: CandleFeed | None = None
         self._daily_pnl_cache: tuple[datetime, float] | None = None
+        # --- Replay: виртуальные часы. При feed=replay _replay_from = начало окна,
+        # _replay_cur = ts последней поданной свечи (двигается runtime в _run()).
+        # _bot_now() возвращает виртуальное время в реплее и реальное — в live. ---
+        self._replay_from: datetime | None = None
+        self._replay_cur: datetime | None = None
         self._signal_busy: set[str] = set()
         self._held: set[str] = set()
         self._held_since: dict[str, float] = {}  # figi -> время добавления в _held (для grace синка)
@@ -497,7 +508,7 @@ class PaperBotRuntime:
                 # Идемпотентность: один открытый ряд на figi. Если уже есть
                 # открытая строка того же инструмента — сначала архивируем её
                 # (защита от двойных записей при переоткрытии фиджи).
-                _now = datetime.now(timezone.utc)
+                _now = self._bot_now()
                 prev = (await db.execute(
                     select(SandboxTrade)
                     .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None))
@@ -539,7 +550,7 @@ class PaperBotRuntime:
                 )
                 row = res.scalar_one_or_none()
                 if row is not None:
-                    row.exit_time = datetime.now(timezone.utc)
+                    row.exit_time = self._bot_now()
                     row.exit_price = float(exit_price)
                     row.exit_reason = reason or ""
                     row.exit_meta = _json.dumps(meta, ensure_ascii=False, default=str) if meta else row.exit_meta
@@ -581,7 +592,7 @@ class PaperBotRuntime:
         step = STEP_SEC.get(self.config.interval_name, 300)
         if self.last_candle_ts is None:
             health = "NO_DATA"
-        elif datetime.now(timezone.utc) - self.last_candle_ts <= timedelta(seconds=3 * step):
+        elif self._bot_now() - self.last_candle_ts <= timedelta(seconds=3 * step):
             health = "HEALTHY"
         else:
             health = "STALE"
@@ -622,6 +633,10 @@ class PaperBotRuntime:
                 "confirm_flip": self.config.confirm_flip,
                 "reentry_cooldown_bars": self.config.reentry_cooldown_bars,
                 "overnight": self.config.overnight,
+                "feed": self.config.feed,
+                "replay_start": self.config.replay_start,
+                "replay_end": self.config.replay_end,
+                "replay_pace": self.config.replay_pace,
             },
             "universe": self.universe,
             "candles_seen": self.candles_seen,
@@ -650,15 +665,30 @@ class PaperBotRuntime:
             entries_paused=self.entries_paused,
         )
 
+    def _bot_now(self) -> datetime:
+        """Виртуализированные часы бота.
+
+        В live/sandbox/paper возвращает реальное wall-clock время UTC.
+        В ReplayFeed — виртуальное время реплея (начало окна до первой свечи,
+        затем ts последней поданной свечи). Все решения, зависящие от «текущего
+        момента» (сессионный гейт, свежесть бара, дневной PnL), должны ходить
+        сюда, чтобы реплей воспроизводил поведение 1-в-1.
+        """
+        if self._replay_cur is not None:
+            return self._replay_cur
+        if self._replay_from is not None:
+            return self._replay_from
+        return datetime.now(timezone.utc)
+
     def daily_pnl_cached(self) -> float:
-        now = datetime.now(timezone.utc)
+        now = self._bot_now()
         if self._daily_pnl_cache and now - self._daily_pnl_cache[0] < DAILY_PNL_TTL:
             return self._daily_pnl_cache[1]
         self._daily_pnl_cache = (now, 0.0)
         return self._daily_pnl_cache[1]
 
     async def refresh_daily_pnl(self) -> float:
-        msk_now = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=3)))
+        msk_now = self._bot_now().astimezone(timezone(timedelta(hours=3)))
         day_start = msk_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
         async with SessionLocal() as db:
             res = await db.execute(
@@ -694,6 +724,21 @@ class PaperBotRuntime:
             pass
         if cfg.use_ensemble:
             cfg.interval_name = "1min"
+        # --- Replay: стартуем виртуальные часы с начала окна (до первой свечи). ---
+        self._replay_from = None
+        self._replay_cur = None
+        if cfg.feed == "replay":
+            try:
+                self._replay_from = datetime.fromisoformat(
+                    cfg.replay_start.replace("Z", "+00:00")
+                )
+                if self._replay_from.tzinfo is None:
+                    self._replay_from = self._replay_from.replace(tzinfo=timezone.utc)
+            except Exception:
+                self._replay_from = None
+                self._log(f"⚠ REPLAY: не удалось распарсить replay_start={cfg.replay_start!r}")
+            if self._replay_from is not None:
+                self._log(f"REPLAY START: окно с {self._replay_from.isoformat()} pacing={cfg.replay_pace}")
         self._log(
             f"НАСТРОЙКИ: торги={'/'.join(cfg.sessions) or '—'} · "
             f"маржа={'/'.join(cfg.margin_sessions) or '—'} "
@@ -732,8 +777,14 @@ class PaperBotRuntime:
             "hot_skips": 0, "last_hot_add_ts": None, "last_error": None, "instruments": [],
         }
         self.last_candle_ts = None
+        # Реплей всегда на paper-брокере: исторические бары невозможны ни в sandbox
+        # (не принимает заявки), ни в live. Сделки реплея пишутся в sandbox_trades
+        # с mode='paper' — не смешиваются с реальными sandbox/live.
         self.broker_mode = cfg.mode
-        if cfg.mode == "sandbox" or cfg.mode == "live":
+        if cfg.feed == "replay" or (cfg.mode != "sandbox" and cfg.mode != "live"):
+            self.broker_mode = "paper"
+            self.broker = PaperBroker(SessionLocal)
+        else:
             self.broker = LiveBroker(SessionLocal, config=cfg)
             # --- StreamManager: subscribe to server streams ---
             from app.config import get_settings
@@ -759,8 +810,19 @@ class PaperBotRuntime:
                     self._log(f"КАПИТАЛ со счёта (equity): {real_cash:.0f} ₽ · позиция до {cfg.ensemble_capital:.0f} ({POS_PCT*100:.0f}%)")
             except Exception as e:
                 self._log(f"КАПИТАЛ не получен: {str(e)[:80]}")
-        else:
-            self.broker = PaperBroker(SessionLocal)
+        # Реплей: детерминированный старт — чистая paper-книга и чистые записи
+        # предыдущих реплеев (mode='paper'), чтобы прогон не зависел от прошлых.
+        if cfg.feed == "replay":
+            try:
+                await self.broker.reset(cfg.initial_cash)
+                from sqlalchemy import delete as _delete
+                from app.models.sandbox_trade import SandboxTrade
+                async with SessionLocal() as db:
+                    await db.execute(_delete(SandboxTrade).where(SandboxTrade.mode == "paper"))
+                    await db.commit()
+                self._log(f"REPLAY RESET: чистая бумажная книга ({cfg.initial_cash:.0f} ₽)")
+            except Exception as e:
+                self._log(f"REPLAY RESET FAIL: {type(e).__name__}: {str(e)[:80]}")
         await self.broker.ensure_account(cfg.initial_cash)
         await self.refresh_daily_pnl()
         self.starting = True
@@ -829,7 +891,7 @@ class PaperBotRuntime:
                             from app.bot.moex import ensure_moex_candles
                             await ensure_moex_candles(u["figi"], u.get("ticker", ""), days=10)
                             candles = await _lc(db, u["figi"], 1,
-                                                date_from=datetime.now(timezone.utc) - timedelta(days=3))
+                                                date_from=self._bot_now() - timedelta(days=3))
                             for row in candles:
                                 buf.append(EC(ts=row.ts, open=row.open, high=row.high,
                                               low=row.low, close=row.close, volume=row.volume))
@@ -838,7 +900,7 @@ class PaperBotRuntime:
                             await ensure_candles(db, u["figi"], cfg.interval_name, days=7)
                             interval_value = self._interval_value()
                             candles = await _lc(db, u["figi"], interval_value,
-                                                date_from=datetime.now(timezone.utc) - timedelta(days=3))
+                                                date_from=self._bot_now() - timedelta(days=3))
                             for row in candles[-MAX_BUFFER:]:
                                 buf.append(EC(ts=row.ts, open=row.open, high=row.high,
                                               low=row.low, close=row.close, volume=row.volume))
@@ -1225,7 +1287,7 @@ class PaperBotRuntime:
                 if self.last_candle_ts is None:
                     alerts.append("НЕТ свечей с момента старта")
                 elif _trade_ok:
-                    age = (datetime.now(timezone.utc) - self.last_candle_ts).total_seconds()
+                    age = (self._bot_now() - self.last_candle_ts).total_seconds()
                     if age > 90:
                         alerts.append(f"НЕТ свечей {age:.0f}с (сессия активна, cps={cps:.2f})")
                 # 2. Очередь персиста растёт
@@ -1461,10 +1523,37 @@ class PaperBotRuntime:
         # Broker (LiveBroker) при этом остаётся на sandbox — торговля по-прежнему
         # тестовая. Обратное сочетание (sandbox-токен на боевом API) не работает.
         settings = get_settings()
-        _feed_token = settings.feed_token
-        _feed_target = None
-        feed = CandleFeed(_feed_token, self.config.interval_name,
-                          self.stream_universe, target=_feed_target)
+        if self.config.feed == "replay":
+            # Реплей: исторические свечи из БД через те же runtime-пути (paper-брокер).
+            # Корректный config.replay_start уже распарсен в start() в self._replay_from.
+            if self._replay_from is None:
+                try:
+                    self._replay_from = datetime.fromisoformat(
+                        self.config.replay_start.replace("Z", "+00:00")
+                    )
+                except Exception:
+                    self._replay_from = None
+                if self._replay_from is not None and self._replay_from.tzinfo is None:
+                    self._replay_from = self._replay_from.replace(tzinfo=timezone.utc)
+            _r_end: datetime | None = None
+            if self.config.replay_end:
+                try:
+                    _r_end = datetime.fromisoformat(self.config.replay_end.replace("Z", "+00:00"))
+                    if _r_end.tzinfo is None:
+                        _r_end = _r_end.replace(tzinfo=timezone.utc)
+                except Exception:
+                    _r_end = None
+            feed: CandleFeed = ReplayFeed(
+                self.config.interval_name, self.stream_universe,
+                self._replay_from or datetime.now(timezone.utc), _r_end,
+                pace=self.config.replay_pace,
+            )
+            self._log("REPLAY FEED: исторические свечи из БД (paper-брокер, без API)")
+        else:
+            _feed_token = settings.feed_token
+            _feed_target = None
+            feed = CandleFeed(_feed_token, self.config.interval_name,
+                              self.stream_universe, target=_feed_target)
         feed.on_log = lambda msg: self._log("TECHINFO [feed] " + msg)
         self.feed = feed
         exited = "stream_exhausted"
@@ -1480,6 +1569,10 @@ class PaperBotRuntime:
                     exited = "running_flag_false"
                     break
                 self.mode = feed.mode
+                # В реплее виртуальные часы двигаются вместе с подаваемой свечой:
+                # все решения (сессии, свежесть, дневной PnL) видят «правильное» время.
+                if isinstance(feed, ReplayFeed) and candle.ts is not None:
+                    self._replay_cur = candle.ts
                 _t1 = _time.perf_counter()
                 await self._process_candle(candle)
                 _dt = (_time.perf_counter() - _t1) * 1000
@@ -1572,7 +1665,7 @@ class PaperBotRuntime:
         # флипают каждые секунды на старых данных.
         try:
             _step = STEP_SEC.get(self.config.interval_name, 60)
-            _age = (datetime.now(timezone.utc) - c.ts).total_seconds()
+            _age = (self._bot_now() - c.ts).total_seconds()
             if _age > _step * 2:
                 self._candles_rejected += 1
                 self.events.log("DATA_STALE_CANDLE", figi=figi,
@@ -1745,7 +1838,7 @@ class PaperBotRuntime:
                 self._log(f"ПРОПУСК ВХОДА {ticker}: поз. уже открыта")
                 self._log_no_trade(figi, "already_held")
                 return
-            if not _sessions_allowed(datetime.now(timezone.utc), self.config.sessions):
+            if not _sessions_allowed(self._bot_now(), self.config.sessions):
                 from app.bot.session import trading_session as _ts
                 self._log(f"ПРОПУСК ВХОДА {ticker}: вне торговых сессий "
                           f"(сейчас {_ts() or '—'}, разрешены {'/'.join(self.config.sessions) or '—'})")

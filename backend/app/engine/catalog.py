@@ -131,6 +131,48 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "period": {"type": "int", "default": 20, "min": 5, "max": 200},
         },
     ),
+    "volume_drop": StrategyCard(
+        id="volume_drop",
+        name="Volume on Drop (V4)",
+        family="volume",
+        wave=3,
+        long_rule="—",
+        short_rule="close<prev_close & vol_ratio>drop_ratio",
+        timeframes=("5min",),
+        status="AVAILABLE",
+        params_schema={
+            "ma_len": {"type": "int", "default": 20, "min": 5, "max": 200},
+            "drop_ratio": {"type": "float", "default": 1.5, "min": 0.5, "max": 20},
+        },
+    ),
+    "volume_climax": StrategyCard(
+        id="volume_climax",
+        name="Volume Climax (V3)",
+        family="volume",
+        wave=3,
+        long_rule="climax_short (нижняя тень) → BUY",
+        short_rule="climax_long (верхняя тень) → SELL",
+        timeframes=("5min",),
+        status="AVAILABLE",
+        params_schema={
+            "ma_len": {"type": "int", "default": 20, "min": 5, "max": 200},
+            "climax_ratio": {"type": "float", "default": 3.0, "min": 1.0, "max": 20},
+            "wick_frac": {"type": "float", "default": 0.5, "min": 0.05, "max": 1.0},
+        },
+    ),
+    "volume_divergence": StrategyCard(
+        id="volume_divergence",
+        name="Volume Divergence (V2/V5)",
+        family="volume",
+        wave=3,
+        long_rule="новый low при объёме ниже среднего → BUY (V5)",
+        short_rule="новый high при объёме ниже среднего → SELL (V2)",
+        timeframes=("5min",),
+        status="AVAILABLE",
+        params_schema={
+            "div_n": {"type": "int", "default": 20, "min": 5, "max": 200},
+        },
+    ),
 }
 
 
