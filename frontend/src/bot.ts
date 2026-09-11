@@ -3,6 +3,10 @@ const API = window.location.port === "5173" ? `http://${window.location.hostname
 import {
   botCancelPending,
   botCloseAll,
+  botEnsembleConfig,
+  botEnsemblePatch,
+  botEnsembleReset,
+  type EnsembleConfig,
   botEvents,
   type BotEventRow,
   type BotOrderRow,
@@ -836,7 +840,26 @@ function _setActiveModeBtn(mode: string) {
 function openTestModal() {
   const overlay = $("test-modal-overlay");
   if (!overlay) return;
+  // Дефолты: конец = сейчас, начало = 7 дней назад, локальное время (datetime-local).
+  const start = $("ts-start") as HTMLInputElement | null;
+  const end = $("ts-end") as HTMLInputElement | null;
+  const now = new Date();
+  if (end) end.value = fmtLocalDT(now);
+  if (start) {
+    const s = new Date(now.getTime() - 7 * 86400000);
+    start.value = fmtLocalDT(s);
+  }
   overlay.classList.remove("hidden");
+}
+
+function fmtLocalDT(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function toUTCISO(v: string): string {
+  if (!v) return "";
+  try { return new Date(v).toISOString(); } catch { return ""; }
 }
 
 function closeTestModal() {
@@ -845,10 +868,10 @@ function closeTestModal() {
 
 async function doRunTest() {
   const name = ($("ts-name") as HTMLInputElement)?.value.trim() ?? "";
-  const start = ($("ts-start") as HTMLInputElement)?.value.trim() ?? "";
-  const end = ($("ts-end") as HTMLInputElement)?.value.trim() ?? "";
+  const start = toUTCISO(($("ts-start") as HTMLInputElement)?.value ?? "");
+  const end = toUTCISO(($("ts-end") as HTMLInputElement)?.value ?? "");
   if (!name || !start) {
-    alert('Укажите название теста и начало периода (ISO UTC).');
+    alert('Укажите название теста и начало периода.');
     return;
   }
   const btn = $("ts-run") as HTMLButtonElement | null;
@@ -1490,6 +1513,7 @@ function initScreener() {
     });
   });
   // Клик по плашке тикера → открыть график в существующем chart
+  $("votes-config-btn")?.addEventListener("click", toggleEnsembleEditor);
   $("votes-grid")?.addEventListener("click", (e) => {
     const el = (e.target as HTMLElement).closest(".vote-chip") as HTMLElement | null;
     if (!el) return;
@@ -1566,6 +1590,92 @@ function renderVotes(votes: Array<{ figi: string; ticker: string; buy: number; s
   }).join("") || `<div class="mini-hint" style="color:#666">нет данных</div>`;
 }
 
+let _ensembleCfg: EnsembleConfig | null = null;
+const _REGIMES = ["NEUTRAL", "HIGH_VOLATILITY", "TREND_UP", "TREND_DOWN", "RANGE"];
+const _REG_SHORT: Record<string, string> = { NEUTRAL: "Нейтр", HIGH_VOLATILITY: "Волат", TREND_UP: "Тренд↑", TREND_DOWN: "Тренд↓", RANGE: "Флэт" };
+
+async function toggleEnsembleEditor() {
+  const ed = $("votes-editor");
+  if (!ed) return;
+  if (!ed.classList.contains("hidden")) { ed.classList.add("hidden"); return; }
+  ed.classList.remove("hidden");
+  ed.innerHTML = `<div class="mini-hint">загрузка…</div>`;
+  try { _ensembleCfg = await botEnsembleConfig(); } catch { _ensembleCfg = null; }
+  renderEnsembleEditor();
+}
+
+function renderEnsembleEditor() {
+  const ed = $("votes-editor");
+  if (!ed) return;
+  const cfg = _ensembleCfg;
+  if (!cfg) { ed.innerHTML = `<div class="mini-hint">не удалось загрузить</div>`; return; }
+  const all = cfg._all_strategies || cfg.setups.map((s) => s.strategy_id);
+  const byId: Record<string, EnsembleConfig["setups"][number]> = {};
+  for (const s of cfg.setups) byId[s.strategy_id] = s;
+  const rows = all.map((id) => {
+    const s = byId[id] || { strategy_id: id, enabled: false, tf: "5min", params: {} };
+    const params = Object.entries(s.params || {}).map(([k, v]) =>
+      `<label class="ens-param">${k}<input type="number" step="any" data-sid="${id}" data-pk="${k}" value="${v}"></label>`).join("");
+    const rf = (cfg.regime_setups_filter || {})[id] || [];
+    const regs = _REGIMES.map((r) => `<label class="ens-reg"><input type="checkbox" data-sid="${id}" data-reg="${r}" ${rf.includes(r) ? "checked" : ""}>${_REG_SHORT[r]}</label>`).join("");
+    return `<div class="ens-row ${s.enabled ? "on" : ""}">` +
+      `<label class="ens-enable"><input type="checkbox" data-sid="${id}" data-role="enable" ${s.enabled ? "checked" : ""}> <b>${id}</b></label>` +
+      `<div class="ens-params">${params || "<span class='mini-hint'>нет параметров</span>"}</div>` +
+      `<div class="ens-regs" title="Ограничить стратегию режимами (пусто = все)">${regs}</div></div>`;
+  }).join("");
+  ed.innerHTML =
+    `<div class="ens-head">` +
+    `<label class="ens-q">Кворум <input type="number" id="ens-quorum" min="1" max="8" value="${cfg.quorum}"></label>` +
+    `<label class="ens-q">Режим <select id="ens-neutral">${["semi_flip", "flip", "no_flip"].map((m) => `<option ${cfg.neutral_mode === m ? "selected" : ""}>${m}</option>`).join("")}</select></label>` +
+    `<label class="ens-q">Vol_thr <input type="number" step="0.1" id="ens-volthr" value="${cfg.vol_thr || 0}"></label></div>` +
+    `<div class="ens-list">${rows}</div>` +
+    `<div class="ens-actions">` +
+    `<button class="btn-primary btn-xs" id="ens-save">💾 Сохранить</button>` +
+    `<button class="btn-secondary btn-xs" id="ens-reset">↺ Сброс</button>` +
+    `<span class="mini-hint" id="ens-status"></span></div>`;
+  $("ens-save")?.addEventListener("click", saveEnsembleEditor);
+  $("ens-reset")?.addEventListener("click", async () => {
+    try { const r = await botEnsembleReset(); _ensembleCfg = r.config; renderEnsembleEditor(); } catch { /* noop */ }
+  });
+}
+
+async function saveEnsembleEditor() {
+  const ed = $("votes-editor");
+  if (!ed || !_ensembleCfg) return;
+  const setups = _ensembleCfg.setups.map((s) => ({ ...s }));
+  const byId: Record<string, EnsembleConfig["setups"][number]> = {};
+  for (const s of setups) byId[s.strategy_id] = s;
+  const all = _ensembleCfg._all_strategies || setups.map((s) => s.strategy_id);
+  for (const id of all) {
+    if (!byId[id]) { byId[id] = { strategy_id: id, enabled: false, tf: "5min", params: {} }; setups.push(byId[id]); }
+  }
+  const regFilter: Record<string, string[]> = {};
+  ed.querySelectorAll("input[type=checkbox]").forEach((el) => {
+    const inp = el as HTMLInputElement;
+    const sid = inp.dataset.sid as string;
+    if (!byId[sid]) return;
+    if (inp.dataset.role === "enable") byId[sid].enabled = inp.checked;
+    else if (inp.dataset.reg) { if (inp.checked) (regFilter[sid] = regFilter[sid] || []).push(inp.dataset.reg as string); }
+  });
+  ed.querySelectorAll("input[type=number][data-pk]").forEach((el) => {
+    const inp = el as HTMLInputElement;
+    const sid = inp.dataset.sid as string;
+    if (byId[sid]) byId[sid].params[inp.dataset.pk as string] = Number(inp.value);
+  });
+  const quorum = Number(($("ens-quorum") as HTMLInputElement)?.value || _ensembleCfg.quorum);
+  const neutral = ($("ens-neutral") as HTMLSelectElement)?.value || _ensembleCfg.neutral_mode;
+  const volthr = Number(($("ens-volthr") as HTMLInputElement)?.value || 0);
+  const st = $("ens-status");
+  if (st) st.textContent = "сохранение…";
+  try {
+    const r = await botEnsemblePatch({ quorum, neutral_mode: neutral, vol_thr: volthr, setups, regime_setups_filter: regFilter });
+    _ensembleCfg = r.config;
+    if (st) st.textContent = `✓ применено (стратегий ${r.applied_strategies})`;
+  } catch {
+    if (st) st.textContent = "ошибка сохранения";
+  }
+}
+
 function initSidebarRightResize() {
   const sb = document.getElementById("sidebar-right");
   if (!sb) return;
@@ -1610,5 +1720,109 @@ function initSidebarRightResize() {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   });
+}
+
+let _testResults: TestRunRow[] = [];
+let _selectedTest: string | null = null;
+
+function initTestResults() {
+  $("btn-test-new")?.addEventListener("click", openTestModal);
+  document.querySelector("#bot-tests-table tbody")?.addEventListener("click", (e) => {
+    const tr = (e.target as HTMLElement).closest("tr") as HTMLElement | null;
+    if (!tr) return;
+    const action = (e.target as HTMLElement).closest("[data-action]");
+    if (!action) { renderTestTrades(tr.dataset.name || "", true); return; }
+    const act = action.getAttribute("data-action")!;
+    const name = tr.dataset.name || "";
+    if (act === "delete") void _deleteTest(name);
+    else if (act === "rerun") void _rerunTest(name);
+    else renderTestTrades(name, true);
+  });
+  void _refreshTestResults();
+}
+
+async function _refreshTestResults() {
+  try { _testResults = await fetchTests(); } catch { _testResults = []; }
+  renderTests();
+}
+
+function renderTests() {
+  const tbody = document.querySelector("#bot-tests-table tbody");
+  if (!tbody) return;
+  if (!_testResults.length) {
+    tbody.innerHTML = `<tr><td colspan="11" style="color:var(--text-dim);text-align:center">Нет сохранённых тестов</td></tr>`;
+    return;
+  }
+  const _m = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(0)} ₽`;
+  tbody.innerHTML = _testResults.map((t) => {
+    const sel = t.name === _selectedTest;
+    return `<tr class="${sel ? "selected" : ""}" data-name="${esc(t.name)}">
+      <td>${esc(t.name)}</td>
+      <td>${esc(t.replay_start ? t.replay_start.slice(0, 10) : "—")}${t.replay_end ? " → " + esc(t.replay_end.slice(0, 10)) : ""}</td>
+      <td>${t.trades}</td>
+      <td class="pos">${t.wins}</td>
+      <td class="neg">${t.losses}</td>
+      <td class="pos">${_m(t.gross_win)}</td>
+      <td class="neg">${_m(-t.gross_loss)}</td>
+      <td class="${t.net >= 0 ? "pos" : "neg"}" style="font-weight:700">${_m(t.net)}</td>
+      <td>${t.pf.toFixed(2)}</td>
+      <td>${t.winrate}%</td>
+      <td>
+        <button data-action="rerun" class="btn-secondary btn-sm" title="Перезапустить" style="padding:2px 6px;font-size:10px">↻</button>
+        <button data-action="delete" class="btn-danger btn-sm" title="Удалить" style="padding:2px 6px;font-size:10px">✕</button>
+      </td>
+    </tr>`;
+  }).join("");
+  if (_selectedTest) renderTestTrades(_selectedTest);
+}
+
+async function _deleteTest(name: string) {
+  if (!confirm(`Удалить тест ${name}? Это удалит все сделки этого прогона.`)) return;
+  try {
+    await deleteTest(name);
+    if (_selectedTest === name) _selectedTest = null;
+    await _refreshTestResults();
+  } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+}
+
+async function _rerunTest(name: string) {
+  const t = _testResults.find((x) => x.name === name);
+  if (!t || !t.replay_start) { alert("Нет периода для перезапуска"); return; }
+  if (!confirm(`Перезапустить тест ${name} (${t.replay_start.slice(0,10)}…)?`)) return;
+  try {
+    await botSetMode("test", { test_name: name, replay_start: t.replay_start, replay_end: t.replay_end });
+    _curMode = "test";
+    _setActiveModeBtn("test");
+  } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+}
+
+async function renderTestTrades(name: string, force = false) {
+  if (_selectedTest === name && !force) { _selectedTest = null; renderTests(); return; }
+  _selectedTest = name;
+  let trades: BotTradeRow[];
+  try { trades = await fetchTestTrades(name); } catch { trades = []; }
+  const tbody = document.querySelector("#bot-test-trades tbody");
+  if (!tbody) return;
+  tbody.innerHTML = `<tr><td colspan="8" style="color:var(--cyan);font-weight:600">🧪 ${esc(name)} — ${trades.length} сделок</td></tr>`;
+  for (const t of trades) {
+    const dtIn = new Date(t.entry_time).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
+    const dtOut = t.ts ? new Date(t.ts).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" }) : "—";
+    const pnl = t.net_pnl != null ? (t.net_pnl >= 0 ? `<b class="pos">+${t.net_pnl.toFixed(0)} ₽</b>` : `<b class="neg">${t.net_pnl.toFixed(0)} ₽</b>`) : "—";
+    tbody.innerHTML += `<tr>
+      <td>${dtIn} → ${dtOut}</td>
+      <td>${esc(t.ticker)}</td>
+      <td class="${t.side === "BUY" ? "pos" : "neg"}">${t.side}</td>
+      <td>${t.qty}</td>
+      <td>${t.entry_price.toFixed(2)} → ${t.exit_price != null ? t.exit_price.toFixed(2) : "—"}</td>
+      <td>${pnl}</td>
+      <td>${t.commission ? t.commission.toFixed(2) : "—"}</td>
+      <td>${esc(t.exit_reason || "—")}</td>
+    </tr>`;
+  }
+  renderTests();
+}
+
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 

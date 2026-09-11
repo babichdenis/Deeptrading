@@ -4,7 +4,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.runtime import BotConfig, BOT_PERSIST_FIELDS, load_bot_settings, runtime, save_bot_settings
+from app.bot.runtime import (BotConfig, BOT_PERSIST_FIELDS, load_bot_settings, runtime,
+                             save_bot_settings, load_ensemble_config, save_ensemble_config,
+                             default_ensemble_config)
 
 
 async def _cfg_from_saved() -> BotConfig:
@@ -296,6 +298,49 @@ async def bot_config_get() -> dict:
         _payload = _config_payload(await _cfg_from_saved())
     _payload.pop("ok", None)
     return _payload
+
+
+@router.get("/ensemble")
+async def bot_ensemble_get() -> dict:
+    """Состав кворума (UI-управляемый конфиг движка)."""
+    cfg = await load_ensemble_config()
+    cfg["_all_strategies"] = [
+        "rsi_reversal", "bollinger_reclaim", "vwap_reclaim", "macd_cross", "donchian_breakout",
+        "pullback_ema", "range_compression_breakout", "volume_drop", "volume_climax", "stochastic",
+    ]
+    return cfg
+
+
+@router.patch("/ensemble")
+async def bot_ensemble_patch(payload: dict) -> dict:
+    """Обновить состав кворума/параметры и применить к запущенному боту."""
+    cfg = await load_ensemble_config()
+    for key in ("quorum", "neutral_mode", "vol_thr", "bias", "entry_tf"):
+        if key in payload:
+            cfg[key] = payload[key]
+    if "setups" in payload and isinstance(payload["setups"], list):
+        cfg["setups"] = payload["setups"]
+    if "regime_setups_filter" in payload and isinstance(payload["regime_setups_filter"], dict):
+        cfg["regime_setups_filter"] = payload["regime_setups_filter"]
+    await save_ensemble_config(cfg)
+    applied = 0
+    try:
+        applied = await runtime.reload_ensemble()
+    except Exception:
+        applied = 0
+    return {"ok": True, "applied_strategies": applied, "config": cfg}
+
+
+@router.post("/ensemble/reset")
+async def bot_ensemble_reset() -> dict:
+    """Сбросить состав кворума к дефолту."""
+    cfg = default_ensemble_config()
+    await save_ensemble_config(cfg)
+    try:
+        await runtime.reload_ensemble()
+    except Exception:
+        pass
+    return {"ok": True, "config": cfg}
 
 
 @router.post("/stop")

@@ -470,6 +470,12 @@
                 <thead><tr><th>Тест</th><th>Период (входы)</th><th>Сделок</th><th>Wins</th><th>Losses</th><th>Gross Win</th><th>Gross Loss</th><th>Net</th><th>PF</th><th>WR%</th><th></th></tr></thead>
                 <tbody></tbody>
               </table>
+              <div id="bot-test-trades-wrap">
+                <table class="runs-table" id="bot-test-trades">
+                  <thead><tr><th>Время входа→выхода</th><th>Акция</th><th>Направл.</th><th>Кол-во</th><th>Цена входа→выхода</th><th>Доход</th><th>Комиссия</th><th>Причина выхода</th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
             </div>
 
 
@@ -519,7 +525,9 @@
           <div class="sr-head">
             <span class="sr-title">🗳 Голоса ансамбля (5m)</span>
             <span class="sr-sub" id="votes-count">—</span>
+            <button class="sr-refresh btn-secondary btn-xs" id="votes-config-btn" title="Состав кворума (управление движком)">⚙</button>
           </div>
+          <div class="votes-editor hidden" id="votes-editor"></div>
           <div class="sr-votes-sort">
             <button class="votes-sort" data-vsort="ticker">Название <span class="vs-arrow"></span></button>
             <button class="votes-sort" data-vsort="atr">Волат. <span class="vs-arrow"></span></button>
@@ -605,16 +613,17 @@
           <input id="ts-name" type="text" placeholder="напр. июль_main" autocomplete="off" />
         </label>
         <label class="bs-field">
-          <span>Начало периода (ISO UTC)</span>
-          <input id="ts-start" type="text" placeholder="2026-07-01T03:00:00+00:00" autocomplete="off" />
+          <span>Начало периода</span>
+          <input id="ts-start" type="datetime-local" step="60" />
         </label>
         <label class="bs-field">
           <span>Конец периода (пусто = до конца данных)</span>
-          <input id="ts-end" type="text" placeholder="2026-07-31T20:00:00+00:00" autocomplete="off" />
+          <input id="ts-end" type="datetime-local" step="60" />
         </label>
         <div class="mini-hint bs-hint">
           Тот же движок, что в Live/Sandbox, но свечи берутся из БД (никаких реальных заявок),
           выход — paper-заглушка. Результат сохраняется под этим именем.
+          Время вводится по вашему часовому поясу и конвертируется в UTC.
         </div>
       </div>
     </div>

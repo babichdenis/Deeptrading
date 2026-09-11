@@ -50,6 +50,8 @@ class EnsembleParams:
     entry_macd_fast: int = 12
     entry_macd_slow: int = 26
     entry_macd_signal: int = 9
+    # --- Режимные фильтры: {strategy_id: [разрешённые режимы]} (пусто = все режимы) ---
+    regime_setups_filter: dict = field(default_factory=dict)
 
 
 class EnsembleV4Strategy:
@@ -112,6 +114,8 @@ class EnsembleV4Strategy:
                 req["volume_filter_threshold"] = self.p.vol_thr
             if self.p.neutral_mode:
                 req["neutral_mode"] = self.p.neutral_mode
+            if self.p.regime_setups_filter:
+                req["regime_setups_filter"] = self.p.regime_setups_filter
             if self.p.entry_macd_1m:
                 req["entry_macd_1m"] = True
                 req["entry_macd_fast"] = self.p.entry_macd_fast

@@ -470,6 +470,48 @@ export async function botCloseAll(): Promise<{ closed: number }> {
   return res.json();
 }
 
+// ============ Ensemble config (UI-управление составом кворума) ============
+
+export interface EnsembleSetup {
+  strategy_id: string;
+  enabled: boolean;
+  tf: string;
+  params: Record<string, number>;
+}
+
+export interface EnsembleConfig {
+  quorum: number;
+  neutral_mode: string;
+  vol_thr?: number;
+  setups: EnsembleSetup[];
+  regime_setups_filter?: Record<string, string[]>;
+  bias?: { tf: string; period: number };
+  entry_tf?: string;
+  _all_strategies?: string[];
+}
+
+export async function botEnsembleConfig(): Promise<EnsembleConfig> {
+  const res = await fetch(`${API}/api/v1/bot/ensemble`);
+  if (!res.ok) throw new Error(`ensemble ${res.status}`);
+  return res.json();
+}
+
+export async function botEnsemblePatch(payload: Partial<EnsembleConfig>): Promise<{ ok: boolean; applied_strategies: number; config: EnsembleConfig }> {
+  const res = await fetch(`${API}/api/v1/bot/ensemble`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`ensemble patch ${res.status}`);
+  return res.json();
+}
+
+export async function botEnsembleReset(): Promise<{ ok: boolean; config: EnsembleConfig }> {
+  const res = await fetch(`${API}/api/v1/bot/ensemble/reset`, { method: "POST" });
+  if (!res.ok) throw new Error(`ensemble reset ${res.status}`);
+  return res.json();
+}
+
 // ============ Sandbox API (T-Invest live data) ============
 
 export interface SandboxStatus {

@@ -175,6 +175,53 @@ async def save_bot_settings(cfg) -> None:
 # Флаг-состояние runtime, которое должно переживать рестарты бота (ключ='bot_flags').
 _BOT_FLAGS_KEY = "bot_flags"
 
+# --- Конфиг состава кворума (UI-управление движком) ---
+_ENSEMBLE_CONFIG_FILE = str(Path(__file__).resolve().parents[2] / "data" / "ensemble_config.json")
+_ENSEMBLE_ALL_STRATEGIES = [
+    "rsi_reversal", "bollinger_reclaim", "vwap_reclaim", "macd_cross", "donchian_breakout",
+    "pullback_ema", "range_compression_breakout", "volume_drop", "volume_climax", "stochastic",
+]
+_ENSEMBLE_DEFAULT_ENABLED = {
+    "rsi_reversal", "bollinger_reclaim", "vwap_reclaim", "macd_cross", "donchian_breakout", "volume_drop",
+}
+
+
+def default_ensemble_config() -> dict:
+    from app.bot.ensemble_strategy import V2_SETUPS
+    V2P = {s["strategy_id"]: dict(s["params"]) for s in V2_SETUPS}
+    V2P["volume_drop"] = {"ma_len": 20, "drop_ratio": 1.5}
+    V2P["volume_climax"] = {"ma_len": 20, "climax_ratio": 3.0, "wick_frac": 0.5}
+    V2P["stochastic"] = {"k_period": 14, "d_period": 3, "oversold": 20, "overbought": 80}
+    setups = [{"strategy_id": s, "enabled": s in _ENSEMBLE_DEFAULT_ENABLED,
+               "tf": "5min", "params": V2P.get(s, {})} for s in _ENSEMBLE_ALL_STRATEGIES]
+    return {"quorum": 2, "neutral_mode": "semi_flip", "setups": setups,
+            "regime_setups_filter": {}, "bias": {"tf": "hour", "period": 50},
+            "entry_tf": "5min"}
+
+
+async def load_ensemble_config() -> dict:
+    """Состав кворума из data/ensemble_config.json (источник правды), дефолт если нет."""
+    try:
+        _p = Path(_ENSEMBLE_CONFIG_FILE)
+        if _p.exists():
+            _d = json.loads(_p.read_text(encoding="utf-8"))
+            if isinstance(_d, dict) and _d.get("setups"):
+                return _d
+    except Exception:
+        pass
+    return default_ensemble_config()
+
+
+async def save_ensemble_config(cfg: dict) -> None:
+    try:
+        _p = Path(_ENSEMBLE_CONFIG_FILE)
+        _p.parent.mkdir(parents=True, exist_ok=True)
+        _tmp = _p.with_suffix(".json.tmp")
+        _tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        _tmp.replace(_p)
+    except Exception:
+        pass
+
 
 async def load_bot_flags() -> dict:
     """Прочитать персистентные runtime-флаги (entries_paused и т.п.) из bot_settings."""
@@ -421,10 +468,10 @@ class PaperBotRuntime:
         return True
 
     async def _build_ensemble_params(self, db, figi, ticker, lot, capital, sessions):
-        """EnsembleParams для semi-flip: ВСЕ 7 стратегий V2, quorum=2, neutral_mode=semi_flip.
+        """EnsembleParams из data/ensemble_config.json (UI-управляемый состав кворума).
 
-        Голоса — все 7 (V2 params), НЕ подмножество из optuna. SL/TP — не трогаем
-        (sl_mult/rr берём из optuna, как есть).
+        Состав голосов, quorum, neutral_mode, bias и режимные фильтры берутся из конфига.
+        SL/TP (sl_mult/rr) — из optuna по инструменту.
         """
         from sqlalchemy import text as _t
         row = (await db.execute(
@@ -432,22 +479,50 @@ class PaperBotRuntime:
         )).first()
         opt = (row[0] if row else None) or {}
 
-        from app.bot.ensemble_strategy import EnsembleParams, V2_SETUPS
-        # Голосуют 5 стратегий (исключены pullback_ema и range_compression_breakout) + volume_drop.
-        _EXCLUDE = {"pullback_ema", "range_compression_breakout"}
-        _setups = [s for s in V2_SETUPS if s.get("strategy_id") not in _EXCLUDE]
-        _setups.append({"strategy_id": "volume_drop", "tf": "5min",
-                        "params": {"ma_len": 20, "drop_ratio": 1.5}})
+        from app.bot.ensemble_strategy import EnsembleParams
+        ec = await load_ensemble_config()
+        _setups = [
+            {"strategy_id": s["strategy_id"], "tf": s.get("tf", "5min"), "params": s.get("params", {})}
+            for s in ec.get("setups", []) if s.get("enabled")
+        ]
+        _bias = ec.get("bias") or {}
         return EnsembleParams(
             figi=figi, lot=int(lot) if lot else 10, capital=capital,
-            quorum=2, session="all", sessions=sessions,
-            setups=_setups,  # 6 голосов
-            sl_mult=float(opt.get("sl_mult", 4.0)),  # SL/TP — как есть (optuna)
+            quorum=int(ec.get("quorum", 2)), session="all", sessions=sessions,
+            setups=_setups,
+            sl_mult=float(opt.get("sl_mult", 4.0)),
             rr=float(opt.get("rr", 4.0)),
-            vol_thr=0.0,
-            neutral_mode="semi_flip",
+            vol_thr=float(ec.get("vol_thr", 0.0) or 0.0),
+            neutral_mode=str(ec.get("neutral_mode", "semi_flip")),
             entry_macd_1m=True,
+            bias_tf=str(_bias.get("tf", "hour")),
+            bias_period=int(_bias.get("period", 50)),
+            regime_setups_filter=ec.get("regime_setups_filter") or {},
         )
+
+    async def reload_ensemble(self) -> int:
+        """Пересобрать стратегии под новый конфиг кворума (data/ensemble_config.json)."""
+        cfg = self.config
+        if not (self.running or self.starting) or not getattr(cfg, "use_ensemble", False):
+            return 0
+        from app.bot.ensemble_strategy import EnsembleV4Strategy
+        n = 0
+        try:
+            async with SessionLocal() as db:
+                for figi, _old in list(self.strategies.items()):
+                    try:
+                        u = next((x for x in self.universe if x["figi"] == figi), {})
+                        params = await self._build_ensemble_params(
+                            db, figi, self.tickers.get(figi, u.get("ticker", "")),
+                            u.get("lot_size", 10), cfg.ensemble_capital, cfg.sessions)
+                        self.strategies[figi] = EnsembleV4Strategy(params)
+                        n += 1
+                    except Exception:
+                        continue
+            self._log(f"⚙ КОНФИГ КВОРУМА применён: пересобрано стратегий {n}")
+        except Exception as e:
+            self._log(f"⚙ КОНФИГ КВОРУМА: ошибка применения: {e}")
+        return n
 
     def _log_no_trade(self, figi: str, reason: str, detail: str = "") -> None:
         """Log why no trade was made for diagnostics (NO_TRADE analysis)."""

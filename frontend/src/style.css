@@ -1291,6 +1291,21 @@ body.modal-open { overflow: hidden; }
 .vote-1 { color: #6aa9ff; background: rgba(106,169,255,0.12); border-color: rgba(106,169,255,0.45); }
 .vote-2 { color: var(--gold); background: rgba(244,185,66,0.12); border-color: rgba(244,185,66,0.5); }
 .vote-3 { color: var(--up); background: rgba(var(--up-rgb),0.12); border-color: rgba(var(--up-rgb),0.5); }
+/* ===== Редактор состава кворума (UI-управление движком) ===== */
+.votes-editor { margin: 6px 8px; padding: 8px; border: 1px solid rgba(var(--accent-rgb),0.35); border-radius: 10px; background: var(--bg-soft); max-height: 70%; overflow: auto; }
+.ens-head { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.ens-q { display: flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: var(--text-dim); }
+.ens-q input, .ens-q select { width: 64px; padding: 3px 5px; font-size: 11px; background: var(--bg); border: 1px solid var(--border-soft); border-radius: 6px; color: var(--text); }
+.ens-list { display: flex; flex-direction: column; gap: 6px; }
+.ens-row { border: 1px solid var(--border-soft); border-radius: 8px; padding: 6px 8px; background: var(--bg); opacity: 0.55; }
+.ens-row.on { opacity: 1; border-color: rgba(var(--up-rgb),0.45); }
+.ens-enable { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.ens-params { display: flex; flex-wrap: wrap; gap: 6px; margin: 5px 0 4px; }
+.ens-param { display: flex; align-items: center; gap: 3px; font-size: 10px; color: var(--text-dim); }
+.ens-param input { width: 58px; padding: 2px 4px; font-size: 11px; background: var(--bg-soft); border: 1px solid var(--border-soft); border-radius: 5px; color: var(--text); }
+.ens-regs { display: flex; flex-wrap: wrap; gap: 6px; }
+.ens-reg { display: flex; align-items: center; gap: 3px; font-size: 10px; color: var(--text-dim); cursor: pointer; }
+.ens-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .bot-live-logs .lg-fill { color: var(--accent); }
 .bot-live-logs .lg-exit { color: #ff8a65; }
 
