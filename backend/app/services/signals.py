@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, desc, select
@@ -44,7 +45,20 @@ def _data_version(candles: list[EngineCandle]) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+_SIG_CACHE: dict = {}
+_SIG_CACHE_MAX = 256
+
+
 def generate_signals(strategy_id: str, params: dict | None, candles: list[EngineCandle]) -> list[dict]:
+    # Кэш по (стратегия, параметры, окно данных): drop_useless и основной прогон
+    # вызывают одну и ту же генерацию — второй вызов берёт готовое.
+    try:
+        _key = (strategy_id, json.dumps(params or {}, sort_keys=True), len(candles),
+                candles[0].ts if candles else None, candles[-1].ts if candles else None)
+    except Exception:
+        _key = None
+    if _key is not None and _key in _SIG_CACHE:
+        return _SIG_CACHE[_key]
     strategy = build_strategy(strategy_id, params)
     warmup = strategy.warmup_bars()
     out: list[dict] = []
@@ -66,6 +80,10 @@ def generate_signals(strategy_id: str, params: dict | None, candles: list[Engine
                 "features": sig.features,
             }
         )
+    if _key is not None:
+        if len(_SIG_CACHE) >= _SIG_CACHE_MAX:
+            _SIG_CACHE.pop(next(iter(_SIG_CACHE)))
+        _SIG_CACHE[_key] = out
     return out
 
 
