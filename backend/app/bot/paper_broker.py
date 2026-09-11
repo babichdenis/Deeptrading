@@ -27,7 +27,7 @@ class PaperBroker:
         self.sessions = session_factory
         self.costs = cost_model or CostModel()
 
-    async def ensure_account(self, initial_cash: float = 100_000.0) -> PaperAccount:
+    async def ensure_account(self, initial_cash: float = 10_000.0) -> PaperAccount:
         async with self.sessions() as db:
             acc = await db.scalar(select(PaperAccount).where(PaperAccount.name == DEFAULT_ACCOUNT))
             if acc is None:
@@ -37,7 +37,7 @@ class PaperBroker:
                 await db.refresh(acc)
             return acc
 
-    async def reset(self, initial_cash: float = 100_000.0) -> None:
+    async def reset(self, initial_cash: float = 10_000.0) -> None:
         async with self.sessions() as db:
             acc = await db.scalar(select(PaperAccount).where(PaperAccount.name == DEFAULT_ACCOUNT))
             if acc:
@@ -49,6 +49,49 @@ class PaperBroker:
         async with self.sessions() as db:
             res = await db.execute(select(PaperPosition))
             return list(res.scalars().all())
+
+    async def get_max_lots(self, figi: str, side: str = "BUY"):
+        """Заглушка маржи для тест/replay-режима: максимум из БД.
+
+        У LiveBroker плечо запрашивается у T-Invest, у PaperBroker брокера нет —
+        поэтому берём теоретический максимум из `instruments.long_lev/short_lev`
+        (те же данные, что используют бэктесты). Формат ответа совпадает с
+        LiveBroker.get_max_lots, чтобы блок MARGIN в runtime работал одинаково.
+        """
+        import asyncio
+        from dataclasses import dataclass as _dc
+
+        @_dc
+        class _ML:
+            buy_cash: int = 0
+            buy_margin: int = 0
+            sell_cash: int = 0
+            sell_margin: int = 0
+            buy_money: float = 0.0
+            buy_margin_money: float = 0.0
+            leverage: float = 1.0
+
+        async def _fetch():
+            from app.models.instrument import Instrument
+            async with self.sessions() as db:
+                row = await db.scalar(select(Instrument).where(Instrument.figi == figi))
+                long_lev = float(getattr(row, "long_lev", 0.0) or 0.0)
+                short_lev = float(getattr(row, "short_lev", 0.0) or 0.0)
+            # В бэктестах отсутствие/0 = плечо 1.0 (без маржи). Потолки лотов не
+            # лимитируем (big): реальный размер ограничен бюджетом в _submit_order.
+            _BIG = 10 ** 9
+            lev = long_lev if side == "BUY" else short_lev
+            return _ML(
+                buy_cash=_BIG,
+                buy_margin=_BIG,
+                sell_cash=_BIG,
+                sell_margin=_BIG,
+                buy_money=float(lev) if lev >= 1 else 0.0,
+                buy_margin_money=0.0,
+                leverage=max(1.0, lev, 1.0),
+            )
+
+        return await asyncio.to_thread(_fetch)
 
     async def get_position(self, figi: str) -> PaperPosition | None:
         async with self.sessions() as db:

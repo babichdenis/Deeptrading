@@ -91,7 +91,7 @@ class LiveBroker:
             return services.orders.get_max_lots(request=request)
         return services.sandbox.get_sandbox_max_lots(request=request)
 
-    async def ensure_account(self, initial_cash: float = 100_000.0) -> PaperAccount | None:
+    async def ensure_account(self, initial_cash: float = 10_000.0) -> PaperAccount | None:
         async with self.sessions() as db:
             acc = await db.scalar(select(PaperAccount).where(PaperAccount.name == DEFAULT_ACCOUNT))
             if acc is None:
@@ -101,7 +101,7 @@ class LiveBroker:
                 await db.refresh(acc)
             return acc
 
-    async def reset(self, initial_cash: float = 100_000.0) -> None:
+    async def reset(self, initial_cash: float = 10_000.0) -> None:
         # live счёт не сбрасывается — только историю paper-учёта
         async with self.sessions() as db:
             acc = await db.scalar(select(PaperAccount).where(PaperAccount.name == DEFAULT_ACCOUNT))

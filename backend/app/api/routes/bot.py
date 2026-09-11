@@ -79,7 +79,7 @@ class StartRequest(BaseModel):
     allow_short: bool = False
     long_allowed: bool = True
     short_allowed: bool = False
-    initial_cash: float = 100_000.0
+    initial_cash: float = 10_000.0
     daily_loss_limit: float = Field(1000.0, ge=0)
     mode: str = "paper"  # paper | sandbox | live
     use_ensemble: bool = False
@@ -670,7 +670,7 @@ async def bot_trades(limit: int = 50) -> dict:
 
 
 @router.post("/reset")
-async def bot_reset(initial_cash: float = 100_000.0) -> dict:
+async def bot_reset(initial_cash: float = 10_000.0) -> dict:
     if runtime.running or runtime.starting:
         raise HTTPException(409, "остановите бота перед сбросом")
     await runtime.broker.reset(initial_cash)

@@ -76,7 +76,7 @@ class BotConfig:
     allow_short: bool = False
     long_allowed: bool = True
     short_allowed: bool = False
-    initial_cash: float = 100_000.0
+    initial_cash: float = 10_000.0
     daily_loss_limit: float = 1000.0
     mode: str = "paper"  # paper | sandbox | live
     use_ensemble: bool = False
@@ -2134,6 +2134,19 @@ class PaperBotRuntime:
                         budget = live_cash * POS_PCT
                     except Exception:
                         pass
+            elif isinstance(self.broker, PaperBroker) and cfg.mode == "test":
+                # Тест-режим: эмулируем Live — бюджет = доля от начального капитала теста
+                # (PaperBroker не спрашивает equity у брокера). Плечо ниже берётся из БД.
+                try:
+                    _acc = await self.broker.ensure_account(cfg.initial_cash)
+                    _eq = float(_acc.cash or cfg.initial_cash)
+                    budget = _eq * POS_PCT
+                    self._log(
+                        f"TEST BUDGET {ticker}: equity≈{_eq:.0f}₽ → слот {budget:.0f}₽ "
+                        f"(POS_PCT {POS_PCT*100:.0f}%) · initial={cfg.initial_cash:.0f}₽"
+                    )
+                except Exception as e:
+                    self._log(f"TEST BUDGET FAIL {ticker}: {type(e).__name__}: {str(e)[:80]} — слот {budget:.0f}₽")
             lev = max(1.0, float(cfg.leverage or 1.0))
             lot_cost = price * lot
             if price <= 0 or lot <= 0 or lot_cost <= 0:
@@ -2150,12 +2163,12 @@ class PaperBotRuntime:
                 self._log(f"ПРОПУСК СДЕЛКИ {ticker}: бюджет {budget:.0f} < стоимость лота {lot_cost:.0f} (divide)")
                 return
             # --- Маржинальное плечо: запрашиваем у брокера ДО входа, ответ в лог ---
-            if isinstance(self.broker, LiveBroker):
+            if isinstance(self.broker, (LiveBroker, PaperBroker)):
                 try:
                     ml = await self.broker.get_max_lots(figi)
                     from app.bot.session import session_state, trading_session
-                    _ss = session_state()
-                    _tss = trading_session()
+                    _ss = session_state(now=self._bot_now())
+                    _tss = trading_session(now=self._bot_now())
                     use_margin = bool(cfg.margin_sessions) and _tss in cfg.margin_sessions
                     _cash_lots = ml.buy_cash if side == "BUY" else ml.sell_cash
                     _mrgn_lots = ml.buy_margin if side == "BUY" else ml.sell_margin
@@ -2198,10 +2211,10 @@ class PaperBotRuntime:
         # qty уже посчитан по собственному бюджету без плеча (own_per_lot при lev=1).
         # Свои деньги = 0 бывает у шортов в sandbox (шорт требует маржи), при этом
         # cash-бюджет на qty есть — значит ордер без плеча допустим.
-        if action == "open" and isinstance(self.broker, LiveBroker) and cfg.use_margin:
+        if action == "open" and isinstance(self.broker, (LiveBroker, PaperBroker)) and cfg.use_margin:
             try:
                 from app.bot.session import trading_session
-                _tss = trading_session()
+                _tss = trading_session(now=self._bot_now())
                 use_margin = bool(cfg.margin_sessions) and _tss in cfg.margin_sessions
                 ml = await self.broker.get_max_lots(figi)
                 cash_max = ml.buy_cash if side == "BUY" else ml.sell_cash
