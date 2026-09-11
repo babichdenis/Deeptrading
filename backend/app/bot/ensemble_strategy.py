@@ -122,9 +122,15 @@ class EnsembleV4Strategy:
                 req["entry_macd_slow"] = self.p.entry_macd_slow
                 req["entry_macd_signal"] = self.p.entry_macd_signal
             res = compute_ensemble(list(candles), req)
-        except Exception:
+        except Exception as e:
+            import logging as _lg
+            _lg.getLogger("ensemble_strategy").exception(
+                "on_bar compute_ensemble FAILED figi=%s candles=%d: %s", self.p.figi[-6:], len(candles), e)
             return None
         if "error" in res:
+            import logging as _lg
+            _lg.getLogger("ensemble_strategy").warning(
+                "on_bar compute_ensemble ERROR figi=%s: %s", self.p.figi[-6:], res.get("error"))
             return None
         try:
             tl = (res.get("regime") or {}).get("timeline") or []
@@ -147,10 +153,21 @@ class EnsembleV4Strategy:
             self._last_vol = None
         entries = res.get("static", {}).get("entries", [])
         if not entries:
+            if last.ts.minute % 5 == 0:
+                import logging as _lg
+                _lg.getLogger("ensemble_strategy").debug(
+                    "on_bar no-entries figi=%s candles=%d funnel=%s",
+                    self.p.figi[-6:], len(candles),
+                    (res.get("static", {}).get("funnel") or {}).get("entries_raw"))
             return None
         cutoff = last.ts - timedelta(minutes=FRESH_MIN)
         fresh = [e for e in entries if e.get("ts", "") >= cutoff.isoformat()]
         if not fresh:
+            if last.ts.minute % 5 == 0:
+                import logging as _lg
+                _lg.getLogger("ensemble_strategy").debug(
+                    "on_bar no-fresh-entries figi=%s last=%s newest_entry=%s",
+                    self.p.figi[-6:], last.ts.isoformat(), entries[-1].get("ts"))
             return None
         last_e = fresh[-1]
         side = Side.BUY if last_e.get("side") == "BUY" else Side.SELL
