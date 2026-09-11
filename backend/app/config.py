@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     tinkoff_token: str = ""
     tinkoff_live_token: str = ""
     sandbox: str = ""
-    bot_mode: str = "sandbox"  # sandbox | live
+    bot_mode: str = "sandbox"  # sandbox | live | test
     sandbox_account: str = ""
     live_account: str = ""
 

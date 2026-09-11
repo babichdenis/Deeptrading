@@ -9,7 +9,11 @@
     <div id="modal-backdrop" class="modal-backdrop hidden"></div>
     <div id="app">
       <aside class="sidebar" id="sidebar">
-        <div class="brand">⚡<span class="brand-name">Deeptrading</span></div>
+        <div class="mode-switch" id="mode-switch" title="Режим бота">
+          <button class="mode-btn" data-mode="live"><span class="m-dot live"></span>Live</button>
+          <button class="mode-btn" data-mode="sandbox"><span class="m-dot sandbox"></span>Sandbox</button>
+          <button class="mode-btn" data-mode="test"><span class="m-dot test"></span>Тест</button>
+        </div>
         <nav class="side-nav">
           <button class="nav-btn" data-page="chart"><span class="ico">📈</span><span>Склад</span></button>
           <!-- <button class="nav-btn" data-page="lab"><span class="ico">🧪</span><span>Lab</span></button> -->
@@ -27,7 +31,6 @@
               <b>MOEX</b>
               <span id="bs-trading-status">—</span>
             </span>
-            <button class="env-badge" id="env-badge" title="Активный контур — нажмите, чтобы переключить sandbox/live">—</button>
           </div>
           <div class="hdr-bot-ctrl">
             <button class="btn-primary start btn-xs" id="btn-bot-start">▶ Запустить</button>
@@ -458,6 +461,17 @@
               <tbody></tbody>
             </table>
 
+            <div class="bot-test-block" id="bot-test-block">
+              <div class="bot-test-head">
+                <h3 class="pg-h3" style="margin:16px 0 0">🧪 Результаты тестов</h3>
+                <button class="btn-secondary btn-sm" id="btn-test-new" title="Запустить новый тест">+ Новый тест</button>
+              </div>
+              <table class="runs-table" id="bot-tests-table">
+                <thead><tr><th>Тест</th><th>Период (входы)</th><th>Сделок</th><th>Wins</th><th>Losses</th><th>Gross Win</th><th>Gross Loss</th><th>Net</th><th>PF</th><th>WR%</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+
 
           </section>
         </div>
@@ -573,6 +587,39 @@
     </div>
     <div class="bot-modal-foot">
       <button class="btn-primary btn-sm" id="bs-save">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="test-modal-overlay">
+  <div class="bot-modal">
+    <div class="bot-modal-head">
+      <b>🧪 Запустить тест</b>
+      <button class="btn-secondary btn-sm" id="ts-close" title="Закрыть">✕</button>
+    </div>
+    <div class="bot-modal-body">
+      <div class="bs-section">
+        <div class="bs-section-title">Параметры прогона</div>
+        <label class="bs-field">
+          <span>Название теста</span>
+          <input id="ts-name" type="text" placeholder="напр. июль_main" autocomplete="off" />
+        </label>
+        <label class="bs-field">
+          <span>Начало периода (ISO UTC)</span>
+          <input id="ts-start" type="text" placeholder="2026-07-01T03:00:00+00:00" autocomplete="off" />
+        </label>
+        <label class="bs-field">
+          <span>Конец периода (пусто = до конца данных)</span>
+          <input id="ts-end" type="text" placeholder="2026-07-31T20:00:00+00:00" autocomplete="off" />
+        </label>
+        <div class="mini-hint bs-hint">
+          Тот же движок, что в Live/Sandbox, но свечи берутся из БД (никаких реальных заявок),
+          выход — paper-заглушка. Результат сохраняется под этим именем.
+        </div>
+      </div>
+    </div>
+    <div class="bot-modal-foot">
+      <button class="btn-primary btn-sm" id="ts-run">Запустить</button>
     </div>
   </div>
 </div>

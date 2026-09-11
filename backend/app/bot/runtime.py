@@ -108,6 +108,7 @@ class BotConfig:
     replay_start: str = ""    # ISO UTC datetime начала окна реплея (обязателен при feed=replay)
     replay_end: str = ""      # ISO UTC datetime конца окна (пусто = до конца данных)
     replay_pace: str = "fast" # fast (макс. скорость) | wall (в реальном времени по барам)
+    test_name: str = ""       # имя теста (режим test): сделки реплея помечаются им
 
 
 # Поля BotConfig, которые сохраняются в БД и восстанавливаются при старте бота.
@@ -529,6 +530,7 @@ class PaperBotRuntime:
                     meta=_json.dumps(meta, ensure_ascii=False, default=str) if meta else None,
                     leverage=float(leverage),
                     mode=self.broker_mode,
+                    test_name=getattr(self.config, "test_name", "") or None,
                 ))
                 await db.commit()
         except Exception:
@@ -641,6 +643,7 @@ class PaperBotRuntime:
                 "replay_start": self.config.replay_start,
                 "replay_end": self.config.replay_end,
                 "replay_pace": self.config.replay_pace,
+                "test_name": self.config.test_name,
             },
             "universe": self.universe,
             "votes": [
@@ -770,6 +773,8 @@ class PaperBotRuntime:
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS exit_meta TEXT"))
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS trailing_active BOOLEAN DEFAULT FALSE"))
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS mode VARCHAR(8) DEFAULT 'sandbox'"))
+                await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS test_name VARCHAR(64)"))
+                await _db.execute(_text("CREATE INDEX IF NOT EXISTS ix_sandbox_trades_test_name ON sandbox_trades (test_name)"))
                 await _db.execute(_text("CREATE TABLE IF NOT EXISTS bot_logs (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(), level VARCHAR(8) DEFAULT 'info', source VARCHAR(16) DEFAULT 'bot', msg TEXT)"))
                 await _db.commit()
             # Восстановить хвост live-логов из bot_logs (переживают рестарт; Live видит
@@ -839,16 +844,21 @@ class PaperBotRuntime:
             except Exception as e:
                 self._log(f"КАПИТАЛ не получен: {str(e)[:80]}")
         # Реплей: детерминированный старт — чистая paper-книга и чистые записи
-        # предыдущих реплеев (mode='paper'), чтобы прогон не зависел от прошлых.
+        # предыдущего прогона. Если задан test_name — чистим только его сделки
+        # (пересоздаём конкретный тест), иначе — все mode='paper' (лед legacy реплеи).
         if cfg.feed == "replay":
             try:
                 await self.broker.reset(cfg.initial_cash)
                 from sqlalchemy import delete as _delete
                 from app.models.sandbox_trade import SandboxTrade
                 async with SessionLocal() as db:
-                    await db.execute(_delete(SandboxTrade).where(SandboxTrade.mode == "paper"))
+                    _q = _delete(SandboxTrade).where(SandboxTrade.mode == "paper")
+                    if cfg.test_name:
+                        _q = _q.where(SandboxTrade.test_name == cfg.test_name)
+                    await db.execute(_q)
                     await db.commit()
-                self._log(f"REPLAY RESET: чистая бумажная книга ({cfg.initial_cash:.0f} ₽)")
+                self._log(f"REPLAY RESET: чистая бумажная книга ({cfg.initial_cash:.0f} ₽)"
+                          + (f" — тест {cfg.test_name!r}" if cfg.test_name else ""))
             except Exception as e:
                 self._log(f"REPLAY RESET FAIL: {type(e).__name__}: {str(e)[:80]}")
         await self.broker.ensure_account(cfg.initial_cash)
@@ -1467,6 +1477,7 @@ class PaperBotRuntime:
                     entry_reason="rebuilt_from_tinkoff",
                     leverage=1.0,
                     mode=self.broker_mode,
+                    test_name=getattr(self.config, "test_name", "") or None,
                 ))
                 created += 1
                 self._log(f"RECONCILE: создана строка {ticker} ({figi[-6:]}) {bp.side} {bp.qty} @{getattr(bp, 'entry_price', 0.0):.2f}")
@@ -1649,6 +1660,8 @@ class PaperBotRuntime:
                 # все решения (сессии, свежесть, дневной PnL) видят «правильное» время.
                 if isinstance(feed, ReplayFeed) and candle.ts is not None:
                     self._replay_cur = candle.ts
+                    if self.config.test_name:
+                        self.mode = f"test:{self.config.test_name}"
                 _t1 = _time.perf_counter()
                 await self._process_candle(candle)
                 _dt = (_time.perf_counter() - _t1) * 1000

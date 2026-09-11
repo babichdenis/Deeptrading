@@ -323,14 +323,56 @@ export async function botStop(): Promise<void> {
   if (!res.ok) throw new Error(`bot stop ${res.status}`);
 }
 
-export async function botSetMode(mode: "sandbox" | "live"): Promise<{ mode: string }> {
+export interface TestOpts {
+  test_name?: string;
+  replay_start?: string;
+  replay_end?: string;
+}
+
+export async function botSetMode(mode: "sandbox" | "live" | "test", opts: TestOpts = {}): Promise<{ mode: string; test_name?: string | null }> {
   const res = await fetch(`${API}/api/v1/bot/mode`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify({ mode, ...opts }),
   });
   if (!res.ok) throw new Error(`bot mode ${res.status}`);
   return res.json();
+}
+
+export interface TestRunRow {
+  name: string;
+  replay_start: string;
+  replay_end: string;
+  created_at: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  gross_win: number;
+  gross_loss: number;
+  net: number;
+  pf: number;
+  winrate: number;
+  positions_open: number;
+}
+
+export async function fetchTests(): Promise<TestRunRow[]> {
+  const res = await fetch(`${API}/api/v1/bot/tests`);
+  if (!res.ok) throw new Error(`tests ${res.status}`);
+  const d = await res.json();
+  return (d.tests ?? []) as TestRunRow[];
+}
+
+export async function deleteTest(name: string): Promise<{ deleted: number }> {
+  const res = await fetch(`${API}/api/v1/bot/tests/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`delete test ${res.status}`);
+  return res.json();
+}
+
+export async function fetchTestTrades(name: string): Promise<BotTradeRow[]> {
+  const res = await fetch(`${API}/api/v1/bot/tests/${encodeURIComponent(name)}`);
+  if (!res.ok) throw new Error(`test trades ${res.status}`);
+  const d = await res.json();
+  return (d.trades ?? []) as BotTradeRow[];
 }
 
 export async function botReset(cash: number): Promise<void> {

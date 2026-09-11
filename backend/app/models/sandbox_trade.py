@@ -31,3 +31,4 @@ class SandboxTrade(Base):
     exit_meta: Mapped[str | None] = mapped_column("exit_meta", Text, nullable=True)
     leverage: Mapped[float] = mapped_column(Float, default=1.0)
     mode: Mapped[str] = mapped_column(String(8), default="sandbox")  # sandbox | live | paper
+    test_name: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)

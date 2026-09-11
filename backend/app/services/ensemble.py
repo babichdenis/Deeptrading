@@ -718,21 +718,26 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                           "BUY": sum(1 for x in sigs if x["side"] == "BUY"),
                           "SELL": sum(1 for x in sigs if x["side"] == "SELL")}
 
-    # IMOEX: при высокой волатильности индекса — обязательный bias (veto) + отдельный голос.
+    # IMOEX: при высокой волатильности индекса — veto по направлению и/или отдельный голос.
     _imoex = req.get("imoex")
     _imoex_dir: dict = {}
     _imoex_hv: set = set()
+    _imoex_veto = False
+    _imoex_voice = False
     if _imoex:
         _imoex_dir = {str(k): int(v) for k, v in (_imoex.get("dir") or {}).items()}
         _imoex_hv = {str(x) for x in (_imoex.get("hv") or [])}
-        _isigs = [{"ts": datetime.fromisoformat(_t), "side": "BUY" if _d > 0 else "SELL",
-                   "reason": "imoex_dir"}
-                  for _t, _d in _imoex_dir.items() if _t in _imoex_hv]
-        if _isigs:
-            setup_runs.append(("imoex_direction", _isigs))
-            setup_out["imoex_direction"] = {"tf": "5min", "signals": len(_isigs),
-                                            "BUY": sum(1 for x in _isigs if x["side"] == "BUY"),
-                                            "SELL": sum(1 for x in _isigs if x["side"] == "SELL")}
+        _imoex_veto = bool(_imoex.get("veto"))
+        _imoex_voice = bool(_imoex.get("voice"))
+        if _imoex_voice:
+            _isigs = [{"ts": datetime.fromisoformat(_t), "side": "BUY" if _d > 0 else "SELL",
+                       "reason": "imoex_dir"}
+                      for _t, _d in _imoex_dir.items() if _t in _imoex_hv]
+            if _isigs:
+                setup_runs.append(("imoex_direction", _isigs))
+                setup_out["imoex_direction"] = {"tf": "5min", "signals": len(_isigs),
+                                                "BUY": sum(1 for x in _isigs if x["side"] == "BUY"),
+                                                "SELL": sum(1 for x in _isigs if x["side"] == "SELL")}
 
     quorum_sigs, funnel = merge_quorum(setup_runs, quorum_k)
     for idx, q in enumerate(quorum_sigs):
@@ -937,7 +942,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             rejected.append({**e, "ts": ts.isoformat(), "reason": "SETUP_MISSING"})
             continue
         # IMOEX-veto: при HV индекса вход разрешён только по его направлению.
-        if _imoex and _imoex_hv:
+        if _imoex_veto and _imoex_hv:
             _tis = ts.isoformat()
             if _tis in _imoex_hv:
                 _id = _imoex_dir.get(_tis)

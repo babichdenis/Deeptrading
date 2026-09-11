@@ -29,12 +29,8 @@ SETUPS = setups(BASE5 + ["volume_drop"])
 
 VARIANTS = [
     ("1. baseline (5+vol_drop)", False, False, "hv"),
-    ("2. IMOEX veto (HV)", True, False, "hv"),
-    ("3. IMOEX голос (HV)", False, True, "hv"),
-    ("4. IMOEX veto+голос (HV)", True, True, "hv"),
     ("5. IMOEX veto (все режимы)", True, False, "all"),
     ("6. IMOEX голос (все режимы)", False, True, "all"),
-    ("7. IMOEX veto+голос (все)", True, True, "all"),
 ]
 
 
@@ -91,7 +87,7 @@ async def get_eligible():
     return [(r[0], r[1], int(r[2]) if r[2] else 1) for r in rows]
 
 
-def base_req(figi, lot, imoex=None):
+def base_req(figi, lot, imoex=None, from_ts=None, to_ts=None):
     req = {
         "figi": figi, "bias_mode": "info",
         "bias": {"tf": "hour", "period": 50},
@@ -104,6 +100,10 @@ def base_req(figi, lot, imoex=None):
         "lot": lot, "setups": SETUPS, "use_all_setups": False, "drop_useless": True,
         "neutral_mode": "semi_flip",
     }
+    if from_ts:
+        req["from_ts"] = from_ts
+    if to_ts:
+        req["to_ts"] = to_ts
     if imoex:
         req["imoex"] = imoex
     return req
@@ -111,16 +111,23 @@ def base_req(figi, lot, imoex=None):
 
 async def main():
     elig = await get_eligible()
-    dfrom = datetime.now(timezone.utc) - timedelta(days=DAYS)
+    # Период — по данным IMOEX (индекс в БД только до ~24.08): берём последние DAYS
+    # от последнего бара IMOEX, иначе входы не пересекаются с индексом.
     async with SessionLocal() as db:
-        imoex_1m = await _lc(db, IMOEX_FIGI, 1, date_from=dfrom)
+        _all_im = await _lc(db, IMOEX_FIGI, 1)
+        if not _all_im:
+            print("нет данных IMOEX")
+            return
+        imoex_max = max(x.ts for x in _all_im)
+        dfrom = imoex_max - timedelta(days=DAYS)
+        imoex_1m = [x for x in _all_im if x.ts >= dfrom]
         cmap = {}
         for figi, ticker, lot in elig:
-            c = await _lc(db, figi, 1, date_from=dfrom)
+            c = await _lc(db, figi, 1, date_from=dfrom, date_to=imoex_max)
             if len(c) >= 200:
                 cmap[ticker] = (figi, c, lot)
     dir_map, hv_set, thr = imoex_maps(imoex_1m)
-    print(f"eligible {len(elig)} | с данными {len(cmap)} | период {DAYS}д")
+    print(f"eligible {len(elig)} | с данными {len(cmap)} | период {dfrom.date()}..{imoex_max.date()} ({DAYS}д)")
     print(f"IMOEX: 5m баров {len(dir_map)} | HV-порог ATR%={thr:.3f} | HV-баров {len(hv_set)}")
 
     print("\n" + "=" * 108)
@@ -132,9 +139,9 @@ async def main():
             imoex = None
             if use_veto or use_voice:
                 hv = list(hv_set) if mode == "hv" else list(dir_map.keys())
-                imoex = {"dir": dir_map, "hv": hv}
+                imoex = {"dir": dir_map, "hv": hv, "veto": use_veto, "voice": use_voice}
             try:
-                res = compute_ensemble(c, base_req(figi, lot, imoex))
+                res = compute_ensemble(c, base_req(figi, lot, imoex, dfrom.isoformat(), imoex_max.isoformat()))
                 if "error" not in res:
                     tr.extend(res.get("static", {}).get("trades", []))
             except Exception as e:

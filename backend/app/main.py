@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -21,6 +22,13 @@ async def lifespan(app: FastAPI):
                 "ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS mode VARCHAR(8) DEFAULT 'sandbox'"))
         except Exception:
             pass
+        try:
+            await conn.execute(_text(
+                "ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS test_name VARCHAR(64)"))
+            await conn.execute(_text(
+                "CREATE INDEX IF NOT EXISTS ix_sandbox_trades_test_name ON sandbox_trades (test_name)"))
+        except Exception:
+            pass
     from app.services.test_queue import queue_dispatcher
     from app.services.ensemble_queue import queue_dispatcher as ens_dispatcher
 
@@ -32,7 +40,7 @@ async def lifespan(app: FastAPI):
         from app.bot.runtime import runtime, BotConfig
         from app.config import get_settings
         _s = get_settings()
-        _mode = _s.bot_mode if _s.bot_mode in ("sandbox", "live") else "sandbox"
+        _mode = _s.bot_mode if _s.bot_mode in ("sandbox", "live", "test") else "sandbox"
         if not runtime.running:
             cfg = BotConfig(
                 strategy_id="ensemble_v4",
@@ -52,8 +60,15 @@ async def lifespan(app: FastAPI):
                 slippage_bps=2.0,
                 confirm_flip=2,
                 reentry_cooldown_bars=15,
-                overnight=False,  # закрывать позиции в конце торгового дня (клиринг между день/вечер выдерживается)
+                overnight=(_mode != "live"),
             )
+            if _mode == "test":
+                cfg.mode = "test"
+                cfg.feed = "replay"
+                cfg.test_name = os.environ.get("BOT_TEST_NAME", "")
+                cfg.replay_start = os.environ.get("BOT_TEST_START", "")
+                cfg.replay_end = os.environ.get("BOT_TEST_END", "")
+                cfg.replay_pace = "fast"
             asyncio.create_task(runtime.start(cfg))
     except Exception as e:
         import logging

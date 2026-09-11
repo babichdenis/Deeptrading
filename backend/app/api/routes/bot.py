@@ -304,32 +304,71 @@ async def bot_stop() -> dict:
 
 
 class ModeRequest(BaseModel):
-    mode: str  # sandbox | live
+    mode: str  # sandbox | live | test
+    test_name: str = ""
+    replay_start: str = ""  # ISO UTC (обязателен для mode=test)
+    replay_end: str = ""
+    replay_pace: str = "fast"
 
 
-def _write_env_mode(mode: str) -> None:
-    """Обновить BOT_MODE в backend/.env (чтобы режим пережил рестарт uvicorn)."""
+def _write_env_mode(mode: str, test_name: str = "", replay_start: str = "", replay_end: str = "") -> None:
+    """Обновить BOT_MODE (и параметры теста) в backend/.env — переживают рестарт uvicorn."""
     import os
     from pathlib import Path
     env_path = Path(__file__).resolve().parents[3] / ".env"
+    pairs = {"BOT_MODE": mode, "BOT_TEST_NAME": test_name,
+             "BOT_TEST_START": replay_start, "BOT_TEST_END": replay_end}
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
-        out, found = [], False
+        out, have = [], set()
         for ln in lines:
-            if ln.strip().startswith("BOT_MODE="):
-                out.append(f"BOT_MODE={mode}")
-                found = True
+            key = ln.split("=", 1)[0].strip()
+            if key in pairs:
+                have.add(key)
+                out.append(f"{key}={pairs[key]}")
             else:
                 out.append(ln)
-        if not found:
-            out.append(f"BOT_MODE={mode}")
+        for k, v in pairs.items():
+            if k not in have:
+                out.append(f"{k}={v}")
         env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
         os.environ["BOT_MODE"] = mode
+        os.environ["BOT_TEST_NAME"] = test_name
+        os.environ["BOT_TEST_START"] = replay_start
+        os.environ["BOT_TEST_END"] = replay_end
     except Exception:
         pass
 
 
-def _build_autostart_cfg(mode: str) -> BotConfig:
+def _build_autostart_cfg(mode: str, test_name: str = "", replay_start: str = "",
+                         replay_end: str = "", replay_pace: str = "fast") -> BotConfig:
+    if mode == "test":
+        # Тест: тот же движок, но исторические свечи из БД (feed=replay) + paper-выход.
+        return BotConfig(
+            strategy_id="ensemble_v4",
+            interval_name="1min",
+            top_n=40,
+            use_ensemble=True,
+            mode="test",
+            feed="replay",
+            replay_start=replay_start,
+            replay_end=replay_end,
+            replay_pace=replay_pace,
+            test_name=test_name,
+            sessions=["morning", "day", "evening"],
+            long_allowed=True,
+            short_allowed=True,
+            ensemble_session="all",
+            atr_period=14,
+            atr_multiplier=4.0,
+            atr_risk_reward=4.0,
+            leverage=1.0,
+            commission_rate=0.0005,
+            slippage_bps=2.0,
+            confirm_flip=2,
+            reentry_cooldown_bars=15,
+            overnight=True,
+        )
     return BotConfig(
         strategy_id="ensemble_v4",
         interval_name="1min",
@@ -354,12 +393,27 @@ def _build_autostart_cfg(mode: str) -> BotConfig:
 
 @router.post("/mode")
 async def bot_set_mode(req: ModeRequest) -> dict:
-    """Переключить контур sandbox/live: обновить .env, перезапустить бота."""
+    """Переключить контур sandbox/live/test: обновить .env, перезапустить бота."""
     import asyncio
-    mode = req.mode if req.mode in ("sandbox", "live") else None
+    mode = req.mode if req.mode in ("sandbox", "live", "test") else None
     if not mode:
-        raise HTTPException(400, "mode must be 'sandbox' or 'live'")
-    _write_env_mode(mode)
+        raise HTTPException(400, "mode must be 'sandbox', 'live' or 'test'")
+    if mode == "test":
+        name = req.test_name.strip()
+        if not name:
+            raise HTTPException(400, "test_name обязателен для mode=test")
+        if not req.replay_start:
+            raise HTTPException(400, "replay_start обязателен для mode=test")
+        # Имена тестов — ключ для идентификации прогона в БД.
+        from pathlib import Path
+        _bad = set("\\/?%*:|\"<>")
+        name = "".join(c if c not in _bad else "_" for c in name).strip()[:48]
+        if not name:
+            raise HTTPException(400, "test_name пуст после нормализации")
+    else:
+        name = req.test_name
+    _write_env_mode(mode, test_name=name, replay_start=req.replay_start.strip(),
+                    replay_end=req.replay_end.strip())
     try:
         from app.config import get_settings
         get_settings.cache_clear()
@@ -373,10 +427,14 @@ async def bot_set_mode(req: ModeRequest) -> dict:
                 break
             await asyncio.sleep(0.5)
     try:
-        await runtime.start(_build_autostart_cfg(mode))
+        await runtime.start(_build_autostart_cfg(
+            mode, test_name=name,
+            replay_start=req.replay_start.strip(),
+            replay_end=req.replay_end.strip(),
+            replay_pace="fast"))
     except Exception as e:
         raise HTTPException(500, f"restart failed: {e}")
-    return {"mode": mode, "restarted": was_running}
+    return {"mode": mode, "test_name": name or None, "restarted": was_running}
 
 
 class PauseRequest(BaseModel):
@@ -643,3 +701,113 @@ async def bot_trading_status() -> dict:
         "status": sber_status,
         "statuses": results,
     }
+
+
+class TestRunInfo(BaseModel):
+    name: str
+    replay_start: str = ""
+    replay_end: str = ""
+    created_at: str = ""
+    trades: int = 0
+    wins: int = 0
+    losses: int = 0
+    gross_win: float = 0.0
+    gross_loss: float = 0.0
+    net: float = 0.0
+    pf: float = 0.0
+    winrate: float = 0.0
+    positions_open: int = 0
+
+
+@router.get("/tests")
+async def bot_tests() -> dict:
+    """Список всех прогонов тестов (mode='paper' + test_name) со статистикой."""
+    from app.database import SessionLocal as _DB
+    from app.models.sandbox_trade import SandboxTrade
+    from sqlalchemy import select as _sel
+    from sqlalchemy import func as _fn
+    async with _DB() as db:
+        r = await db.execute(
+            _sel(SandboxTrade.test_name)
+            .where(SandboxTrade.mode == "paper", SandboxTrade.test_name.is_not(None))
+            .distinct()
+        )
+        names = [x[0] for x in r.all() if x[0]]
+    items = []
+    for name in names:
+        async with _DB() as db:
+            rows = (await db.execute(
+                _sel(SandboxTrade)
+                .where(SandboxTrade.mode == "paper", SandboxTrade.test_name == name)
+            )).scalars().all()
+        closed = [t for t in rows if t.exit_time is not None and t.net_pnl is not None]
+        open_rows = [t for t in rows if t.exit_time is None]
+        wins = [t for t in closed if t.net_pnl >= 0]
+        losses = [t for t in closed if t.net_pnl < 0]
+        gw = sum(float(t.net_pnl) for t in wins)
+        gl = abs(sum(float(t.net_pnl) for t in losses))
+        net = sum(float(t.net_pnl) for t in closed)
+        pf = (gw / gl) if gl > 0 else (gw if gw else 0.0)
+        entries = [t.entry_time for t in rows if t.entry_time]
+        exits = [t.exit_time for t in rows if t.exit_time]
+        items.append(TestRunInfo(
+            name=name,
+            replay_start=min(entries).isoformat() if entries else "",
+            replay_end=max(entries).isoformat() if entries else "",
+            created_at=min(entries).isoformat() if entries else "",
+            trades=len(closed),
+            wins=len(wins), losses=len(losses),
+            gross_win=round(gw, 2), gross_loss=round(gl, 2),
+            net=round(net, 2),
+            pf=round(pf, 3) if pf else 0.0,
+            winrate=round(100.0 * len(wins) / len(closed), 1) if closed else 0.0,
+            positions_open=len(open_rows),
+        ).model_dump())
+    return {"tests": sorted(items, key=lambda x: x["created_at"], reverse=True)}
+
+
+@router.get("/tests/{name}")
+async def bot_test_trades(name: str) -> dict:
+    """Сделки конкретного теста."""
+    from app.database import SessionLocal as _DB
+    from app.models.sandbox_trade import SandboxTrade
+    from sqlalchemy import select as _sel
+    async with _DB() as db:
+        rows = (await db.execute(
+            _sel(SandboxTrade)
+            .where(SandboxTrade.mode == "paper", SandboxTrade.test_name == name)
+            .order_by(SandboxTrade.entry_time.desc())
+        )).scalars().all()
+    trades = []
+    for t in rows:
+        trades.append({
+            "figi": t.figi, "ticker": t.ticker, "side": t.side,
+            "qty": int(t.qty),
+            "entry_price": round(float(t.entry_price), 6),
+            "exit_price": round(float(t.exit_price), 6) if t.exit_price else None,
+            "entry_time": str(t.entry_time),
+            "ts": str(t.exit_time) if t.exit_time else None,
+            "stop_loss": float(t.stop_loss) if t.stop_loss is not None else None,
+            "take_profit": float(t.take_profit) if t.take_profit is not None else None,
+            "commission": round(float(t.commission), 2) if t.commission is not None else 0,
+            "net_pnl": round(float(t.net_pnl), 2) if t.net_pnl is not None else None,
+            "exit_reason": t.exit_reason or "",
+            "entry_reason": t.entry_reason or "",
+            "test_name": t.test_name,
+        })
+    return {"test_name": name, "trades": trades}
+
+
+@router.delete("/tests/{name}")
+async def bot_test_delete(name: str) -> dict:
+    """Удалить прогон теста (все сделки mode='paper' с этим test_name)."""
+    from sqlalchemy import delete as _delete
+    from app.database import SessionLocal as _DB
+    from app.models.sandbox_trade import SandboxTrade
+    async with _DB() as db:
+        r = await db.execute(
+            _delete(SandboxTrade)
+            .where(SandboxTrade.mode == "paper", SandboxTrade.test_name == name)
+        )
+        await db.commit()
+        return {"deleted": int(r.rowcount or 0)}

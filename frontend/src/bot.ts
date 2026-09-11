@@ -25,6 +25,10 @@ import {
   type ScreenerRow,
   type SandboxPositionRow,
   type CarouselStatus,
+  fetchTests,
+  deleteTest,
+  fetchTestTrades,
+  type TestRunRow,
 } from "./api";
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
@@ -376,8 +380,21 @@ export async function initBot(onStateChange?: (running: boolean) => void) {
   $("btn-bot-stop").addEventListener("click", () => void doStop());
   $("btn-bot-pause").addEventListener("click", () => void doPause());
 
-  // Переключение контура sandbox/live (кнопка-плашка в сайдбаре).
-  $("env-badge")?.addEventListener("click", () => void doToggleMode());
+  // Переключение контура Live / Sandbox / Тест (сегментные кнопки в сайдбаре).
+  document.querySelectorAll("#mode-switch .mode-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = (btn as HTMLElement).dataset.mode as "live" | "sandbox" | "test";
+      void doToggleMode(mode);
+    });
+  });
+  // Модалка запуска теста (имя + период реплея).
+  const tOverlay = $("test-modal-overlay");
+  if (tOverlay) {
+    tOverlay.addEventListener("click", (e) => { if (e.target === tOverlay) closeTestModal(); });
+    $("ts-close")?.addEventListener("click", closeTestModal);
+    $("ts-run")?.addEventListener("click", () => void doRunTest());
+  }
+  initTestResults();
 
   document.querySelector("#bot-positions-table tbody")?.addEventListener("click", (e) => {
     const tr = (e.target as HTMLElement).closest("tr") as HTMLElement | null;
@@ -785,22 +802,66 @@ async function doStop() {
   }
 }
 
-async function doToggleMode() {
-  const next = _curMode === "live" ? "sandbox" : "live";
-  const warn = next === "live"
+async function doToggleMode(mode: "live" | "sandbox" | "test") {
+  // Тест запускается через модалку (имя + период реплея).
+  if (mode === "test") {
+    openTestModal();
+    return;
+  }
+  const warn = mode === "live"
     ? "Переключить на LIVE (реальные деньги)?\nБот будет ОСТАНОВЛЕН и перезапущен на боевом счёте."
     : "Переключить на SANDBOX (тестовый счёт)?\nБот будет остановлен и перезапущен.";
   if (!confirm(warn)) return;
-  const btn = $("env-badge") as HTMLButtonElement | null;
-  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+  const btn = document.querySelector(`#mode-switch .mode-btn[data-mode="${mode}"]`) as HTMLButtonElement | null;
+  if (btn) btn.classList.add("busy");
   try {
-    await botSetMode(next);
-    _curMode = next;
+    await botSetMode(mode);
+    _curMode = mode;
+    _setActiveModeBtn(mode);
   } catch (e) {
     alert("Ошибка переключения: " + (e instanceof Error ? e.message : String(e)));
   } finally {
-    if (btn) btn.disabled = false;
+    if (btn) btn.classList.remove("busy");
     await pollOnce();
+  }
+}
+
+function _setActiveModeBtn(mode: string) {
+  document.querySelectorAll("#mode-switch .mode-btn").forEach((b) => {
+    const m = (b as HTMLElement).dataset.mode;
+    b.classList.toggle("active", m === mode);
+  });
+}
+
+function openTestModal() {
+  const overlay = $("test-modal-overlay");
+  if (!overlay) return;
+  overlay.classList.remove("hidden");
+}
+
+function closeTestModal() {
+  $("test-modal-overlay")?.classList.add("hidden");
+}
+
+async function doRunTest() {
+  const name = ($("ts-name") as HTMLInputElement)?.value.trim() ?? "";
+  const start = ($("ts-start") as HTMLInputElement)?.value.trim() ?? "";
+  const end = ($("ts-end") as HTMLInputElement)?.value.trim() ?? "";
+  if (!name || !start) {
+    alert('Укажите название теста и начало периода (ISO UTC).');
+    return;
+  }
+  const btn = $("ts-run") as HTMLButtonElement | null;
+  if (btn) { btn.disabled = true; btn.textContent = "Запускаю…"; }
+  try {
+    await botSetMode("test", { test_name: name, replay_start: start, replay_end: end });
+    _curMode = "test";
+    _setActiveModeBtn("test");
+    closeTestModal();
+  } catch (e) {
+    alert("Ошибка запуска теста: " + (e instanceof Error ? e.message : String(e)));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "Запустить"; }
   }
 }
 
@@ -859,15 +920,22 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     modeChip.classList.add("hidden");
   }
 
-  const envBadge = $("env-badge");
+  const envBadge = $("mode-switch");
   if (envBadge) {
     const em = bst && bst.config && (bst.config as { mode?: string }).mode;
-    const isLive = String(em).toLowerCase() === "live";
-    _curMode = isLive ? "live" : "sandbox";
-    envBadge.textContent = isLive ? "LIVE" : "SANDBOX";
-    envBadge.classList.toggle("env-live", isLive);
-    envBadge.classList.toggle("env-sandbox", !isLive);
-    envBadge.title = isLive ? "Боевой счёт (реальные деньги)" : "Песочница (тестовый счёт)";
+    const mm = String(em || "").toLowerCase();
+    const tn = (bst?.config as any)?.test_name;
+    if (mm === "live") _curMode = "live";
+    else if (mm === "test") _curMode = "test";
+    else _curMode = "sandbox";
+    _setActiveModeBtn(_curMode);
+    const testChip = $("bot-mode-test");
+    if (testChip && mm === "test") {
+      testChip.textContent = tn ? `Тест: ${tn}` : "Тест";
+      testChip.classList.remove("hidden");
+    } else if (testChip) {
+      testChip.classList.add("hidden");
+    }
   }
   const sessEl = $("bs-session");
   if (sessEl) {
