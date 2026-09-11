@@ -911,6 +911,29 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             return None
         return h > 0 if side == "BUY" else h < 0
 
+    _qp_index: dict = {}
+
+    def _find_quorum(pool, side, wf, t, need):
+        """Первый quorum-событие нужного направления/голосов в окне [wf, t] (bisect)."""
+        idx = _qp_index.get(id(pool))
+        if idx is None:
+            by: dict = {}
+            for q in pool:
+                by.setdefault(q["side"], []).append(q)
+            for k in by:
+                by[k].sort(key=lambda q: q["ts"])
+            idx = {k: ([q["ts"] for q in v], v) for k, v in by.items()}
+            _qp_index[id(pool)] = idx
+        ts_list, lst = idx.get(side, ([], []))
+        if not lst:
+            return None
+        lo = bisect.bisect_left(ts_list, wf)
+        hi = bisect.bisect_right(ts_list, t)
+        for q in lst[lo:hi]:
+            if int(q["features"].get("votes", 0)) >= need:
+                return q
+        return None
+
     for e in entries_raw:
         ts, side = e["ts"], e["side"]
         bucket = int(ts.timestamp()) // bias_tf_sec
@@ -966,9 +989,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         need_votes = quorum_k
         if e.get("against_bias") and bias_mode == "strict_ct":
             need_votes = quorum_full  # counter-trend только при полном согласии
-        quorum_ev = next((q for q in quorum_pool
-                          if q["side"] == side and window_from <= q["ts"] <= ts
-                          and int(q["features"].get("votes", 0)) >= need_votes), None)
+        quorum_ev = _find_quorum(quorum_pool, side, window_from, ts, need_votes)
         if quorum_ev is None:
             rejected.append({**e, "ts": ts.isoformat(), "reason": "SETUP_MISSING"})
             continue
@@ -1165,6 +1186,14 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     gross = commission = slippage = 0.0
     per_regime: dict[str, dict] = {}
     entry_by_ts = {a["ts"]: a for a in accepted}
+    # Индекс accepted по направлению (для поиска последнего сигнала <= entry, O(log n)).
+    _acc_sorted: dict = {"BUY": [], "SELL": []}
+    for _a in accepted:
+        _acc_sorted.setdefault(_a["side"], []).append(_a)
+    _acc_ts: dict = {}
+    for _k, _v in _acc_sorted.items():
+        _v.sort(key=lambda x: x["ts"])
+        _acc_ts[_k] = [x["ts"] for x in _v]
     episode_map: dict[tuple[str, str], dict] = {}
     executed_signal_keys: set[tuple[str, str]] = set()
     for a in accepted:
@@ -1242,9 +1271,10 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             # исполнение идёт по open следующего бара — ищем последний сигнал того же
             # направления, не позже момента входа
             want_side = "BUY" if t.side == "LONG" else "SELL"
-            cand = [x for x in accepted if x["side"] == want_side
-                    and x["ts"] <= t.entry_time.isoformat()]
-            a = max(cand, key=lambda x: x["ts"]) if cand else None
+            _lst = _acc_sorted.get(want_side, [])
+            _tsl = _acc_ts.get(want_side, [])
+            _hi = bisect.bisect_right(_tsl, t.entry_time.isoformat())
+            a = _lst[_hi - 1] if _hi > 0 else None
         if a is not None and a.get("volume_features") is not None:
             trades_out[-1]["volume_features"] = a["volume_features"]
         if a is not None and a.get("score") is not None:
