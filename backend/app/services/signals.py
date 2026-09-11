@@ -10,6 +10,7 @@ from app.engine.catalog import STRATEGY_CATALOG, canonical_params_hash
 from app.engine.models import Candle as EngineCandle
 from app.engine.strategies import ParamValidationError, build_strategy, validate_params
 from app.engine.version import ENGINE_ID
+from app.engine.views import CandleWindow
 from app.models.candle import Candle
 from app.models.signals import RunDependency, StrategyRun, StrategySignal
 from app.services.candle_cache import DEFAULT_DAYS, ensure_candles
@@ -53,7 +54,7 @@ def generate_signals(strategy_id: str, params: dict | None, candles: list[Engine
         # по одному разу, оконные используют только хвост — результат тот же,
         # но без O(n^2) копий (зависание на 1min/120д)
         lo = max(0, i - 400)
-        sig = strategy.on_bar(candles[lo:i])
+        sig = strategy.on_bar(CandleWindow(candles, lo, i))
         if sig is None or i <= warmup:
             continue
         out.append(

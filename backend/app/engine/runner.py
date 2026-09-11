@@ -17,32 +17,7 @@ from app.engine.models import (
 )
 from app.engine.policies import SignalPolicy, SignalPolicyConfig
 from app.engine.sessions import SessionPolicy, SessionPolicyConfig
-
-
-class CandlePrefix(Sequence):
-    """Лёгкое представление префикса candles[:n] без копирования списка.
-
-    Используется в hot-path runner вместо срезов (срез 28k баров × 84k раз = O(n²))."""
-
-    __slots__ = ("_src", "_n")
-
-    def __init__(self, src: Sequence, n: int):
-        self._src = src
-        self._n = n
-
-    def __len__(self) -> int:
-        return self._n
-
-    def __getitem__(self, i):
-        n = self._n
-        if isinstance(i, slice):
-            start, stop, step = i.indices(n)
-            return [self._src[j] for j in range(start, stop, step)]
-        if i < 0:
-            i += n
-        if i < 0 or i >= n:
-            raise IndexError(i)
-        return self._src[i]
+from app.engine.views import CandleWindow
 
 
 @dataclass
@@ -220,7 +195,7 @@ class EngineRunner:
                         _side_for_pol,
                         position.entry_price,
                         position.initial_stop,
-                        CandlePrefix(candles, i + 1),
+                        CandleWindow(candles, 0, i + 1),
                         qty=position.qty,
                         commission=position.entry_commission,
                     )
@@ -231,7 +206,7 @@ class EngineRunner:
                         position.entry_price,
                         position.qty,
                         position.entry_commission,
-                        CandlePrefix(candles, i + 1),
+                        CandleWindow(candles, 0, i + 1),
                     ) if activate is not None else False
                     if _act_res:
                         self._trailing_active = True
@@ -274,7 +249,7 @@ class EngineRunner:
                         )
 
             if i + 1 < total and i >= warmup - 1:
-                signal = self.strategy.on_bar(CandlePrefix(candles, i + 1))
+                signal = self.strategy.on_bar(CandleWindow(candles, 0, i + 1))
                 if signal is not None and position is not None and self._trailing_active:
                     # Трейлинг активен: любые противоположные сигналы (и entry-флипы,
                     # и явные exit) игнорируются — позиция живёт до подтянутого стопа.
@@ -431,7 +406,7 @@ class EngineRunner:
         notional = fill * self.cfg.qty
         commission = self.cfg.cost_model.commission(notional)
         slippage = abs(fill - base) * self.cfg.qty
-        plan = self.exit_policy.plan_entry(side, fill, CandlePrefix(candles, index + 1))
+        plan = self.exit_policy.plan_entry(side, fill, CandleWindow(candles, 0, index + 1))
         state = PositionState.LONG if side is Side.BUY else PositionState.SHORT
         ledger.log(index, bar.ts, "FILL_ENTRY", f"{side.value} qty={self.cfg.qty} price={fill}")
         return Position(
