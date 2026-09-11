@@ -117,7 +117,7 @@ async def bot_start(req: StartRequest) -> dict:
         strategy_id=req.strategy_id,
         params=req.params,
         interval_name=req.interval_name,
-        top_n=max(2, min(req.top_n, 15)),
+        top_n=max(2, min(req.top_n, 50)),
         qty_per_trade=max(1, req.qty_per_trade),
         stop_pct=req.stop_pct,
         target_pct=req.target_pct,
@@ -333,7 +333,7 @@ def _build_autostart_cfg(mode: str) -> BotConfig:
     return BotConfig(
         strategy_id="ensemble_v4",
         interval_name="1min",
-        top_n=20,
+        top_n=40,
         use_ensemble=True,
         mode=mode,
         sessions=["morning", "day", "evening"],

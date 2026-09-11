@@ -390,14 +390,18 @@ export async function initBot(onStateChange?: (running: boolean) => void) {
     }
   });
   document.querySelector("#bot-trades-table tbody")?.addEventListener("click", (e) => {
-    const tr = (e.target as HTMLElement).closest("tr") as HTMLElement | null;
+    const tr = (e.target as HTMLElement).closest("tr.trade-row") as HTMLElement | null;
     if (!tr) return;
-    const idx = Array.from(tr.parentElement!.children).indexOf(tr);
+    const idx = Number(tr.dataset.idx);
     const t = _lastTrades[idx];
-    if (t) {
-      _focusPos = null; // закрытая сделка — линии статичны, не обновляем
-      sendEmbedFocus(t.figi, t.ticker, tradeAsTrade(t));
-    }
+    if (!t) return;
+    _focusPos = null; // закрытая сделка — линии статичны, не обновляем
+    sendEmbedFocus(t.figi, t.ticker, tradeAsTrade(t));
+    // Toggle деталей (можно держать открытыми несколько). Состояние храним в _openDetails,
+    // чтобы не терялось при авто-обновлении таблицы.
+    const key = String(tr.dataset.key || "");
+    if (_openDetails.has(key)) _openDetails.delete(key); else _openDetails.add(key);
+    renderTrades(_lastTrades);
   });
 
   void pollOnce();
@@ -420,6 +424,9 @@ let _lastPositions: SandboxPositionRow[] = [];
 let _lastTrades: BotTradeRow[] = [];
 let _prevVol: Record<string, number> = {};  // ticker -> предыдущий Vol (для стрелки направления)
 let _curMode = "sandbox";  // текущий контур (из bot.status.config.mode)
+let _openDetails = new Set<string>();  // ключи раскрытых деталей сделок (можно много)
+let _lastVotes: Array<{ figi: string; ticker: string; buy: number; sell: number; votes: number; side: string; regime?: string | null; vol?: number | null; vol_abs?: number | null }> = [];
+let _lastUniverse: Array<{ figi: string; ticker: string; atr_pct?: number }> = [];
 let _chartInit = false;
 // Позиция, на которую сейчас смотрит график (клик по таблице позиций). При poll,
 // если стоп/TP/trailing изменились — пересылаем обновлённый trade в iframe.
@@ -493,6 +500,7 @@ function renderLogs() {
     ? rows.map((l) => {
         let cls = "";
         if (l.includes("TECHINFO")) cls = ' class="lg-tech"';
+        else if (l.includes("КВОРУМ")) cls = ' class="lg-warn"';
         else if (l.includes("ПРОПУСК") || l.includes("ошибк") || l.includes("ERROR")) cls = ' class="lg-err"';
         else if (l.includes("СИГНАЛ")) cls = ' class="lg-sig"';
         else if (l.includes("ВЫХОД") || l.includes("ЗАКРЫТИЕ")) cls = ' class="lg-exit"';
@@ -921,6 +929,10 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
       }
     }
   }
+  // Вкладка «Голоса»: тикеры юниверса + число голосов на последнем 5m баре.
+  _lastVotes = ((bst as { votes?: Array<{ figi: string; ticker: string; buy: number; sell: number; votes: number; side: string; regime?: string | null; vol?: number | null; vol_abs?: number | null }> } | null)?.votes) || [];
+  _lastUniverse = ((bst as { universe?: Array<{ figi: string; ticker: string; atr_pct?: number }> } | null)?.universe) || [];
+  renderVotes(_lastVotes, _lastUniverse);
 
   if (lastRunning !== engineRunning) {
     lastRunning = engineRunning;
@@ -1109,7 +1121,7 @@ function renderTrades(trades: BotTradeRow[]) {
   document.querySelector("#bot-trades-table tbody")!.innerHTML =
     trades
       .map(
-        (t) => {
+        (t, i) => {
           const isOpen = !t.ts || t.exit_reason === "на торгах" || t.exit_price == null;
           const inT = fmtTime(t.entry_time ?? t.ts);
           const timeCell = isOpen
@@ -1126,26 +1138,83 @@ function renderTrades(trades: BotTradeRow[]) {
             : t.exit_reason === "stop_loss"
               ? `stop_loss${t.stop_loss != null ? ` · SL <span style="color:#ff6b6b">${price(t.stop_loss)}</span>` : ""}`
               : t.exit_reason;
-          return `<tr>` +
+          // Метка bias из meta.entry.against_bias (пишется в ensemble_strategy).
+          let biasTag = "";
+          try {
+            const m = t.meta ? JSON.parse(t.meta) : null;
+            const ab = m?.entry?.against_bias;
+            if (ab === true) biasTag = ` <span style="color:#e74c3c;font-weight:700" title="вход против bias (против направления)">⚠ против bias</span>`;
+            else if (ab === false) biasTag = ` <span style="color:#2ecc71" title="вход по bias">✓ по bias</span>`;
+          } catch { /* noop */ }
+          return `<tr class="trade-row" data-idx="${i}" data-key="${t.ticker}|${t.entry_time}" style="cursor:pointer">` +
             `<td style="font-size:10px;color:var(--text-dim)">${timeCell}</td>` +
-            `<td><b>${t.ticker}</b></td>` +
+            `<td><b>${t.ticker}</b>${biasTag}</td>` +
             `<td>${sideIcon(t.side)}</td>` +
             `<td class="num">${t.qty}</td>` +
             `<td class="num">${pxCell}</td>` +
             `<td class="num">${pnlCell}</td>` +
             `<td class="num" style="color:var(--text-dim)">${!isOpen && t.commission != null ? money(t.commission) : "—"}</td>` +
             `<td>${reasonCell}</td>` +
-            `</tr>`;
+            `</tr>` + (_openDetails.has(`${t.ticker}|${t.entry_time}`) ? tradeDetailsHtml(t) : "");
         }
       )
       .join("") || `<tr><td colspan=8 style="color:var(--text-dim)">пока нет сделок</td></tr>`;
 
 }
 
+// Раскрытие деталей сделки: состав ансамбля, голоса кворума, bias и entry при входе.
+function tradeDetailsHtml(t: BotTradeRow): string {
+  let m: Record<string, unknown> | null = null;
+  try { m = t.meta ? JSON.parse(t.meta) : null; } catch { m = null; }
+  const entry = (m?.entry as Record<string, unknown>) || {};
+  const qe = (m?.quorum_event as Record<string, unknown>) || {};
+  const setups = (m?.setups as Record<string, Record<string, unknown>>) || {};
+  const vol = (m?.volume as Record<string, number>) || {};
+  const regNow = m?.regime as string | undefined;
+  const ab = entry.against_bias;
+  const chip = (txt: string, col: string) =>
+    `<span style="display:inline-block;padding:1px 7px;margin:2px;border-radius:6px;border:1px solid ${col};color:${col};font-size:10px;font-weight:700">${txt}</span>`;
+  const fnum = (x: number | undefined) => (x == null ? "—" : new Intl.NumberFormat("ru-RU").format(Math.round(x)));
+  const rows: string[] = [];
+  // Entry
+  rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Вход:</b> ${String(t.side)} · ${String(entry.reason ?? "—")}` +
+    (ab === true ? ` ${chip("ПРОТИВ bias", "#e74c3c")}` : ab === false ? ` ${chip("по bias", "#2ecc71")}` : "") +
+    (entry.features ? ` · level ${(entry.features as Record<string, unknown>).breakout_level ?? "—"}` : "") + `</div>`);
+  // Объём и режим на входе
+  if (vol.v != null) {
+    rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Объём (вход):</b> ` +
+      `${fnum(vol.v)} <span style="color:var(--text-dim)">(max ${fnum(vol.max)}, min ${fnum(vol.min)})</span>` +
+      ` · <b style="color:var(--text-dim)">Режим:</b> ${regNow || "—"}</div>`);
+  }
+  // Quorum
+  if (Object.keys(qe).length) {
+    rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Кворум:</b> ${String(qe.side ?? "")} · голосов ${String(qe.votes ?? "?")}/${String(qe.total_members ?? "?")} (k=${String(qe.quorum_k ?? "?")}) · BUY ${String(qe.buy_votes ?? 0)} / SELL ${String(qe.sell_votes ?? 0)}</div>`);
+    const mf = (qe.members_for as string[]) || [];
+    const op = (qe.opposition as string[]) || [];
+    if (mf.length) rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">За:</b> ${mf.map((x) => chip(x, "#2ecc71")).join("")}</div>`);
+    if (op.length) rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Против:</b> ${op.map((x) => chip(x, "#e74c3c")).join("")}</div>`);
+  }
+  // Setups
+  const sk = Object.keys(setups);
+  if (sk.length) {
+    rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Стратегии (5m):</b> ${sk.map((k) => {
+      const s = setups[k];
+      const b = Number(s.BUY ?? 0), sl = Number(s.SELL ?? 0);
+      const col = b > sl ? "#2ecc71" : sl > b ? "#e74c3c" : "var(--text-dim)";
+      return chip(`${k}: ↑${b}/↓${sl}`, col);
+    }).join("")}</div>`);
+  }
+  if (!rows.length) rows.push(`<div style="color:var(--text-dim)">нет данных meta</div>`);
+  return `<tr class="trade-details-row"><td colspan="8" style="background:var(--bg-soft);padding:8px 12px;font-size:11px;line-height:1.6">${rows.join("")}</td></tr>`;
+}
+
 // ===== правый сайдбар: рынок TQBR (скринер) =====
 let _srRows: ScreenerRow[] = [];
 let _srSortKey: keyof ScreenerRow = (localStorage.getItem("deeptrading_sr_sort") as keyof ScreenerRow) || "turnover";
 let _srSortAsc = localStorage.getItem("deeptrading_sr_sort_asc") === "1";
+// Сортировка вкладки «Голоса» (с памятью).
+let _votesSortKey: "ticker" | "atr" | "votes" = (localStorage.getItem("deeptrading_votes_sort") as "ticker" | "atr" | "votes") || "ticker";
+let _votesSortAsc = localStorage.getItem("deeptrading_votes_sort_asc") === "1";
 let _srLoading = false;
 let _srQuery = localStorage.getItem("deeptrading_sr_q") ?? "";
 let _srMinTurnoverM = Number(localStorage.getItem("deeptrading_sr_min_t") ?? 0) || 0;
@@ -1343,8 +1412,90 @@ function initScreener() {
     });
   }
   initSidebarRightResize();
+  // Вкладки правого сайдбара: Рынок / Голоса
+  document.querySelectorAll(".sr-tab").forEach((b) => {
+    b.addEventListener("click", () => {
+      const tab = (b as HTMLElement).dataset.srtab;
+      document.querySelectorAll(".sr-tab").forEach((x) => x.classList.toggle("active", x === b));
+      $("sr-pane-market")?.classList.toggle("hidden", tab !== "market");
+      $("sr-pane-votes")?.classList.toggle("hidden", tab !== "votes");
+    });
+  });
+  // Клик по плашке тикера → открыть график в существующем chart
+  $("votes-grid")?.addEventListener("click", (e) => {
+    const el = (e.target as HTMLElement).closest(".vote-chip") as HTMLElement | null;
+    if (!el) return;
+    const figi = el.dataset.figi || "";
+    const ticker = el.dataset.ticker || "";
+    if (figi) { _focusPos = null; sendEmbedFocus(figi, ticker, null); }
+  });
+  // Сортировка вкладки «Голоса» (с памятью)
+  const updVotesArrows = () => {
+    document.querySelectorAll(".votes-sort").forEach((b) => {
+      const el = b as HTMLElement;
+      const arrow = el.querySelector(".vs-arrow");
+      if (arrow) arrow.textContent = el.dataset.vsort === _votesSortKey ? (_votesSortAsc ? "▲" : "▼") : "";
+      el.classList.toggle("active", el.dataset.vsort === _votesSortKey);
+    });
+  };
+  document.querySelectorAll(".votes-sort").forEach((b) => {
+    b.addEventListener("click", () => {
+      const k = (b as HTMLElement).dataset.vsort as "ticker" | "atr" | "votes";
+      if (_votesSortKey === k) _votesSortAsc = !_votesSortAsc;
+      else { _votesSortKey = k; _votesSortAsc = k === "ticker"; }
+      try {
+        localStorage.setItem("deeptrading_votes_sort", _votesSortKey);
+        localStorage.setItem("deeptrading_votes_sort_asc", _votesSortAsc ? "1" : "0");
+      } catch { /* noop */ }
+      updVotesArrows();
+      renderVotes(_lastVotes, _lastUniverse);
+    });
+  });
+  updVotesArrows();
   void _loadScreener(true);
   setInterval(() => void _loadScreener(false), 45000);
+}
+
+// Вкладка «Голоса»: список тикеров юниверса, подсветка по числу голосов
+// (1 — синий, 2 — жёлтый, 3+ — зелёный). Клик открывает график.
+function renderVotes(votes: Array<{ figi: string; ticker: string; buy: number; sell: number; votes: number; side: string; regime?: string | null; vol?: number | null; vol_abs?: number | null }>, universe: Array<{ figi: string; ticker: string; atr_pct?: number }>) {
+  const grid = $("votes-grid");
+  if (!grid) return;
+  const byFigi: Record<string, { buy: number; sell: number; votes: number; side: string; regime?: string | null; vol?: number | null; vol_abs?: number | null }> = {};
+  for (const v of votes || []) byFigi[v.figi] = v;
+  const items = (universe || []).map((u) => {
+    const v = byFigi[u.figi] || { buy: 0, sell: 0, votes: 0, side: "" };
+    return { figi: u.figi, ticker: u.ticker, atr_pct: u.atr_pct, ...v };
+  }).sort((a, b) => {
+    const d = _votesSortKey === "atr"
+      ? (a.atr_pct ?? 0) - (b.atr_pct ?? 0)
+      : _votesSortKey === "votes"
+        ? (a.votes - b.votes) || a.ticker.localeCompare(b.ticker)
+        : a.ticker.localeCompare(b.ticker);
+    return _votesSortAsc ? d : -d;
+  });
+  const cnt = $("votes-count");
+  if (cnt) cnt.textContent = `${items.filter((x) => x.votes > 0).length} / ${items.length} с голосами`;
+  const regShort: Record<string, string> = { HIGH_VOLATILITY: "HV", TREND_UP: "↑", TREND_DOWN: "↓", RANGE: "FLAT", NEUTRAL: "NEU" };
+  const fmtVol = (x: number | null | undefined) => (x == null ? "—" : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : `${Math.round(x)}`);
+  grid.innerHTML = items.map((it) => {
+    const lvl = it.votes >= 3 ? 3 : it.votes === 2 ? 2 : it.votes === 1 ? 1 : 0;
+    // Направление: из голосов, иначе из режима.
+    let dir = "";
+    if (it.votes > 0) dir = it.side === "BUY" ? "▲" : "▼";
+    else if (it.regime === "TREND_UP") dir = "▲";
+    else if (it.regime === "TREND_DOWN") dir = "▼";
+    const dirCol = dir === "▲" ? "var(--up)" : dir === "▼" ? "var(--down)" : "var(--text-dim)";
+    const atr = it.atr_pct != null ? `${it.atr_pct.toFixed(2)}%` : "—";
+    const reg = it.regime ? (regShort[it.regime] || it.regime) : "—";
+    return `<div class="vote-chip vote-${lvl}" data-figi="${it.figi}" data-ticker="${it.ticker}" title="Голоса: BUY ${it.buy} / SELL ${it.sell} · Режим ${it.regime || "—"} · Объём ${fmtVol(it.vol_abs)} · Волат ${atr}">` +
+      `<span class="vc-tk">${it.ticker}</span>` +
+      `<span class="vc-dir" style="color:${dirCol}">${dir || "•"}</span>` +
+      `<span class="vc-reg">${reg}</span>` +
+      `<span class="vc-info">V ${fmtVol(it.vol_abs)}</span>` +
+      `<span class="vc-info">${atr}</span>` +
+      `<span class="vc-v">${it.votes > 0 ? it.votes : ""}</span></div>`;
+  }).join("") || `<div class="mini-hint" style="color:#666">нет данных</div>`;
 }
 
 function initSidebarRightResize() {

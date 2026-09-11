@@ -118,13 +118,24 @@ def _get_portfolio():
     c = _get_client()
     return c.operations.get_portfolio(account_id=_active_creds()[2])
 
-def _get_operations(from_days=60):
+_ops_cache: tuple[float, object, int] | None = None  # (ts, ops, from_days)
+
+def _get_operations(from_days=3):
+    """Операции за N дней (кэш 60с). Окно маленькое — для entry_time/сделок хватает;
+    раньше тянули 60 дней на каждый запрос → таймауты."""
+    global _ops_cache
+    import time as _time
+    now = _time.monotonic()
+    if _ops_cache is not None and _ops_cache[2] == from_days and now - _ops_cache[0] < 60.0:
+        return _ops_cache[1]
     c = _get_client()
-    return c.operations.get_operations(
+    ops = c.operations.get_operations(
         account_id=_active_creds()[2],
         from_=datetime.now(timezone.utc) - timedelta(days=from_days),
         to=datetime.now(timezone.utc),
     )
+    _ops_cache = (now, ops, from_days)
+    return ops
 
 
 def _get_orders():

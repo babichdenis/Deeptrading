@@ -34,8 +34,8 @@ class EnsembleParams:
     session: str = "main"
     sessions: list = field(default_factory=lambda: ["day"])
     setups: list = field(default_factory=lambda: V2_SETUPS)
-    # --- Таймфреймы ансамбля (быстро менять, не трогая код) ---
-    bias_tf: str = "15min"      # направление (bias): "5min" | "15min" | "hour"
+    # --- Таймфреймы ансамбля (как в semi-flip тестах) ---
+    bias_tf: str = "hour"        # направление (bias): "5min" | "15min" | "hour"
     bias_period: int = 50        # период EMA для bias
     entry_tf: str = "5min"       # микро-вход: "1min" | "5min"
     entry_lookback: int = 1      # окно микро-брейкаута (бары entry_tf)
@@ -61,6 +61,7 @@ class EnsembleV4Strategy:
 
     def __init__(self, params: EnsembleParams):
         self.p = params
+        self._last_votes = None
 
     def warmup_bars(self) -> int:
         return 50
@@ -150,6 +151,7 @@ class EnsembleV4Strategy:
         last_e = fresh[-1]
         side = Side.BUY if last_e.get("side") == "BUY" else Side.SELL
         st = res.get("static", {})
+        self._last_votes = st.get("votes_last")
         quorum_list = st.get("quorum_list", [])
         qevent = None
         for q in quorum_list:
@@ -171,10 +173,18 @@ class EnsembleV4Strategy:
             "event_id": qe_raw.get("event_id", ""),
             "reason": qe_raw.get("reason", ""),
         }
+        # Объём бара входа (1m): текущий + max/min за последние 20 баров, и режим на входе.
+        _vols = [float(c.volume or 0) for c in candles[-20:]]
+        _vol_now = float(candles[-1].volume or 0)
+        _vol_max = max(_vols) if _vols else _vol_now
+        _vol_min = min(_vols) if _vols else _vol_now
+        _regime_now = (self._last_regime or {}).get("state") if isinstance(self._last_regime, dict) else None
         meta = {
             "entry": {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in last_e.items()},
             "quorum_event": quorum_event,
             "setups": {k: v for k, v in (st.get("setups") or {}).items()},
+            "volume": {"v": _vol_now, "max": _vol_max, "min": _vol_min},
+            "regime": _regime_now,
         }
         return Signal(
             strategy_id=self.strategy_id,

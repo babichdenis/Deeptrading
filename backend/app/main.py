@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
             cfg = BotConfig(
                 strategy_id="ensemble_v4",
                 interval_name="1min",
-                top_n=20,
+                top_n=40,
                 use_ensemble=True,
                 mode=_mode,
                 sessions=["morning", "day", "evening"],

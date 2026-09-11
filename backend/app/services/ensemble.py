@@ -652,6 +652,44 @@ def _signal_score(quorum_ev: dict, e: dict, side: str, ts: datetime,
     }
 
 
+def _votes_last(setup_runs: list[tuple[str, list[dict]]]) -> dict:
+    """Голоса стратегий на последнем 5m-баре (включая 1–2 голоса, до кворума)."""
+    _vts = None
+    for _, sigs in setup_runs:
+        for s in sigs:
+            if _vts is None or s["ts"] > _vts:
+                _vts = s["ts"]
+    if _vts is None:
+        return {"ts": None, "buy": 0, "sell": 0, "buy_members": [], "sell_members": []}
+    buy = [sid for sid, sigs in setup_runs
+           if any(s["ts"] == _vts and s["side"] == "BUY" for s in sigs)]
+    sell = [sid for sid, sigs in setup_runs
+            if any(s["ts"] == _vts and s["side"] == "SELL" for s in sigs)]
+    return {"ts": _vts.isoformat(), "buy": len(buy), "sell": len(sell),
+            "buy_members": buy, "sell_members": sell}
+
+
+def _stoch_map(bars, k_period: int, d_period: int) -> dict:
+    """Stochastic %K/%D по барам → {ts: (k, d)}."""
+    highs = [b.high for b in bars]
+    lows = [b.low for b in bars]
+    closes = [b.close for b in bars]
+    ks: list = [None] * len(bars)
+    for i in range(len(bars)):
+        if i + 1 < k_period:
+            continue
+        hh = max(highs[i - k_period + 1:i + 1])
+        ll = min(lows[i - k_period + 1:i + 1])
+        rng = hh - ll
+        ks[i] = 100.0 * (closes[i] - ll) / rng if rng > 0 else 50.0
+    ds: list = [None] * len(bars)
+    for i in range(len(bars)):
+        w = [k for k in ks[max(0, i - d_period + 1):i + 1] if k is not None]
+        if w:
+            ds[i] = sum(w) / len(w)
+    return {bars[i].ts: (ks[i], ds[i]) for i in range(len(bars))}
+
+
 def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   setups_cfg: list[dict], quorum_k: int, entry_window_min: int,
                   entry_lookback: int, exit_obj: ExitPolicy, qty_shares: float,
@@ -665,14 +703,36 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     """Один прогон (static или adaptive) через единый конвейер."""
     setup_runs: list[tuple[str, list[dict]]] = []
     setup_out: dict[str, dict] = {}
+    _rsf = req.get("regime_setups_filter") or {}
     for s in setups_cfg:
         sid = s["strategy_id"]
         tf_sec = TF_SECONDS.get(s.get("tf", "5min"), 300)
         sigs = generate_signals(sid, s.get("params"), cached_resample(candles, tf_sec))
+        # Фильтр по режиму: стратегия активна только в разрешённых режимах.
+        _allowed = _rsf.get(sid)
+        if _allowed is not None and regime_bars:
+            sigs = [x for x in sigs
+                    if ((regime_at(regime_bars, x["ts"]) or {}).get("state")) in _allowed]
         setup_runs.append((sid, sigs))
         setup_out[sid] = {"tf": s.get("tf", "5min"), "signals": len(sigs),
                           "BUY": sum(1 for x in sigs if x["side"] == "BUY"),
                           "SELL": sum(1 for x in sigs if x["side"] == "SELL")}
+
+    # IMOEX: при высокой волатильности индекса — обязательный bias (veto) + отдельный голос.
+    _imoex = req.get("imoex")
+    _imoex_dir: dict = {}
+    _imoex_hv: set = set()
+    if _imoex:
+        _imoex_dir = {str(k): int(v) for k, v in (_imoex.get("dir") or {}).items()}
+        _imoex_hv = {str(x) for x in (_imoex.get("hv") or [])}
+        _isigs = [{"ts": datetime.fromisoformat(_t), "side": "BUY" if _d > 0 else "SELL",
+                   "reason": "imoex_dir"}
+                  for _t, _d in _imoex_dir.items() if _t in _imoex_hv]
+        if _isigs:
+            setup_runs.append(("imoex_direction", _isigs))
+            setup_out["imoex_direction"] = {"tf": "5min", "signals": len(_isigs),
+                                            "BUY": sum(1 for x in _isigs if x["side"] == "BUY"),
+                                            "SELL": sum(1 for x in _isigs if x["side"] == "SELL")}
 
     quorum_sigs, funnel = merge_quorum(setup_runs, quorum_k)
     for idx, q in enumerate(quorum_sigs):
@@ -687,8 +747,19 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     # Volume Exhaustion (VOLUME_EXHAUSTION_2026.md Шаг 1): серия фич по закрытым 5m-барам.
     # Торговлю не меняет — сигналы складываются в meta сделки и entry.volume_features.
     vol_series: list[dict] | None = None
-    if req.get("volume_features") or req.get("volume_gate"):
-        vol_series = volume_features(cached_resample(candles, TF_SECONDS["5min"]))
+    _vflow = req.get("volume_flow_filter")
+    if req.get("volume_features") or req.get("volume_gate") or _vflow:
+        from app.services.volume import VolumeParams as _VP
+        _vp = _VP(price=str((_vflow or {}).get("price", "close")),
+                  drop_ratio=float((_vflow or {}).get("ratio", 1.5)))
+        vol_series = volume_features(cached_resample(candles, TF_SECONDS["5min"]), _vp)
+
+    # Stochastic-фильтр (gate): не входить в BUY при перекупленности, в SELL — при перепроданности.
+    stoch_map: dict | None = None
+    if req.get("stoch_filter"):
+        _scfg = req["stoch_filter"] or {}
+        _cse = cached_resample(candles, TF_SECONDS.get(str(req.get("entry_tf", "5min")), 300))
+        stoch_map = _stoch_map(_cse, int(_scfg.get("k_period", 14)), int(_scfg.get("d_period", 3)))
 
     accepted: list[dict] = []
     rejected: list[dict] = []
@@ -865,6 +936,34 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         if quorum_ev is None:
             rejected.append({**e, "ts": ts.isoformat(), "reason": "SETUP_MISSING"})
             continue
+        # IMOEX-veto: при HV индекса вход разрешён только по его направлению.
+        if _imoex and _imoex_hv:
+            _tis = ts.isoformat()
+            if _tis in _imoex_hv:
+                _id = _imoex_dir.get(_tis)
+                if _id is not None and ((_id > 0 and side == "SELL") or (_id < 0 and side == "BUY")):
+                    rejected.append({**e, "ts": _tis, "reason": "IMOEX_VETO"})
+                    continue
+        # Stochastic-фильтр: BUY запрещён при перекупленности, SELL — при перепроданности.
+        if stoch_map is not None:
+            _sk, _sd = stoch_map.get(ts, (None, None))
+            if _sk is not None:
+                _sc = req.get("stoch_filter") or {}
+                if (side == "BUY" and _sk > float(_sc.get("overbought", 80))) or \
+                   (side == "SELL" and _sk < float(_sc.get("oversold", 20))):
+                    rejected.append({**e, "ts": ts.isoformat(), "reason": "STOCH_FILTER"})
+                    continue
+        # Volume-flow фильтр: вход только при подтверждении объёмом.
+        if _vflow is not None and vol_series is not None:
+            _vfn = volume_at(vol_series, ts)
+            if _vfn is not None:
+                _vmode = str(_vflow.get("mode", "sell_only"))
+                if side == "SELL" and not _vfn.get("volume_on_drop"):
+                    rejected.append({**e, "ts": ts.isoformat(), "reason": "VOL_FLOW"})
+                    continue
+                if side == "BUY" and _vmode == "both" and not _vfn.get("volume_on_rise"):
+                    rejected.append({**e, "ts": ts.isoformat(), "reason": "VOL_FLOW"})
+                    continue
         if mode == "long" and side == "SELL":
             rejected.append({**e, "ts": ts.isoformat(), "reason": "REGIME_MODE:long"})
             continue
@@ -1252,6 +1351,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                         for q in quorum_sigs],
         "entries": accepted,
         "rejected": rejected,
+        "votes_last": _votes_last(setup_runs),
         "trades": trades_out,
         "economic": {
             "trades": len(trades_out), "gross": round(gross, 2),

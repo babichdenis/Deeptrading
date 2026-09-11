@@ -11,7 +11,7 @@
       <aside class="sidebar" id="sidebar">
         <div class="brand">⚡<span class="brand-name">Deeptrading</span></div>
         <nav class="side-nav">
-          <!-- <button class="nav-btn" data-page="chart"><span class="ico">📈</span><span>Склад</span></button> -->
+          <button class="nav-btn" data-page="chart"><span class="ico">📈</span><span>Склад</span></button>
           <!-- <button class="nav-btn" data-page="lab"><span class="ico">🧪</span><span>Lab</span></button> -->
           <button class="nav-btn active" data-page="bot"><span class="ico">🤖</span><span>Бот</span></button>
         </nav>
@@ -32,7 +32,7 @@
           <div class="hdr-bot-ctrl">
             <button class="btn-primary start btn-xs" id="btn-bot-start">▶ Запустить</button>
             <button class="btn-primary stop hidden btn-xs" id="btn-bot-stop">■ Остановить</button>
-            <button class="btn-secondary btn-xs hidden" id="btn-bot-pause" title="Остановить НОВЫЕ входы; открытые позиции продолжают жить (SL/TP работают)">⏸ Пауза входов</button>
+            <button class="btn-primary btn-xs hidden" id="btn-bot-pause" title="Остановить НОВЫЕ входы; открытые позиции продолжают жить (SL/TP работают)">⏸ Пауза входов</button>
             <button class="btn-secondary btn-xs" id="btn-bot-settings" title="Настройки бота">⚙</button>
           </div>
           <div id="bot-pill-top" class="bot-pill off"><span class="dot"></span><span id="bot-state-text">Бот выключен</span><span id="bot-mode" class="mode-chip hidden"></span></div>
@@ -470,6 +470,11 @@
 
       <aside class="sidebar sidebar-right" id="sidebar-right">
         <div class="sidebar-grip sr-grip" title="Изменить ширину"></div>
+        <div class="sr-tabs">
+          <button class="sr-tab active" data-srtab="market">📊 Рынок</button>
+          <button class="sr-tab" data-srtab="votes">🗳 Голоса</button>
+        </div>
+        <div class="sr-tabpane" id="sr-pane-market">
         <div class="sr-head">
           <span class="sr-title">📊 Рынок TQBR</span>
           <span class="sr-sub" id="sr-count">—</span>
@@ -495,6 +500,24 @@
           </table>
         </div>
         <button class="sr-refresh btn-secondary btn-xs" id="sr-refresh" title="Обновить с биржи">⟳</button>
+        </div>
+        <div class="sr-tabpane hidden" id="sr-pane-votes">
+          <div class="sr-head">
+            <span class="sr-title">🗳 Голоса ансамбля (5m)</span>
+            <span class="sr-sub" id="votes-count">—</span>
+          </div>
+          <div class="sr-votes-sort">
+            <button class="votes-sort" data-vsort="ticker">Название <span class="vs-arrow"></span></button>
+            <button class="votes-sort" data-vsort="atr">Волат. <span class="vs-arrow"></span></button>
+            <button class="votes-sort" data-vsort="votes">Голоса <span class="vs-arrow"></span></button>
+          </div>
+          <div class="sr-legend">
+            <span class="sr-leg sr-leg-1">1</span>
+            <span class="sr-leg sr-leg-2">2</span>
+            <span class="sr-leg sr-leg-3">3+</span>
+          </div>
+          <div class="votes-grid" id="votes-grid"></div>
+        </div>
       </aside>
     </div>
 

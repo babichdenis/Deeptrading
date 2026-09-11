@@ -96,6 +96,11 @@ class AtrStopPolicy(ExitPolicy):
     trail_activation_r: float | None = None
     trail_distance_r: float | None = None
     trail_activation_comm_mult: float | None = None  # активация трейлинга при PnL >= комиссия_входа * mult
+    # --- Динамический трейлинг ---
+    trail_compress_r: float = 0.0      # сжатие дистанции по прибыли (в R): 0 = выкл
+    trail_min_factor: float = 0.3      # минимальный множитель сжатия
+    trail_min_atr: float = 0.0         # минимальная дистанция (в ATR)
+    trail_vol_boost: float = 0.0       # влияние объёма: 0 = выкл; >0 — высокий объём шире
     policy_id: str = "atr_stop"
     version: str = "1.2.0"
 
@@ -171,6 +176,24 @@ class AtrStopPolicy(ExitPolicy):
             dist_unit = _last_atr if _last_atr else entry_price * 0.01
         else:
             dist_unit = risk
+        # --- Динамическая дистанция: сжатие по прибыли + учёт объёма ---
+        dist = trail * dist_unit
+        if self.trail_compress_r > 0 and risk > 0:
+            _close = bars[-1].close
+            _pnl = (entry_price - _close) if side is Side.SELL else (_close - entry_price)
+            _r = _pnl / risk  # прибыль в единицах риска (R)
+            _factor = max(self.trail_min_factor, 1.0 - self.trail_compress_r * max(0.0, _r))
+            dist *= _factor
+        if self.trail_vol_boost > 0:
+            _vols = [float(b.volume or 0) for b in bars[-50:]]
+            _mean_v = (sum(_vols) / len(_vols)) if _vols else 0.0
+            _vr = (float(bars[-1].volume or 0) / _mean_v) if _mean_v > 0 else 1.0
+            # Высокий объём (движение подтверждено) → шире (даём дышать),
+            # низкий (затишье/истощение) → теснее.
+            _adj = min(1.0 + self.trail_vol_boost, max(1.0 - self.trail_vol_boost, _vr ** 0.5))
+            dist *= _adj
+        if self.trail_min_atr > 0:
+            dist = max(dist, self.trail_min_atr * dist_unit)
         window = bars[-self.period :]
         if side is Side.BUY:
             highest = max(b.high for b in window)
@@ -178,14 +201,14 @@ class AtrStopPolicy(ExitPolicy):
                 move = highest - entry_price
                 if move < self.trail_activation_r * risk:
                     return current_stop
-            candidate = highest - trail * dist_unit
+            candidate = highest - dist
             return max(current_stop or candidate, candidate)
         lowest = min(b.low for b in window)
         if self.trail_activation_comm_mult is None:
             move = entry_price - lowest
             if move < self.trail_activation_r * risk:
                 return current_stop
-        candidate = lowest + trail * dist_unit
+        candidate = lowest + dist
         stop = current_stop if current_stop is not None else candidate
         return min(stop, candidate)
 

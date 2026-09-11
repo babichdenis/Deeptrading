@@ -30,6 +30,7 @@ class VolumeParams:
     drop_ratio: float = 1.5    # V4: падение на объёме
     div_n: int = 20            # V2/V5: окно «новый экстремум»
     wick_frac: float = 0.5     # V3: доля тени в диапазоне
+    price: str = "close"       # сравнение для drop/rise: "close" | "open"
 
 
 def volume_features(candles, p: VolumeParams | None = None) -> list[dict]:
@@ -65,15 +66,19 @@ def volume_features(candles, p: VolumeParams | None = None) -> list[dict]:
             "climax_long": False,   # блок LONG (длинная верхняя тень на росте)
             "climax_short": False,  # блок SHORT (длинная нижняя тень на падении)
             "volume_on_drop": False,
+            "volume_on_rise": False,
             "upper_wick": 0.0,
             "lower_wick": 0.0,
         }
         if rng > 1e-9:
             f["upper_wick"] = round(max(0.0, d["high"] - max(d["open"], d["close"])) / rng, 3)
             f["lower_wick"] = round(max(0.0, min(d["open"], d["close"]) - d["low"]) / rng, 3)
-        # V4: close ниже prev_close и всплеск объёма.
-        if i >= 1 and d["close"] < data[i - 1]["close"] and vr > p.drop_ratio:
+        # V4: цена (close/open) ниже предыдущей и всплеск объёма.
+        _px = "open" if str(p.price) == "open" else "close"
+        if i >= 1 and d[_px] < data[i - 1][_px] and vr > p.drop_ratio:
             f["volume_on_drop"] = True
+        if i >= 1 and d[_px] > data[i - 1][_px] and vr > p.drop_ratio:
+            f["volume_on_rise"] = True
         # V3: climax — всплеск объёма + длинная тень.
         if vr > p.climax_ratio:
             if f["upper_wick"] > p.wick_frac and d["close"] >= d["open"]:

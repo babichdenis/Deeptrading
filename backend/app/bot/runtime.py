@@ -45,7 +45,7 @@ from app.services.tinvest import INTERVAL_NAMES
 MAX_BUFFER = 300
 ENSEMBLE_BUFFER = 4320  # 3 дня 1m-свечей (~72 часовых бара для bias EMA50) — больше не нужно
 DAILY_PNL_TTL = timedelta(seconds=30)
-POS_PCT = 0.20  # доля портфеля на одну позицию (модель portfolio_merge)
+POS_PCT = 0.40  # доля портфеля на одну позицию (модель portfolio_merge)
 
 # Файл, где хранятся настройки бота (единственный источник правды; БД — только резерв).
 _BOT_CONFIG_FILE = str(Path(__file__).resolve().parents[2] / "data" / "bot_config.json")
@@ -56,7 +56,7 @@ class BotConfig:
     strategy_id: str = "rsi_reversal"
     params: dict = field(default_factory=dict)
     interval_name: str = "5min"
-    top_n: int = 20
+    top_n: int = 40
     qty_per_trade: int = 1
     stop_pct: float = 0.01
     target_pct: float = 0.02
@@ -65,9 +65,14 @@ class BotConfig:
     atr_multiplier: float = 4.0
     atr_risk_reward: float = 4.0
     # --- Trailing stop ---
-    initial_sl_atr: float = 4.0  # стандартный SL = 4×ATR (фикс; не optuna sl_mult)
-    trail_activation_comm_mult: float = 4.0  # активация при pnl >= комиссия_входа × mult
-    trail_distance_atr: float = 2.5  # дистанция трейлинга за ценой = 2.5×ATR
+    initial_sl_atr: float = 2.5  # стандартный SL = 2.5×ATR (фикс; не optuna sl_mult)
+    trail_activation_comm_mult: float = 3.0  # активация при pnl >= комиссия_входа × mult
+    trail_distance_atr: float = 2.5  # базовая дистанция трейлинга за ценой = 2.5×ATR
+    # --- Динамический трейлинг ---
+    trail_compress_r: float = 1.0    # сжатие дистанции по прибыли (в R): чем больше плюс, тем теснее
+    trail_min_factor: float = 0.6    # минимальный множитель сжатия (2.5 → 1.5×ATR)
+    trail_min_atr: float = 1.5       # минимальная дистанция (в ATR)
+    trail_vol_boost: float = 0.3     # влияние объёма (высокий → шире, низкий → теснее)
     allow_short: bool = False
     long_allowed: bool = True
     short_allowed: bool = False
@@ -110,6 +115,7 @@ BOT_PERSIST_FIELDS = (
     "sessions", "long_allowed", "short_allowed", "leverage",
     "margin_sessions", "margin_leverage", "margin_sizing",
     "trade_regimes", "trend_alignment",
+    "trail_distance_atr", "trail_compress_r", "trail_min_factor", "trail_min_atr", "trail_vol_boost",
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
     "overnight", "reentry_cooldown_bars", "confirm_flip",
@@ -272,6 +278,8 @@ class PaperBotRuntime:
         self._held: set[str] = set()
         self._held_since: dict[str, float] = {}  # figi -> время добавления в _held (для grace синка)
         self._live_logs: deque[str] = deque(maxlen=400)
+        self._log_persist_queue: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (level, source, msg) — дренится в bot_logs флашером
+        self._log_persist_queue: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (level, source, msg) — дренится в bot_logs флашером
         self.stream_manager: StreamManager | None = None
         self.carousel_diag: dict = {
             "eligible_count": 0,
@@ -306,6 +314,8 @@ class PaperBotRuntime:
         self._entry_bar_index: dict[str, int] = {}  # figi -> bar_index at entry
         self._no_trade_stats: dict[str, int] = {}  # reason -> count (NO_TRADE diagnostics)
         self._regimes: dict[str, dict] = {}  # figi -> {state, vol} последних 5м баров
+        self._votes: dict[str, dict] = {}  # figi -> {ts, buy, sell, members} голоса на последнем 5m баре
+        self._votes_logged: dict[str, str] = {}  # figi -> ts последнего залогированного набора голосов
         self._persist_task: asyncio.Task | None = None
         self.log_candles = True
         self._last_candle_log_ts: float = 0.0
@@ -328,9 +338,12 @@ class PaperBotRuntime:
         self._bad_day: dict[str, dict[str, bool]] = {}  # figi -> {msk_date: is_bad}
         self._candles_rejected: int = 0  # total rejected broken candles
 
-    def _log(self, msg: str) -> None:
+    def _log(self, msg: str, level: str = "info", source: str = "bot") -> None:
         ts = datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S")
         self._live_logs.append(f"[{ts}] {msg}")
+        # Персистентная копия (level/source) — пишется в bot_logs флашером,
+        # переживает рестарт и видна в Live через фильтры UI.
+        self._log_persist_queue.append((level, source, f"[{ts}] {msg}"))
 
 
     def _get_5m_bars(self, figi: str, buf_list: list) -> list:
@@ -407,11 +420,10 @@ class PaperBotRuntime:
         return True
 
     async def _build_ensemble_params(self, db, figi, ticker, lot, capital, sessions):
-        """Собрать EnsembleParams с per-ticker optuna-параметрами из instruments.
+        """EnsembleParams для semi-flip: ВСЕ 7 стратегий V2, quorum=2, neutral_mode=semi_flip.
 
-        Если optuna_params есть: setups из активных стратегий + их параметров,
-        quorum/sl_mult/rr/vol_thr из optuna, neutral_mode=semi_flip.
-        Если нет — V2 дефолты.
+        Голоса — все 7 (V2 params), НЕ подмножество из optuna. SL/TP — не трогаем
+        (sl_mult/rr берём из optuna, как есть).
         """
         from sqlalchemy import text as _t
         row = (await db.execute(
@@ -420,31 +432,18 @@ class PaperBotRuntime:
         opt = (row[0] if row else None) or {}
 
         from app.bot.ensemble_strategy import EnsembleParams, V2_SETUPS
-        ALL_SIDS = ["rsi_reversal", "bollinger_reclaim", "pullback_ema", "vwap_reclaim",
-                    "range_compression_breakout", "macd_cross", "donchian_breakout"]
-        V2P = {s["strategy_id"]: s["params"] for s in V2_SETUPS}
-
-        if not opt.get("active_sids"):
-            # V2 дефолт: все 7, SL4 RR4 q2, semi_flip
-            return EnsembleParams(
-                figi=figi, lot=int(lot) if lot else 10, capital=capital,
-                quorum=2, session="all", sessions=sessions,
-                setups=V2_SETUPS, sl_mult=4.0, rr=4.0, vol_thr=0.0,
-                neutral_mode="semi_flip",
-                entry_macd_1m=True,
-            )
-
-        active = list(opt.get("active_sids", ALL_SIDS))
-        sp = {k: dict(v) for k, v in (opt.get("strategy_params") or {}).items()}
-        setups = [{"strategy_id": s, "tf": "5min",
-                   "params": dict(sp.get(s, V2P.get(s, {})))} for s in active]
+        # Голосуют 5 стратегий (исключены pullback_ema и range_compression_breakout) + volume_drop.
+        _EXCLUDE = {"pullback_ema", "range_compression_breakout"}
+        _setups = [s for s in V2_SETUPS if s.get("strategy_id") not in _EXCLUDE]
+        _setups.append({"strategy_id": "volume_drop", "tf": "5min",
+                        "params": {"ma_len": 20, "drop_ratio": 1.5}})
         return EnsembleParams(
             figi=figi, lot=int(lot) if lot else 10, capital=capital,
-            quorum=int(opt.get("quorum", 2)), session="all", sessions=sessions,
-            setups=setups,
-            sl_mult=float(opt.get("sl_mult", 4.0)),
+            quorum=2, session="all", sessions=sessions,
+            setups=_setups,  # 6 голосов
+            sl_mult=float(opt.get("sl_mult", 4.0)),  # SL/TP — как есть (optuna)
             rr=float(opt.get("rr", 4.0)),
-            vol_thr=float(opt.get("vol_thr", 0.0) or 0.0),
+            vol_thr=0.0,
             neutral_mode="semi_flip",
             entry_macd_1m=True,
         )
@@ -628,6 +627,11 @@ class PaperBotRuntime:
                 "margin_sizing": self.config.margin_sizing,
                 "trade_regimes": list(self.config.trade_regimes),
                 "trend_alignment": bool(self.config.trend_alignment),
+                "trail_distance_atr": self.config.trail_distance_atr,
+                "trail_compress_r": self.config.trail_compress_r,
+                "trail_min_factor": self.config.trail_min_factor,
+                "trail_min_atr": self.config.trail_min_atr,
+                "trail_vol_boost": self.config.trail_vol_boost,
                 "commission_rate": self.config.commission_rate,
                 "slippage_bps": self.config.slippage_bps,
                 "confirm_flip": self.config.confirm_flip,
@@ -639,9 +643,22 @@ class PaperBotRuntime:
                 "replay_pace": self.config.replay_pace,
             },
             "universe": self.universe,
+            "votes": [
+                {"figi": _f, "ticker": self.tickers.get(_f, _f[:6]),
+                 "buy": int(_v.get("buy", 0)), "sell": int(_v.get("sell", 0)),
+                 "votes": max(int(_v.get("buy", 0)), int(_v.get("sell", 0))),
+                 "side": "BUY" if int(_v.get("buy", 0)) >= int(_v.get("sell", 0)) else "SELL",
+                 "ts": _v.get("ts"),
+                 "regime": ((self._regimes.get(_f) or {}).get("state") or {}).get("state")
+                            if isinstance((self._regimes.get(_f) or {}).get("state"), dict) else None,
+                 "vol": (self._regimes.get(_f) or {}).get("vol"),
+                 "vol_abs": (float(self.buffers[_f][-1].volume or 0) if self.buffers.get(_f) else None)}
+                for _f, _v in self._votes.items()
+            ],
             "candles_seen": self.candles_seen,
             "signals_seen": self.signals_seen,
             "pending_orders": len(self.pending_orders),
+            "entries_paused": self.entries_paused,
             "session": session_state(),
             "data": {
                 "health": health,
@@ -753,7 +770,18 @@ class PaperBotRuntime:
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS exit_meta TEXT"))
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS trailing_active BOOLEAN DEFAULT FALSE"))
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS mode VARCHAR(8) DEFAULT 'sandbox'"))
+                await _db.execute(_text("CREATE TABLE IF NOT EXISTS bot_logs (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(), level VARCHAR(8) DEFAULT 'info', source VARCHAR(16) DEFAULT 'bot', msg TEXT)"))
                 await _db.commit()
+            # Восстановить хвост live-логов из bot_logs (переживают рестарт; Live видит
+            # постоянные логи через фильтры UI, а не только deque in-memory).
+            try:
+                _hd = await _db.execute(
+                    _text("SELECT to_char(ts AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD HH24:MI:SS') || ' ' || msg "
+                          "FROM (SELECT ts, msg FROM bot_logs ORDER BY id DESC LIMIT 400) t ORDER BY id")
+                )
+                self._live_logs.extend(_hd.scalars().all())
+            except Exception:
+                pass
         except Exception:
             pass
         self.error = None
@@ -852,13 +880,23 @@ class PaperBotRuntime:
 
             async with SessionLocal() as db:
                 if cfg.use_ensemble:
-                    self.universe = await select_eligible_universe(db, top_n=cfg.top_n)
+                    # Берём ВСЕ eligible-тикеры сразу (без ограничения top_n),
+                    # чтобы не было «горячего» добора через HOT-ADD.
+                    self.universe = await select_eligible_universe(db, top_n=9999)
                 else:
                     self.universe = await select_volatile_universe(
                         db, figi_by_ticker, top_n=cfg.top_n
                     )
             if not self.universe:
                 raise RuntimeError("universe is empty")
+            # Лог отбора: сколько тикеров и с какой волатильностью (ATR%).
+            try:
+                _atrs = [u.get("atr_pct", 0) for u in self.universe if u.get("atr_pct")]
+                if _atrs:
+                    self._log(f"UNIVERSE: {len(self.universe)} тикеров · ATR% {min(_atrs):.3f}–{max(_atrs):.3f} · "
+                              f"{', '.join(u.get('ticker', '?') for u in self.universe)}")
+            except Exception:
+                pass
             # Loaded all eligible for streaming
             async with SessionLocal() as db2:
                 all_eligible = (await db2.execute(
@@ -973,7 +1011,11 @@ class PaperBotRuntime:
                                                      multiplier=cfg.initial_sl_atr,
                                                      risk_reward=float(_rr_r) if _rr_r else cfg.atr_risk_reward,
                                                      trail_activation_comm_mult=cfg.trail_activation_comm_mult,
-                                                     trail_distance_r=cfg.trail_distance_atr)
+                                                     trail_distance_r=cfg.trail_distance_atr,
+                                                     trail_compress_r=cfg.trail_compress_r,
+                                                     trail_min_factor=cfg.trail_min_factor,
+                                                     trail_min_atr=cfg.trail_min_atr,
+                                                     trail_vol_boost=cfg.trail_vol_boost)
                                 _buf_raw = list(self.buffers.get(_f, [])) or None
                                 _pl = _pol.plan_entry(_st, _entry_px, _buf_raw or [])
                             # Сохранённые уровни важнее пересчитанного плана:
@@ -1109,7 +1151,6 @@ class PaperBotRuntime:
         from app.engine.models import Candle as EC
 
         while self.running:
-            await asyncio.sleep(60.0)
             try:
                 async with SessionLocal() as db:
                     # Ищем eligible тикеры которые ещё НЕ в universe
@@ -1168,10 +1209,34 @@ class PaperBotRuntime:
 
                         self.strategies[figi] = proto
                         self.buffers[figi] = buf
+                        # Волатильность (ATR%) из буфера — как в select_eligible_universe.
+                        _atr_pct = 0.0
+                        try:
+                            from app.engine.indicators import atr as _atrfn
+                            _by5: dict[int, dict] = {}
+                            for b in buf:
+                                key = int(b.ts.timestamp() // 300)
+                                if key not in _by5:
+                                    _by5[key] = {"ts": b.ts, "open": float(b.open), "high": float(b.high),
+                                                 "low": float(b.low), "close": float(b.close), "volume": float(b.volume or 0)}
+                                else:
+                                    g = _by5[key]
+                                    g["high"] = max(g["high"], float(b.high))
+                                    g["low"] = min(g["low"], float(b.low))
+                                    g["close"] = float(b.close)
+                                    g["volume"] += float(b.volume or 0)
+                            _ec5 = [EC(ts=g["ts"], open=g["open"], high=g["high"], low=g["low"],
+                                       close=g["close"], volume=g["volume"]) for g in _by5.values()]
+                            _vals = _atrfn(_ec5[-44:], 14)
+                            _la = next((v for v in reversed(_vals) if v is not None), None)
+                            if _la and _ec5 and _ec5[-1].close:
+                                _atr_pct = round(_la / _ec5[-1].close * 100, 3)
+                        except Exception:
+                            pass
                         self.universe.append({
                             "figi": figi, "ticker": ticker,
                             "lot": int(lot) if lot else 10, "name": ticker,
-                            "atr_pct": 0, "avg_price": 0, "avg_turnover": 0, "sector": "",
+                            "atr_pct": _atr_pct, "avg_price": 0, "avg_turnover": 0, "sector": "",
                         })
                         self.tickers[figi] = ticker
                         hot_adds_this_cycle += 1
@@ -1193,6 +1258,7 @@ class PaperBotRuntime:
             except Exception as _e:
                 self._log(f"⚠ HOT-ADD: ошибка — {type(_e).__name__}: {_e}")
                 self.carousel_diag["last_error"] = str(_e)
+            await asyncio.sleep(60.0)
 
     async def _session_monitor(self) -> None:
         """Фоновая задача: логирует состояние при смене торговой сессии.
@@ -1491,6 +1557,16 @@ class PaperBotRuntime:
                         await db.execute(sql, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
                     for f, ts, o, h, l, cl, v in batch5:
                         await db.execute(sql5, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
+                    log_rows = _drain(self._log_persist_queue)
+                    if log_rows:
+                        _payload = [{"level": l, "source": s, "msg": m} for (l, s, m) in log_rows]
+                        await db.execute(
+                            _text(
+                                "INSERT INTO bot_logs (level, source, msg) "
+                                "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, msg text)"
+                            ),
+                            {"rows": json.dumps(_payload, ensure_ascii=False)},
+                        )
                     await db.commit()
                 _pt = (_time.perf_counter() - _tp0) * 1000
                 self.metrics["persist_ms_total"] += _pt
@@ -1805,6 +1881,19 @@ class PaperBotRuntime:
                 "vol": _reg_vol,
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
+        # Голоса на последнем 5m баре (для вкладки «Голоса» и лога недобора кворума).
+        _v = getattr(strategy, "_last_votes", None)
+        if _v and _v.get("ts"):
+            self._votes[figi] = _v
+            _k = int(getattr(getattr(strategy, "p", None), "quorum", 3) or 3)
+            _need = _k - 1  # недобор: например 2 из 3
+            _b, _s = int(_v.get("buy", 0)), int(_v.get("sell", 0))
+            if _need >= 1 and max(_b, _s) == _need and self._votes_logged.get(figi) != _v["ts"]:
+                self._votes_logged[figi] = _v["ts"]
+                _side = "BUY" if _b >= _s else "SELL"
+                _mem = _v.get("buy_members" if _side == "BUY" else "sell_members", [])
+                self._log(f"🟡 КВОРУМ {_need}/{_k} {self.tickers.get(figi, figi[:6])} {_side} "
+                          f"цена={c.close:.2f} ({','.join(_mem)}) — ждём {_k}-й голос")
         if sig is None:
             return
         self.signals_seen += 1
@@ -2068,6 +2157,13 @@ class PaperBotRuntime:
         if order is None or order.status == "CANCELLED":
             return False
         cfg = self.config
+        # Пауза новых входов: НЕ открываем новые позиции из очереди (закрытия/выходы — можно).
+        if order.action == "open" and self.entries_paused:
+            order.status = "CANCELLED"
+            self._log(f"ПАУЗА: отменён вход {order.ticker} ({order.side}) — entries_paused")
+            self.events.log("ORDER_CANCELLED", figi=figi, ticker=order.ticker,
+                            order_id=order.id, action="open", reason="entries_paused")
+            return False
         if order.action == "close":
             trade = await self.broker.close_position(figi, c.open, "signal_exit")
             actual_exit = price_from_trade(trade) if trade else c.open
@@ -2105,7 +2201,11 @@ class PaperBotRuntime:
                 exit_policy = AtrStopPolicy(period=cfg.atr_period, multiplier=_sl_mult,
                                             risk_reward=_rr,
                                             trail_activation_comm_mult=cfg.trail_activation_comm_mult,
-                                            trail_distance_r=cfg.trail_distance_atr)
+                                            trail_distance_r=cfg.trail_distance_atr,
+                                            trail_compress_r=cfg.trail_compress_r,
+                                            trail_min_factor=cfg.trail_min_factor,
+                                            trail_min_atr=cfg.trail_min_atr,
+                                            trail_vol_boost=cfg.trail_vol_boost)
                 buf_raw = list(self.buffers.get(figi, []))
                 plan = exit_policy.plan_entry(side, c.open, buf_raw)
         else:
@@ -2182,7 +2282,11 @@ class PaperBotRuntime:
                                      multiplier=cfg.initial_sl_atr,
                                      risk_reward=float(_rrc) if _rrc else cfg.atr_risk_reward,
                                      trail_activation_comm_mult=cfg.trail_activation_comm_mult,
-                                     trail_distance_r=cfg.trail_distance_atr)
+                                     trail_distance_r=cfg.trail_distance_atr,
+                                     trail_compress_r=cfg.trail_compress_r,
+                                     trail_min_factor=cfg.trail_min_factor,
+                                     trail_min_atr=cfg.trail_min_atr,
+                                     trail_vol_boost=cfg.trail_vol_boost)
                 _buf = self.buffers.get(figi)
                 _bars1 = list(_buf) if _buf else [c]
                 _pl = _pol.plan_entry(_side_enum, _entry_px, _bars1)

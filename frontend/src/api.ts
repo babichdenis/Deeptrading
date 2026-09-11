@@ -360,6 +360,7 @@ export interface BotTradeRow {
   net_pnl: number; commission: number; exit_reason: string;
   stop_loss?: number | null; take_profit?: number | null;
   exit_meta?: string | null;
+  meta?: string | null;
 }
 
 export async function botTrades(limit = 50): Promise<BotTradeRow[]> {

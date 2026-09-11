@@ -47,6 +47,22 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "overbought": {"type": "float", "default": 65, "min": 50, "max": 95},
         },
     ),
+    "stochastic": StrategyCard(
+        id="stochastic",
+        name="Stochastic",
+        family="reversal",
+        wave=1,
+        long_rule="%K<oversold & %K cross up %D",
+        short_rule="%K>overbought & %K cross down %D",
+        timeframes=("15min", "hour", "day"),
+        status="AVAILABLE",
+        params_schema={
+            "k_period": {"type": "int", "default": 14, "min": 2, "max": 100},
+            "d_period": {"type": "int", "default": 3, "min": 1, "max": 20},
+            "oversold": {"type": "float", "default": 20, "min": 5, "max": 50},
+            "overbought": {"type": "float", "default": 80, "min": 50, "max": 95},
+        },
+    ),
     "bollinger_reclaim": StrategyCard(
         id="bollinger_reclaim",
         name="Bollinger Reclaim",

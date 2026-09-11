@@ -159,6 +159,57 @@ class RsiReversalStrategy:
 
 
 @dataclass(frozen=True)
+class StochasticParams:
+    k_period: int = 14
+    d_period: int = 3
+    oversold: float = 20
+    overbought: float = 80
+
+
+class StochasticStrategy:
+    """Stochastic oscillator: %K/%D cross из зон перепроданности/перекупленности."""
+    strategy_id = "stochastic"
+    version = "1.0.0"
+
+    def __init__(self, params: StochasticParams | None = None):
+        self.params = params or StochasticParams()
+        self._highs: list[float] = []
+        self._lows: list[float] = []
+        self._ks: list[float] = []
+        self._prev_k: float | None = None
+        self._prev_d: float | None = None
+
+    def warmup_bars(self) -> int:
+        return self.params.k_period + self.params.d_period + 2
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        bar = candles[-1]
+        self._highs.append(bar.high)
+        self._lows.append(bar.low)
+        kp = self.params.k_period
+        if len(self._highs) < kp:
+            return None
+        hh = max(self._highs[-kp:])
+        ll = min(self._lows[-kp:])
+        rng = hh - ll
+        k = 100.0 * (bar.close - ll) / rng if rng > 0 else 50.0
+        self._ks.append(k)
+        dp = self.params.d_period
+        d = sum(self._ks[-dp:]) / min(len(self._ks), dp)
+        prev_k, prev_d = self._prev_k, self._prev_d
+        self._prev_k, self._prev_d = k, d
+        result: Signal | None = None
+        if prev_k is not None and prev_d is not None:
+            feats = {"k": round(k, 3), "d": round(d, 3),
+                     "prev_k": round(prev_k, 3), "prev_d": round(prev_d, 3)}
+            if k < self.params.oversold and k > d and prev_k <= prev_d:
+                result = _signal(self.strategy_id, Side.BUY, bar.ts, "stoch_cross_up_oversold", feats)
+            elif k > self.params.overbought and k < d and prev_k >= prev_d:
+                result = _signal(self.strategy_id, Side.SELL, bar.ts, "stoch_cross_down_overbought", feats)
+        return result
+
+
+@dataclass(frozen=True)
 class BollingerReclaimParams:
     period: int = 20
     k: float = 2.0
