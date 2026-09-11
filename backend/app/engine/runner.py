@@ -19,6 +19,32 @@ from app.engine.policies import SignalPolicy, SignalPolicyConfig
 from app.engine.sessions import SessionPolicy, SessionPolicyConfig
 
 
+class CandlePrefix(Sequence):
+    """Лёгкое представление префикса candles[:n] без копирования списка.
+
+    Используется в hot-path runner вместо срезов (срез 28k баров × 84k раз = O(n²))."""
+
+    __slots__ = ("_src", "_n")
+
+    def __init__(self, src: Sequence, n: int):
+        self._src = src
+        self._n = n
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, i):
+        n = self._n
+        if isinstance(i, slice):
+            start, stop, step = i.indices(n)
+            return [self._src[j] for j in range(start, stop, step)]
+        if i < 0:
+            i += n
+        if i < 0 or i >= n:
+            raise IndexError(i)
+        return self._src[i]
+
+
 @dataclass
 class EngineConfig:
     figi: str = "UNKNOWN"
@@ -47,6 +73,8 @@ class EngineRunner:
             SessionPolicy(self.cfg.session_policy) if self.cfg.session_policy else None
         )
         self._regime_bars = self.cfg.regime_bars or []
+        self._regime_ts_cache = None
+        self._regime_idx_cache = None
         self._trailing_active = False
         self.exit_coverage: dict = {
             "opposite_received": 0,
@@ -58,16 +86,22 @@ class EngineRunner:
         }
 
     def _regime_at(self, ts) -> str | None:
-        """Look up regime state for timestamp ts from regime_bars."""
+        """Look up regime state for timestamp ts from regime_bars (bisect, O(log n))."""
         if not self._regime_bars:
             return None
-        best = None
-        for r in self._regime_bars:
-            if r.get("ts") and r["ts"] <= ts:
-                best = r
-            else:
-                break
-        return best.get("state") if best else None
+        import bisect as _bisect
+        if self._regime_ts_cache is None:
+            ts_list = [r.get("ts") for r in self._regime_bars]
+            # Отбрасываем None-таймстампы (сохраняем соответствие индексов).
+            pairs = [(t, i) for i, t in enumerate(ts_list) if t is not None]
+            pairs.sort(key=lambda x: x[0])
+            self._regime_ts_cache = [p[0] for p in pairs]
+            self._regime_idx_cache = [p[1] for p in pairs]
+        ts_list = self._regime_ts_cache
+        i = _bisect.bisect_right(ts_list, ts) - 1
+        if i < 0:
+            return None
+        return self._regime_bars[self._regime_idx_cache[i]].get("state")
 
     def run(self, candles: Sequence[Candle], progress_cb=None) -> TradeLedger:
         ledger = TradeLedger()
@@ -186,7 +220,7 @@ class EngineRunner:
                         _side_for_pol,
                         position.entry_price,
                         position.initial_stop,
-                        candles[: i + 1],
+                        CandlePrefix(candles, i + 1),
                         qty=position.qty,
                         commission=position.entry_commission,
                     )
@@ -197,7 +231,7 @@ class EngineRunner:
                         position.entry_price,
                         position.qty,
                         position.entry_commission,
-                        candles[: i + 1],
+                        CandlePrefix(candles, i + 1),
                     ) if activate is not None else False
                     if _act_res:
                         self._trailing_active = True
@@ -240,7 +274,7 @@ class EngineRunner:
                         )
 
             if i + 1 < total and i >= warmup - 1:
-                signal = self.strategy.on_bar(candles[: i + 1])
+                signal = self.strategy.on_bar(CandlePrefix(candles, i + 1))
                 if signal is not None and position is not None and self._trailing_active:
                     # Трейлинг активен: любые противоположные сигналы (и entry-флипы,
                     # и явные exit) игнорируются — позиция живёт до подтянутого стопа.
@@ -397,7 +431,7 @@ class EngineRunner:
         notional = fill * self.cfg.qty
         commission = self.cfg.cost_model.commission(notional)
         slippage = abs(fill - base) * self.cfg.qty
-        plan = self.exit_policy.plan_entry(side, fill, candles[: index + 1])
+        plan = self.exit_policy.plan_entry(side, fill, CandlePrefix(candles, index + 1))
         state = PositionState.LONG if side is Side.BUY else PositionState.SHORT
         ledger.log(index, bar.ts, "FILL_ENTRY", f"{side.value} qty={self.cfg.qty} price={fill}")
         return Position(
