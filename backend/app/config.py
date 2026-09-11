@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     bot_mode: str = "sandbox"  # sandbox | live | test
     sandbox_account: str = ""
     live_account: str = ""
+    log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR
+    log_debug_engine: bool = False  # подробные debug-логи движка (hot path)
 
     @property
     def feed_token(self) -> str:

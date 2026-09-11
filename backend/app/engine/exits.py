@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 from app.engine.indicators import atr
 from app.engine.models import Candle, ExitPlan, ExitReason, PositionState, Side
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 SAME_BAR_CONFLICT_RULE = "STOP_LOSS_FIRST"
@@ -103,11 +107,75 @@ class AtrStopPolicy(ExitPolicy):
     trail_vol_boost: float = 0.0       # влияние объёма: 0 = выкл; >0 — высокий объём шире
     policy_id: str = "atr_stop"
     version: str = "1.2.0"
+    _atr_cache: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def _risk(self, entry_price: float, bars: Sequence[Candle]) -> float:
-        values = atr(bars, self.period)
-        last = values[-1] if values else None
-        return (last or entry_price * 0.01) * self.multiplier
+        n = len(bars)
+        c = self._atr_cache
+        trs = c.get("trs")
+        cn = c.get("n", 0)
+        first_ts = bars[0].ts if n else None
+        if trs is None or n < cn or c.get("first_ts") != first_ts:
+            # Полный пересчёт true range (только массив TR, без ATR-рекурсии).
+            logger.debug("atr_cache rebuild: n=%d prev=%d period=%d", n, cn, self.period)
+            c["first_ts"] = first_ts
+            trs = [0.0] * n
+            for i, bar in enumerate(bars):
+                if i == 0:
+                    trs[i] = bar.high - bar.low
+                else:
+                    pc = bars[i - 1].close
+                    h, l = bar.high, bar.low
+                    tr = h - l
+                    a = h - pc
+                    if a < 0:
+                        a = -a
+                    if a > tr:
+                        tr = a
+                    b = l - pc
+                    if b < 0:
+                        b = -b
+                    if b > tr:
+                        tr = b
+                    trs[i] = tr
+            c["trs"] = trs
+            c["n"] = n
+            c["value"] = None
+            c["value_n"] = 0
+        elif n > cn:
+            # Инкрементальный досчёт новых баров.
+            for i in range(cn, n):
+                bar = bars[i]
+                if i == 0:
+                    trs.append(bar.high - bar.low)
+                else:
+                    pc = bars[i - 1].close
+                    h, l = bar.high, bar.low
+                    tr = h - l
+                    a = h - pc
+                    if a < 0:
+                        a = -a
+                    if a > tr:
+                        tr = a
+                    b = l - pc
+                    if b < 0:
+                        b = -b
+                    if b > tr:
+                        tr = b
+                    trs.append(tr)
+            c["n"] = n
+        p = self.period
+        v = c.get("value")
+        vn = c.get("value_n", 0)
+        if n >= p:
+            if v is None or vn < p:
+                v = sum(trs[:p]) / p
+                vn = p
+            for i in range(vn, n):
+                v = (v * (p - 1) + trs[i]) / p
+            c["value"] = v
+            c["value_n"] = n
+        return (v or entry_price * 0.01) * self.multiplier
 
     def plan_entry(self, side: Side, entry_price: float, bars: Sequence[Candle]) -> ExitPlan:
         distance = self._risk(entry_price, bars)

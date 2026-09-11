@@ -9,6 +9,9 @@ from app import models  # noqa: F401
 from app.api.routes import analysis, bot as bot_routes, catalog, candles, instruments, lab, ml as ml_routes, orchestrator_route, quorum, research, sandbox, screener, signals, test as test_routes, warehouse, ws
 from app.config import get_settings
 from app.database import Base, engine
+from app.logging_setup import setup_logging
+
+setup_logging()
 
 
 @asynccontextmanager

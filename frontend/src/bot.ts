@@ -31,7 +31,6 @@ import {
   type CarouselStatus,
   fetchTests,
   deleteTest,
-  fetchTestTrades,
   type TestRunRow,
 } from "./api";
 
@@ -1724,19 +1723,21 @@ function initSidebarRightResize() {
 
 let _testResults: TestRunRow[] = [];
 let _selectedTest: string | null = null;
+let _lastRunTest: string | null = null;
 
 function initTestResults() {
   $("btn-test-new")?.addEventListener("click", openTestModal);
   document.querySelector("#bot-tests-table tbody")?.addEventListener("click", (e) => {
     const tr = (e.target as HTMLElement).closest("tr") as HTMLElement | null;
     if (!tr) return;
-    const action = (e.target as HTMLElement).closest("[data-action]");
-    if (!action) { renderTestTrades(tr.dataset.name || "", true); return; }
-    const act = action.getAttribute("data-action")!;
     const name = tr.dataset.name || "";
+    const action = (e.target as HTMLElement).closest("[data-action]");
+    // Клик по строке = реальный replay-прогон этого теста через движок (как Live).
+    if (!action) { _selectTest(name); return; }
+    const act = action.getAttribute("data-action")!;
     if (act === "delete") void _deleteTest(name);
     else if (act === "rerun") void _rerunTest(name);
-    else renderTestTrades(name, true);
+    else _selectTest(name);
   });
   void _refreshTestResults();
 }
@@ -1773,7 +1774,6 @@ function renderTests() {
       </td>
     </tr>`;
   }).join("");
-  if (_selectedTest) renderTestTrades(_selectedTest);
 }
 
 async function _deleteTest(name: string) {
@@ -1785,41 +1785,26 @@ async function _deleteTest(name: string) {
   } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
 }
 
+// Выбор теста = реальный replay-прогон через движок: результаты идут в
+// ОСНОВНЫЕ таблицы бота (последние сделки/позиции), как при Live-прогоне.
+function _selectTest(name: string) {
+  if (_selectedTest === name) return;
+  _selectedTest = name;
+  renderTests();
+  void _rerunTest(name);
+}
+
 async function _rerunTest(name: string) {
   const t = _testResults.find((x) => x.name === name);
   if (!t || !t.replay_start) { alert("Нет периода для перезапуска"); return; }
-  if (!confirm(`Перезапустить тест ${name} (${t.replay_start.slice(0,10)}…)?`)) return;
+  if (_selectedTest !== name) _selectedTest = name;
+  if (t.replay_start === _lastRunTest) { renderTests(); return; }
+  _lastRunTest = t.replay_start;
   try {
     await botSetMode("test", { test_name: name, replay_start: t.replay_start, replay_end: t.replay_end });
     _curMode = "test";
     _setActiveModeBtn("test");
   } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
-}
-
-async function renderTestTrades(name: string, force = false) {
-  if (_selectedTest === name && !force) { _selectedTest = null; renderTests(); return; }
-  _selectedTest = name;
-  let trades: BotTradeRow[];
-  try { trades = await fetchTestTrades(name); } catch { trades = []; }
-  const tbody = document.querySelector("#bot-test-trades tbody");
-  if (!tbody) return;
-  tbody.innerHTML = `<tr><td colspan="8" style="color:var(--cyan);font-weight:600">🧪 ${esc(name)} — ${trades.length} сделок</td></tr>`;
-  for (const t of trades) {
-    const dtIn = new Date(t.entry_time).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
-    const dtOut = t.ts ? new Date(t.ts).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" }) : "—";
-    const pnl = t.net_pnl != null ? (t.net_pnl >= 0 ? `<b class="pos">+${t.net_pnl.toFixed(0)} ₽</b>` : `<b class="neg">${t.net_pnl.toFixed(0)} ₽</b>`) : "—";
-    tbody.innerHTML += `<tr>
-      <td>${dtIn} → ${dtOut}</td>
-      <td>${esc(t.ticker)}</td>
-      <td class="${t.side === "BUY" ? "pos" : "neg"}">${t.side}</td>
-      <td>${t.qty}</td>
-      <td>${t.entry_price.toFixed(2)} → ${t.exit_price != null ? t.exit_price.toFixed(2) : "—"}</td>
-      <td>${pnl}</td>
-      <td>${t.commission ? t.commission.toFixed(2) : "—"}</td>
-      <td>${esc(t.exit_reason || "—")}</td>
-    </tr>`;
-  }
-  renderTests();
 }
 
 function esc(s: string): string {

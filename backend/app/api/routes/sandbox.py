@@ -1,10 +1,16 @@
 """Sandbox API — T-Invest sandbox (thread-safe, DB tickers, ATR TP/SL, precise prices)."""
 import asyncio
+import logging
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter
 from app.config import get_settings
 
 router = APIRouter(prefix="/api/v1/sandbox", tags=["sandbox"])
+
+# Модульный логгер: уровни DEBUG/INFO/WARNING настраиваются стандартно
+# (basicConfig или в _configure_logging). Для отладки sandbox/тестов:
+#   logging.getLogger("sandbox_routes").setLevel(logging.DEBUG)
+_log = logging.getLogger("sandbox_routes")
 
 
 def _active_creds():
@@ -414,14 +420,202 @@ def _bot_running():
         return False
 
 
+# ---------------------------------------------------------------------------
+# ТЕСТОВЫЙ РЕЖИМ (replay с test_name): sandbox-эндпоинты отдают данные
+# активного теста, чтобы фронт показывал их в ОСНОВНЫХ таблицах бота.
+# ---------------------------------------------------------------------------
+
+def _active_test_name() -> str | None:
+    """Имя активного теста (config.feed == 'replay' + test_name), либо None."""
+    try:
+        from app.bot.runtime import runtime
+        cfg = getattr(runtime, "config", None)
+        if cfg is None:
+            return None
+        feed = getattr(cfg, "feed", None)
+        tn = (getattr(cfg, "test_name", "") or "").strip()
+        if feed == "replay" and tn:
+            _log.debug("active test: %r (feed=%r)", tn, feed)
+            return tn
+        _log.debug("no active test: feed=%r test_name=%r", feed, tn)
+        return None
+    except Exception as e:
+        _log.warning("active_test_name lookup failed: %s", e)
+        return None
+
+
+async def _test_trades_db(test_name: str):
+    """Все сделки теста (mode='paper', test_name=...) — открытые и закрытые."""
+    from app.database import SessionLocal as _SL
+    from app.models.sandbox_trade import SandboxTrade
+    from sqlalchemy import select as _sel
+    async with _SL() as db:
+        res = await db.execute(
+            _sel(SandboxTrade)
+            .where(SandboxTrade.mode == "paper", SandboxTrade.test_name == test_name)
+            .order_by(SandboxTrade.entry_time.desc())
+        )
+        rows = list(res.scalars().all())
+    _log.debug("test %r: %d stored trades", test_name, len(rows))
+    return rows
+
+
+async def _test_last_close(figi: str) -> float | None:
+    """Последняя цена закрытия из БД (5m, fallback 1m). Для unrealized тестовых позиций."""
+    try:
+        from app.database import SessionLocal
+        from app.models.candle import Candle
+        from sqlalchemy import select
+        for interval in (5, 1):
+            async with SessionLocal() as db:
+                row = (await db.execute(
+                    select(Candle.close)
+                    .where(Candle.figi == figi, Candle.interval == interval)
+                    .order_by(Candle.ts.desc())
+                    .limit(1)
+                )).first()
+            if row:
+                return float(row[0])
+    except Exception as e:
+        _log.debug("test last_close %s: %s", figi, e)
+    return None
+
+
+def _test_portfolio_digest(test_name: str, rows: list) -> dict:
+    """Портфель теста только из нашей таблицы: closed net + unrealized открытых.
+    initial_cash берём из runtime.config (капитал реплея), fallback 10000."""
+    initial = 10000.0
+    try:
+        from app.bot.runtime import runtime
+        init = getattr(getattr(runtime, "config", None), "initial_cash", None)
+        if init and init > 0:
+            initial = float(init)
+    except Exception:
+        pass
+    closed = [r for r in rows if r.exit_time is not None and r.exit_price is not None]
+    open_ = [r for r in rows if r.exit_time is None]
+    closed_net = sum(float(r.net_pnl or 0) for r in closed)
+    unreal = 0.0
+    mv = 0.0
+    for r in open_:
+        cur = None  # лениво: посчитаем ниже через cache
+        # используем последнее значение из мета-хука ниже если нужно; для скорости — entry
+        p = float(r.entry_price)
+        q = abs(int(r.qty))
+        mv += p * q
+    positions_open = len(open_)
+    wins = len([r for r in closed if (r.net_pnl or 0) > 0])
+    total = len(closed)
+    return {
+        "cash": round(initial + closed_net - mv, 2),
+        "initial_cash": round(initial, 2),
+        "equity": round(initial + closed_net + unreal, 2),
+        "market_value": round(mv, 2),
+        "pnl": round(closed_net, 2),
+        "positions_open": positions_open,
+        "own_in_positions": round(mv, 2),
+        "positions_value": round(mv, 2),
+        "tinkoff_currencies": 0,
+        "tinkoff_shares": 0,
+        "trades": {
+            "total": total,
+            "wins": wins,
+            "winrate": round(wins / total * 100, 1) if total else 0,
+        },
+        "reconcile": {"ok": True},
+        "free_funds": round(initial + closed_net - mv, 2),
+        "starting_margin": round(initial, 2),
+    }
+
+
+def _test_trade_row(r) -> dict:
+    """Одна сделка теста в формате /sandbox/trades (закрытая или открытая)."""
+    is_open = r.exit_time is None
+    return {
+        "figi": r.figi, "ticker": r.ticker, "side": r.side,
+        "qty": int(r.qty),
+        "entry_price": round(float(r.entry_price), 6),
+        "exit_price": round(float(r.exit_price), 6) if r.exit_price is not None else None,
+        "entry_time": str(r.entry_time),
+        "ts": str(r.exit_time) if r.exit_time else None,
+        "stop_loss": round(float(r.stop_loss), 6) if r.stop_loss is not None else None,
+        "take_profit": round(float(r.take_profit), 6) if r.take_profit is not None else None,
+        "commission": round(float(r.commission), 2) if r.commission is not None else 0,
+        "net_pnl": None if is_open else round(float(r.net_pnl), 2) if r.net_pnl is not None else None,
+        "exit_reason": "на торгах" if is_open else (r.exit_reason or ""),
+        "entry_reason": r.entry_reason, "meta": r.meta, "exit_meta": r.exit_meta,
+        "strategy_id": "v4_enhanced",
+    }
+
+
+def _test_position_row(r, cur: float | None) -> dict:
+    """Открытая позиция теста в формате /sandbox/positions."""
+    side = r.side
+    entry = float(r.entry_price)
+    qty = int(r.qty)
+    if cur is None:
+        cur = entry
+    pnl = (cur - entry) * qty if side == "LONG" else (entry - cur) * qty
+    own = entry * qty
+    lev = float(r.leverage or 1.0)
+    return {
+        "figi": r.figi, "ticker": r.ticker, "side": side, "qty": qty,
+        "entry_price": round(entry, 6),
+        "entry_time": str(r.entry_time),
+        "stop_loss": round(float(r.stop_loss), 6) if r.stop_loss is not None else None,
+        "take_profit": round(float(r.take_profit), 6) if r.take_profit is not None else None,
+        "trail_active": bool(r.trailing_active),
+        "strategy_id": "v4_enhanced",
+        "current_price": round(cur, 6),
+        "prev_close": None,
+        "unrealized_pnl": round(pnl, 2),
+        "roi_pct": round(pnl / own * 100, 2) if own else 0,
+        "sell_value": round(own + pnl, 2),
+        "leverage": round(lev, 1),
+        "own_money": round(own, 2),
+        "leveraged": 0,
+        "regime": "", "regime_reason": "", "regime_atr_pct": None, "regime_adx": None, "vol": None,
+    }
+
+
+# Кэш последних цен для unrealized тестовых позиций (5м обновление — достаточно).
+_test_price_cache: dict[str, tuple[float, float | None]] = {}
+
+async def _test_price(figi: str) -> float | None:
+    import time as _t
+    now = _t.monotonic()
+    hit = _test_price_cache.get(figi)
+    if hit and now - hit[0] < 300:
+        return hit[1]
+    p = await _test_last_close(figi)
+    _test_price_cache[figi] = (now, p)
+    return p
+
+
 @router.get("/status")
 async def sandbox_status():
+    tn = _active_test_name()
+    if tn:
+        try:
+            rows = await _test_trades_db(tn)
+            dig = _test_portfolio_digest(tn, rows)
+            _log.info("status: TEST mode %r → positions=%d trades=%d pnl=%.2f",
+                      tn, dig["positions_open"], dig["trades"]["total"], dig["pnl"])
+            return {"running": _bot_running(), "mode": f"TEST:{tn}", "portfolio": dig, "test_name": tn}
+        except Exception as e:
+            _log.error("status TEST %r failed: %s", tn, e)
+            return {"running": _bot_running(), "mode": f"TEST:{tn}", "error": f"{type(e).__name__}: {e}",
+                    "portfolio": {"cash": 0, "initial_cash": 10000, "equity": 0, "market_value": 0, "pnl": 0, "positions_open": 0,
+                                  "own_in_positions": 0, "positions_value": 0, "tinkoff_currencies": 0, "tinkoff_shares": 0,
+                                  "trades": {"total": 0, "wins": 0, "winrate": 0},
+                                  "reconcile": {"ok": False}}}
     try:
         dig = await _portfolio_digest()
         if not dig:
             raise RuntimeError("digest empty")
         return {"running": _bot_running(), "mode": _active_mode().upper(), "portfolio": dig}
     except Exception as e:
+        _log.warning("status error: %s", e)
         return {"running": _bot_running(), "mode": _active_mode().upper(), "error": f"{type(e).__name__}: {e}",
                 "portfolio": {"cash": 0, "initial_cash": 10000, "equity": 0, "market_value": 0, "pnl": 0, "positions_open": 0,
                               "own_in_positions": 0, "positions_value": 0, "tinkoff_currencies": 0, "tinkoff_shares": 0,
@@ -431,6 +625,21 @@ async def sandbox_status():
 
 @router.get("/positions")
 async def sandbox_positions():
+    tn = _active_test_name()
+    if tn:
+        try:
+            rows = await _test_trades_db(tn)
+            open_rows = [r for r in rows if r.exit_time is None]
+            items = []
+            for r in open_rows:
+                cur = await _test_price(r.figi)
+                items.append(_test_position_row(r, cur))
+            items.sort(key=lambda t: t["entry_time"], reverse=True)
+            _log.info("positions: TEST %r → %d open positions", tn, len(items))
+            return {"count": len(items), "positions": items}
+        except Exception as e:
+            _log.error("positions TEST %r failed: %s", tn, e)
+            return {"count": 0, "positions": [], "error": f"{type(e).__name__}: {e}"}
     try:
         await _load_margin_map()
         p, ops = await asyncio.gather(
@@ -551,6 +760,17 @@ async def sandbox_positions():
 @router.get("/trades")
 async def sandbox_trades(limit: int = 50):
     """Полные сделки: вход (покупка) и выход (продажа) — одной строкой (FIFO)."""
+    tn = _active_test_name()
+    if tn:
+        try:
+            rows = await _test_trades_db(tn)
+            merged = [_test_trade_row(r) for r in rows]
+            merged.sort(key=lambda t: (t["ts"] or ""), reverse=True)
+            _log.info("trades: TEST %r → %d rows (limit %d)", tn, len(merged), limit)
+            return {"count": len(merged), "trades": merged[:limit], "test_name": tn}
+        except Exception as e:
+            _log.error("trades TEST %r failed: %s", tn, e)
+            return {"count": 0, "trades": [], "error": f"{type(e).__name__}: {e}"}
     try:
         ops = await asyncio.to_thread(_get_operations)
         events = []

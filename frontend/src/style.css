@@ -568,6 +568,11 @@ body {
 /* Блок результатов тестов на вкладке Бот */
 .bot-test-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .bot-test-block .runs-table th { text-align: left; }
+.bot-test-block .runs-table tbody tr { cursor: pointer; }
+.bot-test-block .runs-table tbody tr.selected {
+  background: rgba(var(--accent-rgb, 56, 189, 248), 0.10);
+  outline: 1px solid var(--accent);
+}
 
 .nav-btn {
   display: flex; align-items: center; gap: 9px;

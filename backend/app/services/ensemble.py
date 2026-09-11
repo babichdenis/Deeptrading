@@ -303,30 +303,45 @@ def _oracle_fixed_qty(candles: list[EngineCandle], threshold_pct: float, fee_rat
 
 def _signal_quality(role: str, strategy_id: str, tf: str, signals: list[dict],
                     oracle_points: dict[str, list[datetime]], window_min: int) -> list[dict]:
+    import bisect as _bisect
+    window_sec = window_min * 60
     out = []
     for side in ("BUY", "SELL"):
-        total = sum(1 for s in signals if s["side"] == side)
+        pts = oracle_points.get(side) or []
+        pts_sorted = sorted(pts)
+        np_ = len(pts_sorted)
+        total = 0
         hits = 0
         lead = []
         covered = set()
         for s in signals:
             if s["side"] != side:
                 continue
-            nearest = min(oracle_points[side], key=lambda p: abs((s["ts"] - p).total_seconds()),
-                          default=None)
-            if nearest is None:
+            total += 1
+            if np_ == 0:
                 continue
-            if abs((s["ts"] - nearest).total_seconds()) <= window_min * 60:
+            ts = s["ts"]
+            # Ближайшая oracle-точка через бинарный поиск (O(log n) вместо O(n)).
+            i = _bisect.bisect_left(pts_sorted, ts)
+            best = pts_sorted[i] if i < np_ else None
+            if i > 0:
+                p = pts_sorted[i - 1]
+                if best is None or (ts - p) <= (best - ts):
+                    best = p
+            if best is None:
+                continue
+            delta = (ts - best).total_seconds()
+            if abs(delta) <= window_sec:
                 hits += 1
-                lead.append((s["ts"] - nearest).total_seconds() / 60)
-                covered.add(nearest)
+                lead.append(delta / 60)
+                covered.add(best)
         false_pos = total - hits
-        cov = len(covered) / max(len(oracle_points[side]), 1) * 100
+        cov = len(covered) / max(np_, 1) * 100
         prec = hits / max(total, 1) * 100
         lead_med = sorted(lead)[len(lead) // 2] if lead else None
         out.append({
             "role": role, "strategy_id": strategy_id, "tf": tf, "side": side,
-            "signals": total, "oracle_points": len(oracle_points[side]),
+            "signals": total, "oracle_points": np_,
             "hits": hits, "coverage_pct": round(cov, 1), "precision_pct": round(prec, 1),
             "lead_min_median": round(lead_med, 1) if lead_med is not None else None,
             "false_positives": false_pos,
@@ -498,18 +513,34 @@ def _oracle_coverage(oracle_swings_detail: list[dict], entries_raw: list[dict],
             return "price"
         return "other"
 
+    # Предгруппировка entries_raw по направлению (O(log n) поиск окна вместо O(n) на swing).
+    import bisect as _bisect
+    from datetime import timedelta as _td
+    _entries_by_side: dict[str, list[dict]] = {"BUY": [], "SELL": []}
+    for _s in entries_raw:
+        _entries_by_side.setdefault(_s["side"], []).append(_s)
+    _side_ts: dict[str, list] = {}
+    for _k, _v in _entries_by_side.items():
+        _v.sort(key=lambda s: s["ts"])
+        _side_ts[_k] = [s["ts"] for s in _v]
+
+    def _window(side: str, t: datetime) -> list[dict]:
+        lst = _entries_by_side.get(side) or []
+        ts_list = _side_ts.get(side) or []
+        if not lst:
+            return []
+        lo = _bisect.bisect_left(ts_list, t - _td(seconds=window_sec))
+        hi = _bisect.bisect_right(ts_list, t)
+        return lst[lo:hi]
+
     for sw in oracle_swings_detail:
         side = sw["side"]
         pt = datetime.fromisoformat(sw["point_ts"])
         conf_ts = datetime.fromisoformat(sw["confirmation_ts"])
 
         # все raw того же направления в окне вокруг точки (кроме сигналов позже окна)
-        raw_window = [s for s in entries_raw
-                      if s["side"] == side
-                      and 0 <= (pt - s["ts"]).total_seconds() <= window_sec]
-        raw_causal = [s for s in entries_raw
-                      if s["side"] == side
-                      and 0 <= (conf_ts - s["ts"]).total_seconds() <= window_sec]
+        raw_window = _window(side, pt)
+        raw_causal = _window(side, conf_ts)
 
         ge["tot"] += 1
         ca["tot"] += 1
@@ -1274,12 +1305,16 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                 "p25": round(_q(vals, 0.25), 3),
                 "p75": round(_q(vals, 0.75), 3)}
 
+    _analytics = bool(req.get("analytics", False))
+    logger.debug("pipeline analytics=%s setups=%d quorum=%d candles=%d",
+                 _analytics, len(setup_runs), quorum_k, len(candles))
     quality = []
-    for sid, sigs in setup_runs:
-        quality.extend(_signal_quality("setup", sid, setup_out[sid]["tf"], sigs,
+    if _analytics:
+        for sid, sigs in setup_runs:
+            quality.extend(_signal_quality("setup", sid, setup_out[sid]["tf"], sigs,
+                                           oracle_points, entry_window_min))
+        quality.extend(_signal_quality("entry", "micro_breakout", "1min", entries_raw,
                                        oracle_points, entry_window_min))
-    quality.extend(_signal_quality("entry", "micro_breakout", "1min", entries_raw,
-                                   oracle_points, entry_window_min))
     useless = sorted({q["strategy_id"] for q in quality if q.get("useless")})
 
     mfe_all = [t["mfe_r"] for t in trades_out]
@@ -1328,14 +1363,16 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             "code": r["reason"].split(":")[0],
             "detail": r["reason"],
         } for r in rejected[-500:]],
-        "counterfactual_reentries": _counterfactual_reentries(candles, reentry_rejected,
-                                                              exit_obj, qty_shares),
-        "counterfactual_hold": _counterfactual_hold(candles, trades_out, exit_obj, qty_shares),
+        "counterfactual_reentries": (_counterfactual_reentries(candles, reentry_rejected,
+                                                               exit_obj, qty_shares)
+                                     if _analytics else None),
+        "counterfactual_hold": (_counterfactual_hold(candles, trades_out, exit_obj, qty_shares)
+                                if _analytics else None),
         "exit_coverage": exit_coverage,
         "oracle_coverage": (_oracle_coverage(oracle_swings_detail, entries_raw, accepted,
                                              rejected, int(req.get("oracle_window_min", 10)),
                                              executed_signals=executed_signal_keys)
-                            if oracle_swings_detail else None),
+                            if (_analytics and oracle_swings_detail) else None),
         "episodes": {
             "quorum_points": len(quorum_sigs),
             "entry_decisions": len(accepted),
@@ -1391,12 +1428,12 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             "equity": equity,
         },
         "capture_ratio": {
-            "oracle_gross_potential": round(oracle["gross"], 2),
+            "oracle_gross_potential": round(oracle["gross"], 2) if oracle else None,
             "causal_gross": round(gross, 2),
             "causal_costs": round(costs_total, 2),
             "causal_net": round(net, 2),
-            "gross_capture_pct": round(gross / max(oracle["gross"], 1e-9) * 100, 1),
-            "net_capture_pct": round(net / max(oracle["gross"], 1e-9) * 100, 1),
+            "gross_capture_pct": round(gross / max(oracle["gross"], 1e-9) * 100, 1) if oracle else None,
+            "net_capture_pct": round(net / max(oracle["gross"], 1e-9) * 100, 1) if oracle else None,
         },
         "session_stats": {
             "positions_carried_overnight": sum(
@@ -1520,24 +1557,30 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
     qty_shares = lot
     entry_px_sample = candles[0].open
     qty_shares = max(int(capital / (entry_px_sample * lot)) * lot, lot)
-    oracle = _oracle_fixed_qty(candles, oracle_cfg.get("threshold_pct", 0.5),
-                               oracle_cfg.get("fee_rate_pct", 0.05) / 100.0, qty_shares)
-    oracle_swings = zigzag_swings([c.__dict__ for c in candles],
-                                  oracle_cfg.get("threshold_pct", 0.5) / 100.0)
+    _analytics = bool(req.get("analytics", False))
+    _need_oracle = _analytics or (drop_useless and len(setups_cfg) > 1)
+    oracle = (_oracle_fixed_qty(candles, oracle_cfg.get("threshold_pct", 0.5),
+                                oracle_cfg.get("fee_rate_pct", 0.05) / 100.0, qty_shares)
+              if _analytics else None)
     o_points: dict[str, list[datetime]] = {"BUY": [], "SELL": []}
     o_conf_points: dict[str, list[datetime]] = {"BUY": [], "SELL": []}
     o_swings_detail: list[dict] = []
-    for sw in oracle_swings:
-        side = "BUY" if sw["kind"] == "low" else "SELL"
-        o_points[side].append(candles[sw["idx"]].ts)
-        o_conf_points[side].append(candles[sw["conf"]].ts)
-        o_swings_detail.append({
-            "side": side,
-            "point_ts": candles[sw["idx"]].ts.isoformat(),
-            "confirmation_ts": candles[sw["conf"]].ts.isoformat(),
-            "point_idx": sw["idx"],
-            "conf_idx": sw["conf"],
-        })
+    oracle_swings: list[dict] = []
+    if _need_oracle:
+        oracle_swings = zigzag_swings([c.__dict__ for c in candles],
+                                      oracle_cfg.get("threshold_pct", 0.5) / 100.0)
+        for sw in oracle_swings:
+            side = "BUY" if sw["kind"] == "low" else "SELL"
+            o_points[side].append(candles[sw["idx"]].ts)
+            o_conf_points[side].append(candles[sw["conf"]].ts)
+            if _analytics:
+                o_swings_detail.append({
+                    "side": side,
+                    "point_ts": candles[sw["idx"]].ts.isoformat(),
+                    "confirmation_ts": candles[sw["conf"]].ts.isoformat(),
+                    "point_idx": sw["idx"],
+                    "conf_idx": sw["conf"],
+                })
 
     # --- отсев бесполезных (по предварительному прогону сигналов) ---
     if drop_useless and len(setups_cfg) > 1:
@@ -1627,9 +1670,10 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
         },
         "regime": {"tf": regime_cfg.get("tf", "5min"), "timeline": timeline,
                    "bars": len(regime_row)},
-        "oracle": {"swings": len(oracle_swings), "trades": len(oracle["trades"]),
-                   "gross": oracle["gross"], "net": oracle["net"],
-                   "zones": [{"from": t["entry_ts"], "to": t["exit_ts"]} for t in oracle["trades"]]},
+        "oracle": ({"swings": len(oracle_swings), "trades": len(oracle["trades"]),
+                    "gross": oracle["gross"], "net": oracle["net"],
+                    "zones": [{"from": t["entry_ts"], "to": t["exit_ts"]} for t in oracle["trades"]]}
+                   if oracle else {"swings": len(oracle_swings), "trades": None, "net": None}),
         "static": static,
         "adaptive": adaptive,
         "comparison": {
