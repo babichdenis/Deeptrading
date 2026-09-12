@@ -95,7 +95,7 @@ class PaperBroker:
                 leverage=max(1.0, lev, 1.0),
             )
 
-        return await asyncio.to_thread(_fetch)
+        return await _fetch()
 
     async def get_position(self, figi: str) -> PaperPosition | None:
         if figi in self._pos_cache:
