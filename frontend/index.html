@@ -21,25 +21,30 @@
           <button class="nav-btn active" data-page="bot"><span class="ico">🤖</span><span>Бот</span></button>
         </nav>
         <div class="sidebar-botbar">
-          <div class="hdr-bot-ctrl">
-            <button class="btn-primary start btn-xs" id="btn-bot-start">▶ Запустить</button>
-            <button class="btn-primary stop hidden btn-xs" id="btn-bot-stop">■ Остановить</button>
-            <button class="btn-primary btn-xs hidden" id="btn-bot-pause" title="Остановить НОВЫЕ входы; открытые позиции продолжают жить (SL/TP работают)">⏸ Пауза входов</button>
-            <button class="btn-secondary btn-xs" id="btn-bot-settings" title="Настройки бота">⚙</button>
+          <div class="action-row">
+            <button class="start-btn" id="btn-bot-start">▶ Запустить</button>
+            <button class="stop-btn" id="btn-bot-stop" title="Остановить бота">⏻</button>
+          </div>
+          <div class="aux-row">
+            <button class="pause-btn hidden" id="btn-bot-pause" title="Остановить НОВЫЕ входы; открытые позиции продолжают жить (SL/TP работают)">⏸ Пауза</button>
+            <button class="gear-btn" id="btn-bot-settings" title="Настройки бота">⚙</button>
           </div>
         </div>
         <div class="sidebar-logs">
-          <div class="sl-title">🤖 Логи бота (МСК)</div>
+          <div class="logs-heading">
+            <div class="sl-title">🤖 ЛОГИ БОТА <span>(МСК)</span></div>
+            <button class="lg-btn lg-clear-btn" id="lg-clear" title="Очистить логи">⋮</button>
+          </div>
           <div class="log-toolbar">
             <label class="lg-chip on"><input type="checkbox" id="lg-candles" checked><span>Свечи</span></label>
             <label class="lg-chip on"><input type="checkbox" id="lg-signals" checked><span>Сигналы</span></label>
             <label class="lg-chip on"><input type="checkbox" id="lg-trades" checked><span>Сделки</span></label>
             <label class="lg-chip on"><input type="checkbox" id="lg-events" checked><span>События</span></label>
             <label class="lg-chip on"><input type="checkbox" id="lg-tech" checked><span>Тех</span></label>
-            <input type="date" id="log-filter-date" class="log-date-input" title="Фильтр по дате" />
-            <button class="lg-btn" id="lg-clear">Очистить</button>
           </div>
+          <input type="date" id="log-filter-date" class="log-date-input" title="Фильтр по дате" />
           <div class="bot-live-logs" id="bot-live-logs"><span style="color:#666">нет логов — запусти бота</span></div>
+          <div class="log-footer"><span><i></i>Система работает стабильно</span><span class="lf-count">Логи <b id="log-count">0</b></span></div>
         </div>
         <div class="sidebar-grip" title="Изменить ширину"></div>
       </aside>
@@ -505,9 +510,12 @@
               <thead><tr><th>Вход время</th><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Notional</th><th>Текущая</th><th>P&L ₽</th><th>ROI %</th><th>Плечо</th><th>Режим</th><th>Vol</th><th>SL трейл</th><th>TP / P&L при стопе</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
-            <h3 class="pg-h3">Последние сделки</h3>
+            <div class="thead-ctrl">
+              <h3 class="pg-h3">Последние сделки</h3>
+              <span class="mini-hint">История исполненных сделок · клик по строке раскрывает детали</span>
+            </div>
             <table class="runs-table" id="bot-trades-table">
-              <thead><tr><th>Время входа→выхода</th><th>Акция</th><th>Направл.</th><th>Кол-во</th><th>Цена входа→выхода</th><th>Доход</th><th>Комиссия</th><th>Причина выхода</th></tr></thead>
+              <thead><tr><th>Время входа → выхода</th><th>Акция</th><th>Направл.</th><th>Кол-во</th><th>Цена входа → выхода</th><th>Доход</th><th>Комиссия</th><th>Причина выхода</th><th>R</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
 
@@ -538,7 +546,6 @@
         <div class="sr-tabs">
           <button class="sr-tab active" data-srtab="market">📊 Рынок</button>
           <button class="sr-tab" data-srtab="votes">🗳 Голоса</button>
-          <button class="sr-tab" data-srtab="stats">📈 Статистика</button>
         </div>
         <div class="sr-tabpane" id="sr-pane-market">
         <div class="sr-head">
@@ -585,14 +592,6 @@
             <span class="sr-leg sr-leg-3">3+</span>
           </div>
           <div class="votes-grid" id="votes-grid"></div>
-        </div>
-        <div class="sr-tabpane hidden" id="sr-pane-stats">
-          <div class="sr-head">
-            <span class="sr-title">📈 Статистика прогона</span>
-            <span class="sr-sub" id="stats-test">—</span>
-            <button class="sr-refresh btn-secondary btn-xs" id="stats-refresh" title="Обновить">⟳</button>
-          </div>
-          <div class="stats-body" id="stats-body"></div>
         </div>
       </aside>
     </div>
