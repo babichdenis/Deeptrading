@@ -38,10 +38,10 @@ TO = datetime(2026, 9, 13, tzinfo=timezone.utc)
 REGIME_ORDER = ["HIGH_VOLATILITY", "TREND_UP", "TREND_DOWN", "NEUTRAL", "RANGE", "NO_REGIME"]
 
 
-def build_req(figi, lot, sl=4.0, rr=4.0, session="all", bias="info"):
+def build_req(figi, lot, sl=4.0, rr=4.0, session="all", bias="info", rs_filter=None):
     setups = [{"strategy_id": s, "tf": "5min", "params": dict(V2P.get(s, {}))} for s in V2P]
     setups.append({"strategy_id": "volume_drop", "tf": "5min", "params": dict(VOL_PARAMS)})
-    return {
+    req = {
         "figi": figi, "bias_mode": bias, "bias": {"tf": "hour", "period": 50},
         "entry_tf": "5min", "entry": {"tf": "5min", "lookback": 1},
         "entry_session": session, "quorum": 2, "same_side_reentry_cooldown_bars": 15,
@@ -52,6 +52,9 @@ def build_req(figi, lot, sl=4.0, rr=4.0, session="all", bias="info"):
         "drop_useless": True, "neutral_mode": "semi_flip",
         "from_ts": FROM.isoformat(), "to_ts": TO.isoformat(),
     }
+    if rs_filter:
+        req["regime_setups_filter"] = rs_filter
+    return req
 
 
 async def load_tickers():
@@ -173,6 +176,37 @@ def run_voices(cmap):
         print("  %-28s %7d %5.1f%% %8.2f %+7.1f %+10.0f" % (sid, b["trades"], wr, pf, avg, b["net"]))
 
 
+def run_ablate(cmap, variants):
+    tots = {label: _blank() for label, _ in variants}
+    regs = {label: defaultdict(_blank) for label, _ in variants}
+    for tkr, (figi, lot, c) in cmap.items():
+        tl = regime_timeline(c)
+        for label, rs in variants:
+            try:
+                res = compute_ensemble(c, build_req(figi, lot, rs_filter=rs))
+            except Exception:
+                continue
+            if "error" in res:
+                continue
+            for t in res.get("static", {}).get("trades", []):
+                net = t.get("net", 0.0)
+                reg = regime_of(tl, t.get("entry_ts"))
+                _add(tots[label], net)
+                _add(regs[label][reg], net)
+
+    print("=" * 108)
+    print("ABLATION: режимные фильтры голосов (net по режимам, capital 10K/ticker, all sessions)")
+    print("=" * 108)
+    print("  %-34s %8s %8s %7s %6s | %s" % (
+        "variant", "trades", "net", "WR%", "PF",
+        " ".join("%9s" % r[:9] for r in REGIME_ORDER)))
+    for label, _ in variants:
+        b = tots[label]
+        wr, pf, _ = _fmt(b)
+        cells = " ".join("%+9.0f" % regs[label].get(r, _blank())["net"] for r in REGIME_ORDER)
+        print("  %-34s %8d %+8.0f %6.1f%% %6.2f | %s" % (label, b["trades"], b["net"], wr, pf, cells))
+
+
 def run_bias(cmap):
     agg = defaultdict(lambda: defaultdict(_blank))
     for tkr, (figi, lot, c) in cmap.items():
@@ -268,7 +302,7 @@ def run_sltp(cmap, sls, rrs):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["voices", "sltp", "bias", "all"])
+    ap.add_argument("mode", choices=["voices", "sltp", "bias", "ablate", "all"])
     ap.add_argument("--sls", default="3,4,5,6")
     ap.add_argument("--rrs", default="3,4,5,6")
     args = ap.parse_args()
@@ -280,6 +314,25 @@ async def main():
         run_voices(cmap)
     if args.mode in ("bias", "all"):
         run_bias(cmap)
+    if args.mode in ("ablate", "all"):
+        allreg = ["HIGH_VOLATILITY", "TREND_UP", "TREND_DOWN", "NEUTRAL", "RANGE"]
+        not_td = [r for r in allreg if r != "TREND_DOWN"]
+        not_td_rng = [r for r in allreg if r not in ("TREND_DOWN", "RANGE")]
+        no_rng = [r for r in allreg if r != "RANGE"]
+        no_neu = [r for r in allreg if r != "NEUTRAL"]
+        variants = [
+            ("A0 baseline (all)", None),
+            ("A1 vd off TREND_DOWN", {"volume_drop": not_td}),
+            ("A2 vd off TD+RANGE", {"volume_drop": not_td_rng}),
+            ("A3 A2 + vwap off NEUTRAL", {"volume_drop": not_td_rng, "vwap_reclaim": no_neu}),
+            ("A4 A3 + range off NEUTRAL", {"volume_drop": not_td_rng, "vwap_reclaim": no_neu,
+                                           "range_compression_breakout": no_neu}),
+            ("A5 A4 + donchian off NEUTRAL", {"volume_drop": not_td_rng, "vwap_reclaim": no_neu,
+                                              "range_compression_breakout": no_neu,
+                                              "donchian_breakout": no_neu}),
+            ("A6 vd off RANGE only", {"volume_drop": no_rng}),
+        ]
+        run_ablate(cmap, variants)
     if args.mode in ("sltp", "all"):
         sls = [float(x) for x in args.sls.split(",")]
         rrs = [float(x) for x in args.rrs.split(",")]
