@@ -191,8 +191,17 @@ _resample_cache: dict[int, list[EngineCandle]] = {}
 
 def cached_resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]:
     """Resample with per-call cache. Within one compute_ensemble call,
-    same tf_seconds returns cached result (avoids redundant O(N) passes)."""
-    key = id(candles), tf_seconds
+    same tf_seconds returns cached result (avoids redundant O(N) passes).
+
+    ВАЖНО: ключ обязан включать контентный отпечаток. Ключ только по id(candles)
+    ломается: id() переиспользуется после сборки мусора, и в долгоживущем процессе
+    (матрицы, live) кэш протекает между разными наборами свечей.
+    """
+    try:
+        key = (id(candles), tf_seconds, len(candles),
+               candles[0].ts if candles else None, candles[-1].ts if candles else None)
+    except Exception:
+        key = (id(candles), tf_seconds)
     if key not in _resample_cache:
         _resample_cache[key] = resample(candles, tf_seconds)
     return _resample_cache[key]
