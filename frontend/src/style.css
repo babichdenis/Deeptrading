@@ -513,14 +513,16 @@ body {
 #app { flex-direction: row; }
 
 .sidebar {
-  width: 172px;
+  width: 250px;
   flex-shrink: 0;
-  background: linear-gradient(180deg, #0c0f17, #0a0d13);
+  background:
+    radial-gradient(circle at 45% 20%, rgba(25,73,128,.10), transparent 35%),
+    linear-gradient(180deg, #080f19, #060b13);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  padding: 12px 10px;
-  gap: 14px;
+  padding: 8px 10px 10px;
+  gap: 10px;
 }
 
 .brand {
@@ -544,21 +546,25 @@ body {
 
 /* Переключатель режимов бота: Live / Sandbox / Тест */
 .mode-switch {
-  display: flex; gap: 4px;
-  padding: 3px; border-radius: 9px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid var(--border-soft);
+  height: 34px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  padding: 3px;
+  border-radius: 9px;
+  background: #111824;
+  border: 1px solid #252d3a;
 }
 .mode-btn {
-  flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 6px 4px; border: none; border-radius: 6px;
-  background: transparent; color: var(--text-dim);
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border: 0; border-radius: 6px;
+  background: transparent; color: #8d9aab;
   cursor: pointer; font-size: 11px; font-weight: 700; font-family: inherit;
   transition: background 0.15s, color 0.15s;
 }
-.mode-btn:hover { background: rgba(255,255,255,0.06); color: var(--text); }
-.mode-btn.active { background: var(--accent-soft); color: #a9c4ff; }
-.mode-btn .m-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); }
+.mode-btn:hover { color: var(--text); }
+.mode-btn.active { background: #222c40; color: #e1e8f2; }
+.mode-btn .m-dot { width: 7px; height: 7px; border-radius: 50%; background: #77818f; }
 .mode-btn .m-dot.live { background: #ff5c5c; }
 .mode-btn .m-dot.sandbox { background: var(--gold); }
 .mode-btn .m-dot.test { background: var(--cyan); }
@@ -574,19 +580,22 @@ body {
   outline: 1px solid var(--accent);
 }
 
+.side-nav { padding: 6px 0 4px; }
 .nav-btn {
+  width: 100%; height: 38px;
   display: flex; align-items: center; gap: 9px;
-  padding: 9px 11px;
-  border: none; border-radius: 8px;
-  background: transparent; color: var(--text-dim);
-  cursor: pointer; font-size: 13px; text-align: left;
+  padding: 0 12px;
+  border: none; border-radius: 7px;
+  background: transparent; color: #8996a7;
+  cursor: pointer; font-size: 13px; font-weight: 600; text-align: left;
 }
+.nav-btn + .nav-btn { margin-top: 3px; }
 .nav-btn:hover { background: rgba(255,255,255,0.05); color: var(--text); }
 .nav-btn.active {
-  background: linear-gradient(90deg, var(--accent-soft), transparent);
-  color: #a9c4ff; font-weight: 600;
-  border-left: 2px solid var(--accent);
-  padding-left: 9px;
+  background: linear-gradient(90deg, rgba(42,86,164,.2), transparent);
+  color: #55a5ff;
+  border-left: 2px solid #4a7cff;
+  padding-left: 10px;
 }
 .nav-btn .ico { width: 18px; text-align: center; }
 
@@ -1207,6 +1216,44 @@ body.modal-open { overflow: hidden; }
 .side-down { color: var(--down); font-weight: 700; }
 .dim { color: var(--text-dim); font-size: 11px; }
 
+/* Stock logo (invest-brands CDN) with letter fallback */
+.tick-logo {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 5px;
+  vertical-align: -3px;
+  border-radius: 4px;
+  overflow: hidden;
+  flex: none;
+  background: linear-gradient(135deg, #4a7db9, #2d5a8e);
+}
+.tick-logo img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.tick-logo i {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #4a7db9, #2d5a8e);
+  border-radius: 4px;
+}
+
 /* Sell/Buy buttons for positions */
 .btn-sell {
   background: var(--down);
@@ -1245,13 +1292,13 @@ body.modal-open { overflow: hidden; }
 }
 
 .bot-live-logs {
-  background: #0d1117;
-  border: 1px solid #1f2630;
-  color: #00e676;
+  background: #050b11;
+  border: 1px solid #222d3d;
+  color: #00d995;
   font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.5;
-  padding: 8px 10px;
+  font-size: 10px;
+  line-height: 1.38;
+  padding: 5px 6px;
   border-radius: 6px;
   min-height: 100px;
   height: 180px;
@@ -1260,7 +1307,23 @@ body.modal-open { overflow: hidden; }
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-all;
+  scrollbar-width: thin;
+  scrollbar-color: #334158 #080e16;
 }
+.bot-live-logs::-webkit-scrollbar { width: 7px; }
+.bot-live-logs::-webkit-scrollbar-track { background: #080e16; }
+.bot-live-logs::-webkit-scrollbar-thumb { background: #334158; border-radius: 10px; }
+.bot-live-logs div {
+  padding: 2px 4px 3px 8px;
+  margin: 0 0 3px;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+}
+.bot-live-logs .lg-cnd { color: #55606e; border-left-color: #344154; }
+.bot-live-logs .lg-tech { color: #b8a6ff; border-left-color: #8e68ff; }
+.bot-live-logs .lg-err { color: var(--down); border-left-color: #ff4f63; }
+.bot-live-logs .lg-sig { color: #00e89f; border-left-color: #13dba5; }
+.bot-live-logs .lg-warn { color: var(--gold); font-weight: 700; border-left-color: #f8b72b; }
 .log-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
 .lg-chip {
   display: inline-flex; align-items: center; gap: 4px;
@@ -1551,13 +1614,45 @@ body.sb-resizing .sidebar { cursor: col-resize; }
 .hdr-bot-ctrl { display: flex; align-items: center; gap: 6px; }
 .btn-xs { padding: 5px 12px !important; font-size: 11px !important; border-radius: 7px !important; }
 
-.sidebar-botbar {
-  display: flex; flex-direction: column; gap: 8px;
-  margin-top: 8px; padding-top: 10px;
-  border-top: 1px solid var(--border);
+/* Кнопки управления ботом (стиль trading_sidebar_logs_ui) */
+.action-row { display: grid; grid-template-columns: 1fr 44px; gap: 6px; }
+.start-btn {
+  height: 26px; border: 0; border-radius: 7px; cursor: pointer; font-size: 11px; font-weight: 700;
+  color: #fff;
+  border: 1px solid #00b993;
+  background: linear-gradient(#08d7ac, #00b991);
+  box-shadow: 0 5px 20px rgba(0,219,166,0.14);
+  font-family: inherit;
 }
-.sidebar-botbar .hdr-bot-ctrl { gap: 6px; }
-.sidebar-botbar .hdr-bot-ctrl .btn-xs { flex: 1; }
+.start-btn:hover { filter: brightness(1.08); }
+.stop-btn {
+  height: 26px; border: 0; border-radius: 7px; cursor: pointer; font-size: 13px;
+  color: #a7b1c0; background: #101823; border: 1px solid #283548;
+  font-family: inherit;
+}
+.stop-btn:hover { color: var(--down); border-color: var(--down); }
+.stop-btn.hidden { display: none; }
+.aux-row { display: grid; grid-template-columns: 1fr 34px; gap: 6px; }
+.pause-btn {
+  height: 24px; border: 0; border-radius: 7px; cursor: pointer; font-size: 10px; font-weight: 700;
+  color: var(--gold); background: rgba(244,185,66,0.08); border: 1px solid rgba(244,185,66,0.35);
+  font-family: inherit;
+}
+.pause-btn:hover { background: rgba(244,185,66,0.18); }
+.pause-btn.hidden { display: none; }
+.pause-btn.paused { background: rgba(244,185,66,0.18); color: var(--gold); border-color: rgba(244,185,66,0.5); }
+.gear-btn {
+  height: 24px; border: 0; border-radius: 7px; cursor: pointer; font-size: 12px;
+  color: #a7b1c0; background: #101823; border: 1px solid #283548;
+  font-family: inherit;
+}
+.gear-btn:hover { color: var(--text); border-color: #3a485e; }
+
+.sidebar-botbar {
+  display: flex; flex-direction: column; gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
 .env-badge {
   display: inline-flex; align-items: center; justify-content: center;
   padding: 2px 9px; border-radius: 7px; font-size: 10px; font-weight: 800;
@@ -1570,17 +1665,49 @@ body.sb-resizing .sidebar { cursor: col-resize; }
 .env-badge.env-live { color: #ff5c5c; background: rgba(255,92,92,0.14); border-color: rgba(255,92,92,0.5); }
 
 .sidebar-logs {
-  flex: 1; min-height: 0; margin-top: 4px;
+  flex: 1; min-height: 0;
   display: flex; flex-direction: column; gap: 6px;
-  border-top: 1px solid var(--border); padding-top: 8px;
 }
-.sl-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); font-weight: 700; }
-.sidebar-logs .log-toolbar { gap: 4px; margin: 0; }
-.sidebar-logs .lg-chip { padding: 2px 8px; font-size: 10px; }
+.logs-heading {
+  display: flex; justify-content: space-between; align-items: center;
+}
+.sl-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.045em; color: #7f8da1; font-weight: 800; }
+.sl-title span { font-weight: 500; }
+.lg-clear-btn {
+  border: 0; background: transparent; color: #69778a;
+  font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px;
+}
+.lg-clear-btn:hover { color: var(--down); }
+.sidebar-logs .log-toolbar { display: flex; gap: 4px; flex-wrap: wrap; }
+.sidebar-logs .lg-chip {
+  height: 22px; display: inline-flex; align-items: center; gap: 4px;
+  padding: 0 10px; border-radius: 8px;
+  background: #111a28; border: 1px solid #263247;
+  color: #77869b; font-size: 9px; font-weight: 700; cursor: pointer; user-select: none;
+}
+.sidebar-logs .lg-chip:hover { color: #aab6c9; border-color: #31507d; }
+.sidebar-logs .lg-chip.on {
+  color: #e4ebf6; border-color: #4479df;
+  background: linear-gradient(#183568, #10264c);
+}
+.sidebar-logs .lg-chip.on::before {
+  content: ""; width: 5px; height: 5px; border-radius: 50%;
+  background: #4a8cff; box-shadow: 0 0 6px rgba(74,140,255,0.8);
+}
 .sidebar-logs .bot-live-logs {
   flex: 1; height: auto; max-height: none; min-height: 60px; resize: none;
   font-size: 10px;
 }
+.log-footer {
+  height: 30px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 8px;
+  border: 1px solid #202b3a; border-radius: 7px;
+  background: #0b131e; color: #77869a; font-size: 9px;
+}
+.log-footer span:first-child { display: inline-flex; align-items: center; color: #00dca7; }
+.log-footer i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #00dca7; margin-right: 5px; }
+.log-footer b { color: #d9e3ef; }
 
 /* скрыть пустую карточку результатов Lab */
 #lab-results-v2 { display: none !important; }
@@ -1609,13 +1736,41 @@ body.embedded #page-chart { display: flex; height: 100%; }
 body.embedded #page-chart .chart-section { flex: 1; min-height: 0; }
 body.embedded #page-chart .chart-wrap { flex: 1; height: auto; min-height: 0; }
 
-.bot-chart-section { margin: 0; padding: 0; }
+.bot-chart-section { margin: 0; padding: 0; background: var(--bg); }
+/* Растягиваем график на всю ширину вкладки Бот — без «рамки» из паддингов,
+   как на вкладке Склад (embedded-график идёт вплотную к краям). */
+#page-bot .bot-chart-section { margin-left: -22px; margin-right: -22px; }
 .bot-chart-wrap { margin: 0; padding: 0; border: 0; height: 50vh; min-height: 240px; }
 .bot-chart-wrap .chart-wrap { height: 100%; }
 #bot-chart-frame { width: 100%; height: 100%; border: 0; padding: 0; margin: 0; display: block; background: var(--bg); }
 
 #bot-positions-table tbody tr, #bot-trades-table tbody tr { cursor: pointer; }
 #bot-positions-table tbody tr:hover, #bot-trades-table tbody tr:hover { background: rgba(var(--accent-rgb),0.08); }
+
+/* ===== таблица «Последние сделки» (редизайн: чипы, бейджи, R, стрелка) ===== */
+.thead-ctrl { display: flex; align-items: baseline; gap: 10px; margin: 14px 0 4px; }
+.thead-ctrl .pg-h3 { margin: 0; }
+.thead-ctrl .mini-hint { font-size: 10px; }
+
+#bot-trades-table .td-time { font-family: var(--mono, ui-monospace, "SF Mono", Consolas, monospace); font-size: 10px; color: var(--text-dim); white-space: nowrap; }
+#bot-trades-table .td-px { font-family: var(--mono, ui-monospace, "SF Mono", Consolas, monospace); font-size: 11px; white-space: nowrap; }
+#bot-trades-table .td-arrow { color: var(--text-dim); font-size: 9px; font-weight: 800; cursor: pointer; user-select: none; width: 18px; text-align: center; }
+#bot-trades-table .td-arrow:hover { color: var(--accent); }
+#bot-trades-table tr.trade-row.selected { background: rgba(var(--accent-rgb),0.10); box-shadow: inset 2px 0 var(--accent); }
+
+/* Чип причины выхода (как в макете) */
+.exit-chip { display: inline-block; padding: 2px 7px; border-radius: 5px; background: #151d27; border: 1px solid #344253; color: #aab5c4; font-size: 9px; font-weight: 700; white-space: nowrap; }
+.exit-chip i { font-style: normal; font-weight: 500; }
+.exit-chip.stop { background: #28131a; border-color: #6a2636; color: #ff596c; }
+.exit-chip.pending { background: #17201a; border-color: #395142; color: #e0b83e; }
+
+/* Бейдж режима и bias-метки в колонке «Акция» */
+.rg-badge { display: inline-block; padding: 1px 5px; border: 1px solid #3b4655; border-radius: 5px; color: #b7c1ce; font-size: 9px; margin-left: 4px; }
+.warn-bias { color: #ff596b; font-size: 9px; font-weight: 600; margin-left: 4px; }
+.ok-bias { color: #2ecc71; font-size: 9px; font-weight: 600; margin-left: 4px; }
+
+/* Детали сделки (раскрытая строка) */
+#bot-trades-table .trade-details-row td { background: rgba(255,255,255,0.025); padding: 8px 12px; font-size: 11px; line-height: 1.6; font-family: var(--mono, ui-monospace, Consolas, monospace); color: var(--text); }
 
 .hdr-cluster.hdr-ctl { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hdr-sess { display: flex; align-items: center; gap: 4px; flex-wrap: nowrap; }
@@ -1715,9 +1870,11 @@ body.sb-resizing .sidebar-grip { background: rgba(41, 98, 255, 0.3); }
 body.sb-resizing .sr-grip { background: rgba(41, 98, 255, 0.3); }
 
 .log-date-input {
-  width: 110px; padding: 3px 5px; font-size: 10px;
-  border: 1px solid var(--border); border-radius: 4px;
-  background: var(--bg); color: var(--text);
+  width: 100%; padding: 4px 6px; font-size: 10px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  border: 1px solid #263247; border-radius: 5px;
+  background: #121b27; color: #d2dbe7;
+  align-self: flex-start;
 }
 
 /* ===== правый сайдбар: рынок TQBR (скринер) ===== */
@@ -1732,9 +1889,6 @@ body.sb-resizing .sr-grip { background: rgba(41, 98, 255, 0.3); }
   gap: 8px;
   min-width: 240px;
   max-width: 460px;
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
 }
 
 .sr-head {

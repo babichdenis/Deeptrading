@@ -31,14 +31,14 @@ import {
   screenerAddEligible,
   screenerRemoveEligible,
   type ScreenerRow,
-  fetchTestStats,
-  type TestStats,
-  type StatsRow,
   type SandboxPositionRow,
   type CarouselStatus,
   fetchTests,
   deleteTest,
   type TestRunRow,
+  fetchTestStats,
+  type TestStats,
+  type StatsRow,
 } from "./api";
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
@@ -88,6 +88,36 @@ function sideIcon(side: string): string {
   if (s === "SHORT" || s === "SELL") return `<span class="side-down">▼</span>`;
   return side;
 }
+
+const _logoFail = new Set<string>();
+function tickerLogo(ticker: string, fullName?: string): string {
+  const safe = ticker.replace(/[^A-Za-z0-9._-]/g, "");
+  const img = `/icons/${safe}.png`;
+  const letter = (safe[0] || "").toUpperCase() || "?";
+  if (!fullName) {
+    const sr = _srRows.find((x) => x.ticker === ticker);
+    if (sr) fullName = sr.name;
+  }
+  const name = fullName ? ` title="${fullName.replace(/"/g, "&quot;")}"` : "";
+  if (_logoFail.has(safe)) return `<span class="tick-logo${name}"><i>${letter}</i></span>`;
+  return `<span class="tick-logo${name}"><img src="${img}" alt="" onload="this.style.opacity=1" onerror="this.style.display='none';this.nextElementSibling&&(this.nextElementSibling.style.display='flex');window.__logoFailed&window.__logoFailed('${safe}')"><i>${letter}</i></span>`;
+}
+
+declare global {
+  interface Window { __logoFailed?: (safe: string) => void }
+}
+window.__logoFailed = (safe: string) => { _logoFail.add(safe); };
+window.addEventListener("DOMContentLoaded", () => {
+  const els = document.querySelectorAll<HTMLElement>("[data-logo]");
+  els.forEach((el) => {
+    const full = el.getAttribute("data-logo");
+    if (full) {
+      const im = new Image();
+      im.src = `/icons/${full}.png`;
+      im.onerror = () => _logoFail.add(full);
+    }
+  });
+});
 
 function priceTrend(cur: number, prev: number | null): string {
   if (prev == null || cur === prev) return "";
@@ -431,18 +461,22 @@ export async function initBot(onStateChange?: (running: boolean) => void) {
     }
   });
   document.querySelector("#bot-trades-table tbody")?.addEventListener("click", (e) => {
-    const tr = (e.target as HTMLElement).closest("tr.trade-row") as HTMLElement | null;
+    const target = e.target as HTMLElement;
+    const tr = target.closest("tr.trade-row") as HTMLElement | null;
     if (!tr) return;
     const idx = Number(tr.dataset.idx);
     const t = _lastTrades[idx];
     if (!t) return;
-    _focusPos = null; // закрытая сделка — линии статичны, не обновляем
+    // Стрелка справа → toggle деталей (БЕЗ открытия графика).
+    if (target.closest(".td-arrow")) {
+      const key = String(tr.dataset.key || "");
+      if (_openDetails.has(key)) _openDetails.delete(key); else _openDetails.add(key);
+      renderTrades(_lastTrades);
+      return;
+    }
+    // Любой другой клик по строке → фокус графика (без toggle деталей).
+    _focusPos = null;
     sendEmbedFocus(t.figi, t.ticker, tradeAsTrade(t));
-    // Toggle деталей (можно держать открытыми несколько). Состояние храним в _openDetails,
-    // чтобы не терялось при авто-обновлении таблицы.
-    const key = String(tr.dataset.key || "");
-    if (_openDetails.has(key)) _openDetails.delete(key); else _openDetails.add(key);
-    renderTrades(_lastTrades);
   });
 
   void pollOnce();
@@ -469,6 +503,11 @@ let _openDetails = new Set<string>();  // ключи раскрытых дета
 let _lastVotes: Array<{ figi: string; ticker: string; buy: number; sell: number; votes: number; side: string; regime?: string | null; vol?: number | null; vol_abs?: number | null }> = [];
 let _lastUniverse: Array<{ figi: string; ticker: string; atr_pct?: number }> = [];
 let _chartInit = false;
+// Режим/окно теста из статуса (replay). График в iframe использует это, чтобы
+// в тест-режиме грузить свечи за период реплея, а не «живые» последние бары.
+let _embedMode = "sandbox";
+let _embedReplayStart = "";
+let _embedReplayEnd = "";
 // Позиция, на которую сейчас смотрит график (клик по таблице позиций). При poll,
 // если стоп/TP/trailing изменились — пересылаем обновлённый trade в iframe.
 let _focusPos: { figi: string; ticker: string } | null = null;
@@ -494,10 +533,30 @@ function sendEmbedFocus(figi: string, ticker: string, trade: Record<string, unkn
       entry_price: (t as { entry_price?: number }).entry_price ?? t.price,
       exit_price: (t as { exit_price?: number }).exit_price,
       qty: t.qty,
+      net_pnl: t.net_pnl,
     }));
-  const msg = { type: "focus", figi, ticker, trade, trades: hist };
+  const msg = {
+    type: "focus",
+    figi,
+    ticker,
+    trade,
+    trades: hist,
+    mode: _embedMode,
+    replay_start: _embedReplayStart,
+    replay_end: _embedReplayEnd,
+  };
   f.contentWindow.postMessage(msg, "*");
+}
 
+// Уведомляем iframe-график о смене контура/окна теста. Без активной сделки
+// график должен перестать тянуть «живые» свечи и переключиться на период реплея.
+function sendEmbedMode() {
+  const f = botEmbedFrame();
+  if (!f || !f.contentWindow) return;
+  f.contentWindow.postMessage(
+    { type: "mode", mode: _embedMode, replay_start: _embedReplayStart, replay_end: _embedReplayEnd },
+    "*",
+  );
 }
 function positionAsTrade(p: SandboxPositionRow): Record<string, unknown> {
   const t = p as unknown as { meta?: string; exit_meta?: string | null; entry_reason?: string | null };
@@ -550,6 +609,8 @@ function renderLogs() {
         return `<div${cls}>${l}</div>`;
       }).join("")
     : '<span style="color:#666">нет записей под фильтр</span>';
+  const cnt = $("log-count");
+  if (cnt) cnt.textContent = String(_allLogs.length);
   el.scrollTop = el.scrollHeight;
 }
 
@@ -624,7 +685,7 @@ async function doPause() {
 
 function updatePauseButton() {
   const btn = $("btn-bot-pause");
-  btn.textContent = entriesPaused ? "▶ Снять паузу входов" : "⏸ Пауза новых входов";
+  btn.textContent = entriesPaused ? "▶ Снять паузу" : "⏸ Пауза входов";
   btn.classList.toggle("paused", entriesPaused);
 }
 
@@ -976,10 +1037,20 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     const em = bst && bst.config && (bst.config as { mode?: string }).mode;
     const mm = String(em || "").toLowerCase();
     const tn = (bst?.config as any)?.test_name;
-    if (mm === "live") _curMode = "live";
-    else if (mm === "test") _curMode = "test";
-    else _curMode = "sandbox";
+    let newMode = "sandbox";
+    if (mm === "live") newMode = "live";
+    else if (mm === "test") newMode = "test";
+    else newMode = "sandbox";
+    const newStart = String((bst?.config as any)?.replay_start ?? "");
+    const newEnd = String((bst?.config as any)?.replay_end ?? "");
+    const modeOrWindowChanged =
+      _curMode !== newMode || _embedReplayStart !== newStart || _embedReplayEnd !== newEnd;
+    _curMode = newMode;
+    _embedMode = newMode;
+    _embedReplayStart = newStart;
+    _embedReplayEnd = newEnd;
     _setActiveModeBtn(_curMode);
+    if (modeOrWindowChanged) sendEmbedMode();
     const testChip = $("bot-mode-test");
     if (testChip && mm === "test") {
       testChip.textContent = tn ? `Тест: ${tn}` : "Тест";
@@ -1145,7 +1216,7 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
           : "—";
         return `<tr>` +
           `<td class="num" style="font-size:10px;color:var(--text-dim)">${fmtTime(p.entry_time)}</td>` +
-          `<td><b>${p.ticker}</b></td>` +
+          `<td>${tickerLogo(p.ticker)}<b>${p.ticker}</b></td>` +
           `<td>${sideIcon(p.side)}</td>` +
           `<td class="num">${p.qty}</td>` +
           `<td class="num">${price(p.entry_price)}</td>` +
@@ -1253,43 +1324,56 @@ function renderTrades(trades: BotTradeRow[]) {
           const pnlCell = isOpen
             ? `<b style="color:#ffd740">на торгах</b>`
             : `<b class="${t.net_pnl >= 0 ? "pos" : "neg"}">${t.net_pnl >= 0 ? "+" : ""}${money(t.net_pnl)}</b>`;
-          const reasonCell = isOpen
-            ? "открыта · ждём выхода"
-            : t.exit_reason === "stop_loss"
-              ? `stop_loss${t.stop_loss != null ? ` · SL <span style="color:#ff6b6b">${price(t.stop_loss)}</span>` : ""}`
-              : t.exit_reason;
+          // Чип причины выхода: stop → красный, открытая → жёлтый, иное → серый.
+          let reasonChip: string;
+          if (isOpen) {
+            reasonChip = `<span class="exit-chip pending">Открыта · ждём выхода</span>`;
+          } else if (t.exit_reason === "stop_loss") {
+            reasonChip = `<span class="exit-chip stop">STOP LOSS${t.stop_loss != null ? ` <i>· SL ${price(t.stop_loss)}</i>` : ""}</span>`;
+          } else {
+            reasonChip = `<span class="exit-chip">${t.exit_reason || "—"}</span>`;
+          }
           // Метка bias из meta.entry.against_bias (пишется в ensemble_strategy).
           let biasTag = "";
-          let regTag = "";
           try {
             const m = t.meta ? JSON.parse(t.meta) : null;
             const ab = m?.entry?.against_bias;
-            if (ab === true) biasTag = ` <span style="color:#e74c3c;font-weight:700" title="вход против bias (против направления)">⚠ против bias</span>`;
-            else if (ab === false) biasTag = ` <span style="color:#2ecc71" title="вход по bias">✓ по bias</span>`;
-            const reg = m?.regime;
-            if (reg) {
-              const map: Record<string, [string, string]> = {
-                HIGH_VOLATILITY: ["HV", "#f39c12"], TREND_UP: ["↑", "#2ecc71"],
-                TREND_DOWN: ["↓", "#e74c3c"], NEUTRAL: ["NEU", "#95a5a6"], RANGE: ["FLAT", "#95a5a6"],
-              };
-              const [lbl, col] = map[reg] || [reg, "#95a5a6"];
-              regTag = ` <span class="reg-tag" style="color:${col};border-color:${col}" title="режим ${reg}">${lbl}</span>`;
-            }
+            if (ab === true) biasTag = ` <span class="warn-bias">△ против bias</span>`;
+            else if (ab === false) biasTag = ` <span class="ok-bias">✓ по bias</span>`;
           } catch { /* noop */ }
-          return `<tr class="trade-row" data-idx="${i}" data-key="${t.ticker}|${t.entry_time}" style="cursor:pointer">` +
-            `<td style="font-size:10px;color:var(--text-dim)">${timeCell}</td>` +
-            `<td><b>${t.ticker}</b>${regTag}${biasTag}</td>` +
+          // Бейдж режима (если есть в meta).
+          let regimeBadge = "";
+          try {
+            const m = t.meta ? JSON.parse(t.meta) : null;
+            const rg = String(m?.regime ?? "").replace("HIGH_VOLATILITY", "HV");
+            if (rg) regimeBadge = ` <span class="rg-badge">${rg}</span>`;
+          } catch { /* noop */ }
+          // R-множитель = net_pnl / риск (|entry−SL|×qty).
+          let rVal = ""; let rCls = "";
+          if (!isOpen && t.stop_loss != null && t.entry_price && t.stop_loss !== t.entry_price) {
+            const risk = Math.abs(t.entry_price - t.stop_loss) * t.qty;
+            if (risk > 0) {
+              const r = t.net_pnl / risk;
+              rVal = `${r >= 0 ? "+" : ""}${r.toFixed(1)}`;
+              rCls = r >= 0 ? "pos" : "neg";
+            }
+          }
+          const selected = _openDetails.has(`${t.ticker}|${t.entry_time}`);
+          return `<tr class="trade-row${selected ? " selected" : ""}" data-idx="${i}" data-key="${t.ticker}|${t.entry_time}" style="cursor:pointer">` +
+            `<td class="td-time">${timeCell}</td>` +
+            `<td>${tickerLogo(t.ticker)}<b>${t.ticker}</b>${regimeBadge}${biasTag}</td>` +
             `<td>${sideIcon(t.side)}</td>` +
             `<td class="num">${t.qty}</td>` +
-            `<td class="num">${pxCell}</td>` +
+            `<td class="num td-px">${pxCell}</td>` +
             `<td class="num">${pnlCell}</td>` +
             `<td class="num" style="color:var(--text-dim)">${!isOpen && t.commission != null ? money(t.commission) : "—"}</td>` +
-            `<td>${reasonCell}</td>` +
-            `</tr>` + (_openDetails.has(`${t.ticker}|${t.entry_time}`) ? tradeDetailsHtml(t) : "");
+            `<td>${reasonChip}</td>` +
+            `<td class="num ${rCls}">${rVal || "—"}</td>` +
+            `<td class="td-arrow" title="раскрыть детали">${selected ? "▲" : "▼"}</td>` +
+            `</tr>` + (selected ? tradeDetailsHtml(t) : "");
         }
       )
-      .join("") || `<tr><td colspan=8 style="color:var(--text-dim)">пока нет сделок</td></tr>`;
-
+      .join("") || `<tr><td colspan=10 style="color:var(--text-dim)">пока нет сделок</td></tr>`;
 }
 
 // Раскрытие деталей сделки: состав ансамбля, голоса кворума, bias и entry при входе.
@@ -1335,7 +1419,7 @@ function tradeDetailsHtml(t: BotTradeRow): string {
     }).join("")}</div>`);
   }
   if (!rows.length) rows.push(`<div style="color:var(--text-dim)">нет данных meta</div>`);
-  return `<tr class="trade-details-row"><td colspan="8" style="background:var(--bg-soft);padding:8px 12px;font-size:11px;line-height:1.6">${rows.join("")}</td></tr>`;
+  return `<tr class="trade-details-row"><td colspan="10" style="background:var(--bg-soft);padding:8px 12px;font-size:11px;line-height:1.6">${rows.join("")}</td></tr>`;
 }
 
 // ===== правый сайдбар: рынок TQBR (скринер) =====
@@ -1392,7 +1476,7 @@ function _renderScreenerTable() {
       const turnTxt = r.turnover != null ? "₽" + money(r.turnover) : "—";
       const volTxt = r.rng_pct != null ? r.rng_pct.toFixed(2) + "%" : "—";
       return `<tr class="sr-row${uni}" title="${r.name}">` +
-        `<td class="ticker-cell">${r.ticker}</td>` +
+        `<td class="ticker-cell">${tickerLogo(r.ticker, r.name)}<span class="ticker-txt">${r.ticker}</span></td>` +
         `<td class="sr-num${flash}">${r.price != null ? priceTxt + arrows : `<span class="sr-dim">—</span>`}</td>` +
         `<td class="sr-num">${r.turnover != null ? turnTxt : `<span class="sr-dim">—</span>`}</td>` +
         `<td class="sr-num">${r.rng_pct != null ? `<span style="color:${r.rng_pct >= 3 ? "var(--gold)" : "var(--text)"}">${volTxt}</span>` : `<span class="sr-dim">—</span>`}</td>` +
