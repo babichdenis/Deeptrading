@@ -1,3 +1,4 @@
+import logging
 import os
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -7,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.runtime import (BotConfig, BOT_PERSIST_FIELDS, load_bot_settings, runtime,
                              save_bot_settings, load_ensemble_config, save_ensemble_config,
                              default_ensemble_config)
+
+logger = logging.getLogger("bot_api")
 
 
 async def _cfg_from_saved() -> BotConfig:
@@ -584,6 +587,15 @@ async def bot_logs(limit: int = 200) -> dict:
 async def bot_status() -> dict:
     status = runtime.status
 
+    # При остановленном боте runtime.config может хранить устаревшие значения
+    # (например, autostart/последний запуск), тогда как PATCH /config пишет в файл.
+    # Отдаём сохранённый конфиг, чтобы фронт не перетирал настройки слайдера/пилюль.
+    if not (runtime.running or runtime.starting) and status.get("config"):
+        try:
+            status["config"].update(_config_payload(await _cfg_from_saved()))
+        except Exception:
+            logger.exception("status: не смогли подмешать сохранённый конфиг")
+
     if runtime.running:
         try:
             risk = runtime.risk_snapshot()
@@ -856,3 +868,103 @@ async def bot_test_delete(name: str) -> dict:
         )
         await db.commit()
         return {"deleted": int(r.rowcount or 0)}
+
+
+def _agg(trades: list) -> dict:
+    """Агрегат по списку сделок (net>0 = win)."""
+    n = len(trades)
+    gw = sum(float(t.net_pnl) for t in trades if t.net_pnl is not None and float(t.net_pnl) > 0)
+    gl = sum(float(t.net_pnl) for t in trades if t.net_pnl is not None and float(t.net_pnl) <= 0)
+    net = gw + gl
+    wins = sum(1 for t in trades if t.net_pnl is not None and float(t.net_pnl) > 0)
+    return {
+        "trades": n, "wins": wins, "losses": n - wins,
+        "gross_win": round(gw, 2), "gross_loss": round(gl, 2),
+        "net": round(net, 2),
+        "pf": round(gw / abs(gl), 2) if gl else None,
+        "wr": round(wins / n * 100, 1) if n else 0,
+        "avg_win": round(gw / wins, 2) if wins else 0,
+        "avg_loss": round(gl / (n - wins), 2) if n - wins else 0,
+    }
+
+
+@router.get("/test_stats")
+async def bot_test_stats(test_name: str = "") -> dict:
+    """Статистика прогона теста (или live за период) по срезам.
+
+    Срезы: overall, side, regime, ticker, entry_reason, exit_reason, quorum, session.
+    """
+    import json as _j
+    from collections import defaultdict
+    from sqlalchemy import select as _sel
+    from app.database import SessionLocal as _DB
+    from app.models.sandbox_trade import SandboxTrade
+
+    name = test_name.strip()
+    mode = "paper"
+    if not name:
+        try:
+            from app.bot.runtime import runtime as _rt
+            name = (getattr(_rt.config, "test_name", "") or "").strip()
+            if not name:
+                mode = _rt.broker_mode if getattr(_rt, "broker_mode", None) else "sandbox"
+        except Exception:
+            pass
+    async with _DB() as db:
+        q = _sel(SandboxTrade)
+        if name:
+            q = q.where(SandboxTrade.test_name == name)
+        else:
+            q = q.where(SandboxTrade.mode == mode)
+        rows = (await db.execute(q)).scalars().all()
+
+    closed = [t for t in rows if t.exit_time is not None]
+    opened = [t for t in rows if t.exit_time is None]
+
+    def _meta(t):
+        try:
+            return _j.loads(t.meta) if t.meta else {}
+        except Exception:
+            return {}
+
+    by_side = defaultdict(list)
+    by_regime = defaultdict(list)
+    by_ticker = defaultdict(list)
+    by_entry = defaultdict(list)
+    by_exit = defaultdict(list)
+    by_quorum = defaultdict(list)
+    by_session = defaultdict(list)
+    for t in closed:
+        m = _meta(t)
+        by_side[t.side or "?"].append(t)
+        reg = m.get("regime") or "—"
+        by_regime[reg].append(t)
+        by_ticker[t.ticker or "?"].append(t)
+        by_entry[t.entry_reason or "?"].append(t)
+        by_exit[t.exit_reason or "?"].append(t)
+        ent = m.get("entry") or {}
+        q = ent.get("quorum") or ent.get("votes")
+        by_quorum[str(q) if q is not None else "—"].append(t)
+        try:
+            h = t.entry_time.astimezone(__import__("datetime").timezone(
+                __import__("datetime").timedelta(hours=3))).hour
+            by_session["утро" if h < 10 else ("день" if h < 19 else "вечер")].append(t)
+        except Exception:
+            pass
+
+    def _map(d):
+        return [{"key": k, **_agg(v)} for k, v in sorted(d.items(), key=lambda x: -abs(_agg(x[1])["net"]))]
+
+    return {
+        "test_name": name or None,
+        "mode": mode,
+        "overall": _agg(closed),
+        "open_positions": len(opened),
+        "by_side": _map(by_side),
+        "by_regime": _map(by_regime),
+        "by_ticker": _map(by_ticker),
+        "by_entry_reason": _map(by_entry),
+        "by_exit_reason": _map(by_exit),
+        "by_quorum": _map(by_quorum),
+        "by_session": _map(by_session),
+    }
