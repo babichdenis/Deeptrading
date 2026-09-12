@@ -15,32 +15,28 @@
 
 ## Зоны ответственности
 
-### Зона A — ДВИЖОК и ТЕСТЫ (агент №1)
+### Зона A — ДВИЖОК, ТЕСТЫ и UI (агент №1)
 Файлы:
 - `backend/app/services/ensemble.py` — пайплайн, `compute_ensemble`, `resample`, гейты.
 - `backend/app/bot/ensemble_strategy.py` — `EnsembleParams`, `on_bar`.
-- `backend/app/engine/indicators.py`, `engine/wave1.py`, `engine/quorum.py`, `engine/exits.py` — индикаторы/стратегии/кворум/выходы.
-- `backend/app/bot/runtime.py` — **только** `_build_ensemble_params`, `reload_ensemble`, конфиг кворума.
-- `backend/app/api/routes/bot.py` — **только** `/ensemble*`.
-- `backend/data/ensemble_config.json` — конфиг состава кворума (UI-управляемый).
-- Frontend: редактор кворума (`votes-editor` в `frontend/src/bot.ts`, `style.css`, `index.html`, `api.ts`).
-- `backend/scripts/test_*.py` — тест-скрипты движка.
-- Документ задач: `docs/roadmap/DeepEngine.txt` (профилирование, оптимизация, ускорение).
+- `backend/app/engine/indicators.py`, `engine/wave1.py`, `engine/quorum.py`, `engine/exits.py`, `engine/runner.py` — индикаторы/стратегии/кворум/выходы.
+- `backend/app/bot/runtime.py` — **только** `_build_ensemble_params`, `reload_ensemble`, конфиг кворума, `_execute_pending`, `_step_exit`, SL/TP.
+- `backend/app/api/routes/bot.py` — **только** `/ensemble*`, `/test_stats`, `/config`.
+- `backend/data/ensemble_config.json` — конфиг состава кворума.
+- **`frontend/**` — ВЕСЬ UI** (stats-вкладка, редактор кворума, график, сайдбары).
+- `backend/scripts/test_*.py`, `scripts/golden_ensemble.py` — тесты движка.
+- `docs/roadmap/DeepEngine.txt`, `DEV_PLAN.md` — оптимизация.
 
 ### Зона B — FEED / REPLAY / TEST-РЕЖИМ (агент №2)
 Файлы:
 - `backend/app/bot/feed.py` — свитч `live|replay`.
-- `ReplayFeed` из БД, виртуальные часы `_bot_now`, чистая бумажная книга.
-- `backend/app/api/routes/bot.py` — **только** `/mode`, `/tests*`, replay-эндпоинты.
-- `backend/app/bot/runtime.py` — **только** feed/бумажная книга/replay-часть.
-- `backend/app/models/sandbox_trade.py` — `test_name` (тест-режим).
-- `backend/app/config.py`, `backend/app/main.py` — `bot_mode=test`, автостарт replay из env.
-- Frontend: кнопки режима (`.mode-switch` в `index.html`, `bot.ts`, `api.ts`, `style.css`), модалка теста, блок «Тест-прогоны» во вкладке «Бот».
-- Документ задач: `docs/roadmap/Streaming.md` *(файл пока не найден в репо — уточнить)*.
+- `backend/app/bot/replay_feed.py` — `ReplayFeed` из БД, виртуальные часы.
+- `backend/app/api/routes/sandbox.py` — **только** test/replay-ветки (`_test_*`, `_active_test_name`).
+- `backend/app/bot/runtime.py` — **только** feed/бумажная книга/replay-часть (`_run`, `_process_candle` feed).
+- `docs/roadmap/Streaming.md`, `Sreaming.md` — streaming-контур.
 
-### Общие файлы (правки мелкими коммитами!)
-`runtime.py`, `bot.py`, `main.py`, `config.py`, `frontend/*`.
-Правило: **не трогать чужую зону**; перед коммитом `git pull`/rebase; коммит только в свои строки.
+### ⛔ НЕ ТРОГАТЬ ЧУЖОЕ
+`frontend/**` — зона A. Второй агент НЕ правит фронт (иначе перезапишет stats/UI). Если нужна UI-правка — через зону A.
 
 ## Git-протокол
 
@@ -77,8 +73,11 @@
 ## Координация (журнал сообщений)
 
 > Пишем сюда короткие заметки: кто что начал, что занято, где риск конфликта.
+> **Проверять каждые 10–15 минут.**
 
 - **[A/агент №1]** 2026-09-11: взял A2 (профилирование и оптимизация `compute_ensemble`). Зона B (`feed.py`, replay, `/mode`, `/tests*`) — не трогаю.
+- **[A/агент №1]** 2026-09-12: ⚠️ **`frontend/**` — МОЯ зона**. Были конфликты: агент №2 перезаписывал `frontend/src/bot.ts` и `main.ts` (мои stats/UI-правки), из-за чего фронт «висел». Пожалуйста, **не трогай фронт** — если нужна UI-правка, пиши в журнал.
+- **[A/агент №1]** 2026-09-12: статус — идёт тест `week1` (14–18.07) на .2. Ускорен `resample` (hash `7bfc8ea185097b19` совпал). Следующее: сверка ускорений через `scripts/golden_ensemble.py`, затем Optuna.
 
 
 ## Переписка агентов (последнее сверху)
