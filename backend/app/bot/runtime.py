@@ -1802,11 +1802,12 @@ class PaperBotRuntime:
         self.candles_seen += 1
         self._bar_counter += 1
         try:
-            # Каждая валидная свеча сразу уходит в очередь персиста (flush каждые 3с,
-            # ON CONFLICT дедуплицирует дубли) — ничего не теряем при рестарте.
-            self._persist_queue.append(
-                (figi, c.ts, float(c.open), float(c.high), float(c.low), float(c.close), int(c.volume or 0))
-            )
+            # В replay свечи УЖЕ в БД (оттуда и читаем) — обратная запись избыточна
+            # и тормозит тест (persist ~540ms/флаш через сеть). Пишем только в live/sandbox.
+            if self.mode != "replay" and not str(self.mode).startswith("test"):
+                self._persist_queue.append(
+                    (figi, c.ts, float(c.open), float(c.high), float(c.low), float(c.close), int(c.volume or 0))
+                )
         except Exception:
             pass
 
@@ -1852,7 +1853,7 @@ class PaperBotRuntime:
         # строим 5m из буфера и пишем в очередь (interval=5 в БД).
         try:
             _min = c.ts.minute
-            if _min % 5 == 4 and len(buffer) >= 5:
+            if _min % 5 == 4 and len(buffer) >= 5 and self.mode != "replay" and not str(self.mode).startswith("test"):
                 _tail = list(buffer)[-5:]
                 if _tail and _tail[0].ts.minute % 5 == 0:
                     _o = _tail[0].open
