@@ -1015,7 +1015,8 @@ class PaperBotRuntime:
                             from app.bot.moex import ensure_moex_candles
                             await ensure_moex_candles(u["figi"], u.get("ticker", ""), days=10)
                             candles = await _lc(db, u["figi"], 1,
-                                                date_from=self._bot_now() - timedelta(days=3))
+                                                date_from=self._bot_now() - timedelta(days=3),
+                                                date_to=self._bot_now())
                             for row in candles:
                                 buf.append(EC(ts=row.ts, open=row.open, high=row.high,
                                               low=row.low, close=row.close, volume=row.volume))
