@@ -323,6 +323,7 @@ class PaperBotRuntime:
         self._replay_from: datetime | None = None
         self._replay_cur: datetime | None = None
         self._signal_busy: set[str] = set()
+        self._skip_logged: dict[str, object] = {}  # figi -> ts последней залогированной причины "нет входа"
         self._held: set[str] = set()
         self._held_since: dict[str, float] = {}  # figi -> время добавления в _held (для grace синка)
         self._live_logs: deque[str] = deque(maxlen=400)
@@ -1945,6 +1946,13 @@ class PaperBotRuntime:
             sig = None
         finally:
             self._signal_busy.discard(figi)
+        # Диагностика «почему нет входа»: на 5m-границе логируем причину из стратегии.
+        if sig is None and c.ts.minute % 5 == 0:
+            _skip = getattr(strategy, "_last_skip", None)
+            if _skip and self._skip_logged.get(figi) != c.ts:
+                self._skip_logged[figi] = c.ts
+                self._log(f"⏭ НЕТ ВХОДА {self.tickers.get(figi, figi[-6:])} "
+                          f"ts={c.ts.strftime('%m-%d %H:%M')}: {_skip}")
         _reg_state = getattr(strategy, "_last_regime", None)
         _reg_vol = getattr(strategy, "_last_vol", None)
         # Fallback: если стратегия не вернула regime timeline (новые/hot-add тикеры),

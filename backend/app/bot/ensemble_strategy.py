@@ -64,6 +64,7 @@ class EnsembleV4Strategy:
     def __init__(self, params: EnsembleParams):
         self.p = params
         self._last_votes = None
+        self._last_skip: str | None = None
 
     def warmup_bars(self) -> int:
         return 50
@@ -71,15 +72,19 @@ class EnsembleV4Strategy:
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         from app.engine.sessions import is_session_active
         if not candles:
+            self._last_skip = "no_candles"
             return None
         last = candles[-1]
         if last.ts.minute % 5 != 0:
+            self._last_skip = f"not_5m(min={last.ts.minute})"
             return None
         # Проверяем сессию через sessions список из конфига
         if self.p.sessions:
             if not is_session_active(last.ts, self.p.sessions):
+                self._last_skip = f"session_blocked({last.ts.isoformat()})"
                 return None
         if len(candles) < 50:
+            self._last_skip = f"buffer_small({len(candles)})"
             return None
         try:
             from app.services.ensemble import compute_ensemble
@@ -124,11 +129,13 @@ class EnsembleV4Strategy:
             res = compute_ensemble(list(candles), req)
         except Exception as e:
             import logging as _lg
+            self._last_skip = f"compute_error: {type(e).__name__}: {str(e)[:120]}"
             _lg.getLogger("ensemble_strategy").exception(
                 "on_bar compute_ensemble FAILED figi=%s candles=%d: %s", self.p.figi[-6:], len(candles), e)
             return None
         if "error" in res:
             import logging as _lg
+            self._last_skip = f"res_error: {res.get('error')}"
             _lg.getLogger("ensemble_strategy").warning(
                 "on_bar compute_ensemble ERROR figi=%s: %s", self.p.figi[-6:], res.get("error"))
             return None
@@ -153,6 +160,7 @@ class EnsembleV4Strategy:
             self._last_vol = None
         entries = res.get("static", {}).get("entries", [])
         if not entries:
+            self._last_skip = f"no_entries(funnel_raw={(res.get('static', {}).get('funnel') or {}).get('entries_raw')})"
             if last.ts.minute % 5 == 0:
                 import logging as _lg
                 _lg.getLogger("ensemble_strategy").debug(
@@ -163,12 +171,14 @@ class EnsembleV4Strategy:
         cutoff = last.ts - timedelta(minutes=FRESH_MIN)
         fresh = [e for e in entries if e.get("ts", "") >= cutoff.isoformat()]
         if not fresh:
+            self._last_skip = f"no_fresh(newest={entries[-1].get('ts')} last={last.ts.isoformat()})"
             if last.ts.minute % 5 == 0:
                 import logging as _lg
                 _lg.getLogger("ensemble_strategy").debug(
                     "on_bar no-fresh-entries figi=%s last=%s newest_entry=%s",
                     self.p.figi[-6:], last.ts.isoformat(), entries[-1].get("ts"))
             return None
+        self._last_skip = None
         last_e = fresh[-1]
         side = Side.BUY if last_e.get("side") == "BUY" else Side.SELL
         st = res.get("static", {})
