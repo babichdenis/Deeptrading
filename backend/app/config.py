@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +22,19 @@ class Settings(BaseSettings):
     live_account: str = ""
     log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR
     log_debug_engine: bool = False  # подробные debug-логи движка (hot path)
+
+    @field_validator("log_debug_engine", mode="before")
+    @classmethod
+    def _empty_bool(cls, v):
+        # Пустая строка в .env (LOG_DEBUG_ENGINE=) — это False, а не ошибка парсинга.
+        if isinstance(v, str) and v.strip() == "":
+            return False
+        return v
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _strip_level(cls, v):
+        return v.strip() if isinstance(v, str) else v
 
     @property
     def feed_token(self) -> str:
