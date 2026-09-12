@@ -541,6 +541,7 @@ export interface TestStats {
   by_quorum: StatsRow[];
   by_session: StatsRow[];
   by_strategy: StatsRow[];
+  by_bias: StatsRow[];
 }
 
 export async function fetchTestStats(testName = ""): Promise<TestStats> {

@@ -935,6 +935,7 @@ async def bot_test_stats(test_name: str = "") -> dict:
     by_quorum = defaultdict(list)
     by_session = defaultdict(list)
     by_strategy = defaultdict(list)
+    by_bias = defaultdict(list)
     for t in closed:
         m = _meta(t)
         by_side[t.side or "?"].append(t)
@@ -950,6 +951,8 @@ async def bot_test_stats(test_name: str = "") -> dict:
         _members = qe.get("members_for") or ent.get("quorum_members") or ent.get("members_for") or []
         for _sid in (_members or ["—"]):
             by_strategy[str(_sid)].append(t)
+        _ab = ent.get("against_bias")
+        by_bias["против bias" if _ab is True else ("по bias" if _ab is False else "—")].append(t)
         try:
             h = t.entry_time.astimezone(__import__("datetime").timezone(
                 __import__("datetime").timedelta(hours=3))).hour
@@ -973,4 +976,5 @@ async def bot_test_stats(test_name: str = "") -> dict:
         "by_quorum": _map(by_quorum),
         "by_session": _map(by_session),
         "by_strategy": _map(by_strategy),
+        "by_bias": _map(by_bias),
     }

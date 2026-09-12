@@ -1754,6 +1754,7 @@ async function renderStats() {
     `<div><span>Avg loss</span><b>${o.avg_loss}₽</b></div>` +
     `<div><span>Открыто</span><b>${st.open_positions}</b></div></div>` +
     sec("По направлению", st.by_side) +
+    sec("По bias", st.by_bias) +
     sec("По режиму", st.by_regime) +
     sec("По сессии", st.by_session) +
     sec("По акциям", st.by_ticker) +
