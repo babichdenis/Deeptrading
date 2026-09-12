@@ -83,6 +83,9 @@ class BotConfig:
     ensemble_capital: float = 2000.0
     ensemble_quorum: int = 2
     ensemble_session: str = "main"
+    # --- Лучшие параметры ансамбля (по матрицам июль–сентябрь 2026) ---
+    ensemble_sl_mult: float = 4.0   # SL = sl_mult × ATR
+    ensemble_rr: float = 6.0        # TP = rr × SL (rr6 устойчиво лучше rr4 во всех режимах)
     sessions: list = field(default_factory=lambda: ["day"])
     leverage: float = 1.0
     # --- Commission & slippage (live parity with backtest) ---
@@ -469,36 +472,31 @@ class PaperBotRuntime:
         return True
 
     async def _build_ensemble_params(self, db, figi, ticker, lot, capital, sessions):
-        """EnsembleParams из data/ensemble_config.json (UI-управляемый состав кворума).
+        """EnsembleParams: полный V2-набор (7 стратегий + volume_drop) и SL/TP из конфига.
 
-        Состав голосов, quorum, neutral_mode, bias и режимные фильтры берутся из конфига.
-        SL/TP (sl_mult/rr) — из optuna по инструменту.
+        По матрицам (июль–сентябрь 2026): полный набор голосов + semi_flip + sl4/rr6 даёт
+        лучший net; per-ticker optuna (active_sids/sl/rr) и режимные фильтры голосов
+        переобучаются/не улучшают, поэтому НЕ применяются.
         """
-        from sqlalchemy import text as _t
-        row = (await db.execute(
-            _t("SELECT optuna_params FROM instruments WHERE figi = :f"), {"f": figi}
-        )).first()
-        opt = (row[0] if row else None) or {}
-
-        from app.bot.ensemble_strategy import EnsembleParams
+        from app.bot.ensemble_strategy import EnsembleParams, V2_SETUPS
         ec = await load_ensemble_config()
-        _setups = [
-            {"strategy_id": s["strategy_id"], "tf": s.get("tf", "5min"), "params": s.get("params", {})}
-            for s in ec.get("setups", []) if s.get("enabled")
-        ]
+        _setups = [{"strategy_id": s["strategy_id"], "tf": s.get("tf", "5min"),
+                    "params": dict(s.get("params", {}))} for s in V2_SETUPS]
+        _setups.append({"strategy_id": "volume_drop", "tf": "5min",
+                        "params": {"ma_len": 20, "drop_ratio": 1.5}})
         _bias = ec.get("bias") or {}
         return EnsembleParams(
             figi=figi, lot=int(lot) if lot else 10, capital=capital,
             quorum=int(ec.get("quorum", 2)), session="all", sessions=sessions,
             setups=_setups,
-            sl_mult=float(opt.get("sl_mult", 4.0)),
-            rr=float(opt.get("rr", 4.0)),
+            sl_mult=float(getattr(self.config, "ensemble_sl_mult", 4.0) or 4.0),
+            rr=float(getattr(self.config, "ensemble_rr", 6.0) or 6.0),
             vol_thr=float(ec.get("vol_thr", 0.0) or 0.0),
             neutral_mode=str(ec.get("neutral_mode", "semi_flip")),
             entry_macd_1m=True,
             bias_tf=str(_bias.get("tf", "hour")),
             bias_period=int(_bias.get("period", 50)),
-            regime_setups_filter=ec.get("regime_setups_filter") or {},
+            regime_setups_filter={},
         )
 
     async def reload_ensemble(self) -> int:
