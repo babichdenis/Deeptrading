@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     bot_mode: str = "sandbox"  # sandbox | live | test
     sandbox_account: str = ""
     live_account: str = ""
+    bot_test_name: str = ""
+    bot_test_start: str = ""
+    bot_test_end: str = ""
     log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR
     log_debug_engine: bool = False  # подробные debug-логи движка (hot path)
 

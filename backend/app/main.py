@@ -68,9 +68,9 @@ async def lifespan(app: FastAPI):
             if _mode == "test":
                 cfg.mode = "test"
                 cfg.feed = "replay"
-                cfg.test_name = os.environ.get("BOT_TEST_NAME", "")
-                cfg.replay_start = os.environ.get("BOT_TEST_START", "")
-                cfg.replay_end = os.environ.get("BOT_TEST_END", "")
+                cfg.test_name = _s.bot_test_name or os.environ.get("BOT_TEST_NAME", "")
+                cfg.replay_start = _s.bot_test_start or os.environ.get("BOT_TEST_START", "")
+                cfg.replay_end = _s.bot_test_end or os.environ.get("BOT_TEST_END", "")
                 cfg.replay_pace = "fast"
             asyncio.create_task(runtime.start(cfg))
     except Exception as e:
