@@ -461,19 +461,26 @@ async def _test_trades_db(test_name: str):
 
 
 async def _test_last_close(figi: str) -> float | None:
-    """Последняя цена закрытия из БД (5m, fallback 1m). Для unrealized тестовых позиций."""
+    """Последняя цена закрытия из БД (5m, fallback 1m), НЕ ПОЗЖЕ виртуального
+    времени теста (иначе берётся свежая рыночная свеча → мнимый P&L)."""
     try:
         from app.database import SessionLocal
         from app.models.candle import Candle
         from sqlalchemy import select
+        # Виртуальное время replay: ts последней поданной свечи (или начало окна).
+        _vt = None
+        try:
+            from app.bot.runtime import runtime as _rt
+            _vt = getattr(_rt, "_replay_cur", None) or getattr(_rt, "_replay_from", None)
+        except Exception:
+            _vt = None
         for interval in (5, 1):
             async with SessionLocal() as db:
-                row = (await db.execute(
-                    select(Candle.close)
-                    .where(Candle.figi == figi, Candle.interval == interval)
-                    .order_by(Candle.ts.desc())
-                    .limit(1)
-                )).first()
+                q = (select(Candle.close)
+                     .where(Candle.figi == figi, Candle.interval == interval))
+                if _vt is not None:
+                    q = q.where(Candle.ts <= _vt)
+                row = (await db.execute(q.order_by(Candle.ts.desc()).limit(1))).first()
             if row:
                 return float(row[0])
     except Exception as e:
@@ -556,8 +563,10 @@ def _test_position_row(r, cur: float | None) -> dict:
     if cur is None:
         cur = entry
     pnl = (cur - entry) * qty if side == "LONG" else (entry - cur) * qty
-    own = entry * qty
-    lev = float(r.leverage or 1.0)
+    notional = entry * qty
+    lev = max(1.0, float(r.leverage or 1.0))
+    own = notional / lev          # свои средства (обеспечение)
+    borrowed = notional - own     # заёмные (маржа)
     return {
         "figi": r.figi, "ticker": r.ticker, "side": side, "qty": qty,
         "entry_price": round(entry, 6),
@@ -572,8 +581,10 @@ def _test_position_row(r, cur: float | None) -> dict:
         "roi_pct": round(pnl / own * 100, 2) if own else 0,
         "sell_value": round(own + pnl, 2),
         "leverage": round(lev, 1),
+        "notional": round(notional, 2),
         "own_money": round(own, 2),
-        "leveraged": 0,
+        "borrowed": round(borrowed, 2),
+        "leveraged": round(borrowed, 2),
         "regime": "", "regime_reason": "", "regime_atr_pct": None, "regime_adx": None, "vol": None,
     }
 
