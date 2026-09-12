@@ -65,8 +65,8 @@ class BotConfig:
     atr_multiplier: float = 4.0
     atr_risk_reward: float = 4.0
     # --- Trailing stop ---
-    initial_sl_atr: float = 2.5  # стандартный SL = 2.5×ATR (фикс; не optuna sl_mult)
-    trail_activation_comm_mult: float = 3.0  # активация при pnl >= комиссия_входа × mult
+    initial_sl_atr: float = 4.0  # стандартный SL = 4.0×ATR (шире, чтобы сигнальные/volume-выходы успевали)
+    trail_activation_comm_mult: float | None = None  # None = трейлинг ОТКЛЮЧЁН (только SL/TP+сигналы)
     trail_distance_atr: float = 2.5  # базовая дистанция трейлинга за ценой = 2.5×ATR
     # --- Динамический трейлинг ---
     trail_compress_r: float = 1.0    # сжатие дистанции по прибыли (в R): чем больше плюс, тем теснее
