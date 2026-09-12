@@ -166,18 +166,23 @@ def entry_pullback_deep_pass(c5: list[EngineCandle], atr5: list[float | None],
 
 def resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]:
     out: list[EngineCandle] = []
+    last_bucket: int | None = None
     for c in candles:
-        epoch = int(c.ts.timestamp())
-        bucket = epoch - epoch % tf_seconds
-        key = datetime.fromtimestamp(bucket, tz=timezone.utc)
-        if out and out[-1].ts == key:
+        ts = c.ts
+        # bucket в секундах внутри суток (без timestamp/fromtimestamp — дорогие вызовы)
+        secs = ts.hour * 3600 + ts.minute * 60 + ts.second
+        bucket = (secs // tf_seconds) * tf_seconds
+        if last_bucket == bucket and out:
             prev = out[-1]
-            out[-1] = EngineCandle(ts=key, open=prev.open, high=max(prev.high, c.high),
+            out[-1] = EngineCandle(ts=prev.ts, open=prev.open, high=max(prev.high, c.high),
                                    low=min(prev.low, c.low), close=c.close,
                                    volume=prev.volume + c.volume)
         else:
+            key = ts.replace(hour=bucket // 3600, minute=(bucket % 3600) // 60,
+                             second=0, microsecond=0)
             out.append(EngineCandle(ts=key, open=c.open, high=c.high, low=c.low,
                                     close=c.close, volume=c.volume))
+            last_bucket = bucket
     return out
 
 
