@@ -1334,6 +1334,10 @@ body.modal-open { overflow: hidden; }
 .ens-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 /* ===== Статистика прогона ===== */
 .stats-body { flex: 1; min-height: 0; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 10px; }
+.stats-body > * { flex: 0 0 auto; }
+.stats-period { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px 8px 0; font-size: 10px; color: var(--text-dim); }
+.stats-period label { display: flex; align-items: center; gap: 3px; }
+.stats-period input, .stats-period select { padding: 2px 5px; font-size: 11px; background: var(--bg-soft); border: 1px solid var(--border-soft); border-radius: 5px; color: var(--text); }
 .stats-overall { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .stats-overall > div { display: flex; flex-direction: column; padding: 6px 8px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-soft); font-size: 11px; }
 .stats-overall span { color: var(--text-dim); font-size: 10px; }

@@ -889,33 +889,60 @@ def _agg(trades: list) -> dict:
 
 
 @router.get("/test_stats")
-async def bot_test_stats(test_name: str = "") -> dict:
+async def bot_test_stats(test_name: str = "", date_from: str = "", date_to: str = "",
+                         mode: str = "") -> dict:
     """Статистика прогона теста (или live за период) по срезам.
 
+    date_from/date_to — ISO-дата или дата-время (UTC); фильтр по entry_time.
+    mode — явный режим для live-выборки (sandbox/live); иначе берётся из runtime.
     Срезы: overall, side, regime, ticker, entry_reason, exit_reason, quorum, session.
     """
     import json as _j
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
     from collections import defaultdict
     from sqlalchemy import select as _sel
     from app.database import SessionLocal as _DB
     from app.models.sandbox_trade import SandboxTrade
 
+    def _parse(v: str, end: bool = False):
+        if not v:
+            return None
+        try:
+            if len(v) == 10:
+                d = _dt.fromisoformat(v).replace(tzinfo=_tz.utc)
+                return d + _td(days=1) - _td(microseconds=1) if end else d
+            d = _dt.fromisoformat(v.replace("Z", "+00:00"))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=_tz.utc)
+            return d
+        except Exception:
+            return None
+
     name = test_name.strip()
-    mode = "paper"
+    mode = (mode or "").strip()
     if not name:
         try:
             from app.bot.runtime import runtime as _rt
-            name = (getattr(_rt.config, "test_name", "") or "").strip()
-            if not name:
-                mode = _rt.broker_mode if getattr(_rt, "broker_mode", None) else "sandbox"
+            if not mode:
+                name = (getattr(_rt.config, "test_name", "") or "").strip()
+                if not name:
+                    mode = _rt.broker_mode if getattr(_rt, "broker_mode", None) else "sandbox"
         except Exception:
             pass
+    if not mode:
+        mode = "paper" if name else "sandbox"
     async with _DB() as db:
         q = _sel(SandboxTrade)
         if name:
             q = q.where(SandboxTrade.test_name == name)
         else:
             q = q.where(SandboxTrade.mode == mode)
+        _df = _parse(date_from)
+        _dtto = _parse(date_to, end=True)
+        if _df is not None:
+            q = q.where(SandboxTrade.entry_time >= _df)
+        if _dtto is not None:
+            q = q.where(SandboxTrade.entry_time <= _dtto)
         rows = (await db.execute(q)).scalars().all()
 
     closed = [t for t in rows if t.exit_time is not None]
@@ -966,6 +993,8 @@ async def bot_test_stats(test_name: str = "") -> dict:
     return {
         "test_name": name or None,
         "mode": mode,
+        "date_from": date_from or None,
+        "date_to": date_to or None,
         "overall": _agg(closed),
         "open_positions": len(opened),
         "by_side": _map(by_side),

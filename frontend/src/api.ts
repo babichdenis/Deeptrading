@@ -531,6 +531,8 @@ export interface StatsRow {
 export interface TestStats {
   test_name: string | null;
   mode: string;
+  date_from?: string | null;
+  date_to?: string | null;
   overall: StatsRow & { key?: string };
   open_positions: number;
   by_side: StatsRow[];
@@ -544,8 +546,18 @@ export interface TestStats {
   by_bias: StatsRow[];
 }
 
-export async function fetchTestStats(testName = ""): Promise<TestStats> {
-  const q = testName ? `?test_name=${encodeURIComponent(testName)}` : "";
+export async function fetchTestStats(
+  testName = "",
+  dateFrom = "",
+  dateTo = "",
+  mode = "",
+): Promise<TestStats> {
+  const p = new URLSearchParams();
+  if (testName) p.set("test_name", testName);
+  if (dateFrom) p.set("date_from", dateFrom);
+  if (dateTo) p.set("date_to", dateTo);
+  if (mode) p.set("mode", mode);
+  const q = p.toString() ? `?${p.toString()}` : "";
   const res = await fetch(`${API}/api/v1/bot/test_stats${q}`);
   if (!res.ok) throw new Error(`test_stats ${res.status}`);
   return res.json();

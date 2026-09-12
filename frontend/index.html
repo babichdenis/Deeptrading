@@ -592,6 +592,16 @@
             <span class="sr-sub" id="stats-test">—</span>
             <button class="sr-refresh btn-secondary btn-xs" id="stats-refresh" title="Обновить">⟳</button>
           </div>
+          <div class="stats-period">
+            <label>С <input type="date" id="stats-from"></label>
+            <label>По <input type="date" id="stats-to"></label>
+            <select id="stats-mode" title="Источник данных">
+              <option value="">Авто</option>
+              <option value="sandbox">Live</option>
+              <option value="paper">Тест</option>
+            </select>
+            <button class="btn-secondary btn-xs" id="stats-apply" title="Применить период">OK</button>
+          </div>
           <div class="stats-body" id="stats-body"></div>
         </div>
       </aside>

@@ -1554,6 +1554,8 @@ function initScreener() {
     });
   });
   $("stats-refresh")?.addEventListener("click", () => { void renderStats(); });
+  $("stats-apply")?.addEventListener("click", () => { void renderStats(); });
+  ($("stats-mode") as HTMLSelectElement | null)?.addEventListener("change", () => { void renderStats(); });
   // Клик по плашке тикера → открыть график в существующем chart
   $("votes-config-btn")?.addEventListener("click", toggleEnsembleEditor);
   $("votes-grid")?.addEventListener("click", (e) => {
@@ -1722,18 +1724,32 @@ async function renderStats() {
   const body = $("stats-body");
   if (!body) return;
   body.innerHTML = `<div class="mini-hint">загрузка…</div>`;
+  const fromEl = $("stats-from") as HTMLInputElement | null;
+  const toEl = $("stats-to") as HTMLInputElement | null;
+  const modeEl = $("stats-mode") as HTMLSelectElement | null;
+  const from = fromEl?.value || "";
+  const to = toEl?.value || "";
+  const mode = modeEl?.value || "";
   let st: TestStats;
   try {
-    st = await fetchTestStats();
+    st = await fetchTestStats("", from, to, mode);
   } catch {
     body.innerHTML = `<div class="mini-hint">не удалось загрузить</div>`;
     return;
   }
   const tn = $("stats-test");
-  if (tn) tn.textContent = st.test_name ? `${st.test_name} · ${st.mode}` : st.mode;
+  if (tn) {
+    const src = st.mode === "paper" ? "тест" : st.mode;
+    const per = st.date_from || st.date_to ? ` · ${st.date_from ?? "…"}…${st.date_to ?? "…"}` : "";
+    tn.textContent = (st.test_name ? `${st.test_name} · ${src}` : src) + per;
+  }
   const o = st.overall;
-  const sec = (title: string, rows: StatsRow[]) => {
-    if (!rows.length) return "";
+  if (!o) {
+    body.innerHTML = `<div class="mini-hint">нет данных по прогону</div>`;
+    return;
+  }
+  const sec = (title: string, rows: StatsRow[] | undefined) => {
+    if (!rows || !rows.length) return "";
     const trs = rows.map((r) =>
       `<tr><td>${esc(r.key)}</td><td class="n">${r.trades}</td><td class="n">${r.wr}%</td>` +
       `<td class="n" style="color:${r.net >= 0 ? "var(--up)" : "var(--down)"}">${r.net >= 0 ? "+" : ""}${r.net}</td>` +
