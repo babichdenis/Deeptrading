@@ -603,7 +603,8 @@ class PaperBotRuntime:
                     stop_loss=float(sl) if sl else None,
                     take_profit=float(tp) if tp else None,
                     entry_reason=(meta or {}).get("entry", {}).get("reason") if isinstance(meta, dict) else None,
-                    meta=_json.dumps(meta, ensure_ascii=False, default=str) if meta else None,
+                    meta=_json.dumps({**(meta or {}), "sl_initial": float(sl) if sl else None,
+                                      "entry_price0": float(price)}, ensure_ascii=False, default=str),
                     leverage=float(leverage),
                     mode=self.broker_mode,
                     test_name=getattr(self.config, "test_name", "") or None,
@@ -630,7 +631,13 @@ class PaperBotRuntime:
                     row.exit_time = self._bot_now()
                     row.exit_price = float(exit_price)
                     row.exit_reason = reason or ""
-                    row.exit_meta = _json.dumps(meta, ensure_ascii=False, default=str) if meta else row.exit_meta
+                    # Диагностика стопов: начальный SL из БД (трейлинг его мог подтянуть),
+                    # был ли активен трейлинг, цена входа — для проверки side/дистанции.
+                    meta = dict(meta or {})
+                    meta.setdefault("entry_price", float(row.entry_price))
+                    meta.setdefault("sl_db", float(row.stop_loss) if row.stop_loss is not None else None)
+                    meta.setdefault("trail_active", bool(self._trail_active.get(figi, False)))
+                    row.exit_meta = _json.dumps(meta, ensure_ascii=False, default=str)
                     if net is not None:
                         row.net_pnl = float(net)
                     costs = CostModel(commission_rate=self.config.commission_rate, slippage_bps=self.config.slippage_bps)
