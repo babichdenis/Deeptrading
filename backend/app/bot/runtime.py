@@ -2312,9 +2312,12 @@ class PaperBotRuntime:
             _rr = getattr(strat.p, "rr", None) if strat is not None else None
             if _rr is None:
                 _rr = cfg.atr_risk_reward
+            # Проскальзывание на входе (adverse) — parity с бэктестом (fill_price).
+            _cm = CostModel(commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps)
+            _fill = _cm.fill_price(float(c.open), side)
             if cfg.sl_mode == "fixed":
                 exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
-                plan = exit_policy.plan_entry(side, c.open, [])
+                plan = exit_policy.plan_entry(side, _fill, [])
             else:
                 exit_policy = AtrStopPolicy(period=cfg.atr_period, multiplier=_sl_mult,
                                             risk_reward=_rr,
@@ -2325,16 +2328,18 @@ class PaperBotRuntime:
                                             trail_min_atr=cfg.trail_min_atr,
                                             trail_vol_boost=cfg.trail_vol_boost)
                 buf_raw = list(self.buffers.get(figi, []))
-                plan = exit_policy.plan_entry(side, c.open, buf_raw)
+                plan = exit_policy.plan_entry(side, _fill, buf_raw)
         else:
             exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
-            plan = exit_policy.plan_entry(side, c.open, [])
+            _cm = CostModel(commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps)
+            _fill = _cm.fill_price(float(c.open), side)
+            plan = exit_policy.plan_entry(side, _fill, [])
         actual_entry = await self.broker.open_position(
             figi=figi,
             ticker=order.ticker,
             side=order.side,
             qty=order.qty,
-            price=c.open,
+            price=_fill,
             stop_loss=round(plan.stop_loss, 6) if plan.stop_loss is not None else None,
             take_profit=round(plan.take_profit, 6) if plan.take_profit is not None else None,
             strategy_id=cfg.strategy_id,
@@ -2496,6 +2501,16 @@ class PaperBotRuntime:
         price, reason = _ibe(c, state, stop, tp, close_based=bool(trail_active))
         if price is None:
             return False
+        # Захватываем флаг трейлинга ДО _clear_exit_state (иначе диагностика врёт).
+        _was_trail = bool(trail_active or self._trail_active.get(figi, False))
+        # Проскальзывание на выходе (adverse), как в бэктесте (fill_price).
+        try:
+            _cm = CostModel(commission_rate=self.config.commission_rate,
+                            slippage_bps=self.config.slippage_bps)
+            _opp = Side.SELL if state == PositionState.LONG else Side.BUY
+            price = _cm.fill_price(float(price), _opp)
+        except Exception:
+            pass
 
         trade = await self.broker.close_position(figi, price, reason)
         self._held.discard(figi)
@@ -2505,7 +2520,7 @@ class PaperBotRuntime:
                               net=float(trade.net_pnl) if trade else None,
                               meta={"exit_reason": reason, "exit_price": float(price),
                                     "sl": stop, "tp": tp,
-                                    "trailing": bool(trail_active),
+                                    "trailing": _was_trail,
                                     "bars_held": _bh})
         pnl = float(trade.net_pnl) if trade else 0
         tag = "ВЫХОД-ТРЕЙЛИНГ" if trail_active else "ВЫХОД"
