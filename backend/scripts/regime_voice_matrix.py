@@ -68,10 +68,13 @@ async def load_tickers():
     return [(r[0], r[1], int(r[2]) if r[2] else 1) for r in rows]
 
 
-async def load_candles():
+async def load_candles(only=None):
     out = {}
+    _want = set(only) if only else None
     async with SessionLocal() as db:
         for figi, tkr, lot in await load_tickers():
+            if _want is not None and tkr not in _want:
+                continue
             c = await _lc(db, figi, 1, date_from=FROM, date_to=TO)
             if c and len(c) >= 200:
                 out[tkr] = (figi, lot, c)
@@ -305,10 +308,12 @@ async def main():
     ap.add_argument("mode", choices=["voices", "sltp", "bias", "ablate", "all"])
     ap.add_argument("--sls", default="3,4,5,6")
     ap.add_argument("--rrs", default="3,4,5,6")
+    ap.add_argument("--tickers", default="")
     args = ap.parse_args()
 
+    only = [t.strip() for t in args.tickers.split(",") if t.strip()] or None
     print("Загрузка свечей...")
-    cmap = await load_candles()
+    cmap = await load_candles(only)
     print("тикеров: %d, период 2026-07-01 → 2026-09-13\n" % len(cmap))
     if args.mode in ("voices", "all"):
         run_voices(cmap)
