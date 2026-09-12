@@ -26,6 +26,9 @@ class PaperBroker:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], cost_model: CostModel | None = None):
         self.sessions = session_factory
         self.costs = cost_model or CostModel()
+        # Кэш позиций: get_position зовётся на КАЖДЫЙ бар (hot-path) — без кэша это
+        # 500k+ SQL-запросов за тест. Инвалидируется при open/close/reset.
+        self._pos_cache: dict[str, PaperPosition | None] = {}
 
     async def ensure_account(self, initial_cash: float = 10_000.0) -> PaperAccount:
         async with self.sessions() as db:
@@ -43,6 +46,7 @@ class PaperBroker:
             if acc:
                 await db.delete(acc)
                 await db.commit()
+        self._pos_cache.clear()
         await self.ensure_account(initial_cash)
 
     async def positions(self) -> list[PaperPosition]:
@@ -94,8 +98,12 @@ class PaperBroker:
         return await asyncio.to_thread(_fetch)
 
     async def get_position(self, figi: str) -> PaperPosition | None:
+        if figi in self._pos_cache:
+            return self._pos_cache[figi]
         async with self.sessions() as db:
-            return await db.scalar(select(PaperPosition).where(PaperPosition.figi == figi))
+            pos = await db.scalar(select(PaperPosition).where(PaperPosition.figi == figi))
+        self._pos_cache[figi] = pos
+        return pos
 
     async def open_position(
         self,
@@ -132,6 +140,7 @@ class PaperBroker:
                 )
             )
             await db.commit()
+        self._pos_cache.pop(figi, None)
 
     async def close_position(self, figi: str, price: float, reason: str) -> PaperTrade | None:
         pos = await self.get_position(figi)
@@ -171,6 +180,7 @@ class PaperBroker:
                 acc.cash += Decimal(str(round(net, 2)))
             await db.execute(delete(PaperPosition).where(PaperPosition.id == pos.id))
             await db.commit()
+            self._pos_cache.pop(figi, None)
             return trade
 
     async def update_protective_levels(self, figi: str, stop: float | None, target: float | None) -> None:
@@ -181,6 +191,7 @@ class PaperBroker:
             pos.stop_loss = Decimal(str(stop)) if stop is not None else None
             pos.take_profit = Decimal(str(target)) if target is not None else None
             await db.commit()
+        self._pos_cache.pop(figi, None)
 
     async def trades_history(self, limit: int = 100) -> list[PaperTrade]:
         async with self.sessions() as db:
