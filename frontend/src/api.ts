@@ -540,6 +540,7 @@ export interface TestStats {
   by_exit_reason: StatsRow[];
   by_quorum: StatsRow[];
   by_session: StatsRow[];
+  by_strategy: StatsRow[];
 }
 
 export async function fetchTestStats(testName = ""): Promise<TestStats> {

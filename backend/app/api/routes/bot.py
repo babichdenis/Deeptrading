@@ -934,6 +934,7 @@ async def bot_test_stats(test_name: str = "") -> dict:
     by_exit = defaultdict(list)
     by_quorum = defaultdict(list)
     by_session = defaultdict(list)
+    by_strategy = defaultdict(list)
     for t in closed:
         m = _meta(t)
         by_side[t.side or "?"].append(t)
@@ -946,6 +947,9 @@ async def bot_test_stats(test_name: str = "") -> dict:
         qe = m.get("quorum_event") or {}
         q = qe.get("votes") if qe else (ent.get("quorum") or ent.get("votes"))
         by_quorum[str(q) if q is not None else "—"].append(t)
+        _members = qe.get("members_for") or ent.get("quorum_members") or ent.get("members_for") or []
+        for _sid in (_members or ["—"]):
+            by_strategy[str(_sid)].append(t)
         try:
             h = t.entry_time.astimezone(__import__("datetime").timezone(
                 __import__("datetime").timedelta(hours=3))).hour
@@ -968,4 +972,5 @@ async def bot_test_stats(test_name: str = "") -> dict:
         "by_exit_reason": _map(by_exit),
         "by_quorum": _map(by_quorum),
         "by_session": _map(by_session),
+        "by_strategy": _map(by_strategy),
     }

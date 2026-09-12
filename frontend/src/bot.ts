@@ -1749,6 +1749,7 @@ async function renderStats() {
     sec("По акциям", st.by_ticker) +
     sec("По входам", st.by_entry_reason) +
     sec("По выходам", st.by_exit_reason) +
+    sec("По стратегиям (голоса)", st.by_strategy) +
     sec("По кворуму", st.by_quorum);
 }
 
