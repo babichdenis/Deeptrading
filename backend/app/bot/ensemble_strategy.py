@@ -135,7 +135,7 @@ class EnsembleV4Strategy:
             return None
         if "error" in res:
             import logging as _lg
-            self._last_skip = f"res_error: {res.get('error')}"
+            self._last_skip = f"res_error: {res.get('error')} bars={res.get('bars')} buf={len(candles)}"
             _lg.getLogger("ensemble_strategy").warning(
                 "on_bar compute_ensemble ERROR figi=%s: %s", self.p.figi[-6:], res.get("error"))
             return None
