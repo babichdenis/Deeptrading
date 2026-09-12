@@ -42,14 +42,16 @@ AUG_FROM = datetime(2026, 8, 1, tzinfo=timezone.utc)
 AUG_TO = datetime(2026, 9, 1, tzinfo=timezone.utc)
 OOS_FROM = datetime(2026, 8, 17, tzinfo=timezone.utc)
 OOS_TO = datetime(2026, 9, 1, tzinfo=timezone.utc)
+SEP_FROM = datetime(2026, 9, 1, tzinfo=timezone.utc)
+SEP_TO = datetime(2026, 9, 13, tzinfo=timezone.utc)
 
 
-def make_req(figi, lot, p, neutral_mode, entry_session, from_ts, to_ts):
+def make_req(figi, lot, p, neutral_mode, entry_session, from_ts, to_ts, bias_mode="info"):
     setups = [{"strategy_id": s, "tf": "5min",
                "params": dict(p["strategy_params"].get(s, V2_PARAMS.get(s, {})))}
               for s in p["active_sids"]]
     req = {
-        "figi": figi, "bias_mode": "info",
+        "figi": figi, "bias_mode": bias_mode,
         "bias": {"tf": "hour", "period": 50}, "entry_tf": "5min",
         "entry": {"tf": "5min", "lookback": 1}, "entry_session": entry_session,
         "quorum": int(p["quorum"]), "same_side_reentry_cooldown_bars": 15,
@@ -68,8 +70,8 @@ def make_req(figi, lot, p, neutral_mode, entry_session, from_ts, to_ts):
     return req
 
 
-def run_ticker(candles, figi, lot, p, neutral_mode, entry_session, from_ts, to_ts):
-    req = make_req(figi, lot, p, neutral_mode, entry_session, from_ts, to_ts)
+def run_ticker(candles, figi, lot, p, neutral_mode, entry_session, from_ts, to_ts, bias_mode="info"):
+    req = make_req(figi, lot, p, neutral_mode, entry_session, from_ts, to_ts, bias_mode=bias_mode)
     res = compute_ensemble(candles, req)
     if "error" in res:
         return None
@@ -94,11 +96,18 @@ async def load_candles(figi, from_ts, to_ts):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--period", default="aug", choices=["aug", "oos"])
+    ap.add_argument("--period", default="aug", choices=["aug", "oos", "sep"])
     ap.add_argument("--tickers", default="")
     args = ap.parse_args()
-    from_ts, to_ts = (AUG_FROM, AUG_TO) if args.period == "aug" else (OOS_FROM, OOS_TO)
-    period_label = "AUG (01-31.08)" if args.period == "aug" else "OOS (17-31.08)"
+    if args.period == "aug":
+        from_ts, to_ts = AUG_FROM, AUG_TO
+        period_label = "AUG (01-31.08)"
+    elif args.period == "oos":
+        from_ts, to_ts = OOS_FROM, OOS_TO
+        period_label = "OOS (17-31.08)"
+    else:
+        from_ts, to_ts = SEP_FROM, SEP_TO
+        period_label = "SEP (01-13.09)"
 
     async with SessionLocal() as db:
         rows = (await db.execute(text("""
@@ -142,16 +151,19 @@ async def main():
             print(f"{tkr}: no candles"); continue
 
         cfgs = [
-            ("1 opt semi main", p_opt, "semi_flip", "main"),
-            ("2 opt full main", p_opt, None, "main"),
-            ("3 opt semi all", p_opt, "semi_flip", "all"),
-            ("4 opt full all", p_opt, None, "all"),
-            ("5 v2  semi main", p_v2, "semi_flip", "main"),
+            ("1 opt semi main", p_opt, "semi_flip", "main", "info"),
+            ("2 opt full main", p_opt, None, "main", "info"),
+            ("3 opt semi all", p_opt, "semi_flip", "all", "info"),
+            ("4 opt full all", p_opt, None, "all", "info"),
+            ("5 v2  semi main", p_v2, "semi_flip", "main", "info"),
+            ("6 v2 veto main", p_v2, "semi_flip", "main", "veto"),
+            ("7 v2 strict main", p_v2, "semi_flip", "main", "strict_ct"),
+            ("8 v2 veto all", p_v2, "semi_flip", "all", "veto"),
         ]
         print(f"\n--- {tkr} (lot={lot}, {len(candles)}c) ---")
         res_line = {}
-        for label, p, nm, sess in cfgs:
-            r = run_ticker(candles, figi, lot, p, nm, sess, from_ts, to_ts)
+        for label, p, nm, sess, bm in cfgs:
+            r = run_ticker(candles, figi, lot, p, nm, sess, from_ts, to_ts, bias_mode=bm)
             if r is None:
                 print(f"  {label:16s} ERROR")
                 continue
