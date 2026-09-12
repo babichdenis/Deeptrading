@@ -943,7 +943,8 @@ async def bot_test_stats(test_name: str = "") -> dict:
         by_entry[t.entry_reason or "?"].append(t)
         by_exit[t.exit_reason or "?"].append(t)
         ent = m.get("entry") or {}
-        q = ent.get("quorum") or ent.get("votes")
+        qe = m.get("quorum_event") or {}
+        q = qe.get("votes") if qe else (ent.get("quorum") or ent.get("votes"))
         by_quorum[str(q) if q is not None else "—"].append(t)
         try:
             h = t.entry_time.astimezone(__import__("datetime").timezone(
