@@ -512,6 +512,43 @@ export async function botEnsembleReset(): Promise<{ ok: boolean; config: Ensembl
   return res.json();
 }
 
+// ============ Статистика прогона теста ============
+
+export interface StatsRow {
+  key: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  gross_win: number;
+  gross_loss: number;
+  net: number;
+  pf: number | null;
+  wr: number;
+  avg_win: number;
+  avg_loss: number;
+}
+
+export interface TestStats {
+  test_name: string | null;
+  mode: string;
+  overall: StatsRow & { key?: string };
+  open_positions: number;
+  by_side: StatsRow[];
+  by_regime: StatsRow[];
+  by_ticker: StatsRow[];
+  by_entry_reason: StatsRow[];
+  by_exit_reason: StatsRow[];
+  by_quorum: StatsRow[];
+  by_session: StatsRow[];
+}
+
+export async function fetchTestStats(testName = ""): Promise<TestStats> {
+  const q = testName ? `?test_name=${encodeURIComponent(testName)}` : "";
+  const res = await fetch(`${API}/api/v1/bot/test_stats${q}`);
+  if (!res.ok) throw new Error(`test_stats ${res.status}`);
+  return res.json();
+}
+
 // ============ Sandbox API (T-Invest live data) ============
 
 export interface SandboxStatus {

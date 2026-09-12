@@ -1,3 +1,7 @@
+declare global {
+  interface Window { lucide?: { createIcons: (o?: unknown) => void } }
+}
+
 const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
 
 import {
@@ -27,6 +31,9 @@ import {
   screenerAddEligible,
   screenerRemoveEligible,
   type ScreenerRow,
+  fetchTestStats,
+  type TestStats,
+  type StatsRow,
   type SandboxPositionRow,
   type CarouselStatus,
   fetchTests,
@@ -149,6 +156,16 @@ function levValueToSlider(v: number): number {
   return 4; // не из списка → Max
 }
 function levLabel(v: number): string { return v > 0 ? `×${v}` : "Max"; }
+function levPaint(idx: number | string): void {
+  const el = $("mg-lev") as HTMLInputElement | null;
+  if (!el) return;
+  const i = Math.min(4, Math.max(0, Number(idx) || 0));
+  const pct = (i / 4) * 100;
+  el.style.setProperty("--fill", `${pct}%`);
+}
+function levPaintFromValue(v: number): void {
+  levPaint(levValueToSlider(v));
+}
 
 function sendBotConfigPatch(extra?: Record<string, unknown>) {
   const sessMap: Record<string, string> = {
@@ -268,6 +285,7 @@ function initSessChips() {
           levEl.value = String(idx);
           const lbl = $("mg-lev-label");
           if (lbl) lbl.textContent = levLabel(mlv);
+          levPaint(idx);
         }
       }
       // Режимы.
@@ -335,9 +353,11 @@ function initSessChips() {
     const savedLev = localStorage.getItem("bot_margin_lev");
     if (savedLev != null) levEl.value = String(levValueToSlider(Number(savedLev)));
     updLabel();
+    levPaint(levEl.value);
     levEl.addEventListener("input", () => {
       localStorage.setItem("bot_margin_lev", String(levSliderToValue(Number(levEl.value))));
       updLabel();
+      levPaint(levEl.value);
       sendBotConfigPatch();
     });
   }
@@ -377,6 +397,7 @@ function initSessChips() {
 }
 
 export async function initBot(onStateChange?: (running: boolean) => void) {
+  try { window.lucide?.createIcons(); } catch { /* иконки необязательны */ }
   initSessChips();
   initBotSettings();
   $("btn-bot-start").addEventListener("click", () => void doStart());
@@ -929,6 +950,14 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
       : engineRunning ? `Бот работает · ${bst.mode}`
       : backendAlive ? "Бот остановлен" : "Бот недоступен";
 
+  const hdrBotState = $("hdr-bot-state");
+  if (hdrBotState) {
+    hdrBotState.textContent =
+      botErr ? "Ошибка"
+        : engineRunning ? "Бот активен"
+        : backendAlive ? "Бот остановлен" : "Бот недоступен";
+  }
+
   $("btn-bot-start").classList.toggle("hidden", engineRunning);
   $("btn-bot-stop").classList.toggle("hidden", !engineRunning);
   $("btn-bot-pause").classList.toggle("hidden", !engineRunning);
@@ -1000,6 +1029,7 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
       levElSync.value = String(idx);
       const lbl = $("mg-lev-label");
       if (lbl) lbl.textContent = levLabel(mlv);
+      levPaint(idx);
     }
   }
   // Синхронизация режимов рынка с сервером.
@@ -1509,8 +1539,11 @@ function initScreener() {
       document.querySelectorAll(".sr-tab").forEach((x) => x.classList.toggle("active", x === b));
       $("sr-pane-market")?.classList.toggle("hidden", tab !== "market");
       $("sr-pane-votes")?.classList.toggle("hidden", tab !== "votes");
+      $("sr-pane-stats")?.classList.toggle("hidden", tab !== "stats");
+      if (tab === "stats") void renderStats();
     });
   });
+  $("stats-refresh")?.addEventListener("click", () => { void renderStats(); });
   // Клик по плашке тикера → открыть график в существующем chart
   $("votes-config-btn")?.addEventListener("click", toggleEnsembleEditor);
   $("votes-grid")?.addEventListener("click", (e) => {
@@ -1673,6 +1706,50 @@ async function saveEnsembleEditor() {
   } catch {
     if (st) st.textContent = "ошибка сохранения";
   }
+}
+
+async function renderStats() {
+  const body = $("stats-body");
+  if (!body) return;
+  body.innerHTML = `<div class="mini-hint">загрузка…</div>`;
+  let st: TestStats;
+  try {
+    st = await fetchTestStats();
+  } catch {
+    body.innerHTML = `<div class="mini-hint">не удалось загрузить</div>`;
+    return;
+  }
+  const tn = $("stats-test");
+  if (tn) tn.textContent = st.test_name ? `${st.test_name} · ${st.mode}` : st.mode;
+  const o = st.overall;
+  const sec = (title: string, rows: StatsRow[]) => {
+    if (!rows.length) return "";
+    const trs = rows.map((r) =>
+      `<tr><td>${esc(r.key)}</td><td class="n">${r.trades}</td><td class="n">${r.wr}%</td>` +
+      `<td class="n" style="color:${r.net >= 0 ? "var(--up)" : "var(--down)"}">${r.net >= 0 ? "+" : ""}${r.net}</td>` +
+      `<td class="n">${r.pf ?? "—"}</td></tr>`).join("");
+    return `<div class="stats-sec"><div class="stats-title">${title}</div>` +
+      `<table class="stats-table"><thead><tr><th>Ключ</th><th>N</th><th>WR</th><th>Net</th><th>PF</th></tr></thead>` +
+      `<tbody>${trs}</tbody></table></div>`;
+  };
+  body.innerHTML =
+    `<div class="stats-overall">` +
+    `<div><span>Сделок</span><b>${o.trades}</b></div>` +
+    `<div><span>WR</span><b>${o.wr}%</b></div>` +
+    `<div><span>Net</span><b style="color:${o.net >= 0 ? "var(--up)" : "var(--down)"}">${o.net >= 0 ? "+" : ""}${o.net}₽</b></div>` +
+    `<div><span>PF</span><b>${o.pf ?? "—"}</b></div>` +
+    `<div><span>Gross+</span><b>+${o.gross_win}₽</b></div>` +
+    `<div><span>Gross−</span><b>${o.gross_loss}₽</b></div>` +
+    `<div><span>Avg win</span><b>+${o.avg_win}₽</b></div>` +
+    `<div><span>Avg loss</span><b>${o.avg_loss}₽</b></div>` +
+    `<div><span>Открыто</span><b>${st.open_positions}</b></div></div>` +
+    sec("По направлению", st.by_side) +
+    sec("По режиму", st.by_regime) +
+    sec("По сессии", st.by_session) +
+    sec("По акциям", st.by_ticker) +
+    sec("По входам", st.by_entry_reason) +
+    sec("По выходам", st.by_exit_reason) +
+    sec("По кворуму", st.by_quorum);
 }
 
 function initSidebarRightResize() {
