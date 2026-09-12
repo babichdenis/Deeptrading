@@ -1338,11 +1338,17 @@ body.modal-open { overflow: hidden; }
 .stats-overall > div { display: flex; flex-direction: column; padding: 6px 8px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-soft); font-size: 11px; }
 .stats-overall span { color: var(--text-dim); font-size: 10px; }
 .stats-overall b { font-size: 13px; font-variant-numeric: tabular-nums; }
-.stats-title { font-size: 11px; font-weight: 700; color: var(--text-dim); margin-bottom: 4px; }
+.stats-title { font-size: 11px; font-weight: 700; color: var(--text-dim); margin: 0; padding: 5px 8px; background: var(--bg-soft); border-bottom: 1px solid var(--border-soft); }
+.stats-sec { border: 1px solid var(--border-soft); border-radius: 8px; overflow: hidden; }
 .stats-table { width: 100%; border-collapse: collapse; font-size: 11px; }
-.stats-table th { text-align: left; color: var(--text-dim); font-weight: 600; padding: 3px 4px; border-bottom: 1px solid var(--border-soft); }
-.stats-table td { padding: 3px 4px; border-bottom: 1px solid var(--border-soft); }
+.stats-table th { text-align: right; color: var(--text-dim); font-weight: 600; padding: 4px 8px; background: rgba(255,255,255,0.02); }
+.stats-table th:first-child { text-align: left; }
+.stats-table td { padding: 4px 8px; border-top: 1px solid var(--border-soft); }
+.stats-table td:first-child { text-align: left; }
 .stats-table td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.stats-table tbody tr:nth-child(even) { background: rgba(255,255,255,0.015); }
+.stats-table tbody tr:hover { background: rgba(var(--accent-rgb),0.08); }
+.reg-tag { font-size: 9px; font-weight: 700; border: 1px solid; border-radius: 4px; padding: 0 3px; margin-left: 3px; vertical-align: middle; }
 .bot-live-logs .lg-fill { color: var(--accent); }
 .bot-live-logs .lg-exit { color: #ff8a65; }
 
@@ -1722,6 +1728,9 @@ body.sb-resizing .sr-grip { background: rgba(41, 98, 255, 0.3); }
   gap: 8px;
   min-width: 240px;
   max-width: 460px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .sr-head {

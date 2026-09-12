@@ -1260,15 +1260,25 @@ function renderTrades(trades: BotTradeRow[]) {
               : t.exit_reason;
           // Метка bias из meta.entry.against_bias (пишется в ensemble_strategy).
           let biasTag = "";
+          let regTag = "";
           try {
             const m = t.meta ? JSON.parse(t.meta) : null;
             const ab = m?.entry?.against_bias;
             if (ab === true) biasTag = ` <span style="color:#e74c3c;font-weight:700" title="вход против bias (против направления)">⚠ против bias</span>`;
             else if (ab === false) biasTag = ` <span style="color:#2ecc71" title="вход по bias">✓ по bias</span>`;
+            const reg = m?.regime;
+            if (reg) {
+              const map: Record<string, [string, string]> = {
+                HIGH_VOLATILITY: ["HV", "#f39c12"], TREND_UP: ["↑", "#2ecc71"],
+                TREND_DOWN: ["↓", "#e74c3c"], NEUTRAL: ["NEU", "#95a5a6"], RANGE: ["FLAT", "#95a5a6"],
+              };
+              const [lbl, col] = map[reg] || [reg, "#95a5a6"];
+              regTag = ` <span class="reg-tag" style="color:${col};border-color:${col}" title="режим ${reg}">${lbl}</span>`;
+            }
           } catch { /* noop */ }
           return `<tr class="trade-row" data-idx="${i}" data-key="${t.ticker}|${t.entry_time}" style="cursor:pointer">` +
             `<td style="font-size:10px;color:var(--text-dim)">${timeCell}</td>` +
-            `<td><b>${t.ticker}</b>${biasTag}</td>` +
+            `<td><b>${t.ticker}</b>${regTag}${biasTag}</td>` +
             `<td>${sideIcon(t.side)}</td>` +
             `<td class="num">${t.qty}</td>` +
             `<td class="num">${pxCell}</td>` +
