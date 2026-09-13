@@ -501,6 +501,7 @@ class PaperBotRuntime:
             vol_thr=float(ec.get("vol_thr", 0.0) or 0.0),
             neutral_mode=str(ec.get("neutral_mode", "semi_flip")),
             entry_tf=str(getattr(self.config, "ensemble_entry_tf", "5min") or "5min"),
+            entry_from_setups=True,
             entry_macd_1m=True,
             bias_tf=str(_bias.get("tf", "hour")),
             bias_period=int(_bias.get("period", 50)),

@@ -791,7 +791,15 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     # исполнение движком по open следующего 1м бара
     entry_tf = req.get("entry_tf", "1min")
     entry_candles = cached_resample(candles, TF_SECONDS.get(entry_tf, 60)) if entry_tf != "1min" else candles
-    entries_raw = micro_breakout(entry_candles, entry_lookback)
+    if req.get("entry_from_setups"):
+        # Вход (и его СТОРОНА) берётся из сигналов стратегий-голосов, а не из micro_breakout.
+        entries_raw = [
+            {"ts": s["ts"], "side": s["side"],
+             "reason": f"{sid}:{s.get('reason', '')}", "features": s.get("features")}
+            for sid, sigs in setup_runs for s in sigs
+        ]
+    else:
+        entries_raw = micro_breakout(entry_candles, entry_lookback)
     unique_raw_ts = len({s["ts"] for _, sigs in setup_runs for s in sigs})
 
     # Volume Exhaustion (VOLUME_EXHAUSTION_2026.md Шаг 1): серия фич по закрытым 5m-барам.
