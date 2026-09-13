@@ -822,3 +822,128 @@ class RangeEnsembleStrategy:
             return Signal(strategy_id=self.strategy_id, side=Side.SELL,
                           time=candles[-1].ts, reason="range_scalp_down", features={"type": "scalp"})
         return None
+
+
+# ============================================================
+# HIGH_VOLATILITY: только сильные направленные пробои, сниженный риск
+# ============================================================
+def compute_features_hv(candles: Sequence[Candle]) -> dict:
+    closes = [float(c.close) for c in candles]
+    highs = [float(c.high) for c in candles]
+    lows = [float(c.low) for c in candles]
+    vols = [float(c.volume or 0.0) for c in candles]
+
+    adx, dip, dim = _adx_series(candles, 14)
+    adx_val = adx[-1] if adx else None
+    plus_di = dip[-1] if dip else None
+    minus_di = dim[-1] if dim else None
+    sma50 = _sma(closes, 50)
+    close = closes[-1]
+    prev_close = closes[-2] if len(closes) >= 2 else close
+
+    hv_trend_up = (adx_val is not None and adx_val > 25 and plus_di is not None
+                   and minus_di is not None and plus_di > minus_di
+                   and sma50 is not None and close > sma50)
+    hv_trend_down = (adx_val is not None and adx_val > 25 and plus_di is not None
+                     and minus_di is not None and minus_di > plus_di
+                     and sma50 is not None and close < sma50)
+
+    N = 20
+    highest_high_20 = max(highs[-N - 1:-1]) if len(highs) >= N + 1 else None
+    lowest_low_20 = min(lows[-N - 1:-1]) if len(lows) >= N + 1 else None
+    hv_breakout_up = (highest_high_20 is not None) and (close > highest_high_20)
+    hv_breakdown_down = (lowest_low_20 is not None) and (close < lowest_low_20)
+
+    atr = _atr_series(candles, 14)
+    atr_val = atr[-1] if atr else None
+    atr_sma50 = _sma(atr, 50)
+    atr_expansion = (atr_val is not None and atr_sma50 is not None and atr_val > 1.5 * atr_sma50)
+    hv_breakout_up = hv_breakout_up and atr_expansion
+    hv_breakdown_down = hv_breakdown_down and atr_expansion
+
+    vol_sma20 = _sma(vols, 20)
+    hv_volume_surge_up = (close > prev_close and vol_sma20 is not None and vols[-1] > 2.0 * vol_sma20)
+    hv_volume_surge_down = (close < prev_close and vol_sma20 is not None and vols[-1] > 2.0 * vol_sma20)
+
+    N_mom = 20
+    momentum_20 = ((close - closes[-N_mom - 1]) / closes[-N_mom - 1]) if len(closes) > N_mom else 0.0
+    hv_momentum_strong = momentum_20 > 0.03
+    hv_momentum_strong_neg = momentum_20 < -0.03
+
+    lower_band, mid_band, upper_band = _bb_last(closes, 20, 2.0)
+    bbw = _bb_width_series(closes, 20, 2.0)
+    bbw_sma = _sma(bbw, 60)
+    bb_expansion = bool(bbw) and (bbw_sma is not None) and (bbw[-1] > 1.2 * bbw_sma)
+    hv_bb_break_upper = (upper_band is not None) and (close > upper_band) and bb_expansion
+    hv_bb_break_lower = (lower_band is not None) and (close < lower_band) and bb_expansion
+
+    return {
+        "hv_trend_up": hv_trend_up,
+        "hv_trend_down": hv_trend_down,
+        "hv_breakout_up": hv_breakout_up,
+        "hv_breakdown_down": hv_breakdown_down,
+        "hv_volume_surge_up": hv_volume_surge_up,
+        "hv_volume_surge_down": hv_volume_surge_down,
+        "hv_momentum_strong": hv_momentum_strong,
+        "hv_momentum_strong_neg": hv_momentum_strong_neg,
+        "hv_bb_break_upper": hv_bb_break_upper,
+        "hv_bb_break_lower": hv_bb_break_lower,
+        "_adx": adx_val,
+    }
+
+
+def ensemble_hv_long(f: dict) -> int:
+    score = 2 if f["hv_trend_up"] else 0     # тренд критичен
+    score += 1 if f["hv_breakout_up"] else 0
+    score += 1 if f["hv_volume_surge_up"] else 0
+    score += 1 if f["hv_momentum_strong"] else 0
+    score += 1 if f["hv_bb_break_upper"] else 0
+    return 1 if (f["hv_trend_up"] and score >= 4) else 0
+
+
+def ensemble_hv_short(f: dict) -> int:
+    score = 2 if f["hv_trend_down"] else 0
+    score += 1 if f["hv_breakdown_down"] else 0
+    score += 1 if f["hv_volume_surge_down"] else 0
+    score += 1 if f["hv_momentum_strong_neg"] else 0
+    score += 1 if f["hv_bb_break_lower"] else 0
+    return 1 if (f["hv_trend_down"] and score >= 4) else 0
+
+
+def hv_signals(candles: Sequence[Candle]):
+    """Возвращает (hv_long: bool, hv_short: bool)."""
+    f = compute_features_hv(candles)
+    return (ensemble_hv_long(f) == 1), (ensemble_hv_short(f) == 1)
+
+
+class HighVolatilityEnsembleStrategy:
+    """Только сильные направленные движения в HIGH_VOLATILITY.
+
+    Уменьшенный размер (risk_per_trade), расширенные стопы (atr_mult_stop).
+    """
+    strategy_id = "hv_ensemble"
+    version = "0.1.0"
+
+    def __init__(self, params: dict | None = None):
+        self.params = params or {}
+        self.risk_per_trade = float(self.params.get("risk_per_trade", 0.005))
+        self.atr_mult_stop = float(self.params.get("atr_mult_stop", 2.5))
+
+    def warmup_bars(self) -> int:
+        return 210
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        if len(candles) < self.warmup_bars():
+            return None
+        hv_long, hv_short = hv_signals(candles)
+        if hv_long:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY,
+                          time=candles[-1].ts, reason="hv_long",
+                          features={"type": "hv_long", "risk_per_trade": self.risk_per_trade,
+                                    "atr_mult_stop": self.atr_mult_stop})
+        if hv_short:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL,
+                          time=candles[-1].ts, reason="hv_short",
+                          features={"type": "hv_short", "risk_per_trade": self.risk_per_trade,
+                                    "atr_mult_stop": self.atr_mult_stop})
+        return None
