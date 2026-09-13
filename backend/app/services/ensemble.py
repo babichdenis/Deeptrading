@@ -117,7 +117,7 @@ ALL_STRATEGY_IDS = ["rsi_reversal", "bollinger_reclaim", "pullback_ema", "vwap_r
 # а не reversal-сигналы. `drop_useless` оценивает совпадение с oracle-разворотами и
 # ошибочно удаляет их, поэтому они исключены из отсева.
 VOLUME_STRATEGY_IDS = {"volume_drop", "volume_climax", "volume_divergence"}
-TF_SECONDS = {"1min": 60, "5min": 300, "15min": 900, "hour": 3600}
+TF_SECONDS = {"1min": 60, "5min": 300, "10min": 600, "15min": 900, "hour": 3600}
 
 
 def request_hash(payload: dict) -> str:
