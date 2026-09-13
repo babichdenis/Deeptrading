@@ -360,3 +360,26 @@ range_pct=6.0/os=20/ob=60.
 калибровка детектора +1 386 → роутер+новые голоса → +5 676 → функции +330 → **+6 005 OOS**.
 
 Следующий шаг: A/B на live (июль/август/сентябрь) с этими параметрами.
+
+***
+
+# РЕАЛИЗАЦИЯ АНСАМБЛЕЙ ПО РЕЖИМАМ (код готов, не подключён)
+
+Файл: `backend/app/engine/regime_ensembles.py`. Реализованы все три класса по спецификации:
+- **SHORT**: `compute_features` → 4 ансамбля (`trend_down`, `breakdown_momentum`, `volume_down`,
+  `vol_structure_down`) → `short_signal` (кворум TREND_DOWN=2, HV/RANGE/NEUTRAL=3, TREND_UP=запрет,
+  обязательный breakdown) → `exit_short_signal` (профили trend/breakdown/mean_reversion, трейлинг, тайм-аут).
+- **LONG**: `compute_features_long` → 4 ансамбля → `long_signal` (TREND_UP=2, остальные 3, TREND_DOWN=запрет)
+  → `exit_long_signal`.
+- **RANGE**: `compute_features_range` → `ensemble_mr_long` / `ensemble_mr_short` (касание полосы вес 2 + 2 из 3)
+  + `ensemble_scalping` (микро-пробой + 3 признака) + `range_signals` с фильтром «полного штиля»
+  (bb_width<0.03 & rvol<0.7 & atr/close<0.005) → `RangeEnsembleStrategy`.
+
+Статус: **не подключено к движку** (нет карточек каталога и записей реестра) — ждём проверки.
+Smoke-тесты на SBER/GAZP: LONG-сигналов больше в сентябре (рост), SHORT — в июле (падение);
+RANGE: «штиль» ~44–53% баров (порог, возможно, строговат — кандидат на калибровку).
+
+Матрица режимов: TREND_UP→long (k=2), TREND_DOWN→short (k=2), RANGE→MR long/short+scalp (k=3),
+HV/NEUTRAL→обе стороны (k=3).
+
+Следующий шаг: регистрация в каталоге+реестре, привязка через `regime_setups_filter`, A/B на июле/августе/сентябре.
