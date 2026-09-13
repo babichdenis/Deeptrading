@@ -83,6 +83,9 @@ class BotConfig:
     ensemble_capital: float = 2000.0
     ensemble_quorum: int = 2
     ensemble_session: str = "main"
+    # --- Оверрайд SL/TP (0 = брать per-ticker optuna) ---
+    ensemble_sl_mult: float = 0.0
+    ensemble_rr: float = 0.0
     sessions: list = field(default_factory=lambda: ["day"])
     leverage: float = 1.0
     # --- Commission & slippage (live parity with backtest) ---
@@ -491,8 +494,8 @@ class PaperBotRuntime:
             figi=figi, lot=int(lot) if lot else 10, capital=capital,
             quorum=int(ec.get("quorum", 2)), session="all", sessions=sessions,
             setups=_setups,
-            sl_mult=float(opt.get("sl_mult", 4.0)),
-            rr=float(opt.get("rr", 4.0)),
+            sl_mult=(float(getattr(self.config, "ensemble_sl_mult", 0.0) or 0.0) or float(opt.get("sl_mult", 4.0))),
+            rr=(float(getattr(self.config, "ensemble_rr", 0.0) or 0.0) or float(opt.get("rr", 4.0))),
             vol_thr=float(ec.get("vol_thr", 0.0) or 0.0),
             neutral_mode=str(ec.get("neutral_mode", "semi_flip")),
             entry_macd_1m=True,
