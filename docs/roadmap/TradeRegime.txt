@@ -1,0 +1,330 @@
+Отлично, сделаем три отдельных набора: **на падение (downtrend / bearish)**, **на боковик (range / mean reversion)** и оставим ранее описанный **на подъём (uptrend)** как третий класс. Ниже — расширенные списки в твоём стиле. [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/)
+
+***
+
+## 1. Расширенный список на падение (Downtrend / Bearish)
+
+Цель: ловить **сильные нисходящие тренды и пробой вниз**, а не просто «любой откат».
+
+### 1.1. Трендовые фильтры (down)
+
+| Функция | Идея | Пример |
+|---|---|---|
+| `price_below_sma200` | Долгосрочный даунтренд | `close < sma(close, 200)`  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+| `price_below_sma50` | Среднесрочный даунтренд | `close < sma(close, 50)`  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+| `sma50_below_sma200` | Медвежья структура кривых | `sma(close, 50) < sma(close, 200)`  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+| `ema20_below_ema50` | Краткосрочный тренд вниз | `ema(close, 20) < ema(close, 50)`  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+| `adx_downtrend` | Сильный нисходящий тренд | `adx(14) > 20` и `-di > +di`  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+
+### 1.2. Пробойные / импульсные функции (breakdown / bearish momentum)
+
+| Функция | Идея | Пример |
+|---|---|---|
+| `donchian_breakdown_down` | Пробой нижнего канала Дончиана | `close < lowest(low, N)`  [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/) |
+| `new_low_N` | Обновление локального минимума | `close == lowest(low, N)`  [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/) |
+| `momentum_neg_N` | Отрицательный импульс | `(close - close[N]) / close[N] < 0` (или < −threshold)  |
+| `rsi_below_50` | Медвежий импульс по RSI | `rsi(close, 14) < 50` (можно 45–40)  [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/) |
+| `macd_bearish` | MACD ниже сигнала / ниже нуля | `macd_line < signal_line` и/или `macd_line < 0`  |
+| `bb_break_lower` | Пробой нижней полосы Боллинджера | `close < lower_band(20, 2σ)`  [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/) |
+
+### 1.3. Объёмное подтверждение падения
+
+| Функция | Идея | Пример |
+|---|---|---|
+| `volume_surge_down` | Объём на падении выше среднего | `close < close [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/)` и `volume > k * sma(volume, 20)`  |
+| `rvol_down` | Относительный объём на вниз-барах | `rvol = volume / sma(volume, 20)`; сигнал, если `close < close [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/)` и `rvol > 1.5`  |
+| `obv_downtrend` | OBV падает вместе с ценой | `obv < sma(obv, 20)` и цена делает lower lows  |
+| `cmf_negative` | Money Flow в продажу | `cmf(20) < 0`  |
+| `volume_rally_low` | Объём на отскоках ниже среднего | На барах роста `volume < sma(volume, 20)` | Здоровый даунтренд: падение на объёме, отскоки на сухом объёме  |
+
+### 1.4. Волатильность + структура (для качественных входов в шорт)
+
+| Функция | Идея | Пример |
+|---|---|---|
+| `bb_squeeze_down` | Сжатие BB + пробой вниз | `bb_width < threshold` и `close < lower_band`  [stratbase](https://stratbase.ai/en/blog/range-trading-strategy-guide) |
+| `atr_expansion_down` | Расширение ATR на падении | `atr(14) > sma(atr(14), 20)` и `close < close [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/)`  |
+| `lower_highs_lows` | Структура даунтренда | `high < highest(high, M)[M:]` и `low < lowest(low, M)[M:]`  |
+
+**Итоговый блок в твоём стиле:**
+
+```text
+TrendDownИюльСентябрь:
+  price_below_sma200      +X
+  price_below_sma50       +X
+  sma50_below_sma200      +X
+  ema20_below_ema50       +X
+  adx_downtrend           +X
+
+BreakdownИюльСентябрь:
+  donchian_breakdown_down +X
+  new_low_20              +X
+  momentum_neg_20         +X
+  rsi_below_45            +X
+  macd_bearish            +X
+  bb_break_lower          +X
+
+VolumeDownИюльСентябрь:
+  volume_surge_down       +X
+  rvol_down               +X
+  obv_downtrend           +X
+  cmf_negative            +X
+  volume_rally_low        +X
+
+VolatilityDownИюльСентябрь:
+  bb_squeeze_down         +X
+  atr_expansion_down      +X
+  lower_highs_lows        +X
+```
+
+***
+
+## 2. Список на боковик (Range / Sideways / Mean Reversion)
+
+Цель: ловить **флэт, консолидацию и возврат к средней**, а не трендовые движения. Здесь ключевые фильтры — **низкий ADX, сжатые полосы, отсутствие новых экстремумов**, а сигналы — **RSI/BB/z-score на отклонение от mean**. [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330)
+
+### 2.1. Детекторы боковика (режим «range»)
+
+| Функция | Идея | Пример |
+|---|---|---|
+| `adx_flat` | Отсутствие сильного тренда | `adx(14) < 20` (или < 25)  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+| `adx_declining` | Тренд затухает | `adx(14) < adx(14)[N]` и `adx(14) < 25`  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+| `ma_flat` | Скользящие средние почти горизонтальны | `abs(slope(sma(close, 50), N)) < threshold`  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+| `ma_intertwined` | EMA/SMA переплетены | `max(ema20, ema50, sma200) - min(...) < threshold`  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+| `bb_squeeze` | Сжатие волатильности (Bollinger Bandwidth) | `bb_width = (upper - lower) / mid < threshold`  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+| `no_new_extremes` | Нет новых значимых high/low | `high < highest(high, 20)[20:]` и `low > lowest(low, 20)[20:]`  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+| `range_touch_count` | Много касаний поддержки/сопротивления | Число касаний уровня support/resistance ≥ 2 за M баров  [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330) |
+
+### 2.2. Сигналы mean reversion (внутри боковика)
+
+| Функция | Идея | Пример |
+|---|---|---|
+| `rsi_oversold` | Перепроданность (покупка отката) | `rsi(close, 14) < 30`  [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/) |
+| `rsi_overbought` | Перекупленность (продажа отскока) | `rsi(close, 14) > 70`  [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/) |
+| `bb_lower_touch` | Цена у нижней полосы (покупка) | `close <= lower_band(20, 2σ)`  [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/) |
+| `bb_upper_touch` | Цена у верхней полосы (продажа) | `close >= upper_band(20, 2σ)`  [j2t](https://j2t.com/solutions/blogview/mean-reversion-strategies/) |
+| `bb_rsi_combo_long` | Комбо: низкая полоса + RSI-oversold | `close <= lower_band` и `rsi < 30`  [theindicatorlab](https://theindicatorlab.com/blog/how-to-build-a-mean-reversion-trading-system-on-tradingview/) |
+| `bb_rsi_combo_short` | Комбо: верхняя полоса + RSI-overbought | `close >= upper_band` и `rsi > 70`  [theindicatorlab](https://theindicatorlab.com/blog/how-to-build-a-mean-reversion-trading-system-on-tradingview/) |
+| `zscore_extreme` | Сильное отклонение от средней | `z = (close - sma(close, N)) / std(close, N)`; `|z| > 2`  [technical-analysis-pro](https://www.technical-analysis-pro.com/strategies-range-trading-sideways-markets/) |
+| `stoch_oversold` | Stochastic в зоне перепроданности | `stoch_k < 20` (и/или `stoch_d < 20`)  [mql5](https://www.mql5.com/en/forum/393158/page3720) |
+| `stoch_overbought` | Stochastic в зоне перекупленности | `stoch_k > 80` (и/или `stoch_d > 80`)  [mql5](https://www.mql5.com/en/forum/393158/page3720) |
+
+### 2.3. Подтверждение «чистого» боковика (без скрытого тренда)
+
+| Функция | Идея | Пример |
+|---|---|---|
+| `obv_flat` | OBV без выраженного тренда | `abs(slope(obv, N)) < threshold`  |
+| `volume_decline` | Общий объём снижается / стабилен | `sma(volume, 20) < sma(volume, 60)` или `rvol ≈ 1`  |
+| `hurst_mean_reverting` | Оценка режима (H < 0.5) | `hurst_exponent(close, N) < 0.5`  [stratbase](https://stratbase.ai/en/blog/range-trading-strategy-guide) |
+
+**Итоговый блок в твоём стиле:**
+
+```text
+RangeModeИюльСентябрь:
+  adx_flat                +X
+  adx_declining           +X
+  ma_flat                 +X
+  ma_intertwined          +X
+  bb_squeeze              +X
+  no_new_extremes         +X
+  range_touch_count       +X
+
+MeanReversionLongИюльСентябрь:
+  rsi_oversold            +X
+  bb_lower_touch          +X
+  bb_rsi_combo_long       +X
+  zscore_extreme_neg      +X
+  stoch_oversold          +X
+
+MeanReversionShortИюльСентябрь:
+  rsi_overbought          +X
+  bb_upper_touch          +X
+  bb_rsi_combo_short      +X
+  zscore_extreme_pos      +X
+  stoch_overbought        +X
+
+RangeConfirmИюльСентябрь:
+  obv_flat                +X
+  volume_decline          +X
+  hurst_mean_reverting    +X
+```
+
+***
+
+## 3. Как это использовать в модели
+
+Теперь у тебя три класса рыночных режимов:
+
+- **Uptrend** → функции из предыдущего ответа (TrendUp, BreakoutUp, VolumeUp, VolatilityUp).
+- **Downtrend** → функции из раздела 1 (TrendDown, Breakdown, VolumeDown, VolatilityDown).
+- **Sideways / Range** → функции из раздела 2 (RangeMode, MeanReversionLong/Short, RangeConfirm).
+
+Можно:
+
+1. **Сначала детектировать режим:**
+   - Если `sum(RangeMode) ≥ K` → режим = `SIDEWAYS`.
+   - Иначе если `sum(TrendUp) ≥ M` → режим = `UPTREND`.
+   - Иначе если `sum(TrendDown) ≥ M` → режим = `DOWNTREND`.
+
+2. **Затем внутри режима выбирать сторону:**
+   - В `UPTREND` → преимущественно `BUY`-сигналы (BreakoutUp + VolumeUp).
+   - В `DOWNTREND` → преимущественно `SELL`-сигналы (Breakdown + VolumeDown).
+   - В `SIDEWAYS` → `MeanReversionLong` / `MeanReversionShort` в зависимости от RSI/BB/z-score. [journals.ue.poznan](https://journals.ue.poznan.pl/ebr/article/view/2330)
+
+Если хочешь, могу помочь свести это в единую таблицу признаков с колонками:  
+`feature_name | regime (up/down/side) | side (long/short/filter) | formula | comment` — чтобы сразу загружать в твой пайплайн обучения.
+
+***
+
+# СТАТУС РЕАЛИЗАЦИИ (ведёт агент №1 — обновлять здесь, не теряться)
+
+## Решение по режимам
+Делаем **не 3 класса, а 5 режимов** детектора: `NEUTRAL / TREND_UP / TREND_DOWN / HIGH_VOLATILITY / RANGE` —
+чтобы настраивать плавнее. Новые стратегии — строительные блоки, привязка к режимам через
+`regime_setups_filter` (уже есть в движке и UI).
+
+## Что уже сделано
+- **Найден и исправлен баг паритета** (`EngineRunner.run`, коммит `4b494dc`): в ветке `semi_flip` для NEUTRAL
+  `_close()` вызывался без `position = ...` → закрытая позиция закрывалась снова на каждом баре,
+  завышая бэктест. Эффект: SMLT 2026-07-15 10→5 сделок; неделя 151→79.
+- **Инструменты паритета**: `scripts/parity_diff.py` (live vs compute_ensemble по тикеру/периоду),
+  `scripts/fast_period_compare.py` (быстрый прогон по периодам), `scripts/regime_voice_matrix.py`
+  (голос×режим, bias×режим, SL/TP×режим, ablation), сравнение тестов в UI (вкладка «Статистика» → «⚖ Сравнить тесты»).
+- **Реализованы 3 новые стратегии** (`app/engine/strategies.py` + карточки в `app/engine/catalog.py`):
+  - `trend_up` (BUY): close>SMA(long) & EMA(fast)>EMA(slow) & пробой канала Дончиана вверх & объём > k×avg.
+  - `trend_down` (SELL): зеркально.
+  - `range_reversion` (BUY/SELL): узкий диапазон + RSI-экстремум + касание полос Боллинджера.
+
+## Live-результаты (тесты на .2; 10K, трейлинг off, optuna sl/rr, `trend_alignment=true`, `confirm_flip=2`)
+| Тест | Период | Trades | Net | PF | WR |
+|---|---|---|---|---|---|
+| `week1b` | 14–18.07 | 230 | +6 917₽ | 2.64 | 40.4% |
+| `aug1` | 11–15.08 | 205 | +2 876₽ | 2.06 | 40.5% |
+| `sep2` | 08–12.09 | 102 | −177₽ | 0.79 | 17.6% |
+| `jul_nogate` (без гейтов) | 14–18.07 | 132 | +2 124₽ | 2.63 | 40.9% |
+
+## Быстрый бэктест `compute_ensemble` (после фикса #1; 27 тикеров, 10K/тикер, изолированно)
+| Период | Net | PF | WR |
+|---|---|---|---|
+| июль 14–18 | +48 920₽ | 10.93 | 73.5% |
+| август 11–15 | +25 921₽ | 5.71 | 61.3% |
+| сентябрь 08–12 | +7 322₽ | 2.60 | 48.8% |
+
+## Ключевые выводы
+- Бэктест всё ещё **≈7× оптимистичнее live** — ищем дальше (паритет не полный).
+- **Гипотеза `confirm_flip`**: бэктест флипает сразу, runtime ждёт N подряд. Проверено:
+  снятие гейтов (`trend_alignment=false`, `confirm_flip=0`) сделало live **хуже** (`jul_nogate` +2124 < `week1b` +6917)
+  → гейты **полезны**, оптимизм в другом месте.
+- **Bias (live)**: «по bias» +2134₽ PF 4.69 vs «против bias» +71₽ PF 1.13 → против-bias почти балласт,
+  фильтр по bias должен помочь (в багованном бэктесте вывод был обратный — артефакт).
+- Стратегия **асимметрична** (в июле SELL 199/230): нужны BUY-голоса на рост рынка.
+
+## Следующие шаги
+1. Встроить `trend_up` / `trend_down` / `range_reversion` в конфиг ансамбля по режимам (`regime_setups_filter`).
+2. Прогнать матрицу «режим × стратегия» на исправленном коде (после фикса).
+3. Собрать свой ансамбль на каждый из 5 режимов и протестировать на июле/августе/сентябре.
+4. Закрыть остаточный разрыв паритета live↔бэктест.
+
+***
+
+# АРХИТЕКТУРА: РОУТЕР ПО РЕЖИМАМ (план, ведёт агент №1)
+
+## Принцип
+`RegimeDetector` (5 режимов) + часовой `bias` = gate первого уровня; стратегии — второй уровень,
+включаются только в подходящих режимах через `regime_setups_filter` (уже поддержано движком и UI).
+
+## Матрица «режим → какие голоса включать» (стартовая гипотеза)
+| Режим | Включать | Выключать |
+|---|---|---|
+| **TREND_UP** | `trend_up`, `donchian_breakout`, `macd_cross`, `bollinger_reclaim`, `pullback_ema` | `trend_down`, `range_reversion` |
+| **TREND_DOWN** | `trend_down`, `volume_drop`, `donchian_breakout`, `macd_cross`, `pullback_ema` | `trend_up`, `range_reversion` |
+| **RANGE** | `range_reversion` (+ `bollinger_reclaim`) | трендовые/пробойные |
+| **HIGH_VOLATILITY** | `volume_drop`, `donchian_breakout`, `macd_cross`, `bollinger_reclaim` | `range_reversion` |
+| **NEUTRAL** | `range_reversion`, `pullback_ema`, `bollinger_reclaim`, `macd_cross`, `volume_drop` | агрессивные пробои |
+
+Bias внутри режима: `BULLISH` → усиливать long-голоса; `BEARISH` → short-голоса; `NEUTRAL` → симметрично.
+
+## Как проверяем (без самообмана)
+1. **Тегирование сделок** по `regime_at_entry` и `bias_at_entry` — уже есть в meta (`by_regime`, `by_bias` в UI).
+2. **A/B**: baseline (все голоса везде) vs regime-router vs оптимизация порогов.
+3. **Метрики по режимам**: N, Net, WR, PF, вклад в общий net/просадку (вкладка «Статистика» → срезы по режиму).
+4. **Walk-forward/OOS**: подбор на июле–августе, проверка на сентябре; разные окна.
+5. **Стресс-окна**: трендовое/флэт/высокая волатильность (июль 14–18, авг 11–15, сент 08–12).
+
+## Статус инструментов
+- `scripts/regime_voice_matrix.py` — режим×голос, bias×режим, SL/TP×режим, ablation (уже включает `trend_up/trend_down/range_reversion`).
+- `scripts/fast_period_compare.py` — быстрый прогон по периодам с live-подобной конфигурацией.
+- UI: вкладка «Статистика» → период (С/По) + источник (Live/Тест) + «⚖ Сравнить тесты».
+
+## Открытые вопросы
+- Остаточный разрыв бэктест↔live (~7×) — где именно (исполнение выходов, портфель, fills).
+- Пороги режим-детектора (настраиваемые?) и частота переключений.
+- Risk per regime (размер/стоп в HIGH_VOLATILITY и NEUTRAL).
+
+***
+
+# MTF-СХЕМА (H1 → M15 → M5) — план
+
+## Роли фреймов
+- **H1** — режим (`NEUTRAL/TREND_UP/TREND_DOWN/HIGH_VOLATILITY/RANGE`) + часовой bias.
+- **M15** — основные сигналы (весь зоопарк стратегий).
+- **M5** — точный вход/тайминг и локальные стопы (ATR M5 / recent high-low).
+- **D1** (опц.) — дополнительный фильтр направления (не лонг в сильном D1-даунтренде и наоборот).
+
+## Что уже есть в движке
+- `bias_tf` (hour), `entry_tf` (5min), у каждой стратегии свой `tf` в `setups`.
+- `regime` считается отдельно (сейчас 5m в runtime; можно перевести на H1).
+- Тегирование сделок по `regime`/`bias` уже есть в meta.
+
+## Эксперимент для проверки MTF
+1. Вариант A (текущий): сигналы `tf=5min`, вход 5min, bias hour.
+2. Вариант B: сигналы `tf=15min`, вход 5min, bias hour, режим hour.
+3. Вариант C: B + D1-фильтр направления.
+Сравнить: Sharpe/PF/DD и вклад по режимам на июле/августе/сентябре.
+
+## Как тестировать (без look-ahead)
+- Режим/bias — строго на закрытии H1.
+- Сигналы — на закрытии M15.
+- Вход — следующий бар M15 (консервативно) или M5-уточнение (агрессивнее).
+- Метрики группировать по режимам входа (уже в UI: срез «По режиму»).
+
+***
+
+# КАЛИБРОВКА РЕЖИМ-ДЕТЕКТОРА
+
+## Текущие пороги (`app/services/regime.py`, RegimeDetector)
+```
+slope_threshold        = 0.002   # |наклон EMA50| за 5 баров
+adx_threshold          = 18.0    # ниже = боковик
+atr_percentile_threshold = 90.0  # процентиль ATR% → HIGH_VOLATILITY
+range_mult             = 2.5     # (high-low)/close > mult*ATR% → HIGH_VOLATILITY
+atr_period=14, ema_fast=20, ema_slow=50, window=200
+```
+Логика: сначала HIGH_VOLATILITY (по ATR-перцентилю/ширине бара), затем TREND_UP/DOWN
+(наклон EMA + ADX), затем RANGE (плоская EMA + низкий ADX), иначе NEUTRAL.
+Основание — `reason` и `features` (atr_pct, atr_percentile, ema_slope, adx, volume_ratio) уже пишутся.
+
+## Предлагаемая сетка калибровки (walk-forward)
+```
+adx_trend_threshold   ∈ [20, 22, 25, 28]
+adx_range_max         ∈ [18, 20, 22]
+atr_ratio_high_vol    ∈ [1.5, 1.8, 2.0, 2.3]
+bbw_percentile_hv     ∈ [70, 80, 90]
+hurst_trend_min       ∈ [0.52, 0.55, 0.58]   (если добавим Hurst)
+hurst_range_max       ∈ [0.42, 0.45, 0.48]
+slope_threshold       ∈ [0.001, 0.002, 0.003]
+```
+Процедура: IS-окно → перебор → выбор по Sharpe/Calmar/DD → фикс → OOS → устойчивость
+на нескольких окнах. Контроль доли времени в каждом режиме (ни один не <5% и не >60%).
+
+## Результаты матрицы «режим × голос» (исправленный код, 10 голосов, 01.07–13.09)
+| Режим | всего net | PF | Лидеры | Проблемы |
+|---|---|---|---|---|
+| HIGH_VOLATILITY | +248 332 | 5.41 | volume_drop +230 738, pullback +176 602, donchian +71 770 | все в плюсе |
+| TREND_UP | +82 400 | 13.75 | volume_drop +63 985, pullback +41 174 (PF 19.9), macd +27 252 | все в плюсе |
+| TREND_DOWN | +63 623 | 11.45 | volume_drop +44 421, pullback +35 432 | все в плюсе |
+| NEUTRAL | +127 538 | 2.06 | volume_drop +125 805, pullback +92 739 | **vwap_reclaim −362 (PF 0.74)** |
+| RANGE | −210 | 0.12 | — | всё минус (12 сделок, шум) |
+
+**Вывод:** `trend_up`/`trend_down` **почти не попадают в кворум** (сигналов мало) — их надо
+сделать чувствительнее (или понижать quorum/включать как «решающий» голос). `vwap_reclaim` в NEUTRAL
+минусовой. RANGE практически не торгуется (детектор редко его выдаёт → либо пороги, либо no-trade).

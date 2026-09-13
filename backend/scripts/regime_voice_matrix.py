@@ -30,6 +30,10 @@ from app.services.regime import RegimeDetector, regime_at
 from app.bot.ensemble_strategy import V2_SETUPS
 
 V2P = {s["strategy_id"]: s["params"] for s in V2_SETUPS}
+V2P["volume_drop"] = {"ma_len": 20, "drop_ratio": 1.5}
+V2P["trend_up"] = {}
+V2P["trend_down"] = {}
+V2P["range_reversion"] = {}
 VOL_PARAMS = {"ma_len": 20, "drop_ratio": 1.5}
 
 FROM = datetime(2026, 7, 1, tzinfo=timezone.utc)
