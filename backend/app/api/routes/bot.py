@@ -293,7 +293,7 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.invert_signals is not None and req.invert_signals != cfg.invert_signals:
         changes.append(f"инверсия сигналов: {'вкл' if cfg.invert_signals else 'выкл'} → {'вкл' if req.invert_signals else 'выкл'}")
         cfg.invert_signals = req.invert_signals
-    if req.ensemble_entry_tf is not None and req.ensemble_entry_tf in ("1min", "5min", "15min"):
+    if req.ensemble_entry_tf is not None and req.ensemble_entry_tf in ("1min", "5min", "10min", "15min"):
         if req.ensemble_entry_tf != getattr(cfg, "ensemble_entry_tf", "5min"):
             changes.append(f"entry_tf: {getattr(cfg, 'ensemble_entry_tf', '5min')} → {req.ensemble_entry_tf}")
         cfg.ensemble_entry_tf = req.ensemble_entry_tf
