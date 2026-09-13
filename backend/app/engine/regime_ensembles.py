@@ -23,6 +23,18 @@ from typing import Sequence
 from app.engine.models import Candle, Side, Signal
 
 
+def _as_dict(p) -> dict:
+    """Нормализует params (dict | dataclass | None) в dict."""
+    if p is None:
+        return {}
+    if isinstance(p, dict):
+        return dict(p)
+    try:
+        return {k: getattr(p, k) for k in p.__dataclass_fields__}
+    except Exception:
+        return {}
+
+
 # ============================================================
 # Индикаторы (списки, без внешних зависимостей)
 # ============================================================
@@ -78,6 +90,50 @@ def _atr_series(candles: Sequence[Candle], period: int = 14) -> list[float]:
     return out
 
 
+def _atr_tail(candles: Sequence[Candle], period: int = 14, m: int = 20) -> list[float]:
+    """Последние m значений ATR (SMA по TR). O(m·period)."""
+    n = len(candles)
+    if n < 2:
+        return []
+    start = max(1, n - (m + period - 1))
+    trs = [_tr(candles[i], candles[i - 1]) for i in range(start, n)]
+    out = []
+    for i in range(len(trs)):
+        w = trs[max(0, i - period + 1): i + 1]
+        out.append(sum(w) / len(w))
+    return out
+
+
+def _adx_last(candles: Sequence[Candle], period: int = 14):
+    """(adx, +di, -di) по последним ~2·period барам. O(period)."""
+    n = len(candles)
+    if n < period + 2:
+        return None, None, None
+    cs = candles[-2 * period - 1:] if n > 2 * period + 1 else candles
+    dx, di_p, di_m = [], [], []
+    for i in range(1, len(cs)):
+        prev, cur = cs[i - 1], cs[i]
+        up = float(cur.high) - float(prev.high)
+        down = float(prev.low) - float(cur.low)
+        plus_dm = up if (up > down and up > 0) else 0.0
+        minus_dm = down if (down > up and down > 0) else 0.0
+        tr = _tr(cur, prev)
+        if tr <= 0:
+            dx.append(0.0); di_p.append(0.0); di_m.append(0.0)
+            continue
+        dp = plus_dm / tr * 100
+        dm = minus_dm / tr * 100
+        s = dp + dm
+        dx.append(abs(dp - dm) / s * 100 if s else 0.0)
+        di_p.append(dp); di_m.append(dm)
+    if not dx:
+        return None, None, None
+    w = dx[-period:]
+    wp = di_p[-period:]
+    wm = di_m[-period:]
+    return sum(w) / len(w), sum(wp) / len(wp), sum(wm) / len(wm)
+
+
 def _adx_series(candles: Sequence[Candle], period: int = 14) -> tuple[list[float], list[float], list[float]]:
     """Возвращает (adx, +di, -di) — простой Wilder-стиль (SMA по DX/DI)."""
     dx, di_p, di_m = [], [], []
@@ -119,6 +175,16 @@ def _bb_last(closes: Sequence[float], n: int = 20, k: float = 2.0):
 def _bb_width_series(closes: Sequence[float], n: int = 20, k: float = 2.0) -> list[float]:
     out = []
     for i in range(n, len(closes) + 1):
+        lo, mid, up = _bb_last(closes[:i], n, k)
+        out.append((up - lo) / mid if mid else 0.0)
+    return out
+
+
+def _bbw_tail(closes: Sequence[float], n: int = 20, k: float = 2.0, m: int = 61) -> list[float]:
+    """Только последние m значений BB-width (для sma(bbw,60) и текущего). O(m·n)."""
+    out = []
+    start = max(n, len(closes) - m + 1)
+    for i in range(start, len(closes) + 1):
         lo, mid, up = _bb_last(closes[:i], n, k)
         out.append((up - lo) / mid if mid else 0.0)
     return out
@@ -173,10 +239,7 @@ def compute_features(candles: Sequence[Candle]) -> dict:
     sma200 = _sma(closes, 200)
     ema20 = _ema_series(closes, 20)[-1] if len(closes) >= 20 else None
     ema50 = _ema_series(closes, 50)[-1] if len(closes) >= 50 else None
-    adx, dip, dim = _adx_series(candles, 14)
-    adx_val = adx[-1] if adx else None
-    plus_di = dip[-1] if dip else None
-    minus_di = dim[-1] if dim else None
+    adx_val, plus_di, minus_di = _adx_last(candles, 14)
 
     close = closes[-1]
     prev_close = closes[-2] if len(closes) >= 2 else close
@@ -216,11 +279,11 @@ def compute_features(candles: Sequence[Candle]) -> dict:
     volume_rally_low = (close > prev_close) and (vol_sma20 is not None) and (vols[-1] < vol_sma20)
 
     # Волатильность + структура
-    bbw = _bb_width_series(closes, 20, 2.0)
+    bbw = _bbw_tail(closes, 20, 2.0)
     bbw_sma = _sma(bbw, 60)
     bb_squeeze = (bbw and bbw_sma is not None and bbw[-1] < 0.9 * bbw_sma)
     bb_squeeze_down = bool(bb_squeeze) and bb_break_lower
-    atr = _atr_series(candles, 14)
+    atr = _atr_tail(candles, 14, 20)
     atr_val = atr[-1] if atr else None
     atr_sma20 = _sma(atr, 20)
     atr_expansion_down = (atr_val is not None and atr_sma20 is not None
@@ -344,7 +407,7 @@ def exit_short_signal(pos: ShortPosition, candles: Sequence[Candle], regime: str
     close = float(candles[-1].close)
     high = float(candles[-1].high)
     low = float(candles[-1].low)
-    atr = _atr_series(candles, 14)
+    atr = _atr_tail(candles, 14, 1)
     atr_v = atr[-1] if atr else 0.0
     ema20 = _ema_series([float(c.close) for c in candles], 20)[-1]
 
@@ -401,7 +464,7 @@ class ShortEnsembleStrategy:
     version = "0.1.0"
 
     def __init__(self, params: dict | None = None):
-        self.params = params or {}
+        self.params = _as_dict(params)
         self.regime = str(self.params.get("regime", "TREND_DOWN"))
         self.require_breakdown = bool(self.params.get("require_breakdown", True))
         self.atr_mult_trail = float(self.params.get("atr_mult_trail", 2.5))
@@ -434,10 +497,7 @@ def compute_features_long(candles: Sequence[Candle]) -> dict:
     sma200 = _sma(closes, 200)
     ema20 = _ema_series(closes, 20)[-1] if len(closes) >= 20 else None
     ema50 = _ema_series(closes, 50)[-1] if len(closes) >= 50 else None
-    adx, dip, dim = _adx_series(candles, 14)
-    adx_val = adx[-1] if adx else None
-    plus_di = dip[-1] if dip else None
-    minus_di = dim[-1] if dim else None
+    adx_val, plus_di, minus_di = _adx_last(candles, 14)
 
     close = closes[-1]
     prev_close = closes[-2] if len(closes) >= 2 else close
@@ -477,11 +537,11 @@ def compute_features_long(candles: Sequence[Candle]) -> dict:
     volume_pullback_low = (close < prev_close) and (vol_sma20 is not None) and (vols[-1] < vol_sma20)
 
     # Волатильность + структура up
-    bbw = _bb_width_series(closes, 20, 2.0)
+    bbw = _bbw_tail(closes, 20, 2.0)
     bbw_sma = _sma(bbw, 60)
     bb_squeeze = (bbw and bbw_sma is not None and bbw[-1] < 0.9 * bbw_sma)
     bb_squeeze_up = bool(bb_squeeze) and bb_break_upper
-    atr = _atr_series(candles, 14)
+    atr = _atr_tail(candles, 14, 20)
     atr_val = atr[-1] if atr else None
     atr_sma20 = _sma(atr, 20)
     atr_expansion_up = (atr_val is not None and atr_sma20 is not None
@@ -595,7 +655,7 @@ def exit_long_signal(pos: LongPosition, candles: Sequence[Candle], regime: str,
     close = float(candles[-1].close)
     high = float(candles[-1].high)
     low = float(candles[-1].low)
-    atr = _atr_series(candles, 14)
+    atr = _atr_tail(candles, 14, 1)
     atr_v = atr[-1] if atr else 0.0
     ema20 = _ema_series([float(c.close) for c in candles], 20)[-1]
 
@@ -645,7 +705,7 @@ class LongEnsembleStrategy:
     version = "0.1.0"
 
     def __init__(self, params: dict | None = None):
-        self.params = params or {}
+        self.params = _as_dict(params)
         self.regime = str(self.params.get("regime", "TREND_UP"))
         self.require_breakout = bool(self.params.get("require_breakout", True))
         self.atr_mult_trail = float(self.params.get("atr_mult_trail", 2.5))
@@ -675,10 +735,10 @@ def compute_features_range(candles: Sequence[Candle]) -> dict:
     vols = [float(c.volume or 0.0) for c in candles]
 
     lower_band, mid_band, upper_band = _bb_last(closes, 20, 2.0)
-    bbw = _bb_width_series(closes, 20, 2.0)
+    bbw = _bbw_tail(closes, 20, 2.0)
     bbw_sma = _sma(bbw, 60)
     rsi_val = _rsi_last(closes, 14)
-    atr = _atr_series(candles, 14)
+    atr = _atr_tail(candles, 14, 1)
     atr_val = atr[-1] if atr else 0.0
     vol_sma20 = _sma(vols, 20)
     rvol = (vols[-1] / vol_sma20) if (vol_sma20 and vol_sma20 > 0) else 0.0
@@ -718,7 +778,7 @@ def compute_features_range(candles: Sequence[Candle]) -> dict:
     volume_spike = (vol_sma20 is not None) and (vols[-1] > 1.5 * vol_sma20)
     bb_squeeze = bool(bbw) and (bbw_sma is not None) and (bbw[-1] < 0.9 * bbw_sma)
 
-    atr7 = _atr_series(candles, 7)
+    atr7 = _atr_tail(candles, 7, 20)
     atr7_val = atr7[-1] if atr7 else 0.0
     atr7_sma20 = _sma(atr7, 20)
     fast_atr_expansion = (atr7_sma20 is not None) and (atr7_val > 1.2 * atr7_sma20)
@@ -796,7 +856,7 @@ class RangeEnsembleStrategy:
     version = "0.1.0"
 
     def __init__(self, params: dict | None = None):
-        self.params = params or {}
+        self.params = _as_dict(params)
         self.allow_scalping = bool(self.params.get("allow_scalping", True))
 
     def warmup_bars(self) -> int:
@@ -833,10 +893,7 @@ def compute_features_hv(candles: Sequence[Candle]) -> dict:
     lows = [float(c.low) for c in candles]
     vols = [float(c.volume or 0.0) for c in candles]
 
-    adx, dip, dim = _adx_series(candles, 14)
-    adx_val = adx[-1] if adx else None
-    plus_di = dip[-1] if dip else None
-    minus_di = dim[-1] if dim else None
+    adx_val, plus_di, minus_di = _adx_last(candles, 14)
     sma50 = _sma(closes, 50)
     close = closes[-1]
     prev_close = closes[-2] if len(closes) >= 2 else close
@@ -854,7 +911,7 @@ def compute_features_hv(candles: Sequence[Candle]) -> dict:
     hv_breakout_up = (highest_high_20 is not None) and (close > highest_high_20)
     hv_breakdown_down = (lowest_low_20 is not None) and (close < lowest_low_20)
 
-    atr = _atr_series(candles, 14)
+    atr = _atr_tail(candles, 14, 50)
     atr_val = atr[-1] if atr else None
     atr_sma50 = _sma(atr, 50)
     atr_expansion = (atr_val is not None and atr_sma50 is not None and atr_val > 1.5 * atr_sma50)
@@ -871,7 +928,7 @@ def compute_features_hv(candles: Sequence[Candle]) -> dict:
     hv_momentum_strong_neg = momentum_20 < -0.03
 
     lower_band, mid_band, upper_band = _bb_last(closes, 20, 2.0)
-    bbw = _bb_width_series(closes, 20, 2.0)
+    bbw = _bbw_tail(closes, 20, 2.0)
     bbw_sma = _sma(bbw, 60)
     bb_expansion = bool(bbw) and (bbw_sma is not None) and (bbw[-1] > 1.2 * bbw_sma)
     hv_bb_break_upper = (upper_band is not None) and (close > upper_band) and bb_expansion
@@ -925,7 +982,7 @@ class HighVolatilityEnsembleStrategy:
     version = "0.1.0"
 
     def __init__(self, params: dict | None = None):
-        self.params = params or {}
+        self.params = _as_dict(params)
         self.risk_per_trade = float(self.params.get("risk_per_trade", 0.005))
         self.atr_mult_stop = float(self.params.get("atr_mult_stop", 2.5))
 
@@ -981,7 +1038,7 @@ class NeutralEnsembleStrategy:
     version = "0.1.0"
 
     def __init__(self, params: dict | None = None):
-        self.params = params or {}
+        self.params = _as_dict(params)
         self.risk_per_trade = float(self.params.get("risk_per_trade", 0.0075))
         self.atr_mult_stop = float(self.params.get("atr_mult_stop", 1.75))
 
@@ -1003,3 +1060,39 @@ class NeutralEnsembleStrategy:
                           features={"type": "neutral_short", "risk_per_trade": self.risk_per_trade,
                                     "atr_mult_stop": self.atr_mult_stop})
         return None
+
+
+# ============================================================
+# Params-датаклассы (для регистрации в каталоге/реестре движка)
+# ============================================================
+@dataclass(frozen=True)
+class LongEnsembleParams:
+    regime: str = "TREND_UP"
+    require_breakout: int = 1
+    atr_mult_trail: float = 2.5
+    max_bars: int = 40
+
+
+@dataclass(frozen=True)
+class ShortEnsembleParams:
+    regime: str = "TREND_DOWN"
+    require_breakdown: int = 1
+    atr_mult_trail: float = 2.5
+    max_bars: int = 40
+
+
+@dataclass(frozen=True)
+class RangeEnsembleParams:
+    allow_scalping: int = 1
+
+
+@dataclass(frozen=True)
+class HighVolatilityParams:
+    risk_per_trade: float = 0.005
+    atr_mult_stop: float = 2.5
+
+
+@dataclass(frozen=True)
+class NeutralEnsembleParams:
+    risk_per_trade: float = 0.0075
+    atr_mult_stop: float = 1.75

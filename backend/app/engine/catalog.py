@@ -244,6 +244,58 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "bb_k": {"type": "float", "default": 2.0, "min": 0.5, "max": 4},
         },
     ),
+    "long_ensemble": StrategyCard(
+        id="long_ensemble", name="Uptrend Ensemble (4 groups)", family="regime", wave=4,
+        long_rule="TrendUp+Breakout+Volume+VolStructure → кворум",
+        short_rule="—", timeframes=("5min",), status="AVAILABLE",
+        params_schema={
+            "regime": {"type": "str", "default": "TREND_UP"},
+            "require_breakout": {"type": "int", "default": 1, "min": 0, "max": 1},
+            "atr_mult_trail": {"type": "float", "default": 2.5, "min": 0.5, "max": 6},
+            "max_bars": {"type": "int", "default": 40, "min": 5, "max": 300},
+        },
+    ),
+    "short_ensemble": StrategyCard(
+        id="short_ensemble", name="Downtrend Ensemble (4 groups)", family="regime", wave=4,
+        long_rule="—",
+        short_rule="TrendDown+Breakdown+Volume+VolStructure → кворум",
+        timeframes=("5min",), status="AVAILABLE",
+        params_schema={
+            "regime": {"type": "str", "default": "TREND_DOWN"},
+            "require_breakdown": {"type": "int", "default": 1, "min": 0, "max": 1},
+            "atr_mult_trail": {"type": "float", "default": 2.5, "min": 0.5, "max": 6},
+            "max_bars": {"type": "int", "default": 40, "min": 5, "max": 300},
+        },
+    ),
+    "range_ensemble": StrategyCard(
+        id="range_ensemble", name="Range Ensemble (MR + scalp)", family="regime", wave=4,
+        long_rule="MR от нижней BB / скальп вверх (не штиль)",
+        short_rule="MR от верхней BB / скальп вниз",
+        timeframes=("5min",), status="AVAILABLE",
+        params_schema={
+            "allow_scalping": {"type": "int", "default": 1, "min": 0, "max": 1},
+        },
+    ),
+    "hv_ensemble": StrategyCard(
+        id="hv_ensemble", name="High-Vol Ensemble", family="regime", wave=4,
+        long_rule="сильный ап-пробой (тренд+пробой+объём)",
+        short_rule="сильный даун-пробой",
+        timeframes=("5min",), status="AVAILABLE",
+        params_schema={
+            "risk_per_trade": {"type": "float", "default": 0.005, "min": 0.0, "max": 0.05},
+            "atr_mult_stop": {"type": "float", "default": 2.5, "min": 0.5, "max": 6},
+        },
+    ),
+    "neutral_ensemble": StrategyCard(
+        id="neutral_ensemble", name="Neutral Ensemble (strict)", family="regime", wave=4,
+        long_rule="кворум 3 + обязательный breakout",
+        short_rule="кворум 3 + обязательный breakdown",
+        timeframes=("5min",), status="AVAILABLE",
+        params_schema={
+            "risk_per_trade": {"type": "float", "default": 0.0075, "min": 0.0, "max": 0.05},
+            "atr_mult_stop": {"type": "float", "default": 1.75, "min": 0.5, "max": 6},
+        },
+    ),
 }
 
 

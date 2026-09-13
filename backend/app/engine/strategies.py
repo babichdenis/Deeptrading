@@ -5,6 +5,18 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from app.engine.models import Candle, Signal, Side
+from app.engine.regime_ensembles import (
+    HighVolatilityEnsembleStrategy,
+    HighVolatilityParams,
+    LongEnsembleParams,
+    LongEnsembleStrategy,
+    NeutralEnsembleParams,
+    NeutralEnsembleStrategy,
+    RangeEnsembleParams,
+    RangeEnsembleStrategy,
+    ShortEnsembleParams,
+    ShortEnsembleStrategy,
+)
 from app.engine.wave1 import (
     BollingerReclaimParams,
     BollingerReclaimStrategy,
@@ -481,6 +493,11 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "trend_up": TrendUpStrategy,
     "trend_down": TrendDownStrategy,
     "range_reversion": RangeReversionStrategy,
+    "long_ensemble": LongEnsembleStrategy,
+    "short_ensemble": ShortEnsembleStrategy,
+    "range_ensemble": RangeEnsembleStrategy,
+    "hv_ensemble": HighVolatilityEnsembleStrategy,
+    "neutral_ensemble": NeutralEnsembleStrategy,
 }
 
 _PARAMS_BY_STRATEGY: dict[str, type] = {
@@ -498,6 +515,11 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "trend_up": TrendUpParams,
     "trend_down": TrendDownParams,
     "range_reversion": RangeReversionParams,
+    "long_ensemble": LongEnsembleParams,
+    "short_ensemble": ShortEnsembleParams,
+    "range_ensemble": RangeEnsembleParams,
+    "hv_ensemble": HighVolatilityParams,
+    "neutral_ensemble": NeutralEnsembleParams,
 }
 
 
