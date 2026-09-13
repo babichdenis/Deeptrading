@@ -2506,10 +2506,16 @@ class PaperBotRuntime:
         # 3) Выход на этом баре. TP активен только до активации трейлинга.
         tp = None if (trail_active or self._trail_active.get(figi, False)) else self._exit_target.get(figi)
         stop = self._trail_stop.get(figi)
-        self._log(f"DBG-EXIT {figi[-6:]} {state.value} entry={entry_px:.2f} qty={qty_sh} "
-                  f"bar_ts={c.ts.strftime('%H:%M:%S')} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} "
-                  f"stop={stop if stop is not None else '-'} tp={tp if tp is not None else '-'} "
-                  f"trail={trail_active} pnl_rub={(c.close - entry_px) * qty_sh if state == PositionState.LONG else (entry_px - c.close) * qty_sh:+.2f}")
+        try:
+            from app.config import settings as _s
+            _dbg = bool(getattr(_s, "log_debug_engine", False))
+        except Exception:
+            _dbg = False
+        if _dbg:
+            self._log(f"DBG-EXIT {figi[-6:]} {state.value} entry={entry_px:.2f} qty={qty_sh} "
+                      f"bar_ts={c.ts.strftime('%H:%M:%S')} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} "
+                      f"stop={stop if stop is not None else '-'} tp={tp if tp is not None else '-'} "
+                      f"trail={trail_active} pnl_rub={(c.close - entry_px) * qty_sh if state == PositionState.LONG else (entry_px - c.close) * qty_sh:+.2f}")
         price, reason = _ibe(c, state, stop, tp, close_based=bool(trail_active))
         if price is None:
             return False
