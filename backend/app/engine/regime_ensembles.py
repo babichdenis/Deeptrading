@@ -42,13 +42,13 @@ def _as_dict(p) -> dict:
 ENSEMBLE_CFG: dict = {
     "k_trend": 2,             # кворум в TREND_UP/DOWN
     "k_neutral": 3,           # кворум в NEUTRAL
-    "trend_score_min": 3,     # порог ансамбля trend
+    "trend_score_min": 5,     # порог ансамбля trend (Optuna best)
     "vol_struct_min": 3,      # порог vol_structure
-    "adx_min": 25.0,          # ADX для тренда (HV)
+    "adx_min": 35.0,          # ADX для тренда (HV) — Optuna best
     "vol_mult": 2.0,          # объёмный всплеск (HV)
-    "atr_exp_mult": 1.5,      # расширение ATR (HV breakout)
+    "atr_exp_mult": 2.0,      # расширение ATR (HV breakout) — Optuna best
     "hv_score_min": 5,        # порог HV
-    "overext_mult": 3.0,      # перерастяжение от SMA50 (в ATR)
+    "overext_mult": 5.5,      # перерастяжение от SMA50 (в ATR) — Optuna best
 }
 
 # ============================================================
