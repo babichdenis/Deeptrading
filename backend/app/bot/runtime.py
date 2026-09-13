@@ -1088,10 +1088,10 @@ class PaperBotRuntime:
                     for _p in held_now:
                         _f = _p.figi
                         try:
-                            if _p.side == "LONG":
+                            if _p.side in ("LONG", "BUY"):
                                 _st = Side.BUY
                                 _side_str = "LONG"
-                            elif _p.side == "SHORT":
+                            elif _p.side in ("SHORT", "SELL"):
                                 _st = Side.SELL
                                 _side_str = "SHORT"
                             else:
@@ -1556,7 +1556,7 @@ class PaperBotRuntime:
                 ticker = self.tickers.get(figi, figi[:8])
                 db.add(SandboxTrade(
                     figi=figi, ticker=ticker,
-                    side="SELL" if bp.side == "SHORT" else "BUY",
+                    side="SELL" if bp.side in ("SHORT", "SELL") else "BUY",
                     qty=int(abs(bp.qty)),
                     entry_time=datetime.now(timezone.utc),
                     entry_price=float(getattr(bp, "entry_price", 0.0) or 0.0),
@@ -2022,8 +2022,8 @@ class PaperBotRuntime:
                     qty=_srv_now.qty, entry_price=_srv_now.entry_price,
                     entry_time=datetime.now(timezone.utc), stop_loss=None, take_profit=None,
                 )
-        state_now = PositionState.LONG if (pos_now and pos_now.side == "LONG") else (
-            PositionState.SHORT if (pos_now and pos_now.side == "SHORT") else PositionState.FLAT
+        state_now = PositionState.LONG if (pos_now and pos_now.side in ("LONG", "BUY")) else (
+            PositionState.SHORT if (pos_now and pos_now.side in ("SHORT", "SELL")) else PositionState.FLAT
         )
         bars_held = 0
         policy = SignalPolicy()
@@ -2108,7 +2108,7 @@ class PaperBotRuntime:
             # --- Opposite-hold / confirm_flip ---
             cf = self.config.confirm_flip
             if cf > 0 and pos_now is not None:
-                cur_side = "BUY" if pos_now.side == "LONG" else "SELL"
+                cur_side = "BUY" if pos_now.side in ("LONG", "BUY") else "SELL"
                 if sig.side.value != cur_side:
                     # Противоположный сигнал — считаем
                     self._opposite_count[figi] = self._opposite_count.get(figi, 0) + 1

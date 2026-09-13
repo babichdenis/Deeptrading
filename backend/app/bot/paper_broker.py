@@ -146,11 +146,11 @@ class PaperBroker:
         pos = await self.get_position(figi)
         if pos is None:
             return None
-        exit_side = Side.BUY if pos.side == "SHORT" else Side.SELL
+        exit_side = Side.BUY if pos.side in ("SHORT", "SELL") else Side.SELL
         fill = self.costs.fill_price(price, exit_side)
         exit_price = float(fill)
         entry_price = float(pos.entry_price)
-        direction = 1 if pos.side == "LONG" else -1
+        direction = 1 if pos.side in ("LONG", "BUY") else -1
         gross = (exit_price - entry_price) * pos.qty * direction
         commission = self.costs.commission(exit_price * pos.qty)
         slippage_cost = abs(exit_price - price) * pos.qty
