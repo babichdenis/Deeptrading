@@ -1797,6 +1797,9 @@ class PaperBotRuntime:
         self._candles_received += 1
         self.last_candle_ts = c.ts
         self.data_source = self.mode
+        # Виртуальные часы replay: текущая поданная свеча (для тестового UI-цены).
+        if getattr(self.config, "feed", "") == "replay":
+            self._replay_cur = c.ts
 
         # Битая свеча (прыжок цены / битые OHLC): пропускаем полностью —
         # не персистим и не кормим стратегию (согласуется с backtest _validate_candles)
