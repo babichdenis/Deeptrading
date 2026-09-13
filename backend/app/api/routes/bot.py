@@ -50,6 +50,7 @@ def _config_payload(cfg: BotConfig) -> dict:
         "reentry_cooldown_bars": cfg.reentry_cooldown_bars,
         "confirm_flip": cfg.confirm_flip,
         "invert_signals": bool(getattr(cfg, "invert_signals", False)),
+        "ensemble_entry_tf": getattr(cfg, "ensemble_entry_tf", "5min"),
         "source": "file",
     }
 
@@ -188,6 +189,7 @@ class BotConfigPatch(BaseModel):
     reentry_cooldown_bars: int | None = None
     confirm_flip: int | None = None
     invert_signals: bool | None = None
+    ensemble_entry_tf: str | None = None
 
 
 @router.patch("/config")
@@ -291,6 +293,10 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.invert_signals is not None and req.invert_signals != cfg.invert_signals:
         changes.append(f"инверсия сигналов: {'вкл' if cfg.invert_signals else 'выкл'} → {'вкл' if req.invert_signals else 'выкл'}")
         cfg.invert_signals = req.invert_signals
+    if req.ensemble_entry_tf is not None and req.ensemble_entry_tf in ("1min", "5min", "15min"):
+        if req.ensemble_entry_tf != getattr(cfg, "ensemble_entry_tf", "5min"):
+            changes.append(f"entry_tf: {getattr(cfg, 'ensemble_entry_tf', '5min')} → {req.ensemble_entry_tf}")
+        cfg.ensemble_entry_tf = req.ensemble_entry_tf
     if changes:
         runtime._log("⚙ КОНФИГ: " + " | ".join(changes))
     await save_bot_settings(cfg)

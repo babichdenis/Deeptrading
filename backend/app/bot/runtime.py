@@ -83,6 +83,7 @@ class BotConfig:
     ensemble_capital: float = 2000.0
     ensemble_quorum: int = 2
     ensemble_session: str = "main"
+    ensemble_entry_tf: str = "5min"  # ТФ свечей входа (micro_breakout): 1min | 5min | 15min
     # --- Оверрайд SL/TP (0 = брать per-ticker optuna) ---
     ensemble_sl_mult: float = 0.0
     ensemble_rr: float = 0.0
@@ -123,7 +124,7 @@ BOT_PERSIST_FIELDS = (
     "trail_distance_atr", "trail_compress_r", "trail_min_factor", "trail_min_atr", "trail_vol_boost",
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
-    "overnight", "reentry_cooldown_bars", "confirm_flip", "invert_signals",
+    "overnight", "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf",
 )
 
 
@@ -499,6 +500,7 @@ class PaperBotRuntime:
             rr=(float(getattr(self.config, "ensemble_rr", 0.0) or 0.0) or float(opt.get("rr", 4.0))),
             vol_thr=float(ec.get("vol_thr", 0.0) or 0.0),
             neutral_mode=str(ec.get("neutral_mode", "semi_flip")),
+            entry_tf=str(getattr(self.config, "ensemble_entry_tf", "5min") or "5min"),
             entry_macd_1m=True,
             bias_tf=str(_bias.get("tf", "hour")),
             bias_period=int(_bias.get("period", 50)),
