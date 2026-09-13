@@ -19,6 +19,15 @@ class CandleWindow(Sequence):
     def __len__(self) -> int:
         return self._hi - self._lo
 
+    def __iter__(self):
+        # Быстрая итерация: без поэлементного __getitem__ (isinstance-проверок).
+        src = self._src
+        lo, hi = self._lo, self._hi
+        try:
+            return iter(src[lo:hi])
+        except Exception:
+            return iter([src[j] for j in range(lo, hi)])
+
     def __getitem__(self, i):
         lo, hi = self._lo, self._hi
         n = hi - lo

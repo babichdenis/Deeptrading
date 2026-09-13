@@ -85,14 +85,16 @@ def _obv_tail(closes: Sequence[float], volumes: Sequence[float], m: int = 21) ->
 def _rsi_last(closes: Sequence[float], period: int = 14) -> float | None:
     if len(closes) < period + 1:
         return None
+    # хвост достаточной длины (Wilder сходится) — без прохода по всей истории
+    seg = closes[-(period * 3 + 1):] if len(closes) > period * 3 + 1 else closes
     gains = losses = 0.0
     for i in range(1, period + 1):
-        d = closes[i] - closes[i - 1]
+        d = seg[i] - seg[i - 1]
         gains += d if d > 0 else 0.0
         losses += -d if d < 0 else 0.0
     ag, al = gains / period, losses / period
-    for i in range(period + 1, len(closes)):
-        d = closes[i] - closes[i - 1]
+    for i in range(period + 1, len(seg)):
+        d = seg[i] - seg[i - 1]
         ag = (ag * (period - 1) + (d if d > 0 else 0.0)) / period
         al = (al * (period - 1) + (-d if d < 0 else 0.0)) / period
     if al <= 0:
@@ -209,12 +211,14 @@ def _bb_width_series(closes: Sequence[float], n: int = 20, k: float = 2.0) -> li
 
 
 def _bbw_tail(closes: Sequence[float], n: int = 20, k: float = 2.0, m: int = 61) -> list[float]:
-    """Только последние m значений BB-width (для sma(bbw,60) и текущего). O(m·n)."""
+    """Только последние m значений BB-width (для sma(bbw,60) и текущего). O(m·n), без срезов O(i)."""
     out = []
     start = max(n, len(closes) - m + 1)
     for i in range(start, len(closes) + 1):
-        lo, mid, up = _bb_last(closes[:i], n, k)
-        out.append((up - lo) / mid if mid else 0.0)
+        w = closes[i - n:i]
+        mid = sum(w) / n
+        sd = (sum((x - mid) ** 2 for x in w) / n) ** 0.5
+        out.append((2 * k * sd) / mid if mid else 0.0)
     return out
 
 
@@ -301,7 +305,7 @@ def compute_features(candles: Sequence[Candle]) -> dict:
     rvol = (vols[-1] / vol_sma20) if (vol_sma20 and vol_sma20 > 0) else 0.0
     volume_surge_down = (close < prev_close) and (vol_sma20 is not None) and (vols[-1] > 1.5 * vol_sma20)
     rvol_down = (close < prev_close) and rvol > 1.5
-    obv = _obv_series(closes, vols)
+    obv = _obv_tail(closes, vols, 21)
     obv_sma20 = _sma(obv, 20)
     obv_downtrend = (obv_sma20 is not None) and obv[-1] < obv_sma20
     cmf_val = _cmf_last(candles, 20)
@@ -375,7 +379,7 @@ def compute_all_features(candles: Sequence[Candle]) -> dict:
     out.update(compute_features_range(candles))  # range / MR / scalp
     out.update(compute_features_hv(candles))     # high-volatility
     if key is not None:
-        if len(_FEAT_CACHE) >= 128:
+        if len(_FEAT_CACHE) >= 8192:
             _FEAT_CACHE.clear()
         _FEAT_CACHE[key] = out
     return out
@@ -589,7 +593,7 @@ def compute_features_long(candles: Sequence[Candle]) -> dict:
     rvol = (vols[-1] / vol_sma20) if (vol_sma20 and vol_sma20 > 0) else 0.0
     volume_surge_up = (close > prev_close) and (vol_sma20 is not None) and (vols[-1] > 1.5 * vol_sma20)
     rvol_up = (close > prev_close) and rvol > 1.5
-    obv = _obv_series(closes, vols)
+    obv = _obv_tail(closes, vols, 21)
     obv_sma20 = _sma(obv, 20)
     obv_uptrend = (obv_sma20 is not None) and obv[-1] > obv_sma20
     cmf_val = _cmf_last(candles, 20)
