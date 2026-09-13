@@ -1005,7 +1005,7 @@ def ensemble_hv_long(f: dict) -> int:
     score += 1 if f["hv_momentum_strong"] else 0
     score += 1 if f["hv_bb_break_upper"] else 0
     # + фильтр перерастянутого спайка (не покупать выше SMA50 + 3·ATR)
-    return 1 if (f["hv_trend_up"] and score >= 4 and f.get("hv_not_overext_up", True)) else 0
+    return 1 if (f["hv_trend_up"] and score >= 5 and f.get("hv_not_overext_up", True)) else 0
 
 
 def ensemble_hv_short(f: dict) -> int:
@@ -1014,7 +1014,7 @@ def ensemble_hv_short(f: dict) -> int:
     score += 1 if f["hv_volume_surge_down"] else 0
     score += 1 if f["hv_momentum_strong_neg"] else 0
     score += 1 if f["hv_bb_break_lower"] else 0
-    return 1 if (f["hv_trend_down"] and score >= 4 and f.get("hv_not_overext_dn", True)) else 0
+    return 1 if (f["hv_trend_down"] and score >= 5 and f.get("hv_not_overext_dn", True)) else 0
 
 
 def hv_signals(candles: Sequence[Candle]):
