@@ -947,3 +947,59 @@ class HighVolatilityEnsembleStrategy:
                           features={"type": "hv_short", "risk_per_trade": self.risk_per_trade,
                                     "atr_mult_stop": self.atr_mult_stop})
         return None
+
+
+# ============================================================
+# NEUTRAL: те же 4 ансамбля, но кворум 3 + обязательный breakout
+# ============================================================
+def neutral_signals(candles: Sequence[Candle]):
+    """Возвращает (neutral_long: bool, neutral_short: bool)."""
+    f_up = compute_features_long(candles)
+    f_down = compute_features(candles)
+
+    t_up = ensemble_trend_up(f_up)
+    b_up = ensemble_breakout_momentum(f_up)
+    v_up = ensemble_volume_up(f_up)
+    s_up = ensemble_vol_structure_up(f_up)
+    votes_up = t_up + b_up + v_up + s_up
+
+    t_dn = ensemble_trend_down(f_down)
+    b_dn = ensemble_breakdown_momentum(f_down)
+    v_dn = ensemble_volume_down(f_down)
+    s_dn = ensemble_vol_structure_down(f_down)
+    votes_dn = t_dn + b_dn + v_dn + s_dn
+
+    k = 3
+    neutral_long = (votes_up >= k) and (b_up == 1)
+    neutral_short = (votes_dn >= k) and (b_dn == 1)
+    return neutral_long, neutral_short
+
+
+class NeutralEnsembleStrategy:
+    """NEUTRAL: повышенные требования (кворум 3, обязательный breakout), сниженный риск."""
+    strategy_id = "neutral_ensemble"
+    version = "0.1.0"
+
+    def __init__(self, params: dict | None = None):
+        self.params = params or {}
+        self.risk_per_trade = float(self.params.get("risk_per_trade", 0.0075))
+        self.atr_mult_stop = float(self.params.get("atr_mult_stop", 1.75))
+
+    def warmup_bars(self) -> int:
+        return 210
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        if len(candles) < self.warmup_bars():
+            return None
+        neutral_long, neutral_short = neutral_signals(candles)
+        if neutral_long:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY,
+                          time=candles[-1].ts, reason="neutral_long",
+                          features={"type": "neutral_long", "risk_per_trade": self.risk_per_trade,
+                                    "atr_mult_stop": self.atr_mult_stop})
+        if neutral_short:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL,
+                          time=candles[-1].ts, reason="neutral_short",
+                          features={"type": "neutral_short", "risk_per_trade": self.risk_per_trade,
+                                    "atr_mult_stop": self.atr_mult_stop})
+        return None
