@@ -1175,6 +1175,39 @@ class NeutralEnsembleStrategy:
         return None
 
 
+@dataclass(frozen=True)
+class Momentum1BarParams:
+    """ЭКСПЕРИМЕНТ: вход по направлению последней закрытой свечи (моментум)."""
+    min_body_pct: float = 0.0   # минимальное тело свечи в % (0 = любое)
+
+
+class Momentum1BarStrategy:
+    """BUY если close>open (бычья свеча), SELL если close<open (медвежья)."""
+    strategy_id = "momentum_1bar"
+    version = "0.1.0"
+
+    def __init__(self, params: Momentum1BarParams | None = None):
+        self.params = params or Momentum1BarParams()
+
+    def warmup_bars(self) -> int:
+        return 3
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        if len(candles) < 2:
+            return None
+        b = candles[-1]
+        body = (float(b.close) - float(b.open)) / float(b.open) * 100 if b.open else 0.0
+        if abs(body) < float(self.params.min_body_pct):
+            return None
+        if body > 0:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=b.ts,
+                          reason="mom_up", features={"body_pct": round(body, 3)})
+        if body < 0:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=b.ts,
+                          reason="mom_down", features={"body_pct": round(body, 3)})
+        return None
+
+
 # ============================================================
 # Params-датаклассы (для регистрации в каталоге/реестре движка)
 # ============================================================

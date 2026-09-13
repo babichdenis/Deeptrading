@@ -10,6 +10,8 @@ from app.engine.regime_ensembles import (
     HighVolatilityParams,
     LongEnsembleParams,
     LongEnsembleStrategy,
+    Momentum1BarParams,
+    Momentum1BarStrategy,
     NeutralEnsembleParams,
     NeutralEnsembleStrategy,
     RangeEnsembleParams,
@@ -498,6 +500,7 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "range_ensemble": RangeEnsembleStrategy,
     "hv_ensemble": HighVolatilityEnsembleStrategy,
     "neutral_ensemble": NeutralEnsembleStrategy,
+    "momentum_1bar": Momentum1BarStrategy,
 }
 
 _PARAMS_BY_STRATEGY: dict[str, type] = {
@@ -520,6 +523,7 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "range_ensemble": RangeEnsembleParams,
     "hv_ensemble": HighVolatilityParams,
     "neutral_ensemble": NeutralEnsembleParams,
+    "momentum_1bar": Momentum1BarParams,
 }
 
 

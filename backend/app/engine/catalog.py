@@ -296,6 +296,15 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "atr_mult_stop": {"type": "float", "default": 1.75, "min": 0.5, "max": 6},
         },
     ),
+    "momentum_1bar": StrategyCard(
+        id="momentum_1bar", name="Momentum 1 Bar", family="momentum", wave=4,
+        long_rule="close>open (бычья свеча) → BUY",
+        short_rule="close<open (медвежья свеча) → SELL",
+        timeframes=("1min", "5min"), status="AVAILABLE",
+        params_schema={
+            "min_body_pct": {"type": "float", "default": 0.0, "min": 0.0, "max": 5.0},
+        },
+    ),
 }
 
 

@@ -77,9 +77,8 @@ class EnsembleV4Strategy:
             self._last_skip = "no_candles"
             return None
         last = candles[-1]
-        if last.ts.minute % 5 != 0:
-            self._last_skip = f"not_5m(min={last.ts.minute})"
-            return None
+        # Оценка на каждом баре (1м), а не только на 5м-границе — нужна для 1м-входа.
+        # (раньше был гейт last.ts.minute % 5 != 0 → только 5м)
         # Проверяем сессию через sessions список из конфига
         if self.p.sessions:
             if not is_session_active(last.ts, self.p.sessions):
