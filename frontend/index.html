@@ -610,6 +610,14 @@
             </select>
             <button class="btn-secondary btn-xs" id="stats-apply" title="Применить период">OK</button>
           </div>
+          <div class="stats-compare">
+            <button class="btn-secondary btn-xs" id="stats-cmp-toggle">⚖ Сравнить тесты</button>
+            <div class="stats-cmp-panel hidden" id="stats-cmp-panel">
+              <div class="stats-cmp-list" id="stats-cmp-list"></div>
+              <button class="btn-primary btn-xs" id="stats-cmp-run">Сравнить выбранные</button>
+            </div>
+          </div>
+          <div class="stats-cmp-result" id="stats-cmp-result"></div>
           <div class="stats-body" id="stats-body"></div>
         </div>
       </aside>

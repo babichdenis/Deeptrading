@@ -154,7 +154,7 @@ class EngineRunner:
                                 last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
                                 last_exit_bar = i
                                 exit_candidate = None
-                                self._close(
+                                position = self._close(
                                     i, bar.ts, position, bar.open, ExitReason.SIGNAL_EXIT.value, ledger,
                                 )
                             pending = None

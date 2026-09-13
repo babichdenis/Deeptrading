@@ -39,6 +39,9 @@ import {
   fetchTestStats,
   type TestStats,
   type StatsRow,
+  fetchTestsCompare,
+  type TestsCompare,
+  type TestCompareEntry,
 } from "./api";
 
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
@@ -1640,6 +1643,13 @@ function initScreener() {
   $("stats-refresh")?.addEventListener("click", () => { void renderStats(); });
   $("stats-apply")?.addEventListener("click", () => { void renderStats(); });
   ($("stats-mode") as HTMLSelectElement | null)?.addEventListener("change", () => { void renderStats(); });
+  $("stats-cmp-toggle")?.addEventListener("click", () => {
+    const p = $("stats-cmp-panel");
+    if (!p) return;
+    p.classList.toggle("hidden");
+    if (!p.classList.contains("hidden")) void loadCompareList();
+  });
+  $("stats-cmp-run")?.addEventListener("click", () => { void runCompare(); });
   // Клик по плашке тикера → открыть график в существующем chart
   $("votes-config-btn")?.addEventListener("click", toggleEnsembleEditor);
   $("votes-grid")?.addEventListener("click", (e) => {
@@ -1802,6 +1812,61 @@ async function saveEnsembleEditor() {
   } catch {
     if (st) st.textContent = "ошибка сохранения";
   }
+}
+
+async function loadCompareList() {
+  const list = $("stats-cmp-list");
+  if (!list) return;
+  list.innerHTML = `<span class="mini-hint">загрузка…</span>`;
+  try {
+    const tests = await fetchTests();
+    if (!tests.length) { list.innerHTML = `<span class="mini-hint">нет тестов</span>`; return; }
+    list.innerHTML = tests.map((t) => {
+      const dt = (t.replay_start || "").slice(0, 10);
+      const n = t.net ?? 0;
+      return `<label><input type="checkbox" value="${esc(t.name)}"> ${esc(t.name)} ` +
+        `<span style="color:var(--text-dim)">${dt} · ${t.trades} · ${n >= 0 ? "+" : ""}${n}₽</span></label>`;
+    }).join("");
+  } catch {
+    list.innerHTML = `<span class="mini-hint">ошибка загрузки</span>`;
+  }
+}
+
+async function runCompare() {
+  const out = $("stats-cmp-result");
+  if (!out) return;
+  const names = Array.from(document.querySelectorAll("#stats-cmp-list input:checked"))
+    .map((x) => (x as HTMLInputElement).value);
+  if (!names.length) { out.innerHTML = `<div class="mini-hint">выбери тесты</div>`; return; }
+  out.innerHTML = `<div class="mini-hint">загрузка…</div>`;
+  let d: TestsCompare;
+  try { d = await fetchTestsCompare(names); }
+  catch { out.innerHTML = `<div class="mini-hint">ошибка</div>`; return; }
+  const ts = Object.keys(d.tests);
+  const netCell = (v: number) => `<td style="color:${v >= 0 ? "var(--up)" : "var(--down)"}">${v >= 0 ? "+" : ""}${v}</td>`;
+  const sec = (title: string, pick: (e: TestCompareEntry) => StatsRow[]) => {
+    const maps = ts.map((n) => {
+      const m: Record<string, StatsRow> = {};
+      for (const r of pick(d.tests[n])) m[r.key] = r;
+      return m;
+    });
+    const keys = Array.from(new Set(maps.flatMap((m) => Object.keys(m))));
+    if (!keys.length) return "";
+    const head = `<tr><th>${title}</th>${ts.map((n) => `<th>${esc(n)}</th>`).join("")}</tr>`;
+    const body = keys.map((k) => `<tr><td>${esc(k)}</td>${maps.map((m) => netCell(m[k]?.net ?? 0)).join("")}</tr>`).join("");
+    return `<div class="stats-cmp-h">${title}</div><table class="stats-cmp-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  };
+  const ohead = `<tr><th>Overall</th>${ts.map((n) => `<th>${esc(n)}</th>`).join("")}</tr>`;
+  const orows = (["trades", "wr", "net", "pf"] as const).map((k) =>
+    `<tr><td>${k}</td>${ts.map((n) => {
+      const v = (d.tests[n].overall as unknown as Record<string, number | null>)[k];
+      return `<td>${v ?? "—"}</td>`;
+    }).join("")}</tr>`).join("");
+  out.innerHTML = `<div class="stats-cmp-h">Overall</div><table class="stats-cmp-table"><thead>${ohead}</thead><tbody>${orows}</tbody></table>` +
+    sec("По режиму", (e) => e.by_regime) +
+    sec("По голосам", (e) => e.by_strategy) +
+    sec("По направлению", (e) => e.by_side) +
+    sec("По выходам", (e) => e.by_exit_reason);
 }
 
 async function renderStats() {

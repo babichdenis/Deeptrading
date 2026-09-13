@@ -563,6 +563,24 @@ export async function fetchTestStats(
   return res.json();
 }
 
+export interface TestCompareEntry {
+  overall: StatsRow;
+  by_side: StatsRow[];
+  by_regime: StatsRow[];
+  by_strategy: StatsRow[];
+  by_exit_reason: StatsRow[];
+}
+export interface TestsCompare {
+  tests: Record<string, TestCompareEntry>;
+}
+
+export async function fetchTestsCompare(names: string[]): Promise<TestsCompare> {
+  const q = names.length ? `?names=${encodeURIComponent(names.join(","))}` : "";
+  const res = await fetch(`${API}/api/v1/bot/tests_compare${q}`);
+  if (!res.ok) throw new Error(`tests_compare ${res.status}`);
+  return res.json();
+}
+
 // ============ Sandbox API (T-Invest live data) ============
 
 export interface SandboxStatus {

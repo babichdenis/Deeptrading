@@ -1007,3 +1007,54 @@ async def bot_test_stats(test_name: str = "", date_from: str = "", date_to: str 
         "by_strategy": _map(by_strategy),
         "by_bias": _map(by_bias),
     }
+
+
+@router.get("/tests_compare")
+async def bot_tests_compare(names: str = "") -> dict:
+    """Сравнение нескольких прогонов тестов по срезам (overall/regime/strategy/side/exit)."""
+    import json as _j
+    from collections import defaultdict
+    from sqlalchemy import select as _sel
+    from app.database import SessionLocal as _DB
+    from app.models.sandbox_trade import SandboxTrade
+
+    def _meta(t):
+        try:
+            return _j.loads(t.meta) if t.meta else {}
+        except Exception:
+            return {}
+
+    def _map(d):
+        return [{"key": k, **_agg(v)} for k, v in sorted(d.items(), key=lambda x: -abs(_agg(x[1])["net"]))]
+
+    wanted = [n.strip() for n in names.split(",") if n.strip()]
+    out: dict = {}
+    async with _DB() as db:
+        for name in wanted:
+            rows = (await db.execute(
+                _sel(SandboxTrade).where(SandboxTrade.mode == "paper",
+                                         SandboxTrade.test_name == name)
+            )).scalars().all()
+            closed = [t for t in rows if t.exit_time is not None]
+            by_side = defaultdict(list)
+            by_regime = defaultdict(list)
+            by_strategy = defaultdict(list)
+            by_exit = defaultdict(list)
+            for t in closed:
+                m = _meta(t)
+                by_side[t.side or "?"].append(t)
+                by_regime[m.get("regime") or "—"].append(t)
+                by_exit[t.exit_reason or "?"].append(t)
+                ent = m.get("entry") or {}
+                qe = m.get("quorum_event") or {}
+                members = qe.get("members_for") or ent.get("quorum_members") or ent.get("members_for") or []
+                for sid in (members or ["—"]):
+                    by_strategy[str(sid)].append(t)
+            out[name] = {
+                "overall": _agg(closed),
+                "by_side": _map(by_side),
+                "by_regime": _map(by_regime),
+                "by_strategy": _map(by_strategy),
+                "by_exit_reason": _map(by_exit),
+            }
+    return {"tests": out}
