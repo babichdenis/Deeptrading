@@ -663,3 +663,162 @@ class LongEnsembleStrategy:
                           time=candles[-1].ts, reason="long_ensemble",
                           features={"votes": votes, "regime": self.regime, **details})
         return None
+
+
+# ============================================================
+# RANGE-СТОРОНА: mean reversion + скальпинг + фильтр «полного штиля»
+# ============================================================
+def compute_features_range(candles: Sequence[Candle]) -> dict:
+    closes = [float(c.close) for c in candles]
+    highs = [float(c.high) for c in candles]
+    lows = [float(c.low) for c in candles]
+    vols = [float(c.volume or 0.0) for c in candles]
+
+    lower_band, mid_band, upper_band = _bb_last(closes, 20, 2.0)
+    bbw = _bb_width_series(closes, 20, 2.0)
+    bbw_sma = _sma(bbw, 60)
+    rsi_val = _rsi_last(closes, 14)
+    atr = _atr_series(candles, 14)
+    atr_val = atr[-1] if atr else 0.0
+    vol_sma20 = _sma(vols, 20)
+    rvol = (vols[-1] / vol_sma20) if (vol_sma20 and vol_sma20 > 0) else 0.0
+
+    close = closes[-1]
+    prev_close = closes[-2] if len(closes) >= 2 else close
+
+    # Касания полос
+    bb_lower_touch = (lower_band is not None) and (close <= lower_band * 1.0001)
+    bb_upper_touch = (upper_band is not None) and (close >= upper_band * 0.9999)
+
+    # RSI экстремумы
+    rsi_oversold = (rsi_val is not None) and (rsi_val < 30)
+    rsi_overbought = (rsi_val is not None) and (rsi_val > 70)
+    rsi_neutral = (rsi_val is not None) and (40 < rsi_val < 60)
+
+    # Разворотные свечи (упрощённо — значимое движение против предыдущего бара)
+    reversal_candle_long = (close > prev_close) and ((close - prev_close) / prev_close > 0.005)
+    reversal_candle_short = (close < prev_close) and ((prev_close - close) / prev_close > 0.005)
+
+    # Объёмное подтверждение
+    volume_confirmation_long = (close > prev_close) and (vol_sma20 is not None) and (vols[-1] > 1.2 * vol_sma20)
+    volume_confirmation_short = (close < prev_close) and (vol_sma20 is not None) and (vols[-1] > 1.2 * vol_sma20)
+
+    # Полный штиль
+    bb_width_very_low = bool(bbw) and (bbw[-1] < 0.03)
+    volume_very_low = rvol < 0.7
+    atr_very_low = ((atr_val / close) < 0.005) if close > 0 else False
+
+    # Скальпинг-признаки
+    N_micro = 5
+    micro_high = max(highs[-N_micro - 1:-1]) if len(highs) >= N_micro + 1 else None
+    micro_low = min(lows[-N_micro - 1:-1]) if len(lows) >= N_micro + 1 else None
+    micro_range_breakout_up = (micro_high is not None) and (close > micro_high)
+    micro_range_breakout_down = (micro_low is not None) and (close < micro_low)
+
+    volume_spike = (vol_sma20 is not None) and (vols[-1] > 1.5 * vol_sma20)
+    bb_squeeze = bool(bbw) and (bbw_sma is not None) and (bbw[-1] < 0.9 * bbw_sma)
+
+    atr7 = _atr_series(candles, 7)
+    atr7_val = atr7[-1] if atr7 else 0.0
+    atr7_sma20 = _sma(atr7, 20)
+    fast_atr_expansion = (atr7_sma20 is not None) and (atr7_val > 1.2 * atr7_sma20)
+
+    return {
+        "bb_lower_touch": bb_lower_touch,
+        "bb_upper_touch": bb_upper_touch,
+        "bb_mid": mid_band,
+        "rsi_oversold": rsi_oversold,
+        "rsi_overbought": rsi_overbought,
+        "rsi_neutral": rsi_neutral,
+        "reversal_candle_long": reversal_candle_long,
+        "reversal_candle_short": reversal_candle_short,
+        "volume_confirmation_long": volume_confirmation_long,
+        "volume_confirmation_short": volume_confirmation_short,
+        "bb_width_very_low": bb_width_very_low,
+        "volume_very_low": volume_very_low,
+        "atr_very_low": atr_very_low,
+        "micro_range_breakout_up": micro_range_breakout_up,
+        "micro_range_breakout_down": micro_range_breakout_down,
+        "volume_spike": volume_spike,
+        "bb_squeeze": bb_squeeze,
+        "fast_atr_expansion": fast_atr_expansion,
+        "_rsi": rsi_val, "_rvol": rvol, "_bbw": (bbw[-1] if bbw else None),
+    }
+
+
+def ensemble_mr_long(f: dict) -> int:
+    score = 2 if f["bb_lower_touch"] else 0     # обязательное касание
+    score += 1 if f["rsi_oversold"] else 0
+    score += 1 if f["reversal_candle_long"] else 0
+    score += 1 if f["volume_confirmation_long"] else 0
+    return 1 if score >= 3 else 0
+
+
+def ensemble_mr_short(f: dict) -> int:
+    score = 2 if f["bb_upper_touch"] else 0
+    score += 1 if f["rsi_overbought"] else 0
+    score += 1 if f["reversal_candle_short"] else 0
+    score += 1 if f["volume_confirmation_short"] else 0
+    return 1 if score >= 3 else 0
+
+
+def ensemble_scalping(f: dict) -> str | None:
+    """Возвращает направление скальпа: 'up' | 'down' | None."""
+    if f["micro_range_breakout_up"]:
+        direction = "up"
+    elif f["micro_range_breakout_down"]:
+        direction = "down"
+    else:
+        return None
+    score = 1  # breakout
+    score += 1 if f["rsi_neutral"] else 0
+    score += 1 if f["volume_spike"] else 0
+    score += 1 if f["bb_squeeze"] else 0
+    score += 1 if f["fast_atr_expansion"] else 0
+    return direction if score >= 3 else None
+
+
+def range_signals(candles: Sequence[Candle], allow_scalping: bool = True):
+    """Возвращает (mr_long, mr_short, scalp_dir, no_trade)."""
+    f = compute_features_range(candles)
+    is_full_flat = f["bb_width_very_low"] and f["volume_very_low"] and f["atr_very_low"]
+    if is_full_flat:
+        return False, False, None, True
+    mr_long = ensemble_mr_long(f) == 1
+    mr_short = ensemble_mr_short(f) == 1
+    scalp_dir = ensemble_scalping(f) if allow_scalping else None
+    return mr_long, mr_short, scalp_dir, False
+
+
+class RangeEnsembleStrategy:
+    """Mean Reversion + опциональный скальпинг в RANGE/NEUTRAL."""
+    strategy_id = "range_ensemble"
+    version = "0.1.0"
+
+    def __init__(self, params: dict | None = None):
+        self.params = params or {}
+        self.allow_scalping = bool(self.params.get("allow_scalping", True))
+
+    def warmup_bars(self) -> int:
+        return 210
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        if len(candles) < self.warmup_bars():
+            return None
+        mr_long, mr_short, scalp_dir, no_trade = range_signals(candles, self.allow_scalping)
+        if no_trade:
+            return None
+        # Приоритет: Mean Reversion > Scalping
+        if mr_long:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY,
+                          time=candles[-1].ts, reason="range_mr_long", features={"type": "mr_long"})
+        if mr_short:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL,
+                          time=candles[-1].ts, reason="range_mr_short", features={"type": "mr_short"})
+        if scalp_dir == "up":
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY,
+                          time=candles[-1].ts, reason="range_scalp_up", features={"type": "scalp"})
+        if scalp_dir == "down":
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL,
+                          time=candles[-1].ts, reason="range_scalp_down", features={"type": "scalp"})
+        return None
