@@ -2404,7 +2404,7 @@ class PaperBotRuntime:
             return
         try:
             cfg = self.config
-            _side = getattr(pos, "side", "LONG")
+            _side = "LONG" if str(getattr(pos, "side", "LONG")).upper() in ("LONG", "BUY") else "SHORT"
             _side_enum = Side.BUY if _side == "LONG" else Side.SELL
             _entry_px = self._exit_entry_px.get(figi) or float(getattr(pos, "entry_price", 0) or c.open)
             if cfg.sl_mode == "fixed":
@@ -2452,7 +2452,9 @@ class PaperBotRuntime:
         """
         from app.engine.exits import intrabar_exit as _ibe
         policy = self._exit_plans[figi]
-        side_str = self._exit_side.get(figi) or getattr(pos, "side", "LONG")
+        _raw_side = self._exit_side.get(figi) or getattr(pos, "side", "LONG")
+        # pos.side у брокера = "BUY"/"SELL"; нормализуем к LONG/SHORT.
+        side_str = "LONG" if str(_raw_side).upper() in ("LONG", "BUY") else "SHORT"
         state = PositionState.LONG if side_str == "LONG" else PositionState.SHORT
         trail_side = Side.BUY if state == PositionState.LONG else Side.SELL
         entry_px = self._exit_entry_px.get(figi)
