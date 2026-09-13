@@ -49,6 +49,7 @@ def _config_payload(cfg: BotConfig) -> dict:
         "overnight": cfg.overnight,
         "reentry_cooldown_bars": cfg.reentry_cooldown_bars,
         "confirm_flip": cfg.confirm_flip,
+        "invert_signals": bool(getattr(cfg, "invert_signals", False)),
         "source": "file",
     }
 
@@ -186,6 +187,7 @@ class BotConfigPatch(BaseModel):
     overnight: bool | None = None
     reentry_cooldown_bars: int | None = None
     confirm_flip: int | None = None
+    invert_signals: bool | None = None
 
 
 @router.patch("/config")
@@ -286,6 +288,9 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         if new_cf != cfg.confirm_flip:
             changes.append(f"confirm_flip: {cfg.confirm_flip} → {new_cf}")
         cfg.confirm_flip = new_cf
+    if req.invert_signals is not None and req.invert_signals != cfg.invert_signals:
+        changes.append(f"инверсия сигналов: {'вкл' if cfg.invert_signals else 'выкл'} → {'вкл' if req.invert_signals else 'выкл'}")
+        cfg.invert_signals = req.invert_signals
     if changes:
         runtime._log("⚙ КОНФИГ: " + " | ".join(changes))
     await save_bot_settings(cfg)

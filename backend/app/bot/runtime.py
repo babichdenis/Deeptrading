@@ -123,7 +123,7 @@ BOT_PERSIST_FIELDS = (
     "trail_distance_atr", "trail_compress_r", "trail_min_factor", "trail_min_atr", "trail_vol_boost",
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
-    "overnight", "reentry_cooldown_bars", "confirm_flip",
+    "overnight", "reentry_cooldown_bars", "confirm_flip", "invert_signals",
 )
 
 
