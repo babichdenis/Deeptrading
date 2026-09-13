@@ -973,6 +973,14 @@ def compute_features_hv(candles: Sequence[Candle]) -> dict:
     hv_bb_break_upper = (upper_band is not None) and (close > upper_band) and bb_expansion
     hv_bb_break_lower = (lower_band is not None) and (close < lower_band) and bb_expansion
 
+    # Фильтр «перерастянутого спайка»: не покупать слишком высоко над SMA50 (в ATR),
+    # не продавать слишком низко — иначе входим на вершине/дне выброса.
+    _max_ext = 3.0
+    hv_not_overext_up = (sma50 is not None and atr_val is not None
+                         and close <= sma50 + _max_ext * atr_val)
+    hv_not_overext_dn = (sma50 is not None and atr_val is not None
+                         and close >= sma50 - _max_ext * atr_val)
+
     return {
         "hv_trend_up": hv_trend_up,
         "hv_trend_down": hv_trend_down,
@@ -984,6 +992,8 @@ def compute_features_hv(candles: Sequence[Candle]) -> dict:
         "hv_momentum_strong_neg": hv_momentum_strong_neg,
         "hv_bb_break_upper": hv_bb_break_upper,
         "hv_bb_break_lower": hv_bb_break_lower,
+        "hv_not_overext_up": hv_not_overext_up,
+        "hv_not_overext_dn": hv_not_overext_dn,
         "_adx": adx_val,
     }
 
@@ -994,7 +1004,8 @@ def ensemble_hv_long(f: dict) -> int:
     score += 1 if f["hv_volume_surge_up"] else 0
     score += 1 if f["hv_momentum_strong"] else 0
     score += 1 if f["hv_bb_break_upper"] else 0
-    return 1 if (f["hv_trend_up"] and score >= 4) else 0
+    # + фильтр перерастянутого спайка (не покупать выше SMA50 + 3·ATR)
+    return 1 if (f["hv_trend_up"] and score >= 4 and f.get("hv_not_overext_up", True)) else 0
 
 
 def ensemble_hv_short(f: dict) -> int:
@@ -1003,7 +1014,7 @@ def ensemble_hv_short(f: dict) -> int:
     score += 1 if f["hv_volume_surge_down"] else 0
     score += 1 if f["hv_momentum_strong_neg"] else 0
     score += 1 if f["hv_bb_break_lower"] else 0
-    return 1 if (f["hv_trend_down"] and score >= 4) else 0
+    return 1 if (f["hv_trend_down"] and score >= 4 and f.get("hv_not_overext_dn", True)) else 0
 
 
 def hv_signals(candles: Sequence[Candle]):
