@@ -284,6 +284,188 @@ class VolumeDivergenceStrategy(_VolumeBase):
         return out
 
 
+def _ema_last(values: Sequence[float], span: int) -> float | None:
+    if len(values) < span:
+        return None
+    a = 2 / (span + 1)
+    e = values[0]
+    for v in values[1:]:
+        e = v * a + e * (1 - a)
+    return e
+
+
+def _rsi_last(closes: Sequence[float], period: int = 14) -> float | None:
+    if len(closes) < period + 1:
+        return None
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        d = closes[i] - closes[i - 1]
+        if d >= 0:
+            gains += d
+        else:
+            losses -= d
+    ag, al = gains / period, losses / period
+    for i in range(period + 1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        ag = (ag * (period - 1) + (d if d > 0 else 0.0)) / period
+        al = (al * (period - 1) + (-d if d < 0 else 0.0)) / period
+    if al <= 0:
+        return 100.0
+    rs = ag / al
+    return 100 - 100 / (1 + rs)
+
+
+@dataclass(frozen=True)
+class TrendUpParams:
+    """BUY только в восходящем тренде: цена>SMA(long), EMA(fast)>EMA(slow),
+    пробой вверх канала Дончиана + подтверждение объёмом."""
+    sma_long: int = 200
+    ema_fast: int = 20
+    ema_slow: int = 50
+    donchian: int = 20
+    vol_ma: int = 20
+    vol_mult: float = 1.5
+
+
+class TrendUpStrategy:
+    strategy_id = "trend_up"
+    version = "1.0.0"
+
+    def __init__(self, params: TrendUpParams | None = None):
+        self.params = params or TrendUpParams()
+
+    def warmup_bars(self) -> int:
+        p = self.params
+        return max(p.sma_long, p.ema_slow, p.donchian, p.vol_ma) + 2
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        p = self.params
+        n = len(candles)
+        if n < p.sma_long + 2:
+            return None
+        closes = [float(c.close) for c in candles]
+        sma = sum(closes[-p.sma_long:]) / p.sma_long
+        ema_f = _ema_last(closes, p.ema_fast)
+        ema_s = _ema_last(closes, p.ema_slow)
+        window = candles[n - p.donchian - 1: n - 1]
+        highest = max(float(b.high) for b in window)
+        vols = [float(b.volume or 0.0) for b in candles[-p.vol_ma:]]
+        vol_avg = sum(vols) / len(vols)
+        last = candles[-1]
+        if (ema_f is not None and ema_s is not None and last.close > sma and ema_f > ema_s
+                and last.close > highest and vol_avg > 0
+                and float(last.volume or 0.0) > p.vol_mult * vol_avg):
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=last.ts,
+                          reason="uptrend_breakout",
+                          features={"sma": round(sma, 4), "ema_f": round(ema_f, 4),
+                                    "ema_s": round(ema_s, 4), "donchian_high": round(highest, 4),
+                                    "vol_ratio": round(float(last.volume or 0.0) / vol_avg, 3)})
+        return None
+
+
+@dataclass(frozen=True)
+class TrendDownParams:
+    """SELL только в нисходящем тренде: цена<SMA(long), EMA(fast)<EMA(slow),
+    пробой вниз канала Дончиана + подтверждение объёмом."""
+    sma_long: int = 200
+    ema_fast: int = 20
+    ema_slow: int = 50
+    donchian: int = 20
+    vol_ma: int = 20
+    vol_mult: float = 1.5
+
+
+class TrendDownStrategy:
+    strategy_id = "trend_down"
+    version = "1.0.0"
+
+    def __init__(self, params: TrendDownParams | None = None):
+        self.params = params or TrendDownParams()
+
+    def warmup_bars(self) -> int:
+        p = self.params
+        return max(p.sma_long, p.ema_slow, p.donchian, p.vol_ma) + 2
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        p = self.params
+        n = len(candles)
+        if n < p.sma_long + 2:
+            return None
+        closes = [float(c.close) for c in candles]
+        sma = sum(closes[-p.sma_long:]) / p.sma_long
+        ema_f = _ema_last(closes, p.ema_fast)
+        ema_s = _ema_last(closes, p.ema_slow)
+        window = candles[n - p.donchian - 1: n - 1]
+        lowest = min(float(b.low) for b in window)
+        vols = [float(b.volume or 0.0) for b in candles[-p.vol_ma:]]
+        vol_avg = sum(vols) / len(vols)
+        last = candles[-1]
+        if (ema_f is not None and ema_s is not None and last.close < sma and ema_f < ema_s
+                and last.close < lowest and vol_avg > 0
+                and float(last.volume or 0.0) > p.vol_mult * vol_avg):
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=last.ts,
+                          reason="downtrend_breakdown",
+                          features={"sma": round(sma, 4), "ema_f": round(ema_f, 4),
+                                    "ema_s": round(ema_s, 4), "donchian_low": round(lowest, 4),
+                                    "vol_ratio": round(float(last.volume or 0.0) / vol_avg, 3)})
+        return None
+
+
+@dataclass(frozen=True)
+class RangeReversionParams:
+    """Mean reversion в боковике: узкий диапазон + RSI-экстремум + касание полос BB."""
+    lookback: int = 20
+    range_pct: float = 6.0     # (max-min)/close*100 < range_pct → боковик
+    rsi_period: int = 14
+    rsi_oversold: float = 30.0
+    rsi_overbought: float = 70.0
+    bb_period: int = 20
+    bb_k: float = 2.0
+
+
+class RangeReversionStrategy:
+    strategy_id = "range_reversion"
+    version = "1.0.0"
+
+    def __init__(self, params: RangeReversionParams | None = None):
+        self.params = params or RangeReversionParams()
+
+    def warmup_bars(self) -> int:
+        p = self.params
+        return max(p.lookback, p.rsi_period, p.bb_period) + 2
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        p = self.params
+        n = len(candles)
+        if n < self.warmup_bars():
+            return None
+        window = candles[n - p.lookback: n]
+        hi = max(float(b.high) for b in window)
+        lo = min(float(b.low) for b in window)
+        last = candles[-1]
+        width_pct = (hi - lo) / float(last.close) * 100 if last.close else 0.0
+        if width_pct > p.range_pct:
+            return None  # не боковик
+        closes = [float(c.close) for c in candles]
+        rsi = _rsi_last(closes, p.rsi_period)
+        if rsi is None:
+            return None
+        bb_win = closes[-p.bb_period:]
+        mid = sum(bb_win) / len(bb_win)
+        var = sum((x - mid) ** 2 for x in bb_win) / len(bb_win)
+        sd = var ** 0.5
+        lower, upper = mid - p.bb_k * sd, mid + p.bb_k * sd
+        feat = {"rsi": round(rsi, 1), "bb_lower": round(lower, 4), "bb_upper": round(upper, 4),
+                "range_pct": round(width_pct, 2)}
+        if rsi <= p.rsi_oversold and last.close <= lower:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=last.ts,
+                          reason="range_oversold", features=feat)
+        if rsi >= p.rsi_overbought and last.close >= upper:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=last.ts,
+                          reason="range_overbought", features=feat)
+        return None
+
+
 STRATEGY_REGISTRY: dict[str, type] = {
     "macd_cross": MacdCrossStrategy,
     "donchian_breakout": DonchianBreakoutStrategy,
@@ -296,6 +478,9 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "volume_drop": VolumeDropStrategy,
     "volume_climax": VolumeClimaxStrategy,
     "volume_divergence": VolumeDivergenceStrategy,
+    "trend_up": TrendUpStrategy,
+    "trend_down": TrendDownStrategy,
+    "range_reversion": RangeReversionStrategy,
 }
 
 _PARAMS_BY_STRATEGY: dict[str, type] = {
@@ -310,6 +495,9 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "volume_drop": VolumeDropParams,
     "volume_climax": VolumeClimaxParams,
     "volume_divergence": VolumeDivergenceParams,
+    "trend_up": TrendUpParams,
+    "trend_down": TrendDownParams,
+    "range_reversion": RangeReversionParams,
 }
 
 
