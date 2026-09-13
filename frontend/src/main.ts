@@ -1134,12 +1134,13 @@ window.__chartOverlay = (trade: Record<string, unknown>) => {
     const exitTime = rawExit ? (Math.floor(new Date(String(rawExit)).getTime() / 1000) as UTCTimestamp) : null;
     const side = String(trade.side);
     const pnl = trade.net_pnl != null ? Number(trade.net_pnl) : null;
-    const color = side === "LONG" ? COLORS.up : COLORS.down;
+    const isLong = side === "LONG" || side === "BUY";
+    const color = isLong ? COLORS.up : COLORS.down;
     const markers: SeriesMarker<Time>[] = [
-      { time: entryTime, position: side === "LONG" ? "belowBar" : "aboveBar", color, shape: "arrowUp", text: `Вход` },
+      { time: entryTime, position: isLong ? "belowBar" : "aboveBar", color, shape: isLong ? "arrowUp" : "arrowDown", text: `Вход` },
     ];
     if (exitTime != null) {
-      markers.push({ time: exitTime, position: side === "LONG" ? "aboveBar" : "belowBar", color: pnl != null && pnl >= 0 ? COLORS.up : COLORS.down, shape: "circle", text: pnl != null ? `Выход ${money(pnl)} ₽` : "Выход" });
+      markers.push({ time: exitTime, position: isLong ? "aboveBar" : "belowBar", color: pnl != null && pnl >= 0 ? COLORS.up : COLORS.down, shape: "circle", text: pnl != null ? `Выход ${money(pnl)} ₽` : "Выход" });
     }
     window.__setTradeLines?.(trade);
     refs.markers.setMarkers(markers);

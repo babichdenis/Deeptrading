@@ -2007,7 +2007,7 @@ class PaperBotRuntime:
             return
         self.signals_seen += 1
         ticker = self.tickers.get(figi, "")
-        self._log(f"СИГНАЛ {ticker} {sig.side.value} ({sig.kind})")
+        self._log(f"СИГНАЛ {ticker} {sig.side.value} ({sig.kind}) sid={getattr(sig,'strategy_id','?')} reason={getattr(sig,'reason','?')}")
         self.events.log("SIGNAL_CREATED", figi=figi, ticker=ticker,
                         side=sig.side.value)
 
