@@ -54,6 +54,34 @@ def _ema_series(vals: Sequence[float], n: int) -> list[float]:
     return out
 
 
+def _ema_last(vals: Sequence[float], n: int) -> float | None:
+    """EMA по хвосту (конвергенция): O(n)."""
+    if not vals:
+        return None
+    m = min(len(vals), max(n * 5, n + 5))
+    seg = vals[-m:]
+    a = 2 / (n + 1)
+    e = float(seg[0])
+    for v in seg[1:]:
+        e = a * float(v) + (1 - a) * e
+    return e
+
+
+def _obv_tail(closes: Sequence[float], volumes: Sequence[float], m: int = 21) -> list[float]:
+    """OBV по хвосту (относительный): O(m)."""
+    n = len(closes)
+    start = max(1, n - m + 1)
+    out = [0.0]
+    for i in range(start, n):
+        if closes[i] > closes[i - 1]:
+            out.append(out[-1] + volumes[i])
+        elif closes[i] < closes[i - 1]:
+            out.append(out[-1] - volumes[i])
+        else:
+            out.append(out[-1])
+    return out
+
+
 def _rsi_last(closes: Sequence[float], period: int = 14) -> float | None:
     if len(closes) < period + 1:
         return None
@@ -217,10 +245,12 @@ def _cmf_last(candles: Sequence[Candle], n: int = 20) -> float | None:
 
 
 def _macd_last(closes: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9):
-    if len(closes) < slow + signal:
+    need = (slow + signal) * 4
+    seg = closes[-need:] if len(closes) > need else closes
+    if len(seg) < slow + signal:
         return None, None
-    ef = _ema_series(closes, fast)
-    es = _ema_series(closes, slow)
+    ef = _ema_series(seg, fast)
+    es = _ema_series(seg, slow)
     macd = [a - b for a, b in zip(ef, es)]
     sig = _ema_series(macd, signal)
     return macd[-1], sig[-1]
@@ -237,8 +267,8 @@ def compute_features(candles: Sequence[Candle]) -> dict:
 
     sma50 = _sma(closes, 50)
     sma200 = _sma(closes, 200)
-    ema20 = _ema_series(closes, 20)[-1] if len(closes) >= 20 else None
-    ema50 = _ema_series(closes, 50)[-1] if len(closes) >= 50 else None
+    ema20 = _ema_last(closes, 20)
+    ema50 = _ema_last(closes, 50)
     adx_val, plus_di, minus_di = _adx_last(candles, 14)
 
     close = closes[-1]
@@ -495,8 +525,8 @@ def compute_features_long(candles: Sequence[Candle]) -> dict:
 
     sma50 = _sma(closes, 50)
     sma200 = _sma(closes, 200)
-    ema20 = _ema_series(closes, 20)[-1] if len(closes) >= 20 else None
-    ema50 = _ema_series(closes, 50)[-1] if len(closes) >= 50 else None
+    ema20 = _ema_last(closes, 20)
+    ema50 = _ema_last(closes, 50)
     adx_val, plus_di, minus_di = _adx_last(candles, 14)
 
     close = closes[-1]
@@ -839,15 +869,24 @@ def ensemble_scalping(f: dict) -> str | None:
 
 
 def range_signals(candles: Sequence[Candle], allow_scalping: bool = True):
-    """Возвращает (mr_long, mr_short, scalp_dir, no_trade)."""
+    """Возвращает (mr_long, mr_short, scalp_dir, no_trade, details)."""
     f = compute_features_range(candles)
     is_full_flat = f["bb_width_very_low"] and f["volume_very_low"] and f["atr_very_low"]
+    details = {
+        "flat": is_full_flat,
+        "bb_lower_touch": f["bb_lower_touch"], "bb_upper_touch": f["bb_upper_touch"],
+        "rsi_oversold": f["rsi_oversold"], "rsi_overbought": f["rsi_overbought"],
+        "rsi": f.get("_rsi"), "rvol": f.get("_rvol"),
+    }
     if is_full_flat:
-        return False, False, None, True
+        return False, False, None, True, details
     mr_long = ensemble_mr_long(f) == 1
     mr_short = ensemble_mr_short(f) == 1
     scalp_dir = ensemble_scalping(f) if allow_scalping else None
-    return mr_long, mr_short, scalp_dir, False
+    details["mr_long"] = mr_long
+    details["mr_short"] = mr_short
+    details["scalp"] = scalp_dir
+    return mr_long, mr_short, scalp_dir, False, details
 
 
 class RangeEnsembleStrategy:
@@ -865,22 +904,22 @@ class RangeEnsembleStrategy:
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if len(candles) < self.warmup_bars():
             return None
-        mr_long, mr_short, scalp_dir, no_trade = range_signals(candles, self.allow_scalping)
+        mr_long, mr_short, scalp_dir, no_trade, det = range_signals(candles, self.allow_scalping)
         if no_trade:
             return None
         # Приоритет: Mean Reversion > Scalping
         if mr_long:
             return Signal(strategy_id=self.strategy_id, side=Side.BUY,
-                          time=candles[-1].ts, reason="range_mr_long", features={"type": "mr_long"})
+                          time=candles[-1].ts, reason="range_mr_long", features={"type": "mr_long", **det})
         if mr_short:
             return Signal(strategy_id=self.strategy_id, side=Side.SELL,
-                          time=candles[-1].ts, reason="range_mr_short", features={"type": "mr_short"})
+                          time=candles[-1].ts, reason="range_mr_short", features={"type": "mr_short", **det})
         if scalp_dir == "up":
             return Signal(strategy_id=self.strategy_id, side=Side.BUY,
-                          time=candles[-1].ts, reason="range_scalp_up", features={"type": "scalp"})
+                          time=candles[-1].ts, reason="range_scalp_up", features={"type": "scalp", **det})
         if scalp_dir == "down":
             return Signal(strategy_id=self.strategy_id, side=Side.SELL,
-                          time=candles[-1].ts, reason="range_scalp_down", features={"type": "scalp"})
+                          time=candles[-1].ts, reason="range_scalp_down", features={"type": "scalp", **det})
         return None
 
 
@@ -968,9 +1007,20 @@ def ensemble_hv_short(f: dict) -> int:
 
 
 def hv_signals(candles: Sequence[Candle]):
-    """Возвращает (hv_long: bool, hv_short: bool)."""
+    """Возвращает (hv_long, hv_short, details с голосами)."""
     f = compute_features_hv(candles)
-    return (ensemble_hv_long(f) == 1), (ensemble_hv_short(f) == 1)
+    L = ensemble_hv_long(f)
+    S = ensemble_hv_short(f)
+    details = {
+        "hv_long": L, "hv_short": S,
+        "up": {"trend": f["hv_trend_up"], "breakout": f["hv_breakout_up"],
+               "vol": f["hv_volume_surge_up"], "mom": f["hv_momentum_strong"],
+               "bb": f["hv_bb_break_upper"]},
+        "dn": {"trend": f["hv_trend_down"], "breakout": f["hv_breakdown_down"],
+               "vol": f["hv_volume_surge_down"], "mom": f["hv_momentum_strong_neg"],
+               "bb": f["hv_bb_break_lower"]},
+    }
+    return (L == 1), (S == 1), details
 
 
 class HighVolatilityEnsembleStrategy:
@@ -992,17 +1042,15 @@ class HighVolatilityEnsembleStrategy:
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if len(candles) < self.warmup_bars():
             return None
-        hv_long, hv_short = hv_signals(candles)
+        hv_long, hv_short, det = hv_signals(candles)
         if hv_long:
             return Signal(strategy_id=self.strategy_id, side=Side.BUY,
                           time=candles[-1].ts, reason="hv_long",
-                          features={"type": "hv_long", "risk_per_trade": self.risk_per_trade,
-                                    "atr_mult_stop": self.atr_mult_stop})
+                          features={"type": "hv_long", **det})
         if hv_short:
             return Signal(strategy_id=self.strategy_id, side=Side.SELL,
                           time=candles[-1].ts, reason="hv_short",
-                          features={"type": "hv_short", "risk_per_trade": self.risk_per_trade,
-                                    "atr_mult_stop": self.atr_mult_stop})
+                          features={"type": "hv_short", **det})
         return None
 
 
@@ -1010,7 +1058,7 @@ class HighVolatilityEnsembleStrategy:
 # NEUTRAL: те же 4 ансамбля, но кворум 3 + обязательный breakout
 # ============================================================
 def neutral_signals(candles: Sequence[Candle]):
-    """Возвращает (neutral_long: bool, neutral_short: bool)."""
+    """Возвращает (neutral_long, neutral_short, details с голосами)."""
     f_up = compute_features_long(candles)
     f_down = compute_features(candles)
 
@@ -1029,7 +1077,12 @@ def neutral_signals(candles: Sequence[Candle]):
     k = 3
     neutral_long = (votes_up >= k) and (b_up == 1)
     neutral_short = (votes_dn >= k) and (b_dn == 1)
-    return neutral_long, neutral_short
+    details = {
+        "votes_up": votes_up, "votes_dn": votes_dn,
+        "up": {"t": t_up, "b": b_up, "v": v_up, "s": s_up},
+        "dn": {"t": t_dn, "b": b_dn, "v": v_dn, "s": s_dn},
+    }
+    return neutral_long, neutral_short, details
 
 
 class NeutralEnsembleStrategy:
@@ -1048,17 +1101,15 @@ class NeutralEnsembleStrategy:
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if len(candles) < self.warmup_bars():
             return None
-        neutral_long, neutral_short = neutral_signals(candles)
+        neutral_long, neutral_short, det = neutral_signals(candles)
         if neutral_long:
             return Signal(strategy_id=self.strategy_id, side=Side.BUY,
                           time=candles[-1].ts, reason="neutral_long",
-                          features={"type": "neutral_long", "risk_per_trade": self.risk_per_trade,
-                                    "atr_mult_stop": self.atr_mult_stop})
+                          features={"type": "neutral_long", **det})
         if neutral_short:
             return Signal(strategy_id=self.strategy_id, side=Side.SELL,
                           time=candles[-1].ts, reason="neutral_short",
-                          features={"type": "neutral_short", "risk_per_trade": self.risk_per_trade,
-                                    "atr_mult_stop": self.atr_mult_stop})
+                          features={"type": "neutral_short", **det})
         return None
 
 

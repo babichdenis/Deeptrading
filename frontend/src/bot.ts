@@ -1361,6 +1361,23 @@ function renderTrades(trades: BotTradeRow[]) {
               rCls = r >= 0 ? "pos" : "neg";
             }
           }
+          // Вход (голоса ансамбля) из meta.entry.reason/features.
+          let entryCell = "";
+          try {
+            const m = t.meta ? JSON.parse(t.meta) : null;
+            const er = String(m?.entry?.reason ?? "");
+            const f = (m?.entry?.features || {}) as Record<string, unknown>;
+            if (er) {
+              let votes = "";
+              if (typeof f.votes_up === "number" || typeof f.votes_dn === "number") {
+                votes = ` ↑${f.votes_up ?? 0}/↓${f.votes_dn ?? 0}`;
+              } else if (typeof f.votes === "number") {
+                votes = ` v${f.votes}`;
+              }
+              const short = er.replace("_ensemble", "").replace("neutral_", "neu:").replace("range_", "rng:").replace("hv_", "hv:");
+              entryCell = `<span class="entry-chip" title="${esc(er)}">${esc(short)}${votes}</span>`;
+            }
+          } catch { /* noop */ }
           const selected = _openDetails.has(`${t.ticker}|${t.entry_time}`);
           return `<tr class="trade-row${selected ? " selected" : ""}" data-idx="${i}" data-key="${t.ticker}|${t.entry_time}" style="cursor:pointer">` +
             `<td class="td-time">${timeCell}</td>` +
@@ -1371,12 +1388,13 @@ function renderTrades(trades: BotTradeRow[]) {
             `<td class="num">${pnlCell}</td>` +
             `<td class="num" style="color:var(--text-dim)">${!isOpen && t.commission != null ? money(t.commission) : "—"}</td>` +
             `<td>${reasonChip}</td>` +
+            `<td>${entryCell || "—"}</td>` +
             `<td class="num ${rCls}">${rVal || "—"}</td>` +
             `<td class="td-arrow" title="раскрыть детали">${selected ? "▲" : "▼"}</td>` +
             `</tr>` + (selected ? tradeDetailsHtml(t) : "");
         }
       )
-      .join("") || `<tr><td colspan=10 style="color:var(--text-dim)">пока нет сделок</td></tr>`;
+      .join("") || `<tr><td colspan=11 style="color:var(--text-dim)">пока нет сделок</td></tr>`;
 }
 
 // Раскрытие деталей сделки: состав ансамбля, голоса кворума, bias и entry при входе.
