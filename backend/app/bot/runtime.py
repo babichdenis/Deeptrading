@@ -1954,6 +1954,14 @@ class PaperBotRuntime:
         try:
             _t2 = _time.perf_counter()
             sig = await asyncio.to_thread(strategy.on_bar, list(buffer))
+            # Инверсия на уровне СИГНАЛА: тогда вход, встречный сигнал и выходы
+            # трактуются согласованно (раньше инвертировался только ордер входа).
+            if sig is not None and getattr(self.config, "invert_signals", False):
+                from app.engine.models import Signal as _Sig, Side as _Side
+                sig = _Sig(strategy_id=sig.strategy_id,
+                           side=(_Side.SELL if sig.side == _Side.BUY else _Side.BUY),
+                           time=sig.time, reason=f"inv:{sig.reason}",
+                           features=sig.features, kind=sig.kind)
             _et = (_time.perf_counter() - _t2) * 1000
             self.metrics["ensemble_ms_total"] += _et
             self.metrics["ensemble_ms_n"] += 1
@@ -2136,8 +2144,7 @@ class PaperBotRuntime:
 
     async def _submit_order(self, figi: str, ticker: str, action: str, side: str, meta: dict | None = None) -> None:
         cfg = self.config
-        if action == "open" and getattr(cfg, "invert_signals", False):
-            side = "SELL" if side == "BUY" else "BUY"
+        # Инверсия уже применена на уровне сигнала (см. _process_candle) — здесь НЕ дублируем.
         qty = cfg.qty_per_trade
         _used_lev = 1.0
         if action == "open" and cfg.use_ensemble:
