@@ -1977,7 +1977,7 @@ class PaperBotRuntime:
             try:
                 from app.services.regime import RegimeDetector
                 from app.services.ensemble import resample as _resample5
-                _c5 = _resample5(list(buffer), 300)
+                _c5 = _resample5(list(buffer), 3600)  # режим строго на H1
                 _tl = RegimeDetector().compute(_c5)
                 if _tl:
                     _r = _tl[-1]

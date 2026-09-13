@@ -352,6 +352,36 @@ def compute_features(candles: Sequence[Candle]) -> dict:
 
 
 # ============================================================
+# ЕДИНЫЙ РАСЧЁТ ЗООПАРКА (один раз на бар) + кэш
+# ============================================================
+_FEAT_CACHE: dict = {}
+
+
+def compute_all_features(candles: Sequence[Candle]) -> dict:
+    """Весь зоопарк признаков (up/down/range/hv) ОДИН раз на бар, с кэшем по окну.
+
+    Все ансамбли голосуют по этому словарю — никакого повторного расчёта.
+    """
+    try:
+        key = (len(candles), candles[0].ts if candles else None,
+               candles[-1].ts if candles else None)
+    except Exception:
+        key = None
+    if key is not None and key in _FEAT_CACHE:
+        return _FEAT_CACHE[key]
+    out: dict = {}
+    out.update(compute_features(candles))        # down (short)
+    out.update(compute_features_long(candles))   # up (long)
+    out.update(compute_features_range(candles))  # range / MR / scalp
+    out.update(compute_features_hv(candles))     # high-volatility
+    if key is not None:
+        if len(_FEAT_CACHE) >= 128:
+            _FEAT_CACHE.clear()
+        _FEAT_CACHE[key] = out
+    return out
+
+
+# ============================================================
 # 4 ансамбля (short) — каждый возвращает 0/1
 # ============================================================
 def ensemble_trend_down(f: dict) -> int:
@@ -390,9 +420,8 @@ def ensemble_vol_structure_down(f: dict) -> int:
 # ============================================================
 # Режим-зависимый кворум → итоговый short-сигнал
 # ============================================================
-def short_signal(candles: Sequence[Candle], regime: str, require_breakdown: bool = True):
-    """Возвращает (signal: bool, votes: int, details: dict)."""
-    f = compute_features(candles)
+def short_signal(f: dict, regime: str, require_breakdown: bool = True):
+    """Возвращает (signal: bool, votes: int, details: dict). f — общий зоопарк."""
     t = ensemble_trend_down(f)
     b = ensemble_breakdown_momentum(f)
     v = ensemble_volume_down(f)
@@ -506,7 +535,8 @@ class ShortEnsembleStrategy:
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if len(candles) < self.warmup_bars():
             return None
-        sig, votes, details = short_signal(candles, self.regime, self.require_breakdown)
+        f = compute_all_features(candles)
+        sig, votes, details = short_signal(f, self.regime, self.require_breakdown)
         if sig:
             return Signal(strategy_id=self.strategy_id, side=Side.SELL,
                           time=candles[-1].ts, reason="short_ensemble",
@@ -641,9 +671,8 @@ def ensemble_vol_structure_up(f: dict) -> int:
     return 1 if score >= 3 else 0
 
 
-def long_signal(candles: Sequence[Candle], regime: str, require_breakout: bool = True):
-    """Возвращает (signal: bool, votes: int, details: dict)."""
-    f = compute_features_long(candles)
+def long_signal(f: dict, regime: str, require_breakout: bool = True):
+    """Возвращает (signal: bool, votes: int, details: dict). f — общий зоопарк."""
     t = ensemble_trend_up(f)
     b = ensemble_breakout_momentum(f)
     v = ensemble_volume_up(f)
@@ -747,7 +776,8 @@ class LongEnsembleStrategy:
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if len(candles) < self.warmup_bars():
             return None
-        sig, votes, details = long_signal(candles, self.regime, self.require_breakout)
+        f = compute_all_features(candles)
+        sig, votes, details = long_signal(f, self.regime, self.require_breakout)
         if sig:
             return Signal(strategy_id=self.strategy_id, side=Side.BUY,
                           time=candles[-1].ts, reason="long_ensemble",
@@ -868,9 +898,8 @@ def ensemble_scalping(f: dict) -> str | None:
     return direction if score >= 3 else None
 
 
-def range_signals(candles: Sequence[Candle], allow_scalping: bool = True):
-    """Возвращает (mr_long, mr_short, scalp_dir, no_trade, details)."""
-    f = compute_features_range(candles)
+def range_signals(f: dict, allow_scalping: bool = True):
+    """Возвращает (mr_long, mr_short, scalp_dir, no_trade, details). f — общий зоопарк."""
     is_full_flat = f["bb_width_very_low"] and f["volume_very_low"] and f["atr_very_low"]
     details = {
         "flat": is_full_flat,
@@ -904,7 +933,8 @@ class RangeEnsembleStrategy:
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if len(candles) < self.warmup_bars():
             return None
-        mr_long, mr_short, scalp_dir, no_trade, det = range_signals(candles, self.allow_scalping)
+        f = compute_all_features(candles)
+        mr_long, mr_short, scalp_dir, no_trade, det = range_signals(f, self.allow_scalping)
         if no_trade:
             return None
         # Приоритет: Mean Reversion > Scalping
@@ -1017,9 +1047,8 @@ def ensemble_hv_short(f: dict) -> int:
     return 1 if (f["hv_trend_down"] and score >= 5 and f.get("hv_not_overext_dn", True)) else 0
 
 
-def hv_signals(candles: Sequence[Candle]):
-    """Возвращает (hv_long, hv_short, details с голосами)."""
-    f = compute_features_hv(candles)
+def hv_signals(f: dict):
+    """Возвращает (hv_long, hv_short, details). f — общий зоопарк."""
     L = ensemble_hv_long(f)
     S = ensemble_hv_short(f)
     details = {
@@ -1053,7 +1082,8 @@ class HighVolatilityEnsembleStrategy:
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if len(candles) < self.warmup_bars():
             return None
-        hv_long, hv_short, det = hv_signals(candles)
+        f = compute_all_features(candles)
+        hv_long, hv_short, det = hv_signals(f)
         if hv_long:
             return Signal(strategy_id=self.strategy_id, side=Side.BUY,
                           time=candles[-1].ts, reason="hv_long",
@@ -1068,10 +1098,10 @@ class HighVolatilityEnsembleStrategy:
 # ============================================================
 # NEUTRAL: те же 4 ансамбля, но кворум 3 + обязательный breakout
 # ============================================================
-def neutral_signals(candles: Sequence[Candle]):
-    """Возвращает (neutral_long, neutral_short, details с голосами)."""
-    f_up = compute_features_long(candles)
-    f_down = compute_features(candles)
+def neutral_signals(f: dict):
+    """Возвращает (neutral_long, neutral_short, details). f — общий зоопарк."""
+    f_up = f
+    f_down = f
 
     t_up = ensemble_trend_up(f_up)
     b_up = ensemble_breakout_momentum(f_up)
@@ -1112,7 +1142,8 @@ class NeutralEnsembleStrategy:
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if len(candles) < self.warmup_bars():
             return None
-        neutral_long, neutral_short, det = neutral_signals(candles)
+        f = compute_all_features(candles)
+        neutral_long, neutral_short, det = neutral_signals(f)
         if neutral_long:
             return Signal(strategy_id=self.strategy_id, side=Side.BUY,
                           time=candles[-1].ts, reason="neutral_long",
