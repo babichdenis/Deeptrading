@@ -79,10 +79,10 @@ def _percentile_rank(values: list[float], window: int) -> list[float]:
 class RegimeDetector:
     def __init__(
         self,
-        slope_threshold: float = 0.002,   # |наклон EMA50| за 5 баров, выше = тренд
-        adx_threshold: float = 18.0,      # ниже = боковик
-        atr_percentile_threshold: float = 90.0,
-        range_mult: float = 2.5,          # (high-low)/close > mult*ATR% → high vol
+        slope_threshold: float = 0.0005,  # |наклон EMA50| за 5 баров, выше = тренд (калибровано Optuna 2026-09)
+        adx_threshold: float = 19.0,      # ниже = боковик (калибровано)
+        atr_percentile_threshold: float = 78.0,  # калибровано
+        range_mult: float = 2.75,         # (high-low)/close > mult*ATR% → high vol (калибровано)
         atr_period: int = 14,
         ema_fast: int = 20,
         ema_slow: int = 50,
