@@ -305,9 +305,8 @@ def compute_features(candles: Sequence[Candle]) -> dict:
     N = 20
     donchian_low = min(lows[-N - 1:-1]) if len(lows) >= N + 1 else None
     donchian_breakdown_down = (donchian_low is not None) and close < donchian_low
-    low_N = min(lows[-N:]) if len(lows) >= N else None
-    # float-safe «новый минимум»
-    new_low_N = (low_N is not None) and (close <= low_N * 1.0000001)
+    prior_low = min(lows[-N - 1:-1]) if len(lows) >= N + 1 else None
+    new_low_N = (prior_low is not None) and (lows[-1] < prior_low)
     momentum_neg_N = len(closes) > N and ((close - closes[-N - 1]) / closes[-N - 1] < 0)
     rsi_val = _rsi_last(closes, 14)
     rsi_below_45 = (rsi_val is not None) and rsi_val < 45
@@ -331,8 +330,10 @@ def compute_features(candles: Sequence[Candle]) -> dict:
     # Волатильность + структура
     bbw = _bbw_tail(closes, 20, 2.0)
     bbw_sma = _sma(bbw, 60)
-    bb_squeeze = (bbw and bbw_sma is not None and bbw[-1] < 0.9 * bbw_sma)
-    bb_squeeze_down = bool(bb_squeeze) and bb_break_lower
+    bb_squeeze_prev = bool(bbw) and bbw_sma is not None and len(bbw) >= 2 and bbw[-2] < 0.9 * bbw_sma
+    bb_expanding = bool(bbw) and len(bbw) >= 2 and bbw[-1] > bbw[-2]
+    bb_squeeze = bb_squeeze_prev and bb_expanding
+    bb_squeeze_down = bb_squeeze and bb_break_lower
     atr = _atr_tail(candles, 14, 20)
     atr_val = atr[-1] if atr else None
     atr_sma20 = _sma(atr, 20)
@@ -594,8 +595,8 @@ def compute_features_long(candles: Sequence[Candle]) -> dict:
     N = 20
     donchian_high = max(highs[-N - 1:-1]) if len(highs) >= N + 1 else None
     donchian_breakout_up = (donchian_high is not None) and close > donchian_high
-    high_N = max(highs[-N:]) if len(highs) >= N else None
-    new_high_N = (high_N is not None) and (close >= high_N * 0.9999999)
+    prior_high = max(highs[-N - 1:-1]) if len(highs) >= N + 1 else None
+    new_high_N = (prior_high is not None) and (highs[-1] > prior_high)
     momentum_pos_N = len(closes) > N and ((close - closes[-N - 1]) / closes[-N - 1] > 0)
     rsi_val = _rsi_last(closes, 14)
     rsi_above_55 = (rsi_val is not None) and rsi_val > 55
@@ -619,8 +620,10 @@ def compute_features_long(candles: Sequence[Candle]) -> dict:
     # Волатильность + структура up
     bbw = _bbw_tail(closes, 20, 2.0)
     bbw_sma = _sma(bbw, 60)
-    bb_squeeze = (bbw and bbw_sma is not None and bbw[-1] < 0.9 * bbw_sma)
-    bb_squeeze_up = bool(bb_squeeze) and bb_break_upper
+    bb_squeeze_prev = bool(bbw) and bbw_sma is not None and len(bbw) >= 2 and bbw[-2] < 0.9 * bbw_sma
+    bb_expanding = bool(bbw) and len(bbw) >= 2 and bbw[-1] > bbw[-2]
+    bb_squeeze = bb_squeeze_prev and bb_expanding
+    bb_squeeze_up = bb_squeeze and bb_break_upper
     atr = _atr_tail(candles, 14, 20)
     atr_val = atr[-1] if atr else None
     atr_sma20 = _sma(atr, 20)
@@ -1071,6 +1074,8 @@ def hv_signals(f: dict):
     """Возвращает (hv_long, hv_short, details). f — общий зоопарк."""
     L = ensemble_hv_long(f)
     S = ensemble_hv_short(f)
+    if L and S:
+        L = S = 0
     details = {
         "hv_long": L, "hv_short": S,
         "up": {"trend": f["hv_trend_up"], "breakout": f["hv_breakout_up"],
@@ -1138,8 +1143,11 @@ def neutral_signals(f: dict):
     k = ENSEMBLE_CFG["k_neutral"]
     neutral_long = (votes_up >= k) and (b_up == 1)
     neutral_short = (votes_dn >= k) and (b_dn == 1)
+    if neutral_long and neutral_short:
+        neutral_long = neutral_short = False
     details = {
         "votes_up": votes_up, "votes_dn": votes_dn,
+        "conflict": bool((votes_up >= k and b_up == 1) and (votes_dn >= k and b_dn == 1)),
         "up": {"t": t_up, "b": b_up, "v": v_up, "s": s_up},
         "dn": {"t": t_dn, "b": b_dn, "v": v_dn, "s": s_dn},
     }
