@@ -93,6 +93,7 @@ class BotConfig:
     slippage_bps: float = 2.0  # 2 bps adverse slippage
     # --- Opposite-hold / confirm_flip ---
     confirm_flip: int = 2  # N встречных сигналов перед закрытием (0=отключено)
+    invert_signals: bool = False  # ЭКСПЕРИМЕНТ: инвертировать сторону входа (проверка "обратной" логики)
     # --- Re-entry cooldown ---
     reentry_cooldown_bars: int = 15  # баров между выходом и повторным входом (0=отключено)
     # --- Overnight ---
@@ -2129,6 +2130,8 @@ class PaperBotRuntime:
 
     async def _submit_order(self, figi: str, ticker: str, action: str, side: str, meta: dict | None = None) -> None:
         cfg = self.config
+        if action == "open" and getattr(cfg, "invert_signals", False):
+            side = "SELL" if side == "BUY" else "BUY"
         qty = cfg.qty_per_trade
         _used_lev = 1.0
         if action == "open" and cfg.use_ensemble:
