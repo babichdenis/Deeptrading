@@ -35,6 +35,22 @@ def _as_dict(p) -> dict:
         return {}
 
 
+
+# ============================================================
+# НАСТРАИВАЕМЫЕ ПОРОГИ АНСАМБЛЕЙ (для Optuna / тонкой настройки)
+# ============================================================
+ENSEMBLE_CFG: dict = {
+    "k_trend": 2,             # кворум в TREND_UP/DOWN
+    "k_neutral": 3,           # кворум в NEUTRAL
+    "trend_score_min": 3,     # порог ансамбля trend
+    "vol_struct_min": 3,      # порог vol_structure
+    "adx_min": 25.0,          # ADX для тренда (HV)
+    "vol_mult": 2.0,          # объёмный всплеск (HV)
+    "atr_exp_mult": 1.5,      # расширение ATR (HV breakout)
+    "hv_score_min": 5,        # порог HV
+    "overext_mult": 3.0,      # перерастяжение от SMA50 (в ATR)
+}
+
 # ============================================================
 # Индикаторы (списки, без внешних зависимостей)
 # ============================================================
@@ -395,7 +411,7 @@ def ensemble_trend_down(f: dict) -> int:
     score += 1 if f["sma50_below_sma200"] else 0
     score += 1 if f["ema20_below_ema50"] else 0
     score += 2 if f["adx_downtrend"] else 0  # ADX критичен
-    return 1 if score >= 3 else 0
+    return 1 if score >= ENSEMBLE_CFG["trend_score_min"] else 0
 
 
 def ensemble_breakdown_momentum(f: dict) -> int:
@@ -418,7 +434,7 @@ def ensemble_volume_down(f: dict) -> int:
 def ensemble_vol_structure_down(f: dict) -> int:
     score = (1 if f["bb_squeeze_down"] else 0) + (1 if f["atr_expansion_down"] else 0) + \
             (2 if f["lower_highs_lows"] else 0)
-    return 1 if score >= 3 else 0
+    return 1 if score >= ENSEMBLE_CFG["vol_struct_min"] else 0
 
 
 # ============================================================
@@ -971,10 +987,10 @@ def compute_features_hv(candles: Sequence[Candle]) -> dict:
     close = closes[-1]
     prev_close = closes[-2] if len(closes) >= 2 else close
 
-    hv_trend_up = (adx_val is not None and adx_val > 25 and plus_di is not None
+    hv_trend_up = (adx_val is not None and adx_val > ENSEMBLE_CFG["adx_min"] and plus_di is not None
                    and minus_di is not None and plus_di > minus_di
                    and sma50 is not None and close > sma50)
-    hv_trend_down = (adx_val is not None and adx_val > 25 and plus_di is not None
+    hv_trend_down = (adx_val is not None and adx_val > ENSEMBLE_CFG["adx_min"] and plus_di is not None
                      and minus_di is not None and minus_di > plus_di
                      and sma50 is not None and close < sma50)
 
@@ -987,13 +1003,13 @@ def compute_features_hv(candles: Sequence[Candle]) -> dict:
     atr = _atr_tail(candles, 14, 50)
     atr_val = atr[-1] if atr else None
     atr_sma50 = _sma(atr, 50)
-    atr_expansion = (atr_val is not None and atr_sma50 is not None and atr_val > 1.5 * atr_sma50)
+    atr_expansion = (atr_val is not None and atr_sma50 is not None and atr_val > ENSEMBLE_CFG["atr_exp_mult"] * atr_sma50)
     hv_breakout_up = hv_breakout_up and atr_expansion
     hv_breakdown_down = hv_breakdown_down and atr_expansion
 
     vol_sma20 = _sma(vols, 20)
-    hv_volume_surge_up = (close > prev_close and vol_sma20 is not None and vols[-1] > 2.0 * vol_sma20)
-    hv_volume_surge_down = (close < prev_close and vol_sma20 is not None and vols[-1] > 2.0 * vol_sma20)
+    hv_volume_surge_up = (close > prev_close and vol_sma20 is not None and vols[-1] > ENSEMBLE_CFG["vol_mult"] * vol_sma20)
+    hv_volume_surge_down = (close < prev_close and vol_sma20 is not None and vols[-1] > ENSEMBLE_CFG["vol_mult"] * vol_sma20)
 
     N_mom = 20
     momentum_20 = ((close - closes[-N_mom - 1]) / closes[-N_mom - 1]) if len(closes) > N_mom else 0.0
@@ -1009,7 +1025,7 @@ def compute_features_hv(candles: Sequence[Candle]) -> dict:
 
     # Фильтр «перерастянутого спайка»: не покупать слишком высоко над SMA50 (в ATR),
     # не продавать слишком низко — иначе входим на вершине/дне выброса.
-    _max_ext = 3.0
+    _max_ext = ENSEMBLE_CFG["overext_mult"]
     hv_not_overext_up = (sma50 is not None and atr_val is not None
                          and close <= sma50 + _max_ext * atr_val)
     hv_not_overext_dn = (sma50 is not None and atr_val is not None
@@ -1039,7 +1055,7 @@ def ensemble_hv_long(f: dict) -> int:
     score += 1 if f["hv_momentum_strong"] else 0
     score += 1 if f["hv_bb_break_upper"] else 0
     # + фильтр перерастянутого спайка (не покупать выше SMA50 + 3·ATR)
-    return 1 if (f["hv_trend_up"] and score >= 5 and f.get("hv_not_overext_up", True)) else 0
+    return 1 if (f["hv_trend_up"] and score >= ENSEMBLE_CFG["hv_score_min"] and f.get("hv_not_overext_up", True)) else 0
 
 
 def ensemble_hv_short(f: dict) -> int:
@@ -1048,7 +1064,7 @@ def ensemble_hv_short(f: dict) -> int:
     score += 1 if f["hv_volume_surge_down"] else 0
     score += 1 if f["hv_momentum_strong_neg"] else 0
     score += 1 if f["hv_bb_break_lower"] else 0
-    return 1 if (f["hv_trend_down"] and score >= 5 and f.get("hv_not_overext_dn", True)) else 0
+    return 1 if (f["hv_trend_down"] and score >= ENSEMBLE_CFG["hv_score_min"] and f.get("hv_not_overext_dn", True)) else 0
 
 
 def hv_signals(f: dict):
@@ -1119,7 +1135,7 @@ def neutral_signals(f: dict):
     s_dn = ensemble_vol_structure_down(f_down)
     votes_dn = t_dn + b_dn + v_dn + s_dn
 
-    k = 3
+    k = ENSEMBLE_CFG["k_neutral"]
     neutral_long = (votes_up >= k) and (b_up == 1)
     neutral_short = (votes_dn >= k) and (b_dn == 1)
     details = {
