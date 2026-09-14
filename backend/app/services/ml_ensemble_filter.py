@@ -33,6 +33,7 @@ def _find_ml_file(name: str, env_key: str) -> str:
         os.environ.get(env_key, ""),
         str(_ML_DIR / name),
         str(_BACKEND_DIR / name),
+        str(_BACKEND_DIR / "reports" / name),
         f"/Users/Denis/Dev/tinvest_study/{name}",
     ]
     for c in cands:
