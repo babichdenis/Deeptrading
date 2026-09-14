@@ -21,8 +21,28 @@ import pandas as pd
 
 from app.engine.models import Candle as EngineCandle
 
-ML_PATH = "/Users/Denis/Dev/tinvest_study/ml_25stocks_2024.joblib"
-MAPPING_PATH = "/Users/Denis/Dev/tinvest_study/ticker_mapping.txt"
+from pathlib import Path as _Path
+
+_ML_DIR = _Path(__file__).resolve().parents[2] / "data" / "ml"
+_BACKEND_DIR = _Path(__file__).resolve().parents[2]
+
+
+def _find_ml_file(name: str, env_key: str) -> str:
+    """Ищем файл: env-override → backend/data/ml/ → backend/ → старое место на .3."""
+    cands = [
+        os.environ.get(env_key, ""),
+        str(_ML_DIR / name),
+        str(_BACKEND_DIR / name),
+        f"/Users/Denis/Dev/tinvest_study/{name}",
+    ]
+    for c in cands:
+        if c and os.path.exists(c):
+            return c
+    return str(_ML_DIR / name)
+
+
+ML_PATH = _find_ml_file("ml_25stocks_2024.joblib", "ML_MODEL_PATH")
+MAPPING_PATH = _find_ml_file("ticker_mapping.txt", "ML_MAPPING_PATH")
 FEATS = ["natr", "rsi", "rsid", "mhist", "bbpos", "donpos", "emadist",
          "vwapdev", "volz", "rvol", "fd", "hod", "vol_ratio", "dow", "bias_1h"]
 

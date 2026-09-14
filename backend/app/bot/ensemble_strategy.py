@@ -57,6 +57,8 @@ class EnsembleParams:
     regime_setups_filter: dict = field(default_factory=dict)
     # --- Быстрый режим-гейт: не гонять тяжёлый ансамбль, если режим не разрешён ---
     trade_regimes: list = field(default_factory=list)
+    # --- ML-фильтр (LightGBM gate качества сигналов): {"threshold":0.55} ---
+    ml_filter: dict = field(default_factory=dict)
 
 
 class EnsembleV4Strategy:
@@ -151,6 +153,8 @@ class EnsembleV4Strategy:
             if self.p.entry_direction_sid:
                 req["entry_direction_sid"] = self.p.entry_direction_sid
             req["regime"] = {"tf": getattr(self.p, "regime_tf", "hour") or "hour"}
+            if self.p.ml_filter:
+                req["ml_filter"] = self.p.ml_filter
             if self.p.entry_macd_1m:
                 req["entry_macd_1m"] = True
                 req["entry_macd_fast"] = self.p.entry_macd_fast
