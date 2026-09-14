@@ -682,6 +682,54 @@ class PaperBotRuntime:
         except Exception:
             pass
 
+    async def set_position_levels(self, figi: str, sl: float | None = None, tp: float | None = None) -> dict:
+        """Ручная правка SL/TP позиции: in-memory учёт выхода + запись в БД.
+
+        Сбрасывает трейлинг (trail_active=False), чтобы действовали ОБА уровня:
+        SL защищает прибыль, TP — цель. Уровни переживают рестарт (читаются из БД).
+        """
+        from app.models.sandbox_trade import SandboxTrade
+        from sqlalchemy import select as _sel
+        try:
+            pos = await self.broker.get_position(figi)
+        except Exception:
+            pos = None
+        if pos is None:
+            return {"ok": False, "error": "no_position"}
+        if figi not in self._exit_plans:
+            _buf = self.buffers.get(figi)
+            _c = list(_buf)[-1] if _buf else None
+            if _c is not None:
+                await self._ensure_exit_state(figi, _c, pos)
+        if figi not in self._exit_plans and figi not in self._trail_stop:
+            return {"ok": False, "error": "no_exit_state"}
+        if sl is not None:
+            self._trail_stop[figi] = float(sl)
+        if tp is not None:
+            self._exit_target[figi] = float(tp)
+        self._trail_active[figi] = False
+        try:
+            async with SessionLocal() as db:
+                row = (await db.execute(
+                    _sel(SandboxTrade).where(
+                        SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
+                        SandboxTrade.mode == self.broker_mode)
+                    .order_by(SandboxTrade.entry_time.desc()).limit(1)
+                )).scalar_one_or_none()
+                if row is not None:
+                    if sl is not None:
+                        row.stop_loss = float(sl)
+                    if tp is not None:
+                        row.take_profit = float(tp)
+                    row.trailing_active = False
+                    await db.commit()
+        except Exception as _e:
+            self._log(f"SL/TP РУЧНО: ошибка записи в БД: {_e}")
+        self._log(f"SL/TP РУЧНО {figi[-6:]}: sl={self._trail_stop.get(figi)} tp={self._exit_target.get(figi)}")
+        self.events.log("SLTP_MANUAL", figi=figi,
+                        sl=self._trail_stop.get(figi), tp=self._exit_target.get(figi))
+        return {"ok": True, "figi": figi, "sl": self._trail_stop.get(figi), "tp": self._exit_target.get(figi)}
+
     @property
     def status(self) -> dict:
         step = STEP_SEC.get(self.config.interval_name, 300)
@@ -2450,11 +2498,34 @@ class PaperBotRuntime:
             self._exit_entry_px[figi] = float(_entry_px)
             self._exit_qty[figi] = int(getattr(pos, "qty", 0) or 0)
             self._trail_active[figi] = False
-            self._trail_stop[figi] = float(_pl.stop_loss) if _pl.stop_loss is not None else 0.0
-            if _pl.take_profit is not None:
+            # Источник уровней при восстановлении: сначала БД (ручные правки/прошлый
+            # прогон переживают рестарт), иначе — расчёт от ATR.
+            _db_sl = _db_tp = None
+            try:
+                from app.models.sandbox_trade import SandboxTrade
+                from sqlalchemy import select as _sel
+                async with SessionLocal() as _db:
+                    _row = (await _db.execute(
+                        _sel(SandboxTrade).where(
+                            SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
+                            SandboxTrade.mode == self.broker_mode)
+                        .order_by(SandboxTrade.entry_time.desc()).limit(1)
+                    )).scalar_one_or_none()
+                    if _row is not None:
+                        _db_sl = float(_row.stop_loss) if _row.stop_loss is not None else None
+                        _db_tp = float(_row.take_profit) if _row.take_profit is not None else None
+            except Exception:
+                pass
+            self._trail_stop[figi] = _db_sl if _db_sl is not None else (
+                float(_pl.stop_loss) if _pl.stop_loss is not None else 0.0)
+            if _db_tp is not None:
+                self._exit_target[figi] = _db_tp
+            elif _pl.take_profit is not None:
                 self._exit_target[figi] = float(_pl.take_profit)
             self._entry_bar_index.setdefault(figi, self._bar_counter)
-            self._log(f"EXIT-INIT {figi[-6:]} {_side} entry={_entry_px:.2f} sl={self._trail_stop[figi]:.2f}")
+            self._log(f"EXIT-INIT {figi[-6:]} {_side} entry={_entry_px:.2f} "
+                      f"sl={self._trail_stop[figi]:.2f} tp={self._exit_target.get(figi)} "
+                      f"src={'db' if _db_sl is not None else 'atr'}")
         except Exception as _ei_e:
             self._log(f"exit-init error {figi[-6:]}: {_ei_e}")
 

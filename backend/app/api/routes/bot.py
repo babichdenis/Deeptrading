@@ -581,6 +581,30 @@ async def bot_close_position(figi: str) -> dict:
     return {"closed": True, "figi": figi, "ticker": pos.ticker, "price": price}
 
 
+@router.post("/positions/levels")
+async def bot_position_levels(payload: dict) -> dict:
+    """Ручная правка SL/TP позиции (защита прибыли / сдвиг цели)."""
+    figi = str(payload.get("figi") or "").strip()
+    ticker = str(payload.get("ticker") or "").strip().upper()
+    if not figi and ticker:
+        _u = next((u for u in (runtime.universe or [])
+                   if str(u.get("ticker", "")).upper() == ticker), None)
+        if _u:
+            figi = _u["figi"]
+    if not figi:
+        raise HTTPException(400, "figi или ticker обязателен")
+    sl = payload.get("sl")
+    tp = payload.get("tp")
+    res = await runtime.set_position_levels(
+        figi,
+        sl=float(sl) if sl is not None else None,
+        tp=float(tp) if tp is not None else None,
+    )
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error", "error"))
+    return res
+
+
 @router.get("/logconfig")
 async def bot_logconfig_get() -> dict:
     return {"log_candles": runtime.log_candles, "buffer_max": runtime._live_logs.maxlen}
