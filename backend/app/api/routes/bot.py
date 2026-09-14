@@ -52,6 +52,7 @@ def _config_payload(cfg: BotConfig) -> dict:
         "invert_signals": bool(getattr(cfg, "invert_signals", False)),
         "ensemble_entry_tf": getattr(cfg, "ensemble_entry_tf", "5min"),
         "ensemble_entry_from_setups": bool(getattr(cfg, "ensemble_entry_from_setups", True)),
+        "ensemble_direction_sid": getattr(cfg, "ensemble_direction_sid", ""),
         "source": "file",
     }
 
@@ -192,6 +193,7 @@ class BotConfigPatch(BaseModel):
     invert_signals: bool | None = None
     ensemble_entry_tf: str | None = None
     ensemble_entry_from_setups: bool | None = None
+    ensemble_direction_sid: str | None = None
 
 
 @router.patch("/config")
@@ -302,6 +304,10 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.ensemble_entry_from_setups is not None and req.ensemble_entry_from_setups != getattr(cfg, "ensemble_entry_from_setups", True):
         changes.append(f"entry_from_setups: {getattr(cfg, 'ensemble_entry_from_setups', True)} → {req.ensemble_entry_from_setups}")
         cfg.ensemble_entry_from_setups = req.ensemble_entry_from_setups
+    if req.ensemble_direction_sid is not None:
+        if req.ensemble_direction_sid != getattr(cfg, "ensemble_direction_sid", ""):
+            changes.append(f"direction_sid: {getattr(cfg, 'ensemble_direction_sid', '') or '—'} → {req.ensemble_direction_sid or '—'}")
+        cfg.ensemble_direction_sid = req.ensemble_direction_sid
     if changes:
         runtime._log("⚙ КОНФИГ: " + " | ".join(changes))
     await save_bot_settings(cfg)

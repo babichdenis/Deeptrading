@@ -48,6 +48,7 @@ class EnsembleParams:
     # --- EXP-008: минуточный MACD-фильтр (гистограмма 1m в сторону входа) ---
     entry_macd_1m: bool = False
     entry_from_setups: bool = False  # вход (и сторона) из сигналов стратегий, не micro_breakout
+    entry_direction_sid: str = ""    # Путь 2: направление только от этой стратегии
     regime_tf: str = "hour"          # ТФ режим-детектора (H1 по умолчанию)
     entry_macd_fast: int = 12
     entry_macd_slow: int = 26
@@ -124,6 +125,8 @@ class EnsembleV4Strategy:
                 req["regime_setups_filter"] = self.p.regime_setups_filter
             if self.p.entry_from_setups:
                 req["entry_from_setups"] = True
+            if self.p.entry_direction_sid:
+                req["entry_direction_sid"] = self.p.entry_direction_sid
             req["regime"] = {"tf": getattr(self.p, "regime_tf", "hour") or "hour"}
             if self.p.entry_macd_1m:
                 req["entry_macd_1m"] = True

@@ -791,7 +791,16 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     # исполнение движком по open следующего 1м бара
     entry_tf = req.get("entry_tf", "1min")
     entry_candles = cached_resample(candles, TF_SECONDS.get(entry_tf, 60)) if entry_tf != "1min" else candles
-    if req.get("entry_from_setups"):
+    _direction_sid = req.get("entry_direction_sid")
+    if _direction_sid:
+        # Путь 2: направление (и точка входа) — только от указанной стратегии,
+        # остальные голоса лишь фильтруют кворумом.
+        entries_raw = [
+            {"ts": s["ts"], "side": s["side"],
+             "reason": f"{sid}:{s.get('reason', '')}", "features": s.get("features")}
+            for sid, sigs in setup_runs if sid == _direction_sid for s in sigs
+        ]
+    elif req.get("entry_from_setups"):
         # Вход (и его СТОРОНА) берётся из сигналов стратегий-голосов, а не из micro_breakout.
         entries_raw = [
             {"ts": s["ts"], "side": s["side"],
