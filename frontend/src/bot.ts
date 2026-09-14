@@ -1369,13 +1369,23 @@ function renderTrades(trades: BotTradeRow[]) {
             const f = (m?.entry?.features || {}) as Record<string, unknown>;
             if (er) {
               let votes = "";
-              if (typeof f.votes_up === "number" || typeof f.votes_dn === "number") {
+              if (typeof f.long_votes === "number" || typeof f.short_votes === "number") {
+                votes = ` ↑${f.long_votes ?? 0}/↓${f.short_votes ?? 0}`;
+              } else if (typeof f.votes_up === "number" || typeof f.votes_dn === "number") {
                 votes = ` ↑${f.votes_up ?? 0}/↓${f.votes_dn ?? 0}`;
               } else if (typeof f.votes === "number") {
                 votes = ` v${f.votes}`;
               }
+              const up: string[] = []; const dn: string[] = [];
+              for (const [k, v] of Object.entries(f)) {
+                if (k.startsWith("m1_") || k.startsWith("m5_")) {
+                  const nm = k.replace(/^m[15]_/, "");
+                  if (v === "BUY") up.push(nm); else if (v === "SELL") dn.push(nm);
+                }
+              }
+              const tip = (up.length || dn.length) ? `↑ ${up.join(",") || "—"} | ↓ ${dn.join(",") || "—"}` : er;
               const short = er.replace("_ensemble", "").replace("neutral_", "neu:").replace("range_", "rng:").replace("hv_", "hv:");
-              entryCell = `<span class="entry-chip" title="${esc(er)}">${esc(short)}${votes}</span>`;
+              entryCell = `<span class="entry-chip" title="${esc(tip)}">${esc(short)}${votes}</span>`;
             }
           } catch { /* noop */ }
           const selected = _openDetails.has(`${t.ticker}|${t.entry_time}`);
@@ -1415,6 +1425,24 @@ function tradeDetailsHtml(t: BotTradeRow): string {
   rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Вход:</b> ${String(t.side)} · ${String(entry.reason ?? "—")}` +
     (ab === true ? ` ${chip("ПРОТИВ bias", "#e74c3c")}` : ab === false ? ` ${chip("по bias", "#2ecc71")}` : "") +
     (entry.features ? ` · level ${(entry.features as Record<string, unknown>).breakout_level ?? "—"}` : "") + `</div>`);
+  // Голоса функций (ensemble_vote): кто ↑ / кто ↓
+  try {
+    const f = (entry.features as Record<string, unknown>) || {};
+    const up: string[] = [];
+    const dn: string[] = [];
+    for (const [k, v] of Object.entries(f)) {
+      if (k.startsWith("m1_") || k.startsWith("m5_")) {
+        const nm = k.replace(/^m[15]_/, "");
+        if (v === "BUY") up.push(nm);
+        else if (v === "SELL") dn.push(nm);
+      }
+    }
+    if (up.length || dn.length) {
+      rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Голоса:</b> ` +
+        `<span style="color:var(--up)">↑ ${up.join(", ") || "—"}</span> &nbsp;` +
+        `<span style="color:var(--down)">↓ ${dn.join(", ") || "—"}</span></div>`);
+    }
+  } catch { /* noop */ }
   // Объём и режим на входе
   if (vol.v != null) {
     rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Объём (вход):</b> ` +
