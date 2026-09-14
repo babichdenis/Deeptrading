@@ -730,6 +730,56 @@ class PaperBotRuntime:
                         sl=self._trail_stop.get(figi), tp=self._exit_target.get(figi))
         return {"ok": True, "figi": figi, "sl": self._trail_stop.get(figi), "tp": self._exit_target.get(figi)}
 
+    async def state_snapshot(self) -> dict:
+        """Компактный снапшот состояния для внешнего управления (ИИ/мониторинг).
+
+        Позиции + последняя цена из буфера + SL/TP + P&L + дистанции до уровней
+        + режим + алерты — одним вызовом, без походов в БД.
+        """
+        out: dict = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "mode": self.mode, "running": bool(self.running),
+            "equity": None, "positions": [], "alerts": [],
+        }
+        try:
+            out["equity"] = float(await self.broker.equity())
+        except Exception:
+            pass
+        try:
+            pos_list = await self.broker.positions()
+        except Exception:
+            pos_list = []
+        for p in pos_list:
+            figi = str(getattr(p, "figi", "") or "")
+            bb = self.tcs_to_bbg.get(figi, figi)
+            buf = self.buffers.get(bb) or self.buffers.get(figi)
+            last = float(buf[-1].close) if buf else None
+            entry = self._exit_entry_px.get(bb) or float(getattr(p, "entry_price", 0) or 0)
+            side_raw = str(getattr(p, "side", "")).upper()
+            long_ = side_raw in ("LONG", "BUY")
+            qty = int(self._exit_qty.get(bb) or getattr(p, "qty", 0) or 0)
+            sl = self._trail_stop.get(bb)
+            tp = self._exit_target.get(bb)
+            pnl = (last - entry) * qty * (1 if long_ else -1) if (last and entry) else None
+            d_sl = abs(last - sl) / last * 100 if (last and sl) else None
+            d_tp = abs(tp - last) / last * 100 if (last and tp) else None
+            reg = (self._regimes.get(bb) or {}).get("state")
+            reg_name = reg.get("state") if isinstance(reg, dict) else reg
+            out["positions"].append({
+                "figi": bb, "ticker": self.tickers.get(bb, getattr(p, "ticker", "") or bb[-6:]),
+                "side": "LONG" if long_ else "SHORT", "qty": qty,
+                "entry": entry, "last": last, "pnl": pnl,
+                "sl": sl, "tp": tp,
+                "dist_sl_pct": d_sl, "dist_tp_pct": d_tp,
+                "regime": reg_name, "trail_active": bool(self._trail_active.get(bb)),
+            })
+        for pos in out["positions"]:
+            for key, lbl in (("dist_sl_pct", "SL"), ("dist_tp_pct", "TP")):
+                d = pos.get(key)
+                if d is not None and d <= 0.7:
+                    out["alerts"].append(f"{pos['ticker']}: {d:.2f}% до {lbl} (P&L {pos['pnl']:+.1f}₽)")
+        return out
+
     @property
     def status(self) -> dict:
         step = STEP_SEC.get(self.config.interval_name, 300)

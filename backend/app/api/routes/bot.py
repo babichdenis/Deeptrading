@@ -605,6 +605,12 @@ async def bot_position_levels(payload: dict) -> dict:
     return res
 
 
+@router.get("/state")
+async def bot_state() -> dict:
+    """Единый снапшот состояния (позиции+цены+SL/TP+P&L+режим+алерты) для ИИ/мониторинга."""
+    return await runtime.state_snapshot()
+
+
 @router.get("/logconfig")
 async def bot_logconfig_get() -> dict:
     return {"log_candles": runtime.log_candles, "buffer_max": runtime._live_logs.maxlen}
