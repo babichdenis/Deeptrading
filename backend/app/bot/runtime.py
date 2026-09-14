@@ -116,6 +116,7 @@ class BotConfig:
     replay_end: str = ""      # ISO UTC datetime конца окна (пусто = до конца данных)
     replay_pace: str = "fast" # fast (макс. скорость) | wall (в реальном времени по барам)
     test_name: str = ""       # имя теста (режим test): сделки реплея помечаются им
+    intrabar_check_sec: float = 10.0  # период intrabar-проверки SL/TP по последней цене (0=выкл)
 
 
 # Поля BotConfig, которые сохраняются в БД и восстанавливаются при старте бота.
@@ -779,6 +780,68 @@ class PaperBotRuntime:
                 if d is not None and d <= 0.7:
                     out["alerts"].append(f"{pos['ticker']}: {d:.2f}% до {lbl} (P&L {pos['pnl']:+.1f}₽)")
         return out
+
+    async def _intrabar_exit_loop(self) -> None:
+        """Быстрая (intrabar) проверка SL/TP между барами по последней цене брокера.
+
+        Детерминированный слой защиты: не ждём закрытия 1м бара. Работает только
+        при наличии учёта выхода (_exit_plans) и реальной позиции у брокера.
+        """
+        await asyncio.sleep(25.0)  # дать прогреться (warmup/восстановление позиций)
+        while True:
+            try:
+                _sec = float(getattr(self.config, "intrabar_check_sec", 10.0) or 0.0)
+                if _sec <= 0:
+                    await asyncio.sleep(30.0)
+                    continue
+                await asyncio.sleep(max(2.0, _sec))
+                if not self.running or not self._exit_plans:
+                    continue
+                _lp = getattr(self.broker, "last_prices", None)
+                if _lp is None:
+                    continue
+                prices = await _lp(list(self._exit_plans.keys()))
+                if not prices:
+                    continue
+                for figi, px in list(prices.items()):
+                    try:
+                        if not px or px <= 0:
+                            continue
+                        sl = self._trail_stop.get(figi)
+                        tp = self._exit_target.get(figi)
+                        if sl is None and tp is None:
+                            continue
+                        side = self._exit_side.get(figi) or "LONG"
+                        long_ = str(side).upper() in ("LONG", "BUY")
+                        hit_sl = bool(sl) and ((long_ and px <= sl) or (not long_ and px >= sl))
+                        hit_tp = bool(tp) and ((long_ and px >= tp) or (not long_ and px <= tp))
+                        if not (hit_sl or hit_tp):
+                            continue
+                        pos = await self.broker.get_position(figi)
+                        if pos is None:
+                            continue
+                        reason = "intrabar_sl" if hit_sl else "intrabar_tp"
+                        trade = await self.broker.close_position(figi, float(px), reason)
+                        self._held.discard(figi)
+                        self._opposite_count.pop(figi, None)
+                        self._last_exit_bar[figi] = self._bar_counter
+                        self._clear_exit_state(figi)
+                        _bh = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
+                        if trade is not None:
+                            await self._st_close(figi, float(px), reason=reason,
+                                                 net=float(trade.net_pnl),
+                                                 meta={"bars_held": _bh, "intrabar": True})
+                            self._log(f"INTRABAR ВЫХОД {figi[-6:]} {reason} @ {px:.2f} "
+                                      f"pnl={float(trade.net_pnl):+.2f}")
+                            self.events.log("ORDER_FILLED", figi=figi, reason=reason,
+                                            price=float(px), net_pnl=float(trade.net_pnl),
+                                            intrabar=True)
+                    except Exception as _ie:
+                        self._log(f"intrabar {figi[-6:]}: {type(_ie).__name__}: {str(_ie)[:70]}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._log(f"intrabar-exit loop: {type(e).__name__}: {str(e)[:80]}")
 
     @property
     def status(self) -> dict:
@@ -1852,6 +1915,7 @@ class PaperBotRuntime:
         self._reconcile_task = asyncio.create_task(self._reconcile_loop())
         self._session_task = asyncio.create_task(self._session_monitor())
         self._metrics_task = asyncio.create_task(self._metrics_loop())
+        self._intrabar_task = asyncio.create_task(self._intrabar_exit_loop())
         try:
             async for candle in feed.stream():
                 if not self.running:
@@ -1887,7 +1951,7 @@ class PaperBotRuntime:
                     await self._persist_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task', '_metrics_task'):
+            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task', '_metrics_task', '_intrabar_task'):
                 task = getattr(self, t, None)
                 if task:
                     task.cancel()

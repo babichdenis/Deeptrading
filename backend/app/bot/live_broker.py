@@ -326,6 +326,26 @@ class LiveBroker:
             )
         return await asyncio.to_thread(_fetch)
 
+    async def last_prices(self, figis: list[str]) -> dict[str, float]:
+        """Последние цены по списку figi (для intrabar-проверки SL/TP)."""
+        import asyncio
+
+        def _fetch():
+            services = self._get_services()
+            resp = services.market_data.get_last_prices(figi=list(figis))
+            out: dict[str, float] = {}
+            for lp in (getattr(resp, "last_prices", None) or []):
+                try:
+                    out[lp.figi] = float(lp.price.units) + float(lp.price.nano) / 1e9
+                except Exception:
+                    continue
+            return out
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except Exception:
+            return {}
+
     async def get_trading_status(self, figi: str) -> str:
         """Текущий статус торгов инструмента из API (SecurityTradingStatus enum name).
         Возвращает имя константы, например SECURITY_TRADING_STATUS_NORMAL_TRADING."""
