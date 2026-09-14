@@ -1057,6 +1057,15 @@ class PaperBotRuntime:
                 async with sem:
                     return await _load_one(u)
 
+            # IMOEX (индекс): всегда держим свежие 1м свечи в БД (режим/bias/MOEX-контекст)
+            try:
+                from app.bot.moex import ensure_imoex_candles
+                _n_imoex = await ensure_imoex_candles(days=10)
+                if _n_imoex:
+                    self._log(f"IMOEX: догружено {_n_imoex} 1м свечей")
+            except Exception as e:
+                self._log(f"⚠ IMOEX load: {str(e)[:100]}")
+
             results = await asyncio.gather(*[_load_bounded(u) for u in self.universe])
             for res in results:
                 if res is None:
