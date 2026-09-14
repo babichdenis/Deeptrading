@@ -98,6 +98,15 @@ cd backend
 **Эталонный тест baseline vs ML:** `scripts/run_v4_mltest.py` (5 FIGI, 2026-05..07, кэш в `reports/`).
 Ранние эксперименты: `scripts/h_train_ml.py`, `scripts/h057_train.py`.
 
+**⚠️ Windows-консоль (`.2`): `UnicodeEncodeError: 'charmap' codec can't encode '\u20bd'`**
+Скрипты печатают `₽`, а консоль в cp1251. Запускать с UTF-8:
+```bat
+cd /d C:\Users\nadts\Dev\Deeptrading\backend
+set "PYTHONIOENCODING=utf-8"
+.venv\Scripts\python.exe scripts\run_v4_mltest.py
+```
+(кавычки в `set "VAR=value"` обязательны — иначе в значение попадёт пробел)
+
 **⚠️ Если скрипт «просит токен»:**
 - путь через **CSV** (`ml_train_csv.py`) токена не требует вообще — используйте его;
 - путь через **БД** (`run_v4_mltest.py`, `research_pack._load_candles`) берёт настройки из

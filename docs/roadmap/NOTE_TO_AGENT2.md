@@ -41,3 +41,14 @@ UI на `.2` (вкладка «📈 Статистика») я синхрони�
 
 - Не менять `data/ensemble_config.json` на `.3` (там боевой бот) — тесты на `.2`.
 - Если правишь `bot.ts`/`style.css` — предупреди, я синхронизирую вручную (у нас разные ветки).
+
+## 5. Ошибка `UnicodeEncodeError ... \u20bd` (консоль cp1251)
+
+Скрипты печатают `₽`, а Windows-консоль в cp1251 → падение. Запускай так:
+```bat
+cd /d C:\Users\nadts\Dev\Deeptrading\backend
+set "PYTHONIOENCODING=utf-8"
+.venv\Scripts\python.exe scripts\run_v4_mltest.py
+```
+Кавычки в `set "VAR=value"` обязательны (иначе пробел попадёт в значение).
+ML-тест у меня прошёл: baseline net=9265₽/973 сделки/PF 7.83 vs ML(thr=0.55) net=1881₽/91 сделка/WR 69.3%/PF 8.69 (rej 3751).
