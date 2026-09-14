@@ -2323,7 +2323,7 @@ class PaperBotRuntime:
         # Инверсия уже применена на уровне сигнала (см. _process_candle) — здесь НЕ дублируем.
         qty = cfg.qty_per_trade
         _used_lev = 1.0
-        if action == "open" and cfg.use_ensemble:
+        if action == "open":
             buf = self.buffers.get(figi)
             price = float(buf[-1].close) if buf else 0.0
             lot = 10
@@ -2346,12 +2346,20 @@ class PaperBotRuntime:
                         budget = live_cash * POS_PCT
                     except Exception:
                         pass
-            elif isinstance(self.broker, PaperBroker) and cfg.mode == "test":
+            elif isinstance(self.broker, PaperBroker):
                 # Тест-режим: эмулируем Live — бюджет = доля от начального капитала теста
                 # (PaperBroker не спрашивает equity у брокера). Плечо ниже берётся из БД.
                 try:
                     _acc = await self.broker.ensure_account(cfg.initial_cash)
-                    _eq = float(_acc.cash or cfg.initial_cash)
+                    _pos_list = await self.broker.positions()
+                    _pv = 0.0
+                    for _p in _pos_list:
+                        _pb = self.buffers.get(getattr(_p, "figi", ""))
+                        _ppx = float(_pb[-1].close) if _pb else float(getattr(_p, "entry_price", 0) or 0)
+                        _pv += abs(float(getattr(_p, "qty", 0) or 0)) * _ppx
+                    _eq = float(_acc.cash or 0.0) + _pv
+                    if _eq <= 0:
+                        _eq = float(cfg.initial_cash)
                     budget = _eq * POS_PCT
                     self._log(
                         f"TEST BUDGET {ticker}: equity≈{_eq:.0f}₽ → слот {budget:.0f}₽ "

@@ -662,12 +662,23 @@ async def bot_status() -> dict:
 
     portfolio = {}
     try:
-        from app.api.routes.sandbox import _portfolio_digest
-        dig = await _portfolio_digest()
-        if dig:
-            portfolio = dig
+        from app.api.routes.sandbox import (
+            _active_test_name, _test_trades_db, _test_portfolio_digest,
+        )
+        _tn = _active_test_name()
+        if _tn:
+            _rows = await _test_trades_db(_tn)
+            portfolio = _test_portfolio_digest(_tn, _rows)
     except Exception:
         portfolio = {}
+    if not portfolio:
+        try:
+            from app.api.routes.sandbox import _portfolio_digest
+            dig = await _portfolio_digest()
+            if dig:
+                portfolio = dig
+        except Exception:
+            portfolio = {}
 
     return {
         **status,
