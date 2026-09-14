@@ -296,6 +296,17 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "atr_mult_stop": {"type": "float", "default": 1.75, "min": 0.5, "max": 6},
         },
     ),
+    "ensemble_vote": StrategyCard(
+        id="ensemble_vote", name="Ensemble Vote (10 функций)", family="ensemble", wave=4,
+        long_rule=">=min_votes функций за BUY и больше, чем за SELL",
+        short_rule=">=min_votes функций за SELL и больше, чем за BUY",
+        timeframes=("1min",), status="AVAILABLE",
+        params_schema={
+            "min_votes": {"type": "int", "default": 3, "min": 1, "max": 10},
+            "lookback": {"type": "int", "default": 5, "min": 1, "max": 20},
+            "overext_mult": {"type": "float", "default": 3.0, "min": 0.5, "max": 8},
+        },
+    ),
     "momentum_1bar": StrategyCard(
         id="momentum_1bar", name="Momentum 1 Bar", family="momentum", wave=4,
         long_rule="close>open (бычья свеча) → BUY",

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from app.engine.models import Candle, Signal, Side
+from app.engine.ensemble_v2 import EnsembleVoteParams, EnsembleVoteStrategy
 from app.engine.regime_ensembles import (
     HighVolatilityEnsembleStrategy,
     HighVolatilityParams,
@@ -501,6 +502,7 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "hv_ensemble": HighVolatilityEnsembleStrategy,
     "neutral_ensemble": NeutralEnsembleStrategy,
     "momentum_1bar": Momentum1BarStrategy,
+    "ensemble_vote": EnsembleVoteStrategy,
 }
 
 _PARAMS_BY_STRATEGY: dict[str, type] = {
@@ -524,6 +526,7 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "hv_ensemble": HighVolatilityParams,
     "neutral_ensemble": NeutralEnsembleParams,
     "momentum_1bar": Momentum1BarParams,
+    "ensemble_vote": EnsembleVoteParams,
 }
 
 
