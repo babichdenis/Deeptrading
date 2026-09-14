@@ -509,6 +509,7 @@ class PaperBotRuntime:
             bias_tf=str(_bias.get("tf", "hour")),
             bias_period=int(_bias.get("period", 50)),
             regime_setups_filter=ec.get("regime_setups_filter") or {},
+            trade_regimes=list(getattr(self.config, "trade_regimes", []) or []),
         )
 
     async def reload_ensemble(self) -> int:

@@ -55,6 +55,8 @@ class EnsembleParams:
     entry_macd_signal: int = 9
     # --- Режимные фильтры: {strategy_id: [разрешённые режимы]} (пусто = все режимы) ---
     regime_setups_filter: dict = field(default_factory=dict)
+    # --- Быстрый режим-гейт: не гонять тяжёлый ансамбль, если режим не разрешён ---
+    trade_regimes: list = field(default_factory=list)
 
 
 class EnsembleV4Strategy:
@@ -68,6 +70,7 @@ class EnsembleV4Strategy:
         self.p = params
         self._last_votes = None
         self._last_skip: str | None = None
+        self._regime_cache: dict = {"key": None, "state": None}
 
     def warmup_bars(self) -> int:
         return 50
@@ -88,6 +91,26 @@ class EnsembleV4Strategy:
         if len(candles) < 50:
             self._last_skip = f"buffer_small({len(candles)})"
             return None
+        # --- Быстрый режим-гейт (H1, кэш на час): если режим запрещён конфигом
+        # (напр. торгуем всё, кроме NEUTRAL) — тяжёлый ансамбль НЕ считаем вообще.
+        if self.p.trade_regimes:
+            try:
+                _key = last.ts.replace(minute=0, second=0, microsecond=0)
+                if self._regime_cache.get("key") != _key:
+                    from app.services.ensemble import resample as _rs
+                    from app.services.regime import RegimeDetector as _RD
+                    _h1 = _rs(list(candles), 3600)
+                    _states = _RD().compute(_h1) if _h1 else []
+                    _st = _states[-1]["state"] if _states else None
+                    self._regime_cache = {"key": _key, "state": _st}
+                _st_now = self._regime_cache.get("state")
+                if _st_now:
+                    self._last_regime = {"state": _st_now}
+                    if _st_now not in self.p.trade_regimes:
+                        self._last_skip = f"regime_blocked({_st_now})"
+                        return None
+            except Exception:
+                pass
         try:
             from app.services.ensemble import compute_ensemble
 
