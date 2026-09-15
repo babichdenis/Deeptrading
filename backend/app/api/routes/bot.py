@@ -53,6 +53,18 @@ def _config_payload(cfg: BotConfig) -> dict:
         "ensemble_entry_tf": getattr(cfg, "ensemble_entry_tf", "5min"),
         "ensemble_entry_from_setups": bool(getattr(cfg, "ensemble_entry_from_setups", True)),
         "ensemble_direction_sid": getattr(cfg, "ensemble_direction_sid", ""),
+        "entry_confirm_closes": int(getattr(cfg, "entry_confirm_closes", 0) or 0),
+        "entry_confirm_closes_sides": list(getattr(cfg, "entry_confirm_closes_sides", []) or []),
+        "loss_streak_hold": bool(getattr(cfg, "loss_streak_hold", True)),
+        "loss_streak_n": int(getattr(cfg, "loss_streak_n", 2) or 2),
+        "loss_streak_hold_min": float(getattr(cfg, "loss_streak_hold_min", 60.0) or 60.0),
+        "loss_streak_scope": str(getattr(cfg, "loss_streak_scope", "ticker") or "ticker"),
+        "ai_approval": bool(getattr(cfg, "ai_approval", False)),
+        "ai_approval_timeout_sec": float(getattr(cfg, "ai_approval_timeout_sec", 45.0) or 45.0),
+        "ai_approval_default": str(getattr(cfg, "ai_approval_default", "approve") or "approve"),
+        "ai_reject_cooldown_min": float(getattr(cfg, "ai_reject_cooldown_min", 15.0) or 0.0),
+        "imoex_guard": bool(getattr(cfg, "imoex_guard", True)),
+        "imoex_chase_block_pct": float(getattr(cfg, "imoex_chase_block_pct", 1.5) or 1.5),
         "source": "file",
     }
 
@@ -205,6 +217,7 @@ class BotConfigPatch(BaseModel):
     ai_approval: bool | None = None
     ai_approval_timeout_sec: float | None = None
     ai_approval_default: str | None = None
+    ai_reject_cooldown_min: float | None = None
     # IMOEX guard
     imoex_guard: bool | None = None
     imoex_chase_block_pct: float | None = None
@@ -359,6 +372,11 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         if req.ai_approval_default != getattr(cfg, "ai_approval_default", "approve"):
             changes.append(f"AI-таймаут default: {getattr(cfg, 'ai_approval_default', 'approve')} → {req.ai_approval_default}")
         cfg.ai_approval_default = req.ai_approval_default
+    if req.ai_reject_cooldown_min is not None:
+        _cd = max(0.0, min(240.0, float(req.ai_reject_cooldown_min)))
+        if _cd != float(getattr(cfg, "ai_reject_cooldown_min", 15.0) or 15.0):
+            changes.append(f"AI-пауза после отказа: {getattr(cfg, 'ai_reject_cooldown_min', 15.0)} → {_cd} мин")
+        cfg.ai_reject_cooldown_min = _cd
     if req.imoex_guard is not None and req.imoex_guard != getattr(cfg, "imoex_guard", True):
         changes.append(f"IMOEX guard: {'вкл' if getattr(cfg, 'imoex_guard', True) else 'выкл'} → {'вкл' if req.imoex_guard else 'выкл'}")
         cfg.imoex_guard = req.imoex_guard

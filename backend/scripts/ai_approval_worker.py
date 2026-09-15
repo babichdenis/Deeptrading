@@ -20,7 +20,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -117,6 +117,7 @@ def _ctx_compact(api: str, order: dict) -> dict:
     side = str(order.get("side") or "").upper()
     meta = order.get("meta") or {}
     out: dict = {
+        "now_msk": datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M"),
         "order": {
             "ticker": tk, "side": side, "qty": order.get("qty"),
             "price": order.get("price"),

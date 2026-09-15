@@ -139,6 +139,7 @@ class BotConfig:
     ai_approval: bool = False              # True = новые входы ждут подтверждения ИИ/человека
     ai_approval_timeout_sec: float = 45.0  # сколько ждать решение, сек
     ai_approval_default: str = "approve"   # approve | reject — что делать по таймауту
+    ai_reject_cooldown_min: float = 15.0   # пауза входов по тикеру после отклонения ИИ, мин (0=выкл)
 
 
 # Поля BotConfig, которые сохраняются в БД и восстанавливаются при старте бота.
@@ -155,6 +156,7 @@ BOT_PERSIST_FIELDS = (
     "imoex_guard", "imoex_spike_pct", "imoex_spike_points", "imoex_spike_window_min",
     "imoex_release_frac", "imoex_min_block_min", "imoex_guard_min_beta", "imoex_chase_block_pct",
     "ai_approval", "ai_approval_timeout_sec", "ai_approval_default",
+    "ai_reject_cooldown_min",
 )
 
 
@@ -448,6 +450,8 @@ class PaperBotRuntime:
         self._last_loss_ts: dict[str, datetime] = {}    # figi -> время последнего убытка
         self._global_loss_streak: int = 0
         self._global_last_loss_ts: datetime | None = None
+        # --- AI-гейт: пауза после отклонения (per-ticker) ---
+        self._ai_reject_until: dict[str, datetime] = {}
         # --- AI-гейт: последние решения ИИ (shadow/боевые) для UI ---
         self._ai_decisions: deque = deque(maxlen=50)
         self._ai_prompt: dict = {}  # текущий промпт/модель AI-гейта (для UI)
@@ -1781,10 +1785,15 @@ class PaperBotRuntime:
                 o.meta = {**(o.meta or {}), "ai_decision": "reject", "ai_reason": reason}
                 self._approvals_since.pop(o.id, None)
                 del self.pending_orders[figi]
-                self._log(f"AI-ГЕЙТ: вход {o.ticker} {o.side} ОТКЛОНЁН — {reason or 'без причины'}")
+                _cd = float(getattr(self.config, "ai_reject_cooldown_min", 15.0) or 0.0)
+                if _cd > 0:
+                    self._ai_reject_until[figi] = self._bot_now() + timedelta(minutes=_cd)
+                self._log(f"AI-ГЕЙТ: вход {o.ticker} {o.side} ОТКЛОНЁН — {reason or 'без причины'}"
+                          + (f" (пауза входов {_cd:.0f} мин)" if _cd > 0 else ""))
                 self.events.log("AI_APPROVAL_REJECTED", figi=figi, ticker=o.ticker,
                                 order_id=o.id, reason=reason)
-                return {"ok": True, "order_id": order_id, "status": "REJECTED"}
+                return {"ok": True, "order_id": order_id, "status": "REJECTED",
+                        "cooldown_min": _cd}
         return {"ok": False, "error": "order not found or not pending approval"}
 
     async def close_all(self) -> dict:
@@ -2929,8 +2938,21 @@ class PaperBotRuntime:
             qty=qty,
             meta={**dict(meta or {}), "leverage": float(_used_lev)},
         )
-        # --- AI-гейт: новые входы ждут подтверждения (ИИ/человек) ---
+        # --- AI-гейт: дедуп и пауза после отклонения ---
         if action == "open" and bool(getattr(cfg, "ai_approval", False)):
+            _pend = self.pending_orders.get(figi)
+            if _pend is not None and getattr(_pend, "status", "") == "PENDING_APPROVAL":
+                self._log(f"AI-ГЕЙТ: {ticker} уже ждёт решения — новую заявку не создаём")
+                self._log_no_trade(figi, "ai_already_pending")
+                return
+            _cd = float(getattr(cfg, "ai_reject_cooldown_min", 15.0) or 0.0)
+            _until = self._ai_reject_until.get(figi)
+            if _cd > 0 and _until is not None and self._bot_now() < _until:
+                _left = (_until - self._bot_now()).total_seconds() / 60.0
+                self._log(f"AI-ГЕЙТ: {ticker} недавно отклонён ИИ — входы на паузе ещё {_left:.0f} мин")
+                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="AI_REJECT_COOLDOWN")
+                self._log_no_trade(figi, "ai_reject_cooldown")
+                return
             order.status = "PENDING_APPROVAL"
             self._approvals_since[order.id] = _time.monotonic()
             self._log(f"AI-ГЕЙТ: вход {ticker} {side} qty={qty} ждёт подтверждения "
