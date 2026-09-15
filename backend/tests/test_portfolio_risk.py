@@ -124,7 +124,7 @@ def test_candidate_score_history_matters():
                            hist={"n": 30, "wr": 0.55, "wr5": 0.6, "net": 120.0},
                            turnover=50e6, votes=3, total_members=5, vol_ratio=1.6)
     bad = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL",
-                          hist={"n": 30, "wr": 0.15, "wr5": 0.0, "net": -90.0},
+                          hist={"n": 30, "wr": 0.15, "wr5": 0.0, "net": -190.0},
                           turnover=50e6, votes=3, total_members=5, vol_ratio=1.6)
     assert good["score"] > bad["score"] + 15
     assert good["factors"]["hist"] > 0.7 > bad["factors"]["hist"]
@@ -134,10 +134,32 @@ def test_candidate_score_history_matters():
 
 def test_candidate_score_vetoes_illiquid():
     from app.bot.portfolio import candidate_score
-    r = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", turnover=0.5e6)
+    r = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", turnover=0.2e6)
     assert "illiquid" in r["veto"]
     r2 = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", turnover=20e6)
     assert r2["veto"] == []
+    # нулевой оборот = нет данных, не хороним
+    r3 = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", turnover=0.0)
+    assert "illiquid" not in r3["veto"]
+    # порог настраивается
+    r4 = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL",
+                         turnover=5e6, min_turnover=10e6)
+    assert "illiquid" in r4["veto"]
+
+
+def test_candidate_score_noise_losses_not_vetoed():
+    from app.bot.portfolio import candidate_score
+    # «шумовой» минус (LENT −14₽ за 20 сделок) не хороним
+    noise = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL",
+                            hist={"n": 20, "wr": 0.30, "wr5": 0.2, "net": -14.0})
+    assert "bad_history" not in noise["veto"]
+    toxic = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL",
+                            hist={"n": 63, "wr": 0.14, "wr5": 0.2, "net": -93.0})
+    assert "bad_history" in toxic["veto"]
+    off = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL",
+                          hist={"n": 63, "wr": 0.14, "wr5": 0.2, "net": -93.0},
+                          history_veto=False)
+    assert "bad_history" not in off["veto"]
 
 
 def test_candidate_score_regime_and_fit():

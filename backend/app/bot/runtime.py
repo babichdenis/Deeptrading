@@ -93,6 +93,8 @@ class BotConfig:
     queue_enabled: bool = True           # очередь кандидатов: топ-1 по силе входит с бустом
     queue_ttl_min: int = 30              # время жизни кандидата в очереди (мин)
     queue_interval_sec: int = 120        # период проверки очереди (сек)
+    queue_min_turnover: float = 300_000.0  # мин. дневной оборот тикера (₽) — иначе вето illiquid
+    queue_history_veto: bool = True      # вето на явно токсичную историю (n≥20, net<−50₽, WR<25%)
     top_boost: float = 2.0               # множитель слота для топ-1 кандидата
     dd_reduce1_pct: float = 0.05         # просадка от пика equity → закрыть 50% позиций
     dd_reduce2_pct: float = 0.10         # просадка от пика equity → закрыть 80% позиций
@@ -170,6 +172,7 @@ BOT_PERSIST_FIELDS = (
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
     "queue_enabled", "queue_ttl_min", "queue_interval_sec", "top_boost",
+    "queue_min_turnover", "queue_history_veto",
     "dd_reduce1_pct", "dd_reduce2_pct",
     "entry_confirm_closes", "entry_confirm_closes_sides",
     "loss_streak_hold", "loss_streak_n", "loss_streak_hold_min", "loss_streak_scope",
@@ -655,6 +658,16 @@ class PaperBotRuntime:
                 d.pop("last5", None)
             self._hist_cache = out
             self._turnover_cache = {str(r[0] or "").upper(): float(r[1] or 0.0) for r in uni}
+            # Реальный дневной оборот — с MOEX ISS (скринер), колонка universe часто устарела.
+            try:
+                from app.api.routes.screener import fetch_tqbr_market
+                q = await asyncio.to_thread(fetch_tqbr_market)
+                for tk, row in (q or {}).items():
+                    val = float(row.get("turnover") or 0.0)
+                    if val > 0:
+                        self._turnover_cache[str(tk).upper()] = val
+            except Exception:
+                pass
             self._hist_ts = _t.monotonic()
         except Exception:
             pass
@@ -714,7 +727,9 @@ class PaperBotRuntime:
                        total_members=int(qe.get("total_members") or 0),
                        vol_ratio=vol_ratio,
                        regime=str(reg.get("state") or "neutral"),
-                       fit=self._fit_score(snap, tk))
+                       fit=self._fit_score(snap, tk),
+                       min_turnover=float(getattr(self.config, "queue_min_turnover", 300_000) or 0.0),
+                       history_veto=bool(getattr(self.config, "queue_history_veto", True)))
         except Exception:
             return {"score": 50.0, "factors": {}, "veto": []}
 

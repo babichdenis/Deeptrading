@@ -188,12 +188,14 @@ def _clamp01(x: float) -> float:
 def candidate_score(*, ret_ticker: float, ret_index: float, beta: float = 1.0,
                     side: str = "SELL", hist: dict | None = None, turnover: float = 0.0,
                     votes: int = 0, total_members: int = 0, vol_ratio: float = 1.0,
-                    regime: str = "neutral", fit: float = 1.0) -> dict:
+                    regime: str = "neutral", fit: float = 1.0,
+                    min_turnover: float = 300_000.0, history_veto: bool = True) -> dict:
     """Комплексная оценка кандидата (0–100) с расшифровкой.
 
     Веса: относительная сила к IMOEX 30%, история сделок по тикеру 25%,
     уверенность сигнала (кворум + объём) 20%, ликвидность 15%, вписываемость в лимиты 10%.
-    Вето: неликвид (<1 млн ₽/день) и стабильно убыточная история (n≥10, net<0, WR<35%).
+    Вето: неликвид (0 < оборот < min_turnover ₽/день) и явно токсичная история
+    (n≥20, суммарный net < −50₽, WR < 25%) — «шумовые» минусы не хороним.
     """
     is_long = str(side).upper() in ("BUY", "LONG")
     rs = float(ret_ticker or 0.0) - float(beta or 0.0) * float(ret_index or 0.0)
@@ -228,9 +230,10 @@ def candidate_score(*, ret_ticker: float, ret_index: float, beta: float = 1.0,
     total = (0.30 * f_rs + 0.25 * f_hist + 0.20 * f_conf
              + 0.15 * f_liq + 0.10 * f_fit + adj)
     veto: list[str] = []
-    if 0 < t < 1e6:
+    if 0 < t < float(min_turnover or 0.0):
         veto.append("illiquid")
-    if n >= 10 and float(h.get("net") or 0.0) < 0 and float(h.get("wr") or 0.0) < 0.35:
+    if (history_veto and n >= 20 and float(h.get("net") or 0.0) < -50.0
+            and float(h.get("wr") or 0.0) < 0.25):
         veto.append("bad_history")
     return {
         "score": round(_clamp01(total) * 100.0, 1),
