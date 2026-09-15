@@ -191,3 +191,17 @@ def test_rank_ok_explore_then_top():
     assert ok is False and "не в топ-2" in why
     assert rank_ok(hist, "CCC", top_n=2, explore=10, min_hist=50)[0] is False
     assert rank_ok(hist, "AAA", top_n=0, explore=0)[0] is True        # топ выключен
+
+
+def test_check_order_margin_uses_risk_rate():
+    from app.bot.portfolio import PortfolioLimits, check_order, snapshot
+    meta = {"SFIN": {"sector": "financial", "beta": 1.0, "dlong": 0.40, "dshort": 0.6851}}
+    snap = snapshot(10000.0, [], meta, {"liquid": 10000, "starting_margin": 7500})
+    lim = PortfolioLimits(max_net_exposure_pct=0, max_sector_pct=0,
+                          max_margin_use_pct=0.8, max_stress_loss_pct=0)
+    # 1000₽ номинал × 0.6851 = 685₽ маржи → 7500+685 > 8000 → блок
+    ok, why = check_order(snap, "SELL", 1000, "SFIN", meta, lim)
+    assert not ok and "маржа" in why
+    # 1000₽ номинала LONG: риск 0.40 → 400₽ → 7900 < 8000 → ок
+    ok2, _ = check_order(snap, "BUY", 1000, "SFIN", meta, lim)
+    assert ok2

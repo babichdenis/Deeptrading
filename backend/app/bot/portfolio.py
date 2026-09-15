@@ -117,9 +117,15 @@ def check_order(snap: dict, side: str, notional: float, ticker: str,
     # 3) маржа (буфер)
     if lim.max_margin_use_pct > 0:
         used = float(snap.get("margin_used") or 0.0)
-        # оценка требуемой маржи новой позиции: номинал / gross_leverage портфеля
-        lev = max(1.0, float(snap.get("gross_leverage") or 1.0))
-        new_margin = notional / lev
+        # Маржа новой позиции = номинал × риск-ставка брокера (dlong/dshort) —
+        # это то, что реально заморозит брокер. Fallback — оценка через gross_leverage.
+        _m3 = meta_for(meta_by_ticker, ticker)
+        _risk3 = float(_m3.get("dshort" if not is_long else "dlong") or 0.0)
+        if 0 < _risk3 < 1:
+            new_margin = notional * _risk3
+        else:
+            lev = max(1.0, float(snap.get("gross_leverage") or 1.0))
+            new_margin = notional / lev
         if (used + new_margin) > eq * lim.max_margin_use_pct:
             return False, (f"маржа {(used+new_margin)/eq:.0%} > "
                            f"{lim.max_margin_use_pct:.0%} (equity)")
