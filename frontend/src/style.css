@@ -757,6 +757,16 @@ body {
 #sr-pane-aigate .ag-note.tighten .ag-dec { color: var(--gold); }
 #sr-pane-aigate .ag-note.hold .ag-dec { color: var(--up); }
 
+/* --- Страница «Анализ» (статистика перенесена из правого сайдбара) --- */
+#page-analytics { padding: 14px 18px 24px; overflow: auto; }
+#page-analytics .an-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+#page-analytics .an-title { font-size: 16px; font-weight: 700; }
+#page-analytics .an-sub { color: var(--text-dim); font-size: 12px; }
+#page-analytics .stats-period, #page-analytics .stats-compare { padding: 4px 0; }
+#page-analytics .stats-body { overflow: visible; padding: 4px 0; max-width: 1400px; }
+#page-analytics .stats-overall { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+#page-analytics .stats-cmp-result { overflow: visible; }
+
 /* Подсветка SL/TP в таблице позиций: цена ближе 1.5 ATR к уровню */
 #bot-positions-table td.near-sl { color: var(--down) !important; font-weight: 700; }
 #bot-positions-table td.near-tp { color: var(--up) !important; font-weight: 700; }

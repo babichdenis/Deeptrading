@@ -19,6 +19,7 @@
           <button class="nav-btn" data-page="chart"><span class="ico">📈</span><span>Склад</span></button>
           <!-- <button class="nav-btn" data-page="lab"><span class="ico">🧪</span><span>Lab</span></button> -->
           <button class="nav-btn active" data-page="bot"><span class="ico">🤖</span><span>Бот</span></button>
+          <button class="nav-btn" data-page="analytics"><span class="ico">📊</span><span>Анализ</span></button>
         </nav>
         <div class="sidebar-botbar">
           <div class="action-row">
@@ -501,6 +502,33 @@
             </div>
           </section>
 
+          <section class="page page-pad" id="page-analytics">
+            <div class="an-head">
+              <div class="an-title">📊 Анализ</div>
+              <span class="an-sub" id="stats-test">—</span>
+              <button class="btn-secondary btn-xs" id="stats-refresh" title="Обновить">⟳ Обновить</button>
+            </div>
+            <div class="stats-period">
+              <label>С <input type="date" id="stats-from"></label>
+              <label>По <input type="date" id="stats-to"></label>
+              <select id="stats-mode" title="Источник данных">
+                <option value="">Авто</option>
+                <option value="sandbox">Live</option>
+                <option value="paper">Тест</option>
+              </select>
+              <button class="btn-secondary btn-xs" id="stats-apply" title="Применить период">OK</button>
+            </div>
+            <div class="stats-compare">
+              <button class="btn-secondary btn-xs" id="stats-cmp-toggle">⚖ Сравнить тесты</button>
+              <div class="stats-cmp-panel hidden" id="stats-cmp-panel">
+                <div class="stats-cmp-list" id="stats-cmp-list"></div>
+                <button class="btn-primary btn-xs" id="stats-cmp-run">Сравнить выбранные</button>
+              </div>
+            </div>
+            <div class="stats-cmp-result" id="stats-cmp-result"></div>
+            <div class="stats-body" id="stats-body"></div>
+          </section>
+
           <section class="page page-pad active" id="page-bot">
             <div class="universe-chips" id="bot-universe"></div>
             
@@ -551,7 +579,6 @@
         <div class="sr-tabs">
           <button class="sr-tab active" data-srtab="market">📊 Рынок</button>
           <button class="sr-tab" data-srtab="votes">🗳 Голоса</button>
-          <button class="sr-tab" data-srtab="stats">📈 Статистика</button>
           <button class="sr-tab" data-srtab="aigate">🤖 AI-гейт</button>
         </div>
         <div class="sr-tabpane" id="sr-pane-market">
@@ -599,32 +626,6 @@
             <span class="sr-leg sr-leg-3">3+</span>
           </div>
           <div class="votes-grid" id="votes-grid"></div>
-        </div>
-        <div class="sr-tabpane hidden" id="sr-pane-stats">
-          <div class="sr-head">
-            <span class="sr-title">📈 Статистика прогона</span>
-            <span class="sr-sub" id="stats-test">—</span>
-            <button class="sr-refresh btn-secondary btn-xs" id="stats-refresh" title="Обновить">⟳</button>
-          </div>
-          <div class="stats-period">
-            <label>С <input type="date" id="stats-from"></label>
-            <label>По <input type="date" id="stats-to"></label>
-            <select id="stats-mode" title="Источник данных">
-              <option value="">Авто</option>
-              <option value="sandbox">Live</option>
-              <option value="paper">Тест</option>
-            </select>
-            <button class="btn-secondary btn-xs" id="stats-apply" title="Применить период">OK</button>
-          </div>
-          <div class="stats-compare">
-            <button class="btn-secondary btn-xs" id="stats-cmp-toggle">⚖ Сравнить тесты</button>
-            <div class="stats-cmp-panel hidden" id="stats-cmp-panel">
-              <div class="stats-cmp-list" id="stats-cmp-list"></div>
-              <button class="btn-primary btn-xs" id="stats-cmp-run">Сравнить выбранные</button>
-            </div>
-          </div>
-          <div class="stats-cmp-result" id="stats-cmp-result"></div>
-          <div class="stats-body" id="stats-body"></div>
         </div>
         <div class="sr-tabpane hidden" id="sr-pane-aigate">
           <div class="sr-head">

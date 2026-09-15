@@ -33,7 +33,7 @@ import {
   type StrategyCardDto,
   previewConfiguration,
 } from "./api";
-import { initBot, pollOnce } from "./bot";
+import { initBot, pollOnce, renderStats } from "./bot";
 import { initLab, refreshConfigs } from "./lab";
 import { initTest } from "./test";
 import type { SyncReport } from "./api";
@@ -138,6 +138,7 @@ const PAGE_TITLES: Record<string, string> = {
   test: "Тест — потолок торговли",
   lab: "Lab — тесты стратегий",
   bot: "Paper-бот — дашборд",
+  analytics: "Анализ — статистика и AI-гейт",
 };
 
 const IS_EMBEDDED = new URLSearchParams(window.location.search).get("embedded") === "1";
@@ -170,6 +171,7 @@ function initNav() {
       if (_pt) _pt.textContent = PAGE_TITLES[page] ?? page;
       if (page === "lab") void refreshConfigs();
       if (page === "bot") void pollOnce();
+      if (page === "analytics") void renderStats();
     }),
   );
 }

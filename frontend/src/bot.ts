@@ -1843,9 +1843,7 @@ function initScreener() {
       document.querySelectorAll(".sr-tab").forEach((x) => x.classList.toggle("active", x === b));
       $("sr-pane-market")?.classList.toggle("hidden", tab !== "market");
       $("sr-pane-votes")?.classList.toggle("hidden", tab !== "votes");
-      $("sr-pane-stats")?.classList.toggle("hidden", tab !== "stats");
       $("sr-pane-aigate")?.classList.toggle("hidden", tab !== "aigate");
-      if (tab === "stats") void renderStats();
       if (tab === "aigate") void renderAiGate();
     });
   });
@@ -2088,7 +2086,7 @@ async function runCompare() {
     sec("По выходам", (e) => e.by_exit_reason);
 }
 
-async function renderStats() {
+export async function renderStats() {
   const body = $("stats-body");
   if (!body) return;
   body.innerHTML = `<div class="mini-hint">загрузка…</div>`;
