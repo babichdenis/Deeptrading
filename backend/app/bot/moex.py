@@ -89,11 +89,18 @@ def imoex_candles(from_date: str, till_date: str) -> list[dict]:
     return out
 
 
-def sync_imoex_sync(days: int = 10) -> int:
-    now = datetime.now(timezone.utc)
-    from_ = now - timedelta(days=days)
-    candles = imoex_candles(from_.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d"))
+def imoex_last_ts() -> datetime | None:
+    """Последняя 1м свеча IMOEX в БД (или None)."""
     engine = _sync_engine()
+    with engine.connect() as db:
+        return db.execute(text(
+            "SELECT max(ts) FROM candles WHERE figi=:f AND interval=1"
+        ), {"f": IMOEX_FIGI}).scalar()
+
+
+def _upsert_imoex(engine, candles: list[dict]) -> int:
+    if not candles:
+        return 0
     with engine.begin() as db:
         for c in candles:
             db.execute(text("""
@@ -106,24 +113,52 @@ def sync_imoex_sync(days: int = 10) -> int:
     return len(candles)
 
 
+def sync_imoex_recent(minutes: int = 60) -> int:
+    """Догрузить хвост 1м свечей IMOEX (последние `minutes` минут).
+
+    ISS `till` — это начало дня (эксклюзивно), поэтому till = завтра (МСК),
+    иначе за сегодняшний день возвращается пусто.
+    """
+    now = datetime.now(timezone.utc)
+    from_ts = now - timedelta(minutes=max(5, int(minutes)))
+    _msk = timezone(timedelta(hours=3))
+    from_date = from_ts.astimezone(_msk).strftime("%Y-%m-%d")
+    till_date = (now.astimezone(_msk) + timedelta(days=1)).strftime("%Y-%m-%d")
+    candles = imoex_candles(from_date, till_date)
+    tail = [c for c in candles if c["ts"] >= from_ts]
+    return _upsert_imoex(_sync_engine(), tail)
+
+
+def _sync_imoex_gap(days: int = 10) -> int:
+    """Синхронный gap-fill: если хвост отстал >30 мин — догрузить от хвоста."""
+    now = datetime.now(timezone.utc)
+    last = imoex_last_ts()
+    if last is not None and (now - last) <= timedelta(minutes=30):
+        return 0
+    from_ts = (last - timedelta(minutes=5)) if last is not None else (now - timedelta(days=max(1, days)))
+    _msk = timezone(timedelta(hours=3))
+    from_date = from_ts.astimezone(_msk).strftime("%Y-%m-%d")
+    till_date = (now.astimezone(_msk) + timedelta(days=1)).strftime("%Y-%m-%d")
+    candles = imoex_candles(from_date, till_date)
+    tail = [c for c in candles if c["ts"] >= from_ts]
+    return _upsert_imoex(_sync_engine(), tail)
+
+
+def sync_imoex_sync(days: int = 10) -> int:
+    now = datetime.now(timezone.utc)
+    from_ = now - timedelta(days=days)
+    _msk = timezone(timedelta(hours=3))
+    candles = imoex_candles(from_.astimezone(_msk).strftime("%Y-%m-%d"),
+                            (now.astimezone(_msk) + timedelta(days=1)).strftime("%Y-%m-%d"))
+    return _upsert_imoex(_sync_engine(), candles)
+
+
 async def ensure_imoex_candles(days: int = 10) -> int:
-    """Догрузить 1м свечи IMOEX, если в БД нет свежих за последние 2 дня."""
+    """Догрузить 1м свечи IMOEX, если хвост в БД отстал (>30 мин) или данных нет."""
     import asyncio
 
-    def _fresh():
-        engine = _sync_engine()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
-        with engine.connect() as db:
-            n = db.execute(text(
-                "SELECT count(*) FROM candles "
-                "WHERE figi=:f AND interval=1 AND ts>=:c"
-            ), {"f": IMOEX_FIGI, "c": cutoff}).scalar()
-        return bool(n and int(n) > 0)
-
-    if await asyncio.to_thread(_fresh):
-        return 0
     try:
-        return await asyncio.to_thread(sync_imoex_sync, days)
+        return await asyncio.to_thread(_sync_imoex_gap, days)
     except Exception as e:
         print(f"[moex] ensure_imoex_candles failed: {e}")
         return 0

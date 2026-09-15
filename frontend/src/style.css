@@ -702,14 +702,19 @@ body {
 }
 .hdr-live-badge span { font-size: 11px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
 .hdr-live-badge .live-dot,
-.hdr-live-badge .mex-dot { width: 7px; height: 7px; border-radius: 50%; background: #4b5563; flex-shrink: 0; transition: background .25s ease, box-shadow .25s ease; }
+.hdr-live-badge .mex-dot,
+.hdr-live-badge .imoex-dot { width: 7px; height: 7px; border-radius: 50%; background: #4b5563; flex-shrink: 0; transition: background .25s ease, box-shadow .25s ease; }
 .hdr-live-badge span.pos { color: var(--up); }
 .hdr-live-badge span.neg { color: var(--down); }
 .hdr-live-badge span.warn { color: var(--gold); }
 .hdr-live-badge:has(> span.pos) .live-dot,
-.hdr-live-badge:has(> span.pos) .mex-dot { background: var(--up); box-shadow: 0 0 8px rgba(var(--up-rgb),0.8); animation: pulse 2s infinite; }
+.hdr-live-badge:has(> span.pos) .mex-dot,
+.hdr-live-badge:has(> span.pos) .imoex-dot { background: var(--up); box-shadow: 0 0 8px rgba(var(--up-rgb),0.8); animation: pulse 2s infinite; }
 .hdr-live-badge:has(> span.warn) .live-dot,
-.hdr-live-badge:has(> span.warn) .mex-dot { background: var(--gold); box-shadow: 0 0 8px rgba(244,185,66,0.7); animation: pulse 2s infinite; }
+.hdr-live-badge:has(> span.warn) .mex-dot,
+.hdr-live-badge:has(> span.warn) .imoex-dot { background: var(--gold); box-shadow: 0 0 8px rgba(244,185,66,0.7); animation: pulse 2s infinite; }
+.hdr-live-badge:has(> span.neg) .imoex-dot { background: var(--down); box-shadow: 0 0 8px rgba(var(--down-rgb),0.8); animation: pulse 1.2s infinite; }
+.hdr-live-badge:has(> span.neg) { border-color: rgba(var(--down-rgb),0.35); }
 
 .hdr-indicators .bot-pill {
   align-self: stretch;

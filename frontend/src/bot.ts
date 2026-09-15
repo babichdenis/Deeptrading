@@ -1022,6 +1022,54 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
         : backendAlive ? "Бот остановлен" : "Бот недоступен";
   }
 
+  // IMOEX guard: всплеск индекса (блокировки против входа) + свежесть свечей MOEX.
+  const igEl = $("bs-imoex-guard");
+  const igText = $("bs-imoex-text");
+  if (igEl && igText) {
+    const ig = bst ? bst.imoex_guard : null;
+    igEl.classList.remove("on", "off");
+    igText.classList.remove("pos", "neg", "warn");
+    let igTxt = "—";
+    let igTitle = "IMOEX guard: нет данных";
+    if (!ig) {
+      igEl.classList.add("off");
+    } else if (!ig.enabled) {
+      igTxt = "выкл";
+      igEl.classList.add("off");
+      igTitle = "IMOEX guard выключен (imoex_guard=false)";
+    } else if (ig.stale) {
+      igTxt = "НЕТ СВЕЧЕЙ";
+      igText.classList.add("neg");
+      const ageMin = ig.age_sec != null ? Math.round(Number(ig.age_sec) / 60) : null;
+      igTitle = `Свечи IMOEX не обновляются! ${ig.last_candle ? "последняя: " + ig.last_candle : ""}`
+        + (ageMin != null ? ` (${ageMin} мин назад)` : "")
+        + " — входы против направления индекса НЕ защищены";
+    } else if (ig.active > 0) {
+      igTxt = `↑${Number(ig.pct).toFixed(2)}% блок SELL`;
+      igText.classList.add("neg");
+      igTitle = "Всплеск IMOEX ВВЕРХ — SELL-входы запрещены (блокировок: " + (ig.blocks ?? 0) + ")";
+    } else if (ig.active < 0) {
+      igTxt = `↓${Number(ig.pct).toFixed(2)}% блок BUY`;
+      igText.classList.add("neg");
+      igTitle = "Всплеск IMOEX ВНИЗ — BUY-входы запрещены (блокировок: " + (ig.blocks ?? 0) + ")";
+    } else {
+      igTxt = "ок";
+      igText.classList.add("pos");
+      const ageMin = ig.age_sec != null ? Math.round(Number(ig.age_sec) / 60) : null;
+      igTitle = `IMOEX guard активен, всплеска нет · ход ${Number(ig.pct ?? 0).toFixed(2)}%`
+        + ` · свеча: ${ig.last_candle ? new Date(ig.last_candle).toLocaleTimeString("ru-RU", { hour12: false }) : "—"}`
+        + (ageMin != null ? ` (${ageMin} мин)` : "")
+        + ` · блокировок: ${ig.blocks ?? 0}`;
+    }
+    if (ig && ig.enabled && !ig.stale && ig.active === 0) {
+      igTitle += ` · порог ${ig.on_pct}%/${ig.window_min}м`
+        + (ig.chase_pct ? ` · chase ≥${ig.chase_pct}%` : "")
+        + (ig.min_beta ? ` · beta ≥${ig.min_beta}` : "");
+    }
+    igText.textContent = igTxt;
+    igEl.title = igTitle;
+  }
+
   $("btn-bot-start").classList.toggle("hidden", engineRunning);
   $("btn-bot-stop").classList.toggle("hidden", !engineRunning);
   $("btn-bot-pause").classList.toggle("hidden", !engineRunning);

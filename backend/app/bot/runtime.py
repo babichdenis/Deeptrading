@@ -117,6 +117,16 @@ class BotConfig:
     replay_pace: str = "fast" # fast (макс. скорость) | wall (в реальном времени по барам)
     test_name: str = ""       # имя теста (режим test): сделки реплея помечаются им
     intrabar_check_sec: float = 10.0  # период intrabar-проверки SL/TP по последней цене (0=выкл)
+    # --- IMOEX guard: запрет новых входов против всплеска индекса MOEX ---
+    imoex_guard: bool = True          # вкл/выкл защиту
+    imoex_spike_pct: float = 0.8      # порог хода индекса за окно, % (активация)
+    imoex_spike_points: float = 20.0  # порог хода индекса за окно, пункты (0=выкл)
+    imoex_spike_window_min: int = 20  # окно расчёта хода индекса, минут
+    imoex_release_frac: float = 0.5   # релиз, когда ход затух до N от порога
+    imoex_min_block_min: float = 5.0  # мин. длительность блока, минут
+    imoex_refresh_sec: float = 60.0   # период догрузки 1м свечей IMOEX (live), сек
+    imoex_guard_min_beta: float = 0.0  # 0 = блокировать все; >0 = только бумаги с beta >= порога
+    imoex_chase_block_pct: float = 1.5  # второй уровень: при |ходе| >= N% блокировать и входы ПО индексу (0=выкл)
 
 
 # Поля BotConfig, которые сохраняются в БД и восстанавливаются при старте бота.
@@ -128,6 +138,8 @@ BOT_PERSIST_FIELDS = (
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
     "overnight", "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
+    "imoex_guard", "imoex_spike_pct", "imoex_spike_points", "imoex_spike_window_min",
+    "imoex_release_frac", "imoex_min_block_min", "imoex_guard_min_beta", "imoex_chase_block_pct",
 )
 
 
@@ -394,6 +406,13 @@ class PaperBotRuntime:
         self._day_jumps: dict[str, dict[str, int]] = {}  # figi -> {msk_date: jump_count}
         self._bad_day: dict[str, dict[str, bool]] = {}  # figi -> {msk_date: is_bad}
         self._candles_rejected: int = 0  # total rejected broken candles
+        # --- IMOEX guard: непрерывный ряд индекса + защита входов от всплесков ---
+        self._imoex_buf: list[tuple[datetime, float]] = []  # [(ts, close)] 1м свечи IMOEX
+        self._imoex_state = None  # ImoexGuardState (ленивая инициализация)
+        self._imoex_last_tick: str = ""  # минута последнего пересчёта (YYYYMMDDHHMM)
+        self._imoex_tick_err: str = ""
+        self._imoex_beta: dict[str, float] = {}  # figi -> beta к IMOEX (instruments.imoex_beta)
+        self._imoex_stale_warn_ts: float = 0.0  # throttle предупреждений об устаревании
 
     def _log(self, msg: str, level: str = "info", source: str = "bot") -> None:
         ts = datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S")
@@ -742,6 +761,7 @@ class PaperBotRuntime:
             "ts": datetime.now(timezone.utc).isoformat(),
             "mode": self.mode, "running": bool(self.running),
             "equity": None, "positions": [], "alerts": [],
+            "imoex_guard": self._imoex_guard_snapshot(),
         }
         try:
             out["equity"] = float(await self.broker.equity())
@@ -844,6 +864,188 @@ class PaperBotRuntime:
             except Exception as e:
                 self._log(f"intrabar-exit loop: {type(e).__name__}: {str(e)[:80]}")
 
+    # --- IMOEX guard: непрерывный ряд индекса + запрет входов против всплеска ---
+
+    async def _load_imoex_buf(self, lookback_min: int = 360) -> int:
+        """Загрузить 1м свечи IMOEX из БД до текущего (виртуального в реплее) времени.
+
+        В реплее грузим всё окно теста сразу (расчёт берёт только бары <= bot_now,
+        поэтому будущие бары не видны — look-ahead исключён), иначе ряд не растёт
+        по ходу виртуальных часов.
+        """
+        try:
+            from sqlalchemy import text as _text
+            from app.bot.moex import IMOEX_FIGI as _IF
+            now = self._bot_now()
+            _frm = now - timedelta(minutes=int(lookback_min))
+            _upto = now
+            _replay = getattr(self.config, "feed", "live") == "replay"
+            if _replay:
+                _re = getattr(self.config, "replay_end", "") or ""
+                if _re:
+                    try:
+                        _upto = datetime.fromisoformat(_re.replace("Z", "+00:00"))
+                        if _upto.tzinfo is None:
+                            _upto = _upto.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        _upto = now
+                if _upto < now:
+                    _upto = now
+                _sql = ("SELECT ts, close FROM candles WHERE figi = :f AND interval = 1 "
+                        "AND ts <= :upto AND ts >= :frm ORDER BY ts")
+                _params = {"f": _IF, "upto": _upto, "frm": _frm}
+            else:
+                # Live: берём последние N баров ДО now (переживает выходные/праздники,
+                # когда за последние часы свечей нет).
+                _sql = ("SELECT ts, close FROM ("
+                        "SELECT ts, close FROM candles WHERE figi = :f AND interval = 1 "
+                        "AND ts <= :upto ORDER BY ts DESC LIMIT :n) t ORDER BY ts")
+                _params = {"f": _IF, "upto": _upto, "n": int(lookback_min) + 30}
+            async with SessionLocal() as db:
+                rows = (await db.execute(_text(_sql), _params)).all()
+            self._imoex_buf = [(r[0], float(r[1])) for r in rows]
+            return len(self._imoex_buf)
+        except Exception as e:
+            self._log(f"⚠ IMOEX buf: {type(e).__name__}: {str(e)[:80]}")
+            return 0
+
+    def _imoex_move(self):
+        """Ход индекса за окно (pts, pct) или None."""
+        from app.bot.imoex_guard import move_at as _move_at
+        return _move_at(self._imoex_buf, self._bot_now(),
+                        int(getattr(self.config, "imoex_spike_window_min", 20) or 20))
+
+    def _imoex_guard_tick(self) -> None:
+        """Пересчитать состояние guard'а (вызывается на каждой новой минуте)."""
+        cfg = self.config
+        if not getattr(cfg, "imoex_guard", True):
+            return
+        try:
+            mv = self._imoex_move()
+            if mv is None:
+                return
+            pts, pct, _, _ = mv
+            from app.bot.imoex_guard import ImoexGuardState as _IGS, step as _step
+            if self._imoex_state is None:
+                self._imoex_state = _IGS()
+            on_pct = float(getattr(cfg, "imoex_spike_pct", 0.8) or 0.8)
+            on_pts = float(getattr(cfg, "imoex_spike_points", 0.0) or 0.0)
+            rel_frac = float(getattr(cfg, "imoex_release_frac", 0.5) or 0.5)
+            ev = _step(
+                self._imoex_state, pts, pct, self._bot_now(),
+                on_pct=on_pct, off_pct=on_pct * rel_frac,
+                on_points=on_pts, off_points=(on_pts * rel_frac) if on_pts > 0 else 0.0,
+                min_block_min=float(getattr(cfg, "imoex_min_block_min", 5.0) or 0.0),
+            )
+            _win = int(getattr(cfg, "imoex_spike_window_min", 20) or 20)
+            if ev == "activate_up":
+                self._log(f"IMOEX GUARD: всплеск ВВЕРХ {pts:+.1f}п ({pct:+.2f}% за {_win}м) — SELL-входы запрещены")
+                self.events.log("IMOEX_GUARD", reason="activate_up",
+                                move_pts=round(pts, 1), move_pct=round(pct, 2))
+            elif ev == "activate_down":
+                self._log(f"IMOEX GUARD: всплеск ВНИЗ {pts:+.1f}п ({pct:+.2f}% за {_win}м) — BUY-входы запрещены")
+                self.events.log("IMOEX_GUARD", reason="activate_down",
+                                move_pts=round(pts, 1), move_pct=round(pct, 2))
+            elif ev == "release":
+                self._log(f"IMOEX GUARD: стабилизация {pts:+.1f}п ({pct:+.2f}%) — входы разрешены")
+                self.events.log("IMOEX_GUARD", reason="release",
+                                move_pts=round(pts, 1), move_pct=round(pct, 2))
+        except Exception as e:
+            _err = f"{type(e).__name__}: {str(e)[:80]}"
+            if _err != self._imoex_tick_err:
+                self._imoex_tick_err = _err
+                self._log(f"⚠ IMOEX guard: {_err}")
+
+    def _imoex_block_reason(self, side: str, figi: str | None = None) -> str | None:
+        """Причина блокировки входа против/вослед всплеска индекса, или None."""
+        st = self._imoex_state
+        if st is None or not getattr(self.config, "imoex_guard", True):
+            return None
+        from app.bot.imoex_guard import block_for as _block_for
+        _beta = self._imoex_beta.get(figi) if figi else None
+        return _block_for(
+            st, side,
+            beta=_beta,
+            min_beta=float(getattr(self.config, "imoex_guard_min_beta", 0.0) or 0.0),
+            chase_pct=float(getattr(self.config, "imoex_chase_block_pct", 0.0) or 0.0),
+        )
+
+    def _imoex_guard_snapshot(self) -> dict:
+        st = self._imoex_state
+        cfg = self.config
+        last_ts = self._imoex_buf[-1][0] if self._imoex_buf else None
+        now = self._bot_now()
+        try:
+            age_sec = (now - last_ts).total_seconds() if last_ts else None
+        except Exception:
+            age_sec = None
+        _trading = False
+        try:
+            from app.bot.session import session_state as _ss, trading_session as _ts
+            _trading = (_ss(now=now) in ("trading", "pre_open")) and (_ts(now=now) is not None)
+        except Exception:
+            pass
+        _stale_sec = float(getattr(cfg, "imoex_stale_sec", 300.0) or 300.0)
+        _stale = bool(_trading and (age_sec is None or age_sec > _stale_sec))
+        return {
+            "enabled": bool(getattr(cfg, "imoex_guard", True)),
+            "active": int(st.active) if st else 0,
+            "since": st.since.isoformat() if (st is not None and st.since) else None,
+            "move": round(st.move, 2) if st else 0.0,
+            "pct": round(st.pct, 3) if st else 0.0,
+            "blocks": int(st.blocks) if st else 0,
+            "activations": int(st.activations) if st else 0,
+            "releases": int(st.releases) if st else 0,
+            "window_min": int(getattr(cfg, "imoex_spike_window_min", 20) or 20),
+            "on_pct": float(getattr(cfg, "imoex_spike_pct", 0.8) or 0.8),
+            "on_points": float(getattr(cfg, "imoex_spike_points", 0.0) or 0.0),
+            "min_beta": float(getattr(cfg, "imoex_guard_min_beta", 0.0) or 0.0),
+            "chase_pct": float(getattr(cfg, "imoex_chase_block_pct", 0.0) or 0.0),
+            "last_candle": last_ts.isoformat() if last_ts else None,
+            "age_sec": round(age_sec, 1) if age_sec is not None else None,
+            "stale": _stale,
+            "trading": bool(_trading),
+        }
+
+    async def _imoex_loop(self) -> None:
+        """Live: периодически догружает 1м свечи IMOEX (MOEX ISS) и обновляет ряд guard'а.
+
+        В реплее данные уже в БД, часы виртуальные — догрузка не нужна.
+        """
+        await asyncio.sleep(5.0)
+        while True:
+            try:
+                _sec = float(getattr(self.config, "imoex_refresh_sec", 60.0) or 60.0)
+                _replay = getattr(self.config, "feed", "live") == "replay"
+                if getattr(self.config, "imoex_guard", True) and not _replay:
+                    try:
+                        from app.bot.moex import sync_imoex_recent
+                        _n = await asyncio.to_thread(sync_imoex_recent, max(30, int(_sec) + 30))
+                        if _n:
+                            self.metrics["last_imoex_sync"] = {
+                                "rows": int(_n), "ts": datetime.now(timezone.utc).isoformat()}
+                    except Exception as e:
+                        self._log(f"⚠ IMOEX sync: {type(e).__name__}: {str(e)[:80]}")
+                    await self._load_imoex_buf()
+                    self._imoex_guard_tick()
+                    # Оперативный алерт: свечи IMOEX не обновляются в торговую сессию.
+                    _snap = self._imoex_guard_snapshot()
+                    if _snap.get("stale"):
+                        _noww = _time.monotonic()
+                        if _noww - self._imoex_stale_warn_ts > 600:
+                            self._imoex_stale_warn_ts = _noww
+                            _age_min = int((_snap.get("age_sec") or 0) // 60)
+                            self._log(f"⚠ IMOEX: свечи НЕ ОБНОВЛЯЮТСЯ — последняя {_snap.get('last_candle')} "
+                                      f"(возраст {_age_min} мин). Входы против направления не защищены!")
+                            self.events.log("IMOEX_STALE", last_candle=_snap.get("last_candle"),
+                                            age_sec=_snap.get("age_sec"))
+                await asyncio.sleep(max(10.0, _sec))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._log(f"imoex-loop: {type(e).__name__}: {str(e)[:80]}")
+                await asyncio.sleep(30.0)
+
     @property
     def status(self) -> dict:
         step = STEP_SEC.get(self.config.interval_name, 300)
@@ -931,6 +1133,7 @@ class PaperBotRuntime:
                 "entries_paused": risk.entries_paused,
             },
             "carousel": self.carousel_diag,
+            "imoex_guard": self._imoex_guard_snapshot(),
             "metrics": dict(self.metrics),
         }
 
@@ -1061,6 +1264,7 @@ class PaperBotRuntime:
         self.pending_orders = {}
         self.tickers = {}
         self.entries_paused = False
+        self._imoex_state = None  # счётчики guard'а — с чистого листа на каждый запуск
         self.carousel_diag = {
             "eligible_count": 0, "active_count": 0, "hot_adds": 0,
             "hot_skips": 0, "last_hot_add_ts": None, "last_error": None, "instruments": [],
@@ -1228,6 +1432,27 @@ class PaperBotRuntime:
                     self._log(f"IMOEX: догружено {_n_imoex} 1м свечей")
             except Exception as e:
                 self._log(f"⚠ IMOEX load: {str(e)[:100]}")
+            # IMOEX guard: загрузить ряд индекса и посчитать состояние всплеска.
+            try:
+                _n_buf = await self._load_imoex_buf()
+                self._imoex_last_tick = ""
+                self._imoex_guard_tick()
+                if _n_buf:
+                    self._log(f"IMOEX GUARD: ряд {_n_buf} свечей загружен ({self._imoex_guard_snapshot()})")
+            except Exception as e:
+                self._log(f"⚠ IMOEX guard init: {str(e)[:100]}")
+            # Beta бумаг к IMOEX (instruments.imoex_beta) — для per-ticker режима guard'а.
+            try:
+                from sqlalchemy import text as _textb
+                async with SessionLocal() as _dbb:
+                    _brows = (await _dbb.execute(_textb(
+                        "SELECT figi, imoex_beta FROM instruments WHERE imoex_beta IS NOT NULL"
+                    ))).all()
+                self._imoex_beta = {r[0]: float(r[1]) for r in _brows}
+                if self._imoex_beta:
+                    self._log(f"IMOEX GUARD: beta загружена для {len(self._imoex_beta)} бумаг")
+            except Exception as e:
+                self._log(f"⚠ IMOEX beta load: {str(e)[:100]}")
 
             results = await asyncio.gather(*[_load_bounded(u) for u in self.universe])
             for res in results:
@@ -1917,6 +2142,7 @@ class PaperBotRuntime:
         self._session_task = asyncio.create_task(self._session_monitor())
         self._metrics_task = asyncio.create_task(self._metrics_loop())
         self._intrabar_task = asyncio.create_task(self._intrabar_exit_loop())
+        self._imoex_task = asyncio.create_task(self._imoex_loop())
         try:
             async for candle in feed.stream():
                 if not self.running:
@@ -1952,7 +2178,7 @@ class PaperBotRuntime:
                     await self._persist_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task', '_metrics_task', '_intrabar_task'):
+            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task', '_metrics_task', '_intrabar_task', '_imoex_task'):
                 task = getattr(self, t, None)
                 if task:
                     task.cancel()
@@ -1976,6 +2202,15 @@ class PaperBotRuntime:
         # Виртуальные часы replay: текущая поданная свеча (для тестового UI-цены).
         if getattr(self.config, "feed", "") == "replay":
             self._replay_cur = c.ts
+
+        # IMOEX guard: пересчёт состояния всплеска раз в минуту (по виртуальным часам).
+        try:
+            _mm = self._bot_now().strftime("%Y%m%d%H%M")
+            if _mm != self._imoex_last_tick:
+                self._imoex_last_tick = _mm
+                self._imoex_guard_tick()
+        except Exception:
+            pass
 
         # Битая свеча (прыжок цены / битые OHLC): пропускаем полностью —
         # не персистим и не кормим стратегию (согласуется с backtest _validate_candles)
@@ -2271,6 +2506,15 @@ class PaperBotRuntime:
                                     reason=f"TREND_ALIGN_{_reg_name}")
                     self._log_no_trade(figi, "trend_alignment")
                     return
+            # IMOEX guard: не входить против всплеска индекса, пока он не стабилизируется.
+            _imoex_why = self._imoex_block_reason(sig.side.value, figi)
+            if _imoex_why:
+                if self._imoex_state is not None:
+                    self._imoex_state.blocks += 1
+                self._log(f"ПРОПУСК ВХОДА {ticker}: против IMOEX — {_imoex_why}")
+                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="IMOEX_GUARD")
+                self._log_no_trade(figi, "imoex_guard")
+                return
             risk = self.risk_snapshot()
             if not risk.entries_allowed():
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,

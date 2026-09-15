@@ -77,9 +77,28 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger("uvicorn").warning("Auto-start bot failed: %s", e)
 
+    # IMOEX keepalive: постоянная запись 1м свечей индекса MOEX в БД (даже без бота).
+    # Нужна IMOEX-guard'у бота (запрет входов против всплеска индекса) и аналитике.
+    async def _imoex_keepalive() -> None:
+        import logging as _logging
+        _log = _logging.getLogger("uvicorn")
+        await asyncio.sleep(3.0)
+        while True:
+            try:
+                from app.bot.moex import sync_imoex_recent
+                _n = await asyncio.to_thread(sync_imoex_recent, 180)
+                if _n:
+                    _log.info("IMOEX keepalive: +%s свечей", _n)
+            except Exception as e:
+                _log.warning("IMOEX keepalive: %s", str(e)[:120])
+            await asyncio.sleep(300.0)
+
+    _imoex_task = asyncio.create_task(_imoex_keepalive())
+
     try:
         yield
     finally:
+        _imoex_task.cancel()
         queue_dispatcher.stop()
         ens_dispatcher.stop()
         await engine.dispose()

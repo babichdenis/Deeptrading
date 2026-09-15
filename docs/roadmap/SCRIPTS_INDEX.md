@@ -89,6 +89,9 @@
 - `download_futures_5m.py`, `download_imoex.py`, `download_iss_macro.py`, `download_macro_5m_2025.py`, `download_macro_futures.py` — фьючерсы/индексы/макро
 - `build_imoex_5m.py`, `build_g2_daily.py` — подготовка
 - `last_closed_bar.py` — хелпер point-in-time (5m бар закрыт в ts+5m)
+- `imoex_sensitivity.py` — IMOEX-чувствительность: порог следования акций за индексом, beta/corr/R², lead-lag, fade после экстремума (отчёт `docs/results/IMOEX_SENSITIVITY_2026-09-15.md`); `--save-db` пишет beta/corr/R² в `instruments.imoex_beta/corr/r2`
+- `pair_leadlag.py` — парный лид-лаг 26 акций + IMOEX (k=0..3), топ направленных пар и догон (отчёт `docs/results/PAIR_LEADLAG_2026-09-15.md`)
+- `imoex_fade_backtest.py` — fade-бэктест: откат акций после |move20| IMOEX ≥ T (immediate/retrace25/50), издержки бота и тариф
 
 ## 9. ДИАГНОСТИКА / ПРОФИЛИРОВАНИЕ
 
