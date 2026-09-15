@@ -50,12 +50,17 @@
 
 | Ключ | Источник | Содержимое |
 |---|---|---|
-| `order` | `/api/v1/bot/approvals` | id, ticker, side, qty, price, waiting_sec, meta (фичи сигнала) |
-| `context.state` | `/api/v1/bot/state` | позиции (вход/цена/P&L/SL/TP/дистанции), equity, guard |
-| `context.risk` | `/api/v1/bot/status` | state (NORMAL/…), daily_pnl, лимит дня |
-| `context.portfolio` | `/api/v1/bot/status` | equity, cash, positions_open |
+| `now_msk` | — | текущее время МСК (модель не гадает) |
+| `order` | `/api/v1/bot/approvals` | ticker, side, qty, price, reason (фичи сигнала) |
+| `context.positions` | `/api/v1/bot/state` | count, same_side, this_ticker (сторона/qty/pnl/SL/TP) |
+| `context.equity` | `/api/v1/bot/state` | эквити |
 | `context.guard` | `/api/v1/bot/status` | active/pct/move/trading/stale/last_candle |
-| `context.recent_trades` | `/api/v1/bot/trades` | последние 8 сделок: ticker/side/net_pnl/exit_reason |
+| `context.risk` | `/api/v1/bot/status` | state (NORMAL/…), daily_pnl, лимит дня |
+| `context.session` | `/api/v1/bot/status` | торговая сессия (утро/день/вечер) |
+| `context.recent_trades_ticker` | `/api/v1/bot/trades` | последние 5 сделок ЭТОГО тикера |
+| `context.candles_1m` | `/api/analysis/{figi}?interval_name=1min&limit=60` | последние 5 закрытых 1м свечей (t — МСК, o/h/l/c/v) |
+| `context.volume` | там же | last, mean50, ratio (объём к среднему за 50) |
+| `context.signal_features` | meta заявки | votes / volume_features / regime и т.п. |
 
 **Важно про IMOEX:** индекс публикуется только **09:50–19:00 МСК** (в БД 547 бар/день).
 Вне этого окна `guard.trading=false` — правила про всплеск/stale не применяются.

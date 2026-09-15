@@ -61,6 +61,17 @@ SYSTEM = """Ты — риск-менеджер торгового бота (MOEX
 Совет не исполняется автоматически — его видит человек в дашборде; пиши так, чтобы его можно
 было однажды превратить в правило.
 
+ДАННЫЕ О ЦЕНЕ И ОБЪЁМЕ (используй их, не выдумывай):
+- candles_1m: последние 5 закрытых 1м свечей (время t — МСК; o/h/l/c/v) — видно импульс и разворот;
+- volume: {last, mean50, ratio} — объём последнего бара, средний за 50 и их отношение;
+- signal_features — фичи сигнала (голоса, объёмные фичи), если переданы.
+Правила по ним:
+- вход SELL, а последние 3+ свечи растут (каждая close выше предыдущей) → вход против
+  импульса: REJECT или совет подождать разворот/подтверждение;
+- вход BUY, а последние 3+ свечи падают → то же зеркально;
+- volume.ratio < 0.5 → низкая ликвидность: совет уменьшить размер или подождать;
+- volume.ratio > 3 и сторона против бара → возможен выброс: осторожно, совет подождать.
+
 Не выдумывай данные, опирайся только на переданный JSON. Учитывай сессию (МСК): утро/вечер
 менее ликвидны, вечером движения чаще ложные."""
 
@@ -154,6 +165,52 @@ def _ctx_compact(api: str, order: dict) -> dict:
             {k: t.get(k) for k in ("entry_time", "side", "net_pnl", "exit_reason")} for t in rows]
     except Exception:
         out["recent_trades_ticker"] = []
+    # Последние 1м свечи (3-5) + объём (last / mean50 / ratio) — цена и ликвидность.
+    try:
+        figi = str(order.get("figi") or "")
+        a = _http("GET", f"{api}/api/analysis/{figi}?interval_name=1min&limit=60", timeout=25)
+        cs = a.get("candles") or []
+        def _num(v):
+            try:
+                return float(v)
+            except Exception:
+                return None
+
+        def _t_msk(v):
+            try:
+                s = str(v).replace("Z", "+00:00")
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone(timedelta(hours=3))).strftime("%H:%M")
+            except Exception:
+                return str(v)[11:16]
+
+        out["candles_1m"] = [
+            {"t": _t_msk(c.get("ts")),
+             "o": _num(c.get("open")), "h": _num(c.get("high")),
+             "l": _num(c.get("low")), "c": _num(c.get("close")),
+             "v": int(_num(c.get("volume")) or 0)}
+            for c in cs[-5:]
+        ]
+        vols = [(_num(c.get("volume")) or 0.0) for c in cs[-51:]]
+        if vols:
+            _last = vols[-1]
+            _prev = vols[:-1] or vols
+            _mean = sum(_prev) / len(_prev) if _prev else 0.0
+            out["volume"] = {"last": int(_last), "mean50": int(_mean),
+                             "ratio": (round(_last / _mean, 2) if _mean > 0 else None)}
+    except Exception as e:
+        out["candles_error"] = f"{type(e).__name__}: {str(e)[:80]}"
+    # Фичи сигнала (голоса/объёмные фичи), если есть в meta заявки.
+    try:
+        _feats = {k: meta.get(k) for k in
+                  ("votes", "volume_features", "quorum", "atr_pct", "regime", "entry_tf")
+                  if meta.get(k) is not None}
+        if _feats:
+            out["signal_features"] = _feats
+    except Exception:
+        pass
     return out
 
 
