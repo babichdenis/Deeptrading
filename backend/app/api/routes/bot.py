@@ -45,6 +45,10 @@ def _config_payload(cfg: BotConfig) -> dict:
         "atr_risk_reward": cfg.atr_risk_reward,
         "top_n": cfg.top_n,
         "ensemble_quorum": cfg.ensemble_quorum,
+        "pos_pct": float(getattr(cfg, "pos_pct", 0.4) or 0.4),
+        "max_positions": int(getattr(cfg, "max_positions", 0) or 0),
+        "max_exposure_pct": float(getattr(cfg, "max_exposure_pct", 1.0) or 0.0),
+        "max_short_share": float(getattr(cfg, "max_short_share", 0.7) or 0.0),
         "commission_rate": cfg.commission_rate,
         "overnight": cfg.overnight,
         "reentry_cooldown_bars": cfg.reentry_cooldown_bars,
@@ -198,6 +202,10 @@ class BotConfigPatch(BaseModel):
     atr_risk_reward: float | None = None
     top_n: int | None = None
     ensemble_quorum: int | None = None
+    pos_pct: float | None = None  # доля equity на позицию (0.4 = 40%)
+    max_positions: int | None = None  # максимум одновременных позиций (0 = без лимита)
+    max_exposure_pct: float | None = None  # свои деньги в позициях <= X от equity (1.0 = 100%)
+    max_short_share: float | None = None  # макс. доля SHORT среди позиций (0.7 = 70%)
     commission_rate: float | None = None
     overnight: bool | None = None
     reentry_cooldown_bars: int | None = None
@@ -303,6 +311,26 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         if new_q != cfg.ensemble_quorum:
             changes.append(f"quorum: {cfg.ensemble_quorum} → {new_q}")
         cfg.ensemble_quorum = new_q
+    if req.pos_pct is not None:
+        _pp = max(0.05, min(1.0, float(req.pos_pct)))
+        if abs(_pp - float(getattr(cfg, "pos_pct", 0.4) or 0.4)) > 1e-9:
+            changes.append(f"слот: {float(getattr(cfg, 'pos_pct', 0.4) or 0.4)*100:.0f}% → {_pp*100:.0f}% от EQ")
+        cfg.pos_pct = _pp
+    if req.max_positions is not None:
+        _mp = max(0, min(50, int(req.max_positions)))
+        if _mp != int(getattr(cfg, "max_positions", 0) or 0):
+            changes.append(f"макс. позиций: {getattr(cfg, 'max_positions', 0)} → {_mp}")
+        cfg.max_positions = _mp
+    if req.max_exposure_pct is not None:
+        _me = max(0.0, min(5.0, float(req.max_exposure_pct)))
+        if abs(_me - float(getattr(cfg, "max_exposure_pct", 1.0) or 0.0)) > 1e-9:
+            changes.append(f"кап экспозиции: {float(getattr(cfg, 'max_exposure_pct', 1.0) or 0.0)*100:.0f}% → {_me*100:.0f}% от equity")
+        cfg.max_exposure_pct = _me
+    if req.max_short_share is not None:
+        _ms = max(0.0, min(1.0, float(req.max_short_share)))
+        if abs(_ms - float(getattr(cfg, "max_short_share", 0.7) or 0.0)) > 1e-9:
+            changes.append(f"лимит шортов: {float(getattr(cfg, 'max_short_share', 0.7) or 0.0)*100:.0f}% → {_ms*100:.0f}% позиций")
+        cfg.max_short_share = _ms
     if req.commission_rate is not None:
         new_cr = max(0.0, req.commission_rate) / 100.0
         if new_cr != cfg.commission_rate:

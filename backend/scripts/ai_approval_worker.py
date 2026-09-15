@@ -50,6 +50,8 @@ SYSTEM = """Ты — риск-менеджер торгового бота (MOEX
    низкая ликвидность, вход против режима.
 5. APPROVE, если противопоказаний нет: бот уже прошёл свои фильтры (кворум, режим, guard),
    а вход согласован с направлением индекса/трендом.
+5a. БАЛАНС L/S: если long_short.shorts заметно больше longs (short_share > 0.7) — к SELL-входам
+   относись строже (перекос в шорты), а BUY-входы приветствуются для баланса.
 6. skip — если данных мало или случай спорный (пусть решит таймаут/человек).
 
 СОВЕТ (advice) — всегда заполняй, 1 короткая фраза, конкретное действие, например:
@@ -159,6 +161,8 @@ def _ctx_compact(api: str, order: dict) -> dict:
     try:
         r = _http("GET", f"{api}/api/v1/bot/status")
         out["risk"] = r.get("risk")
+        out["long_short"] = r.get("long_short")
+        out["loss_streak"] = r.get("loss_streak")
         _sess = r.get("session")
         out["session"] = (_sess.get("state") if isinstance(_sess, dict) else _sess)
     except Exception:
@@ -678,7 +682,9 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                 item.update(_watch_market_ctx(args.api, str(p.get("figi") or "")))
                 items.append(item)
             ctx = {"now_msk": datetime.now(timezone.utc).astimezone(MSK).strftime("%Y-%m-%d %H:%M"),
-                   "guard": guard, "risk": risk, "positions": items}
+                   "guard": guard, "risk": risk,
+                   "long_short": (stt or {}).get("long_short") if isinstance(stt, dict) else None,
+                   "positions": items}
 
             def _one(prov: str):
                 _t = time.monotonic()

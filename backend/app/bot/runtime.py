@@ -81,6 +81,11 @@ class BotConfig:
     mode: str = "paper"  # paper | sandbox | live
     use_ensemble: bool = False
     ensemble_capital: float = 2000.0
+    pos_pct: float = 0.40  # доля equity на одну позицию (слот), 0.4 = 40%
+    max_positions: int = 5  # максимум одновременных позиций (0 = без лимита)
+    max_exposure_pct: float = 1.0  # свои деньги в позициях <= X от equity (1.0 = 100%, 0 = без лимита)
+    max_short_share: float = 0.7  # макс. доля SHORT среди позиций (0 = без лимита)
+    balance_min_positions: int = 3  # баланс L/S включается при >= N позиций
     ensemble_quorum: int = 2
     ensemble_session: str = "main"
     ensemble_entry_tf: str = "5min"  # ТФ свечей входа (micro_breakout): 1min | 5min | 10min | 15min
@@ -88,7 +93,7 @@ class BotConfig:
     ensemble_direction_sid: str = ""  # Путь 2: направление только от этой стратегии (пусто = общий режим)
     # --- Тройное подтверждение входа на 1м свечах ---
     entry_confirm_closes: int = 3  # N 1м-закрытий строго по направлению (BUY: каждое выше предыдущего)
-    entry_confirm_closes_sides: list = field(default_factory=lambda: ["BUY"])  # к каким сторонам применять
+    entry_confirm_closes_sides: list = field(default_factory=lambda: ["BUY", "SELL"])  # к каким сторонам
     # --- HOLD после серии убытков ---
     loss_streak_hold: bool = True       # пауза входов после серии убытков
     loss_streak_n: int = 2              # сколько убытков подряд
@@ -103,10 +108,10 @@ class BotConfig:
     commission_rate: float = 0.0005  # 0.05% per trade (T-Invest, parity с движком)
     slippage_bps: float = 2.0  # 2 bps adverse slippage
     # --- Opposite-hold / confirm_flip ---
-    confirm_flip: int = 2  # N встречных сигналов перед закрытием (0=отключено)
+    confirm_flip: int = 3  # N встречных сигналов перед закрытием (0=отключено)
     invert_signals: bool = False  # ЭКСПЕРИМЕНТ: инвертировать сторону входа (проверка "обратной" логики)
     # --- Re-entry cooldown ---
-    reentry_cooldown_bars: int = 15  # баров между выходом и повторным входом (0=отключено)
+    reentry_cooldown_bars: int = 30  # баров между выходом и повторным входом (0=отключено)
     # --- Overnight ---
     overnight: bool = False  # по умолчанию закрывать на конец торгового дня; True = держать через ночь
     # --- Margin ---
@@ -151,6 +156,7 @@ BOT_PERSIST_FIELDS = (
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
     "overnight", "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
+    "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "entry_confirm_closes", "entry_confirm_closes_sides",
     "loss_streak_hold", "loss_streak_n", "loss_streak_hold_min", "loss_streak_scope",
     "imoex_guard", "imoex_spike_pct", "imoex_spike_points", "imoex_spike_window_min",
@@ -452,10 +458,20 @@ class PaperBotRuntime:
         self._global_last_loss_ts: datetime | None = None
         # --- AI-гейт: пауза после отклонения (per-ticker) ---
         self._ai_reject_until: dict[str, datetime] = {}
+        # --- Экспозиция: плечо по каждой позиции (для капа «свои ≤ equity») ---
+        self._pos_leverage: dict[str, float] = {}
         # --- AI-гейт: последние решения ИИ (shadow/боевые) для UI ---
         self._ai_decisions: deque = deque(maxlen=50)
         self._ai_notes: deque = deque(maxlen=50)  # заметки вахтёра позиций (llama)
         self._ai_prompt: dict = {}  # текущий промпт/модель AI-гейта (для UI)
+
+    def _pos_pct(self) -> float:
+        """Доля equity на одну позицию (слот). Настраивается (PATCH /config), по умолчанию 40%."""
+        try:
+            v = float(getattr(self.config, "pos_pct", POS_PCT) or POS_PCT)
+            return min(max(v, 0.05), 1.0)
+        except Exception:
+            return POS_PCT
 
     def _log(self, msg: str, level: str = "info", source: str = "bot") -> None:
         ts = datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S")
@@ -1196,6 +1212,7 @@ class PaperBotRuntime:
             "carousel": self.carousel_diag,
             "imoex_guard": self._imoex_guard_snapshot(),
             "loss_streak": self.loss_streak_snapshot(),
+            "long_short": self.long_short_snapshot(),
             "ai_approval": {
                 "enabled": bool(getattr(self.config, "ai_approval", False)),
                 "pending": len(self.list_approvals()),
@@ -1369,8 +1386,8 @@ class PaperBotRuntime:
                 real_cash = await self.broker.equity()
                 if real_cash and real_cash > 0:
                     cfg.initial_cash = real_cash
-                    cfg.ensemble_capital = real_cash * POS_PCT
-                    self._log(f"КАПИТАЛ со счёта (equity): {real_cash:.0f} ₽ · позиция до {cfg.ensemble_capital:.0f} ({POS_PCT*100:.0f}%)")
+                    cfg.ensemble_capital = real_cash * self._pos_pct()
+                    self._log(f"КАПИТАЛ со счёта (equity): {real_cash:.0f} ₽ · позиция до {cfg.ensemble_capital:.0f} ({self._pos_pct()*100:.0f}%)")
             except Exception as e:
                 self._log(f"КАПИТАЛ не получен: {str(e)[:80]}")
         # Реплей: детерминированный старт — чистая paper-книга и чистые записи
@@ -1712,6 +1729,19 @@ class PaperBotRuntime:
         if left > 0:
             return (True, f"{cnt} убытков подряд, пауза ещё {left:.0f} мин")
         return (False, "")
+
+    def long_short_snapshot(self) -> dict:
+        """Соотношение LONG/SHORT по открытым позициям (для UI и AI-контекста)."""
+        longs = shorts = 0
+        for _f in list(self._held):
+            _s = str(self._exit_side.get(_f, "")).upper()
+            if _s == "LONG":
+                longs += 1
+            elif _s == "SHORT":
+                shorts += 1
+        total = longs + shorts
+        return {"longs": longs, "shorts": shorts, "total": total,
+                "short_share": (round(shorts / total, 3) if total else 0.0)}
 
     def loss_streak_snapshot(self) -> dict:
         """Активные HOLD-паузы (для UI/AI-гейта)."""
@@ -2855,16 +2885,16 @@ class PaperBotRuntime:
             budget = cfg.ensemble_capital
             if isinstance(self.broker, LiveBroker):
                 try:
-                    # Бюджет на ОДИН слот = 20% от equity (собственные деньги на позицию).
+                    # Бюджет на ОДИН слот = pos_pct (по умолчанию 40%) от equity.
                     # Плечо маржи доводит размер позиции до максимума, который разрешит
                     # брокер (см. блок MARGIN ниже) — НЕ до максимума портфеля.
                     _eq = await self.broker.equity()
                     _free = await self.broker.free_funds()
-                    budget = min(_eq * POS_PCT, _free) if _free > 0 else _eq * POS_PCT
+                    budget = min(_eq * self._pos_pct(), _free) if _free > 0 else _eq * self._pos_pct()
                 except Exception:
                     try:
                         live_cash = await self.broker.cash()
-                        budget = live_cash * POS_PCT
+                        budget = live_cash * self._pos_pct()
                     except Exception:
                         pass
             elif isinstance(self.broker, PaperBroker):
@@ -2881,10 +2911,10 @@ class PaperBotRuntime:
                     _eq = float(_acc.cash or 0.0) + _pv
                     if _eq <= 0:
                         _eq = float(cfg.initial_cash)
-                    budget = _eq * POS_PCT
+                    budget = _eq * self._pos_pct()
                     self._log(
                         f"TEST BUDGET {ticker}: equity≈{_eq:.0f}₽ → слот {budget:.0f}₽ "
-                        f"(POS_PCT {POS_PCT*100:.0f}%) · initial={cfg.initial_cash:.0f}₽"
+                        f"(слот {self._pos_pct()*100:.0f}% от EQ) · initial={cfg.initial_cash:.0f}₽"
                     )
                 except Exception as e:
                     self._log(f"TEST BUDGET FAIL {ticker}: {type(e).__name__}: {str(e)[:80]} — слот {budget:.0f}₽")
@@ -2979,6 +3009,31 @@ class PaperBotRuntime:
                     qty = max_lots
             except Exception as e:
                 self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed without cap")
+        # --- Кап совокупной экспозиции: свои деньги в позициях <= max_exposure_pct от equity ---
+        if action == "open":
+            try:
+                _cap = float(getattr(cfg, "max_exposure_pct", 0.0) or 0.0)
+                if _cap > 0:
+                    _eq_cap = float(await self.broker.equity() or 0.0)
+                    if _eq_cap > 0:
+                        _own_now = 0.0
+                        for _f in list(self._held):
+                            _ep = float(self._exit_entry_px.get(_f) or 0.0)
+                            _q = float(self._exit_qty.get(_f) or 0.0)
+                            _lev = max(1.0, float(self._pos_leverage.get(_f, 1.0) or 1.0))
+                            _own_now += (_ep * _q) / _lev
+                        _lot_cap = next((u.get("lot") for u in self.universe
+                                         if u.get("figi") == figi), 1) or 1
+                        _own_new = (float(price) * int(qty) * int(_lot_cap)) / max(1.0, float(_used_lev or 1.0))
+                        if _own_now + _own_new > _eq_cap * _cap:
+                            self._log(f"ПРОПУСК ВХОДА {ticker}: кап экспозиции "
+                                      f"{_cap*100:.0f}% (свои {_own_now:.0f}+{_own_new:.0f} > equity {_eq_cap:.0f}₽)")
+                            self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                            reason="MAX_EXPOSURE")
+                            self._log_no_trade(figi, "max_exposure")
+                            return
+            except Exception:
+                pass
         order = BotOrder(
             id=_new_order_id(),
             figi=figi,
@@ -2988,6 +3043,37 @@ class PaperBotRuntime:
             qty=qty,
             meta={**dict(meta or {}), "leverage": float(_used_lev)},
         )
+        # --- Лимит числа одновременных позиций ---
+        if action == "open":
+            try:
+                _max_pos = int(getattr(cfg, "max_positions", 0) or 0)
+                if _max_pos > 0 and len(self._held) >= _max_pos:
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: лимит позиций {_max_pos} "
+                              f"(сейчас {len(self._held)})")
+                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                    reason="MAX_POSITIONS")
+                    self._log_no_trade(figi, "max_positions")
+                    return
+            except Exception:
+                pass
+        # --- Баланс LONG/SHORT: не даём уйти в односторонний шорт ---
+        if action == "open" and side == "SELL":
+            try:
+                _share = float(getattr(cfg, "max_short_share", 0.0) or 0.0)
+                _min_total = int(getattr(cfg, "balance_min_positions", 3) or 3)
+                if _share > 0 and len(self._held) >= _min_total:
+                    _shorts = sum(1 for _f in self._held
+                                  if str(self._exit_side.get(_f, "")).upper() == "SHORT")
+                    _total = len(self._held)
+                    if (_shorts + 1) / (_total + 1) > _share:
+                        self._log(f"ПРОПУСК ВХОДА {ticker}: дисбаланс L/S — шортов {_shorts} из {_total} "
+                                  f"(лимит {_share*100:.0f}%)")
+                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                        reason="LS_BALANCE")
+                        self._log_no_trade(figi, "ls_balance")
+                        return
+            except Exception:
+                pass
         # --- AI-гейт: дедуп и пауза после отклонения ---
         if action == "open" and bool(getattr(cfg, "ai_approval", False)):
             _pend = self.pending_orders.get(figi)
@@ -3132,6 +3218,7 @@ class PaperBotRuntime:
         self._exit_entry_px[figi] = float(entry_px)
         _lot_entry = next((u.get("lot") for u in self.universe if u.get("figi") == figi), 1) or 1
         self._exit_qty[figi] = int(order.qty) * int(_lot_entry)
+        self._pos_leverage[figi] = max(1.0, float((order.meta or {}).get("leverage") or 1.0))
         self._trail_active[figi] = False
         self._trail_stop[figi] = float(plan.stop_loss) if plan.stop_loss is not None else 0.0
         if plan.take_profit is not None:
@@ -3153,6 +3240,7 @@ class PaperBotRuntime:
         self._trail_active.pop(figi, None)
         self._trail_stop.pop(figi, None)
         self._exit_target.pop(figi, None)
+        self._pos_leverage.pop(figi, None)
 
     async def _ensure_exit_state(self, figi: str, c, pos) -> None:
         """Ленивая инициализация учёта выхода, если позиция есть у брокера,

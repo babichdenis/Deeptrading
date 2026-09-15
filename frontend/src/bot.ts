@@ -2087,6 +2087,21 @@ async function runCompare() {
 }
 
 export async function renderStats() {
+  // Строка размера слота (pos_pct) — на странице «Анализ».
+  try {
+    const [rc, rs] = await Promise.all([
+      fetch(`${API}/api/v1/bot/config`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`${API}/api/v1/bot/status`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ]);
+    const el = $("an-sizing");
+    if (el && rc) {
+      const ls = (rs && rs.long_short) || {};
+      el.textContent = `слот: ${Math.round((Number(rc.pos_pct) || 0.4) * 100)}% от EQ` +
+        ` · макс позиций: ${rc.max_positions ?? "—"}` +
+        ` · кап экспозиции: ${Math.round((Number(rc.max_exposure_pct) || 1) * 100)}%` +
+        ` · L/S: ${ls.longs ?? "—"}/${ls.shorts ?? "—"}`;
+    }
+  } catch { /* ignore */ }
   const body = $("stats-body");
   if (!body) return;
   body.innerHTML = `<div class="mini-hint">загрузка…</div>`;
