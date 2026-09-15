@@ -767,6 +767,13 @@ body {
 #page-analytics .stats-overall { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
 #page-analytics .stats-cmp-result { overflow: visible; }
 
+.an-aigate { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-soft); display: flex; flex-direction: column; gap: 4px; }
+.an-aigate .an-ag-head { font-size: 12px; }
+.an-aigate .an-ag-head b.pos { color: var(--up); }
+.an-aigate .an-ag-head b.neg { color: var(--down); }
+.an-aigate .an-ag-prov { font-size: 11px; color: var(--text-dim); display: flex; gap: 12px; flex-wrap: wrap; }
+.an-aigate .an-ag-top { font-size: 11px; color: var(--text-dim); }
+
 /* Подсветка SL/TP в таблице позиций: цена ближе 1.5 ATR к уровню */
 #bot-positions-table td.near-sl { color: var(--down) !important; font-weight: 700; }
 #bot-positions-table td.near-tp { color: var(--up) !important; font-weight: 700; }

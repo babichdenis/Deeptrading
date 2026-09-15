@@ -1765,8 +1765,8 @@ class PaperBotRuntime:
             out.append(d)
         return out
 
-    def add_ai_decision(self, payload: dict) -> dict:
-        """Записать решение AI-гейта (в т.ч. shadow) — для UI и истории."""
+    async def add_ai_decision(self, payload: dict) -> dict:
+        """Записать решение AI-гейта (в т.ч. shadow) — в память (UI) и БД (статистика)."""
         rec = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "order_id": str(payload.get("order_id") or ""),
@@ -1787,6 +1787,23 @@ class PaperBotRuntime:
         self._ai_decisions.append(rec)
         self.events.log("AI_DECISION", figi=payload.get("figi"), ticker=rec["ticker"],
                         decision=rec["decision"], shadow=rec["shadow"], reason=rec["reason"][:120])
+        # Персист в БД — для статистики (трекер исходов достраивает контрфакт).
+        try:
+            from app.models.ai_decision import AiDecision
+            from datetime import datetime as _dt, timezone as _tz
+            async with SessionLocal() as db:
+                db.add(AiDecision(
+                    ts=_dt.now(_tz.utc), order_id=rec["order_id"], figi=str(payload.get("figi") or ""),
+                    ticker=rec["ticker"], side=rec["side"], qty=int(rec["qty"] or 0),
+                    price=float(payload.get("price") or 0.0), provider=rec["provider"],
+                    model=rec["model"], decision=rec["decision"], reason=rec["reason"],
+                    advice=rec["advice"], confidence=float(rec["confidence"] or 0.0),
+                    latency_ms=int(rec["latency_ms"] or 0), agreement=bool(rec["agreement"]),
+                    applied=bool(rec["applied"]), shadow=bool(rec["shadow"]),
+                ))
+                await db.commit()
+        except Exception as _e:
+            self._log(f"AI_DECISION persist: {type(_e).__name__}: {str(_e)[:80]}")
         return {"ok": True, "record": rec}
 
     def list_ai_decisions(self, limit: int = 20) -> list[dict]:
@@ -3016,12 +3033,27 @@ class PaperBotRuntime:
                 if _cap > 0:
                     _eq_cap = float(await self.broker.equity() or 0.0)
                     if _eq_cap > 0:
+                        # Свои деньги считаем как брокер: entry × qty_штук / leverage из сделки.
                         _own_now = 0.0
-                        for _f in list(self._held):
-                            _ep = float(self._exit_entry_px.get(_f) or 0.0)
-                            _q = float(self._exit_qty.get(_f) or 0.0)
-                            _lev = max(1.0, float(self._pos_leverage.get(_f, 1.0) or 1.0))
-                            _own_now += (_ep * _q) / _lev
+                        try:
+                            from sqlalchemy import text as _tcap
+                            _lot_by_figi = {u.get("figi"): int(u.get("lot") or 1) for u in self.universe}
+                            async with SessionLocal() as _dbcap:
+                                _cap_rows = (await _dbcap.execute(_tcap(
+                                    "SELECT figi, entry_price, qty, leverage FROM sandbox_trades "
+                                    "WHERE exit_time IS NULL AND mode = :m"
+                                ), {"m": self.broker_mode})).all()
+                            for _r in _cap_rows:
+                                _ep = float(_r[1] or 0.0)
+                                _q = float(_r[2] or 0.0) * float(_lot_by_figi.get(_r[0], 1))
+                                _lev = max(1.0, float(_r[3] or 1.0))
+                                _own_now += (_ep * _q) / _lev
+                        except Exception:
+                            for _f in list(self._held):
+                                _ep = float(self._exit_entry_px.get(_f) or 0.0)
+                                _q = float(self._exit_qty.get(_f) or 0.0)
+                                _lev = max(1.0, float(self._pos_leverage.get(_f, 1.0) or 1.0))
+                                _own_now += (_ep * _q) / _lev
                         _lot_cap = next((u.get("lot") for u in self.universe
                                          if u.get("figi") == figi), 1) or 1
                         _own_new = (float(price) * int(qty) * int(_lot_cap)) / max(1.0, float(_used_lev or 1.0))

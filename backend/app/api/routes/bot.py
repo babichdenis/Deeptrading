@@ -649,7 +649,7 @@ async def bot_approvals() -> dict:
 @router.post("/ai_decisions")
 async def bot_ai_decision(payload: dict) -> dict:
     """Записать решение AI-гейта (в т.ч. shadow) — воркер шлёт сюда свои вердикты для UI."""
-    return runtime.add_ai_decision(payload or {})
+    return await runtime.add_ai_decision(payload or {})
 
 
 @router.get("/ai_decisions")
@@ -680,6 +680,76 @@ async def bot_ai_note_set(payload: dict) -> dict:
 async def bot_ai_notes_get(limit: int = 20) -> dict:
     """Последние заметки вахтёра позиций — для UI."""
     return {"count": 0, "notes": runtime.list_ai_notes(limit)}
+
+
+@router.get("/ai_stats")
+async def bot_ai_stats(days: int = 7) -> dict:
+    """Статистика AI-гейта: решения, согласие, «сэкономлено/упущено» (контрфакт), точность.
+
+    saved_rub/missed_rub считает трекер (scripts/ai_gate_tracker.py) по цене +30 мин:
+    для отклонённых — что было бы; для одобренных — фактический net_pnl (actual_pnl).
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from sqlalchemy import text as _t
+    from app.database import SessionLocal as _DB
+    _frm = _dt.now(_tz.utc) - _td(days=max(1, min(int(days), 90)))
+    async with _DB() as db:
+        rows = (await db.execute(_t(
+            """SELECT provider, decision, agreement, count(*) n,
+                      coalesce(sum(saved_rub) FILTER (WHERE decision = 'reject'),0) saved,
+                      coalesce(sum(missed_rub) FILTER (WHERE decision = 'reject'),0) missed,
+                      coalesce(sum(actual_pnl) FILTER (WHERE decision <> 'reject'),0) actual,
+                      count(outcome_ts) with_outcome,
+                      coalesce(avg(latency_ms),0) lat
+               FROM ai_decisions WHERE ts >= :frm
+               GROUP BY 1,2,3"""
+        ), {"frm": _frm})).all()
+        top_missed = (await db.execute(_t(
+            """SELECT ticker, coalesce(sum(missed_rub),0) v, count(*) n
+               FROM ai_decisions WHERE ts >= :frm AND missed_rub > 0 AND decision = 'reject' 
+               GROUP BY 1 ORDER BY v DESC LIMIT 5"""
+        ), {"frm": _frm})).all()
+        top_saved = (await db.execute(_t(
+            """SELECT ticker, coalesce(sum(saved_rub),0) v, count(*) n
+               FROM ai_decisions WHERE ts >= :frm AND saved_rub > 0 AND decision = 'reject' 
+               GROUP BY 1 ORDER BY v DESC LIMIT 5"""
+        ), {"frm": _frm})).all()
+    tot = {"n": 0, "approve": 0, "reject": 0, "skip": 0, "saved": 0.0, "missed": 0.0,
+           "actual": 0.0, "with_outcome": 0, "agree": 0, "disagree": 0}
+    by_prov: dict = {}
+    for r in rows:
+        _p = r.provider or "—"
+        _d = str(r.decision or "")
+        pv = by_prov.setdefault(_p, {"n": 0, "approve": 0, "reject": 0, "skip": 0,
+                                     "saved": 0.0, "missed": 0.0, "actual": 0.0,
+                                     "with_outcome": 0, "lat": 0.0})
+        for tgt in (tot, pv):
+            tgt["n"] += int(r.n)
+            if _d in ("approve", "reject", "skip"):
+                tgt[_d] += int(r.n)
+            tgt["saved"] += float(r.saved or 0)
+            tgt["missed"] += float(r.missed or 0)
+            tgt["actual"] += float(r.actual or 0)
+            tgt["with_outcome"] += int(r.with_outcome or 0)
+        if r.agreement is True:
+            tot["agree"] += int(r.n)
+        elif r.agreement is False:
+            tot["disagree"] += int(r.n)
+        pv["lat"] = float(r.lat or 0)
+    for v in by_prov.values():
+        v["saved"] = round(v["saved"], 2)
+        v["missed"] = round(v["missed"], 2)
+        v["actual"] = round(v["actual"], 2)
+        v["lat"] = round(v["lat"], 0)
+    tot["saved"] = round(tot["saved"], 2)
+    tot["missed"] = round(tot["missed"], 2)
+    tot["actual"] = round(tot["actual"], 2)
+    tot["impact"] = round(tot["saved"] - tot["missed"], 2)
+    return {"days": days, "totals": tot, "by_provider": by_prov,
+            "top_missed": [{"ticker": r.ticker, "missed": round(float(r.v), 2), "n": int(r.n)}
+                           for r in top_missed],
+            "top_saved": [{"ticker": r.ticker, "saved": round(float(r.v), 2), "n": int(r.n)}
+                          for r in top_saved]}
 
 
 @router.post("/approvals/{order_id}/approve")

@@ -2102,6 +2102,31 @@ export async function renderStats() {
         ` · L/S: ${ls.longs ?? "—"}/${ls.shorts ?? "—"}`;
     }
   } catch { /* ignore */ }
+  // Блок AI-гейта: «сэкономлено/упущено» по контрфакту (трекер).
+  try {
+    const ag = $("an-aigate");
+    if (ag) {
+      const st = await fetch(`${API}/api/v1/bot/ai_stats?days=7`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (st && st.totals) {
+        const t = st.totals;
+        const provs = Object.entries(st.by_provider || {}).map(([p, v]: [string, any]) =>
+          `<span class="an-ag-prov"><b>${p}</b>: n=${v.n} · ✓${v.approve}/✕${v.reject} · saved ${money(v.saved)}₽ / missed ${money(v.missed)}₽ · ${Math.round(v.lat)}мс</span>`).join("");
+        const tm = (st.top_missed || []).map((x: any) => `${x.ticker} −${money(x.missed)}₽`).join(", ");
+        const tsv = (st.top_saved || []).map((x: any) => `${x.ticker} +${money(x.saved)}₽`).join(", ");
+        ag.innerHTML =
+          `<div class="an-ag-head">🤖 AI-гейт (${st.days} дн): <b class="${t.impact >= 0 ? "pos" : "neg"}">${t.impact >= 0 ? "+" : ""}${money(t.impact)}₽</b>` +
+          ` · сэкономлено ${money(t.saved)}₽ · упущено ${money(t.missed)}₽` +
+          ` · решений ${t.n} (✓${t.approve} ✕${t.reject} …${t.skip})` +
+          ` · согласие 🤝${t.agree}/≠${t.disagree}</div>` +
+          `<div class="an-ag-prov">${provs || "—"}</div>` +
+          (tm ? `<div class="an-ag-top">Больше всего упущено: ${tm}</div>` : "") +
+          (tsv ? `<div class="an-ag-top">Сэкономлено: ${tsv}</div>` : "");
+      } else {
+        ag.innerHTML = '<div class="an-ag-head">🤖 AI-гейт: нет данных (трекер ещё не набрал исходы)</div>';
+      }
+    }
+  } catch { /* ignore */ }
   const body = $("stats-body");
   if (!body) return;
   body.innerHTML = `<div class="mini-hint">загрузка…</div>`;

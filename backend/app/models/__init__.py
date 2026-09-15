@@ -1,3 +1,4 @@
+from app.models.ai_decision import AiDecision
 from app.models.candle import Candle
 from app.models.configurations import Configuration
 from app.services.eventbus import EventLog  # noqa: F401
@@ -14,6 +15,7 @@ from app.models.instrument import Instrument
 from app.models.signals import RunDependency, SignalDecision, StrategyRun, StrategySignal
 
 __all__ = [
+    "AiDecision",
     "Candle",
     "Configuration",
     "BotSetting",
