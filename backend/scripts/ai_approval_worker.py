@@ -291,7 +291,17 @@ hold (держать), tighten (подтянуть стоп), close (закры�
 5. Плохой контекст (серия убытков, вход против IMOEX-всплеска, риск не NORMAL) → close/tighten.
 6. Нет причин → hold.
 
-Только слова: ты НЕ управляешь ботом, твой ответ — совет человеку. Не выдумывай данные."""
+ЦЕНА И СТАКАН (если переданы):
+- candles_1m — последние 5 минутных свечей: если 3+ свечи идут ПРОТИВ позиции,
+  а прибыль ещё есть — не жадничай: подтяни TP к цене (зафиксировать) или tighten SL;
+- orderbook: imbalance (перевес бидов) — для SHORT рост перевеса покупателей (imbalance > +0.3)
+  и для LONG перевес продавцов (< -0.3) = давление против позиции → защищай прибыль;
+  spread_bps широкий (>15-20) — плохая точка выхода, не паникуй, но и не жадничай;
+  depth_rub маленький — тонкий стакан, выход может быть со slippage → лучше зафиксировать раньше.
+- Если позиция в хорошем плюсе, но импульс развернулся — TP ПОДТЯНУТЬ к цене (забрать прибыль),
+  а SL — не ниже безубытка (для LONG) / не выше (для SHORT).
+
+Не выдумывай данные, опирайся только на переданный JSON."""
 
 
 def _parse_watch(txt: str) -> dict:
@@ -389,6 +399,67 @@ def _log(rec: dict) -> None:
     print(json.dumps(rec, ensure_ascii=False, default=str), flush=True)
 
 
+
+SYSTEM_WATCH_MANY = """Ты — вахтёр ОТКРЫТЫХ ПОЗИЦИЙ торгового бота (MOEX). В одном запросе переданы
+ВСЕ позиции под риском (positions[]). По КАЖДОЙ позиции реши: hold (держать), tighten (подтянуть
+уровни), close (закрыть), watch (наблюдать). Отвечай СТРОГО JSON:
+{"decisions": [{"ticker": "<тикер>", "action": "hold|tighten|close|watch",
+                "sl": <число|null>, "tp": <число|null>,
+                "reason": "коротко", "advice": "что сделать", "confidence": 0.0-1.0}, ...]}
+
+Отвечай РОВНО по одной записи на каждый ticker из positions[] (не пропускай).
+Поля sl/tp — НОВЫЕ цены уровней, если action=tighten (иначе null). Есть готовые
+levels.sl_suggest/tp_suggest — подставляй ИХ (не копируй текущие position.sl/tp):
+- SL только подтягиваем: LONG — выше текущего и ниже цены; SHORT — ниже текущего и выше цены;
+- TP только подтягиваем к цене (защита прибыли при развороте): LONG — ниже текущего и выше цены;
+  SHORT — выше текущего и ниже цены; не ставить TP, если позиция в минусе.
+
+Правила по позиции:
+1. dist_sl_atr <= 1.0 → close или tighten.
+2. dist_tp_atr <= 1.0 → hold или tighten (зафиксировать).
+3. pnl < 0 и цена против позиции → tighten/close.
+4. pnl > 0 и dist_tp_atr > 2 → hold.
+5. Цена/стакан против позиции (candles_1m 3+ свечи против; orderbook.imbalance против стороны;
+   широкий спред/тонкий стакан) и есть прибыль → tighten TP к цене, SL не хуже безубытка.
+6. Нет причин → hold.
+
+Ты НЕ управляешь ботом сам: уровни применяет система с лимитами (буфер 0.3 ATR, шаг ≤2 ATR),
+остальное — совет человеку. Не выдумывай данные, опирайся только на переданный JSON."""
+
+
+def _parse_watch_many(txt: str) -> dict:
+    """Ответ модели по всем позициям -> {"decisions": [...], "_by_ticker": {ticker: d}}."""
+    try:
+        d = json.loads(_extract_json(txt))
+    except Exception:
+        return {"decisions": [], "error": f"parse_error: {txt[:80]}"}
+    items = d.get("decisions")
+    if not isinstance(items, list):
+        items = [d] if d.get("ticker") else []
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        a = str(it.get("action", "watch")).lower()
+        if a not in ("hold", "tighten", "close", "watch"):
+            a = "watch"
+        for k in ("sl", "tp"):
+            v = it.get(k)
+            try:
+                it[k] = float(v) if v not in (None, "", "null") else None
+            except Exception:
+                it[k] = None
+        _r = str(it.get("reason") or "").strip()
+        for _junk in ("коротко по-русски,", "коротко по-русски", "коротко,"):
+            if _r.lower().startswith(_junk):
+                _r = _r[len(_junk):].strip()
+        out.append({"ticker": str(it.get("ticker") or "").upper(), "action": a,
+                    "sl": it.get("sl"), "tp": it.get("tp"),
+                    "reason": _r[:300], "advice": str(it.get("advice") or "")[:300],
+                    "confidence": it.get("confidence")})
+    return {"decisions": out, "_by_ticker": {x["ticker"]: x for x in out if x["ticker"]}}
+
+
 def _apply_ai_levels(args, api: str, p: dict, new_sl: float | None, new_tp: float | None) -> dict:
     """Применить SL/TP от ИИ с жёсткими правилами.
 
@@ -470,13 +541,109 @@ def _apply_ai_levels(args, api: str, p: dict, new_sl: float | None, new_tp: floa
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:100]}"}
 
 
+def _watch_market_ctx(api: str, figi: str) -> dict:
+    """Рыночный контекст для вахтёра: последние 5 1м свечей + объём + стакан."""
+    out: dict = {}
+    try:
+        a = _http("GET", f"{api}/api/analysis/{figi}?interval_name=1min&limit=60", timeout=25)
+        cs = a.get("candles") or []
+
+        def _num(v):
+            try:
+                return float(v)
+            except Exception:
+                return None
+
+        def _t_msk(v):
+            try:
+                s = str(v).replace("Z", "+00:00")
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone(timedelta(hours=3))).strftime("%H:%M")
+            except Exception:
+                return str(v)[11:16]
+
+        out["candles_1m"] = [
+            {"t": _t_msk(c.get("ts")), "o": _num(c.get("open")), "h": _num(c.get("high")),
+             "l": _num(c.get("low")), "c": _num(c.get("close")), "v": int(_num(c.get("volume")) or 0)}
+            for c in cs[-5:]
+        ]
+        vols = [(_num(c.get("volume")) or 0.0) for c in cs[-51:]]
+        if vols:
+            _prev = vols[:-1] or vols
+            _mean = sum(_prev) / len(_prev) if _prev else 0.0
+            out["volume"] = {"last": int(vols[-1]), "mean50": int(_mean),
+                             "ratio": (round(vols[-1] / _mean, 2) if _mean > 0 else None)}
+    except Exception as e:
+        out["candles_error"] = f"{type(e).__name__}: {str(e)[:60]}"
+    try:
+        ob = _http("GET", f"{api}/api/v1/bot/orderbook/{figi}?depth=10", timeout=30)
+        if isinstance(ob, dict) and ob.get("spread_bps") is not None:
+            out["orderbook"] = {k: ob.get(k) for k in
+                                ("last", "best_bid", "best_ask", "spread_bps",
+                                 "bid_qty", "ask_qty", "imbalance", "depth_rub",
+                                 "top_bids", "top_asks")}
+    except Exception as e:
+        out["orderbook_error"] = f"{type(e).__name__}: {str(e)[:60]}"
+    return out
+
+
+def _suggest_levels(p: dict) -> dict:
+    """Готовые безопасные уровни (0.5 ATR от цены) — чтобы 3B не считала."""
+    out: dict = {}
+    try:
+        last = float(p.get("last") or 0)
+        atr = float(p.get("atr") or 0)
+        sl0 = float(p.get("sl")) if p.get("sl") else None
+        tp0 = float(p.get("tp")) if p.get("tp") else None
+        side = str(p.get("side") or "").upper()
+        if last and atr:
+            if side == "LONG":
+                c = round(last - 0.5 * atr, 6)
+                if sl0 is None or c > sl0:
+                    out["sl_suggest"] = c
+                ct = round(last + 0.5 * atr, 6)
+                if tp0 is not None and ct < tp0:
+                    out["tp_suggest"] = ct
+            else:
+                c = round(last + 0.5 * atr, 6)
+                if sl0 is None or c < sl0:
+                    out["sl_suggest"] = c
+                ct = round(last - 0.5 * atr, 6)
+                if tp0 is not None and ct > tp0:
+                    out["tp_suggest"] = ct
+    except Exception:
+        pass
+    return out
+
+
+def _normalize_levels(d: dict, p: dict, levels: dict) -> dict:
+    """Если модель не дала числа или скопировала текущие — подставляем предложения."""
+    if d.get("action") != "tighten":
+        return d
+    try:
+        cur_sl = float(p.get("sl")) if p.get("sl") else None
+        cur_tp = float(p.get("tp")) if p.get("tp") else None
+        if levels.get("sl_suggest") and (
+                not d.get("sl") or (cur_sl is not None and abs(float(d["sl"]) - cur_sl) < 1e-9)):
+            d["sl"] = levels["sl_suggest"]
+        if levels.get("tp_suggest") and (
+                not d.get("tp") or (cur_tp is not None and abs(float(d["tp"]) - cur_tp) < 1e-9)):
+            d["tp"] = levels["tp_suggest"]
+    except Exception:
+        pass
+    return d
+
+
 def run_watch(args, provs: list[str], models: dict) -> None:
-    """Вахтёр позиций: раз в N сек смотрит позиции у SL/TP или в минусе,
-    спрашивает модели (hold/tighten/close) и пишет заметки — словами, без управления."""
+    """Вахтёр позиций (БАТЧ): все позиции под риском — в ОДНОМ запросе к каждой модели.
+    Решения приходят массивом; уровни применяет только --apply провайдер (с лимитами)."""
     _seen: dict[str, tuple[str, float]] = {}
     MSK = timezone(timedelta(hours=3))
-    print(f"[ai-watch] providers={','.join(provs)} interval={args.watch_interval}s "
-          f"min_atr={args.watch_min_atr}", flush=True)
+    apply_prov = (args.apply or provs[0])
+    print(f"[ai-watch] providers={','.join(provs)} apply={apply_prov} interval={args.watch_interval}s "
+          f"min_atr={args.watch_min_atr} batch_max={args.watch_max}", flush=True)
     while True:
         try:
             st = _http("GET", f"{args.api}/api/v1/bot/state")
@@ -484,6 +651,7 @@ def run_watch(args, provs: list[str], models: dict) -> None:
             poss = (st.get("positions") or []) if isinstance(st, dict) else []
             guard = (stt or {}).get("imoex_guard") if isinstance(stt, dict) else None
             risk = (stt or {}).get("risk") if isinstance(stt, dict) else None
+            watch: list[dict] = []
             for p in poss:
                 ds = p.get("dist_sl_atr")
                 dt = p.get("dist_tp_atr")
@@ -493,105 +661,84 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                 losing = (pnl is not None and pnl < 0)
                 if not (near or losing):
                     continue
-                tk = str(p.get("ticker") or "")
-                # Готовые уровни-подсказки (безопасные), чтобы модель не считала, а выбирала.
-                _levels: dict = {}
+                if p.get("trail_active"):
+                    continue  # трейлинг управляет сам
+                watch.append(p)
+            if not watch:
+                time.sleep(max(15.0, float(args.watch_interval)))
+                continue
+            watch.sort(key=lambda x: (x.get("dist_sl_atr") if x.get("dist_sl_atr") is not None else 99))
+            watch = watch[: max(1, int(args.watch_max))]
+            items = []
+            for p in watch:
+                item = {k: p.get(k) for k in
+                        ("ticker", "side", "qty", "entry", "last", "pnl", "sl", "tp", "atr",
+                         "dist_sl_pct", "dist_tp_pct", "dist_sl_atr", "dist_tp_atr", "regime")}
+                item["levels"] = _suggest_levels(p)
+                item.update(_watch_market_ctx(args.api, str(p.get("figi") or "")))
+                items.append(item)
+            ctx = {"now_msk": datetime.now(timezone.utc).astimezone(MSK).strftime("%Y-%m-%d %H:%M"),
+                   "guard": guard, "risk": risk, "positions": items}
+
+            def _one(prov: str):
+                _t = time.monotonic()
                 try:
-                    _last = float(p.get("last") or 0)
-                    _atr = float(p.get("atr") or 0)
-                    _sl0 = float(p.get("sl")) if p.get("sl") else None
-                    _tp0 = float(p.get("tp")) if p.get("tp") else None
-                    _side = str(p.get("side") or "").upper()
-                    if _last and _atr:
-                        if _side == "LONG":
-                            _cand = round(_last - 0.5 * _atr, 6)
-                            if _sl0 is None or _cand > _sl0:
-                                _levels["sl_suggest"] = _cand
-                            _cand_tp = round(_last + 0.5 * _atr, 6)
-                            if _tp0 is not None and _cand_tp < _tp0:
-                                _levels["tp_suggest"] = _cand_tp
-                        else:
-                            _cand = round(_last + 0.5 * _atr, 6)
-                            if _sl0 is None or _cand < _sl0:
-                                _levels["sl_suggest"] = _cand
-                            _cand_tp = round(_last - 0.5 * _atr, 6)
-                            if _tp0 is not None and _cand_tp > _tp0:
-                                _levels["tp_suggest"] = _cand_tp
-                except Exception:
-                    pass
-                ctx = {
-                    "now_msk": datetime.now(timezone.utc).astimezone(MSK).strftime("%Y-%m-%d %H:%M"),
-                    "position": {k: p.get(k) for k in
-                                 ("ticker", "side", "qty", "entry", "last", "pnl", "sl", "tp",
-                                  "atr", "dist_sl_pct", "dist_tp_pct", "dist_sl_atr", "dist_tp_atr",
-                                  "regime", "trail_active")},
-                    "levels": _levels,
-                    "guard": guard, "risk": risk,
-                }
+                    if prov == "opencode":
+                        d = _ask_opencode({"positions": len(items)}, ctx, models.get("opencode", "big-pickle"),
+                                          args.opencode_url, system=SYSTEM_WATCH_MANY, parser=_parse_watch_many)
+                    elif prov == "ollama":
+                        d = _ask_ollama({"positions": len(items)}, ctx, models.get("ollama", "llama3.2:3b"),
+                                        args.ollama_url, system=SYSTEM_WATCH_MANY, parser=_parse_watch_many)
+                    else:
+                        d = _ask_deepseek({"positions": len(items)}, ctx, models.get("deepseek", "deepseek-chat"),
+                                          os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                                          os.environ.get("DEEPSEEK_API_KEY", ""),
+                                          system=SYSTEM_WATCH_MANY, parser=_parse_watch_many)
+                except Exception as e:
+                    d = {"decisions": [], "error": f"{type(e).__name__}: {str(e)[:80]}"}
+                return d, int((time.monotonic() - _t) * 1000)
 
-                def _one(prov: str):
-                    _t = time.monotonic()
-                    try:
-                        if prov == "opencode":
-                            d = _ask_opencode(p, ctx, models.get("opencode", "big-pickle"),
-                                              args.opencode_url, system=SYSTEM_WATCH, parser=_parse_watch)
-                        elif prov == "ollama":
-                            d = _ask_ollama(p, ctx, models.get("ollama", "llama3.2:3b"),
-                                            args.ollama_url, system=SYSTEM_WATCH, parser=_parse_watch)
-                        else:
-                            d = _ask_deepseek(p, ctx, models.get("deepseek", "deepseek-chat"),
-                                              os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-                                              os.environ.get("DEEPSEEK_API_KEY", ""), system=SYSTEM_WATCH, parser=_parse_watch)
-                    except Exception as e:
-                        d = {"action": "watch", "reason": f"error: {type(e).__name__}: {str(e)[:80]}",
-                             "advice": ""}
-                    return d, int((time.monotonic() - _t) * 1000)
+            with ThreadPoolExecutor(max_workers=max(1, len(provs))) as ex:
+                futs = {pr: ex.submit(_one, pr) for pr in provs}
+                out = {pr: f.result() for pr, f in futs.items()}
 
-                with ThreadPoolExecutor(max_workers=max(1, len(provs))) as ex:
-                    futs = {pr: ex.submit(_one, pr) for pr in provs}
-                    out = {pr: f.result() for pr, f in futs.items()}
-                for prov, (d, lat) in out.items():
+            for prov, (res, lat) in out.items():
+                by = (res or {}).get("_by_ticker") or {}
+                if (res or {}).get("error"):
+                    print(f"[ai-watch] {prov}: {res['error'][:120]}", flush=True)
+                _is_apply = (prov == apply_prov)
+                for p in watch:
+                    tk = str(p.get("ticker") or "").upper()
+                    d = by.get(tk)
+                    if not d:
+                        continue
                     act = d.get("action", "watch")
                     prev = _seen.get(tk)
                     if prev and prev[0] == act and (time.monotonic() - prev[1]) < 600:
-                        continue  # не спамим одинаковым советом
+                        continue
                     _seen[tk] = (act, time.monotonic())
+                    item = next((x for x in items if str(x.get("ticker") or "").upper() == tk), {})
+                    d = _normalize_levels(d, p, item.get("levels") or {})
                     rec = {"ticker": tk, "side": p.get("side"), "action": act,
                            "note": d.get("reason", ""), "advice": d.get("advice", ""),
                            "model": models.get(prov, ""), "provider": prov, "latency_ms": lat,
-                           "dist_sl_atr": ds, "dist_tp_atr": dt, "pnl": pnl}
-                    # --- Применение SL/TP (если разрешено): только подтяжка, с лимитами ---
-                    # Нормализация уровней: если модель не дала числа или просто
-                    # скопировала текущие значения — подставляем безопасные предложения.
-                    if act == "tighten":
-                        try:
-                            _cur_sl = float(p.get("sl")) if p.get("sl") else None
-                            _cur_tp = float(p.get("tp")) if p.get("tp") else None
-                            _got_sl = d.get("sl")
-                            _got_tp = d.get("tp")
-                            if _levels.get("sl_suggest") and (
-                                    not _got_sl or (_cur_sl is not None and abs(float(_got_sl) - _cur_sl) < 1e-9)):
-                                d["sl"] = _levels["sl_suggest"]
-                            if _levels.get("tp_suggest") and (
-                                    not _got_tp or (_cur_tp is not None and abs(float(_got_tp) - _cur_tp) < 1e-9)):
-                                d["tp"] = _levels["tp_suggest"]
-                        except Exception:
-                            pass
+                           "dist_sl_atr": p.get("dist_sl_atr"), "dist_tp_atr": p.get("dist_tp_atr"),
+                           "pnl": p.get("pnl")}
                     _want = bool(d.get("sl") or d.get("tp"))
-                    if args.ai_sl_manage and act == "tighten" and _want and not p.get("trail_active"):
+                    if args.ai_sl_manage and _is_apply and act == "tighten" and _want:
                         _ap = _apply_ai_levels(args, args.api, p, d.get("sl"), d.get("tp"))
                         rec["applied_levels"] = _ap
                         if _ap.get("ok"):
                             rec["advice"] = f"{rec['advice']} → применено: {_ap.get('applied')}"
                         else:
                             rec["note"] = f"{rec['note']} | уровни отклонены: {_ap.get('error')}"
-                    elif args.ai_sl_manage and act == "tighten" and _want and p.get("trail_active"):
-                        rec["note"] = f"{rec['note']} | трейлинг активен — уровни не трогаем"
+                    elif args.ai_sl_manage and not _is_apply and _want:
+                        rec["note"] = f"{rec['note']} | советник (применяет {apply_prov})"
                     try:
                         _http("POST", f"{args.api}/api/v1/bot/ai_notes", rec)
                     except Exception:
                         pass
-                    _log({"kind": "position_watch", **rec})
+                    _log({"kind": "position_watch", "batch": True, **rec})
         except KeyboardInterrupt:
             return
         except Exception as e:
@@ -624,6 +771,7 @@ def main() -> None:
                     help="разрешить llama ПОДТЯГИВАТЬ SL (только в сторону прибыли, с лимитами)")
     ap.add_argument("--ai-sl-max-step-atr", type=float, default=2.0)
     ap.add_argument("--ai-sl-buffer-atr", type=float, default=0.3)
+    ap.add_argument("--watch-max", type=int, default=8, help="макс. позиций в одном батч-запросе вахтёра")
     args = ap.parse_args()
 
     _load_env()
