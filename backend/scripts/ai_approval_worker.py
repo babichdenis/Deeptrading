@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -258,6 +259,27 @@ def _parse_decision(txt: str) -> dict:
     return d
 
 
+def _ask_ollama(order: dict, ctx: dict, model: str, base: str) -> dict:
+    """Локальный Ollama на .2 (OpenAI-совместимый /v1). Бесплатно, без лимитов."""
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": json.dumps({"order": order, "context": ctx},
+                                                   ensure_ascii=False, default=str)[:12000]},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 400,
+        "response_format": {"type": "json_object"},
+    }
+    with httpx.Client(timeout=240.0) as c:
+        r = c.post(f"{base.rstrip('/')}/chat/completions", json=payload)
+        r.raise_for_status()
+        data = r.json()
+    txt = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "{}"
+    return _parse_decision(txt)
+
+
 def _ask_opencode(order: dict, ctx: dict, model: str, url: str) -> dict:
     """Big Pickle и другие модели opencode zen — через локальный `opencode serve`
     (бесплатный tier Zen работает только внутри opencode)."""
@@ -300,8 +322,12 @@ def main() -> None:
     ap.add_argument("--interval", type=float, default=5.0)
     ap.add_argument("--dry-run", action="store_true",
                     help="shadow: решения НЕ применяются, только логируются и уходят в UI")
-    ap.add_argument("--provider", default="opencode", choices=("opencode", "deepseek"))
+    ap.add_argument("--provider", default="opencode", choices=("opencode", "deepseek", "ollama"))
+    ap.add_argument("--providers", default="", help="список через запятую: opencode,ollama (параллельно)")
+    ap.add_argument("--apply", default="", help="чей вердикт применять (по умолчанию первый из providers)")
     ap.add_argument("--opencode-url", default=os.environ.get("OPENCODE_URL", "http://127.0.0.1:4096"))
+    ap.add_argument("--ollama-url", default=os.environ.get("OLLAMA_URL", "http://192.168.1.2:11434/v1"))
+    ap.add_argument("--ollama-model", default="", help="модель Ollama (по умолчанию llama3.2:3b)")
     ap.add_argument("--model", default="")
     ap.add_argument("--selftest", action="store_true", help="проверить провайдера синтетической заявкой и выйти")
     ap.add_argument("--full-context", action="store_true",
@@ -309,35 +335,44 @@ def main() -> None:
     args = ap.parse_args()
 
     _load_env()
-    if args.provider == "opencode":
-        model = args.model or "big-pickle"
-        print(f"[ai-gate] provider=opencode model={model} url={args.opencode_url} "
-              f"api={args.api} dry_run={args.dry_run}", flush=True)
-    else:
-        model = args.model or os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-        base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        key = os.environ.get("DEEPSEEK_API_KEY", "")
-        if not key:
-            print("НЕТ DEEPSEEK_API_KEY (env или backend/.env) — выход", file=sys.stderr)
-            raise SystemExit(2)
-        print(f"[ai-gate] provider=deepseek model={model} base={base} "
-              f"api={args.api} dry_run={args.dry_run}", flush=True)
+    _provs = [p.strip() for p in (args.providers or args.provider).split(",") if p.strip()]
+    if not _provs:
+        _provs = ["opencode"]
+    _apply = (args.apply or _provs[0]).strip()
+    if _apply not in _provs:
+        _apply = _provs[0]
+    _models = {
+        "opencode": args.model or "big-pickle",
+        "ollama": args.ollama_model or "llama3.2:3b",
+        "deepseek": args.model or os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+    }
+    if "deepseek" in _provs and not os.environ.get("DEEPSEEK_API_KEY"):
+        print("НЕТ DEEPSEEK_API_KEY (env или backend/.env) — выход", file=sys.stderr)
+        raise SystemExit(2)
+    print(f"[ai-gate] providers={','.join(_provs)} apply={_apply} "
+          f"models={ {p: _models.get(p) for p in _provs} } api={args.api} dry_run={args.dry_run}",
+          flush=True)
 
-    def decide(order: dict, ctx: dict) -> dict:
-        if args.provider == "opencode":
-            return _ask_opencode(order, ctx, model, args.opencode_url)
-        return _ask_deepseek(order, ctx, model, os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+    def decide(provider: str, order: dict, ctx: dict) -> dict:
+        if provider == "opencode":
+            return _ask_opencode(order, ctx, _models["opencode"], args.opencode_url)
+        if provider == "ollama":
+            return _ask_ollama(order, ctx, _models["ollama"], args.ollama_url)
+        return _ask_deepseek(order, ctx, _models["deepseek"],
+                             os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
                              os.environ.get("DEEPSEEK_API_KEY", ""))
 
     # Отдаём текущий промпт/конфиг в бота — виден в UI (вкладка AI-гейт).
     def post_prompt() -> bool:
         try:
             _http("POST", f"{args.api}/api/v1/bot/ai_prompt", {
-                "provider": args.provider, "model": model, "shadow": args.dry_run,
-                "system": SYSTEM,
+                "provider": ",".join(_provs), "model": ",".join(_models.get(p, "") for p in _provs),
+                "shadow": args.dry_run, "system": SYSTEM,
                 "context_schema": {
-                    "order": "id, ticker, side, qty, price, waiting_sec",
-                    "context": "state(позиции/equity/guard), risk, portfolio, recent_trades",
+                    "order": "ticker, side, qty, price, reason",
+                    "context": "now_msk, positions, equity, guard, risk, session, "
+                               "recent_trades_ticker, candles_1m (5×1м, МСК), volume{last,mean50,ratio}",
+                    "apply": _apply,
                 },
             })
             return True
@@ -350,7 +385,13 @@ def main() -> None:
     if args.selftest:
         sample = {"id": "selftest-1", "ticker": "SMLT", "side": "SELL", "qty": 10,
                   "price": 339.2, "waiting_sec": 1.0}
-        print("SELFTEST:", json.dumps(decide(sample, {"note": "synthetic"}), ensure_ascii=False), flush=True)
+        with ThreadPoolExecutor(max_workers=max(1, len(_provs))) as ex:
+            futs = {p: ex.submit(decide, p, sample, {"note": "synthetic"}) for p in _provs}
+            for p, f in futs.items():
+                try:
+                    print(f"SELFTEST[{p}]:", json.dumps(f.result(), ensure_ascii=False), flush=True)
+                except Exception as e:
+                    print(f"SELFTEST[{p}]: ERROR {type(e).__name__}: {e}", flush=True)
         return
 
     while True:
@@ -369,37 +410,49 @@ def main() -> None:
                 if wait > tmo * 0.75:
                     continue  # поздно решать — пусть сработает таймаут/default
                 ctx = _ctx(args.api) if args.full_context else _ctx_compact(args.api, order)
-                t0 = time.monotonic()
-                try:
-                    dec = decide(order, ctx)
-                except Exception as e:
-                    _log({"ts": datetime.now(timezone.utc).isoformat(), "order_id": oid,
-                          "ticker": order.get("ticker"), "decision": "skip",
-                          "reason": f"deepseek_error: {type(e).__name__}: {str(e)[:120]}",
-                          "latency_ms": int((time.monotonic() - t0) * 1000), "model": model,
-                          "dry_run": args.dry_run})
-                    continue
-                rec = {"ts": datetime.now(timezone.utc).isoformat(), "order_id": oid,
-                       "ticker": order.get("ticker"), "side": order.get("side"),
-                       "qty": order.get("qty"), "figi": order.get("figi"),
-                       "decision": dec["decision"], "reason": dec.get("reason", ""),
-                       "advice": dec.get("advice", ""),
-                       "confidence": dec.get("confidence"),
-                       "latency_ms": int((time.monotonic() - t0) * 1000),
-                       "model": model, "dry_run": args.dry_run, "shadow": args.dry_run}
-                if not args.dry_run and dec["decision"] in ("approve", "reject"):
+
+                def _timed(p: str):
+                    _t = time.monotonic()
                     try:
-                        res = _http("POST", f"{args.api}/api/v1/bot/approvals/{oid}/{dec['decision']}",
-                                    {"reason": f"AI: {dec.get('reason', '')[:200]}"})
-                        rec["applied"] = res
+                        _d = decide(p, order, ctx)
                     except Exception as e:
-                        rec["applied"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
-                # Отдать решение в бота — для поля AI-гейта в UI (работает и в shadow).
-                try:
-                    _http("POST", f"{args.api}/api/v1/bot/ai_decisions", rec)
-                except Exception as e:
-                    rec["ui_post_error"] = f"{type(e).__name__}: {str(e)[:80]}"
-                _log(rec)
+                        _d = {"decision": "skip",
+                              "reason": f"{p}_error: {type(e).__name__}: {str(e)[:120]}",
+                              "advice": "", "confidence": 0.0}
+                    return _d, int((time.monotonic() - _t) * 1000)
+
+                with ThreadPoolExecutor(max_workers=max(1, len(_provs))) as ex:
+                    futs = {p: ex.submit(_timed, p) for p in _provs}
+                    out = {p: f.result() for p, f in futs.items()}
+                decs = {p: out[p][0] for p in _provs}
+                agree = len({str(decs[p].get("decision")) for p in _provs}) == 1
+                applied_dec = decs.get(_apply, {})
+                applied_res = None
+                if not args.dry_run and applied_dec.get("decision") in ("approve", "reject"):
+                    try:
+                        applied_res = _http(
+                            "POST", f"{args.api}/api/v1/bot/approvals/{oid}/{applied_dec['decision']}",
+                            {"reason": f"AI[{_apply}]: {applied_dec.get('reason', '')[:200]}"})
+                    except Exception as e:
+                        applied_res = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+                for p in _provs:
+                    d = decs[p]
+                    rec = {"ts": datetime.now(timezone.utc).isoformat(), "order_id": oid,
+                           "ticker": order.get("ticker"), "side": order.get("side"),
+                           "qty": order.get("qty"), "figi": order.get("figi"),
+                           "provider": p, "model": _models.get(p, ""),
+                           "decision": d.get("decision"), "reason": d.get("reason", ""),
+                           "advice": d.get("advice", ""), "confidence": d.get("confidence"),
+                           "latency_ms": out[p][1], "agreement": agree,
+                           "applied": bool(p == _apply and applied_res is not None),
+                           "dry_run": args.dry_run, "shadow": args.dry_run}
+                    if p == _apply and applied_res is not None:
+                        rec["apply_result"] = applied_res
+                    try:
+                        _http("POST", f"{args.api}/api/v1/bot/ai_decisions", rec)
+                    except Exception as e:
+                        rec["ui_post_error"] = f"{type(e).__name__}: {str(e)[:80]}"
+                    _log(rec)
         except KeyboardInterrupt:
             print("stop", flush=True)
             return

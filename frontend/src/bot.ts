@@ -1717,13 +1717,16 @@ async function renderAiGate() {
     const t = d.ts ? new Date(d.ts).toLocaleTimeString("ru-RU", { hour12: false }) : "";
     const conf = d.confidence != null ? ` · conf ${Number(d.confidence).toFixed(2)}` : "";
     const lat = d.latency_ms != null ? ` · ${Math.round(Number(d.latency_ms))}мс` : "";
+    const prov = d.provider ? ` · ${_agEsc(d.provider)}` : "";
+    const agree = d.agreement === true ? " · 🤝" : (d.agreement === false ? " · ≠" : "");
+    const applied = d.applied ? " · применено" : (d.shadow ? " · shadow" : "");
     return `<div class="ag-row ${cls}${d.shadow ? " shadow" : ""}" title="${_agEsc(d.reason)}">
       <div class="ag-r1">
         <span class="ag-t">${_agEsc(t)}</span>
         <span class="ag-tk">${_agEsc(d.ticker)} ${_agEsc(d.side)}${d.qty ? " ×" + _agEsc(d.qty) : ""}</span>
         <span class="ag-dec">${label}</span>
       </div>
-      <div class="ag-r2">${_agEsc(d.reason)}<span class="ag-meta">${_agEsc(d.model || "")}${conf}${lat}${d.shadow ? " · shadow" : ""}</span></div>
+      <div class="ag-r2">${_agEsc(d.reason)}<span class="ag-meta">${_agEsc(d.model || "")}${prov}${conf}${lat}${agree}${applied}</span></div>
       ${d.advice ? `<div class="ag-advice" title="совет нейросети">💡 ${_agEsc(d.advice)}</div>` : ""}
     </div>`;
   }).join("");

@@ -115,6 +115,18 @@ nohup .venv-mcp/bin/python3 scripts/ai_approval_worker.py > /tmp/ai_gate.log 2>&
 # проверить провайдера без бота:
 .venv-mcp/bin/python3 scripts/ai_approval_worker.py --selftest
 # другая модель Zen: --model deepseek-v4-flash-free | mimo-v2.5-free | nemotron-3-ultra-free
+
+# ПАРАЛЛЕЛЬНЫЙ РЕЖИМ (два и более провайдера одновременно):
+#   оба отвечают параллельно, в UI две строки на заявку, флаг согласия (🤝 / ≠),
+#   применяется вердикт --apply (по умолчанию первый).
+nohup .venv-mcp/bin/python3 scripts/ai_approval_worker.py \
+  --providers opencode,ollama --apply opencode > /tmp/ai_gate.log 2>&1 &
+
+# Замеры (реальный контекст, 15.09.2026):
+#   кейс «рынок как есть»:  big-pickle approve (43.6с) = llama3.2:3b approve (19.6с) — согласие
+#   кейс «SELL при 3 растущих свечах»: big-pickle REJECT (26.8с, увидел свечи)
+#                                      llama3.2:3b approve (18.7с, шаблонный ответ) — расхождение
+#   Вывод: локальная 3B быстрее, но данные (свечи/объём) не анализирует — только как советник/фолбэк.
 ```
 
 Требуется запущенный `opencode serve` (порт 4096) — бесплатный tier Zen работает только

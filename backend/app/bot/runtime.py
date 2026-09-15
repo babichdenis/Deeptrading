@@ -1739,6 +1739,9 @@ class PaperBotRuntime:
             "advice": str(payload.get("advice") or "")[:300],
             "confidence": payload.get("confidence"),
             "model": str(payload.get("model") or ""),
+            "provider": str(payload.get("provider") or ""),
+            "agreement": payload.get("agreement"),
+            "applied": bool(payload.get("applied", False)),
             "latency_ms": payload.get("latency_ms"),
             "shadow": bool(payload.get("shadow", False)),
         }
