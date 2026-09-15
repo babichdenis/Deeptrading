@@ -216,6 +216,28 @@ class LiveBroker:
         mv = await self.market_value()
         return max(0.0, eq - mv)
 
+    async def margin_attributes(self) -> dict:
+        """Маржинальные атрибуты счёта: liquid_portfolio, starting_margin, minimal_margin.
+
+        Это «правда» брокера: сколько заморожено под позиции (starting_margin) и
+        сколько всего ликвидно (liquid_portfolio) — используется капом экспозиции.
+        """
+        import asyncio
+
+        def _f():
+            services = self._get_services()
+            ma = services.users.get_margin_attributes(account_id=self._account)
+            return {
+                "liquid": self._q(ma.liquid_portfolio),
+                "starting_margin": self._q(ma.starting_margin),
+                "minimal_margin": self._q(getattr(ma, "minimal_margin", None)),
+            }
+
+        try:
+            return await asyncio.to_thread(_f)
+        except Exception:
+            return {}
+
     async def free_funds(self) -> float:
         """Реально свободные средства для сделок = ликвидный портфель − начальная маржа.
         (Свободные деньги на счёте искажены шортами; начальная маржа — замороженное обеспечение.)"""

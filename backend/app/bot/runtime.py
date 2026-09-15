@@ -3033,30 +3033,34 @@ class PaperBotRuntime:
                 if _cap > 0:
                     _eq_cap = float(await self.broker.equity() or 0.0)
                     if _eq_cap > 0:
-                        # Свои деньги считаем как брокер: entry × qty_штук / leverage из сделки.
-                        _own_now = 0.0
-                        try:
-                            from sqlalchemy import text as _tcap
-                            _lot_by_figi = {u.get("figi"): int(u.get("lot") or 1) for u in self.universe}
-                            async with SessionLocal() as _dbcap:
-                                _cap_rows = (await _dbcap.execute(_tcap(
-                                    "SELECT figi, entry_price, qty, leverage FROM sandbox_trades "
-                                    "WHERE exit_time IS NULL AND mode = :m"
-                                ), {"m": self.broker_mode})).all()
-                            for _r in _cap_rows:
-                                _ep = float(_r[1] or 0.0)
-                                _q = float(_r[2] or 0.0) * float(_lot_by_figi.get(_r[0], 1))
-                                _lev = max(1.0, float(_r[3] or 1.0))
-                                _own_now += (_ep * _q) / _lev
-                        except Exception:
+                        # Свои деньги/маржа — «правда» брокера (starting_margin), а не наша
+                        # оценка entry×qty/lev (она завышала в разы). Если брокер недоступен —
+                        # fallback на оценку.
+                        _own_now = None
+                        _eff_lev = None
+                        _ma_fn = getattr(self.broker, "margin_attributes", None)
+                        if _ma_fn is not None:
+                            try:
+                                _ma = await _ma_fn()
+                                if _ma and _ma.get("liquid"):
+                                    _own_now = float(_ma.get("starting_margin") or 0.0)
+                                    _mv_cap = float(await self.broker.market_value() or 0.0)
+                                    _eff_lev = max(1.0, _mv_cap / max(_own_now, 1.0))
+                                    _eq_cap = float(_ma.get("liquid") or _eq_cap)
+                            except Exception:
+                                _own_now = None
+                        if _own_now is None:
+                            _own_now = 0.0
                             for _f in list(self._held):
                                 _ep = float(self._exit_entry_px.get(_f) or 0.0)
                                 _q = float(self._exit_qty.get(_f) or 0.0)
                                 _lev = max(1.0, float(self._pos_leverage.get(_f, 1.0) or 1.0))
                                 _own_now += (_ep * _q) / _lev
+                            _eff_lev = 1.0
                         _lot_cap = next((u.get("lot") for u in self.universe
                                          if u.get("figi") == figi), 1) or 1
-                        _own_new = (float(price) * int(qty) * int(_lot_cap)) / max(1.0, float(_used_lev or 1.0))
+                        _own_new = ((float(price) * int(qty) * int(_lot_cap))
+                                    / max(1.0, float(_eff_lev or _used_lev or 1.0)))
                         if _own_now + _own_new > _eq_cap * _cap:
                             self._log(f"ПРОПУСК ВХОДА {ticker}: кап экспозиции "
                                       f"{_cap*100:.0f}% (свои {_own_now:.0f}+{_own_new:.0f} > equity {_eq_cap:.0f}₽)")
