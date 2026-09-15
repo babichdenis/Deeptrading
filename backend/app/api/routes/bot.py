@@ -49,6 +49,10 @@ def _config_payload(cfg: BotConfig) -> dict:
         "max_positions": int(getattr(cfg, "max_positions", 0) or 0),
         "max_exposure_pct": float(getattr(cfg, "max_exposure_pct", 1.0) or 0.0),
         "max_short_share": float(getattr(cfg, "max_short_share", 0.7) or 0.0),
+        "max_net_exposure_pct": float(getattr(cfg, "max_net_exposure_pct", 0.5) or 0.0),
+        "max_sector_pct": float(getattr(cfg, "max_sector_pct", 0.35) or 0.0),
+        "max_margin_use_pct": float(getattr(cfg, "max_margin_use_pct", 0.8) or 0.0),
+        "max_stress_loss_pct": float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.0),
         "commission_rate": cfg.commission_rate,
         "overnight": cfg.overnight,
         "reentry_cooldown_bars": cfg.reentry_cooldown_bars,
@@ -206,6 +210,10 @@ class BotConfigPatch(BaseModel):
     max_positions: int | None = None  # максимум одновременных позиций (0 = без лимита)
     max_exposure_pct: float | None = None  # свои деньги в позициях <= X от equity (1.0 = 100%)
     max_short_share: float | None = None  # макс. доля SHORT среди позиций (0.7 = 70%)
+    max_net_exposure_pct: float | None = None  # |net| <= X equity
+    max_sector_pct: float | None = None        # сектор <= X equity
+    max_margin_use_pct: float | None = None    # starting_margin <= X equity
+    max_stress_loss_pct: float | None = None   # убыток при ±5% IMOEX <= X equity
     commission_rate: float | None = None
     overnight: bool | None = None
     reentry_cooldown_bars: int | None = None
@@ -326,6 +334,26 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         if abs(_me - float(getattr(cfg, "max_exposure_pct", 1.0) or 0.0)) > 1e-9:
             changes.append(f"кап экспозиции: {float(getattr(cfg, 'max_exposure_pct', 1.0) or 0.0)*100:.0f}% → {_me*100:.0f}% от equity")
         cfg.max_exposure_pct = _me
+    if req.max_net_exposure_pct is not None:
+        _mn = max(0.0, min(5.0, float(req.max_net_exposure_pct)))
+        if abs(_mn - float(getattr(cfg, "max_net_exposure_pct", 0.5) or 0.0)) > 1e-9:
+            changes.append(f"net-экспозиция: {float(getattr(cfg, 'max_net_exposure_pct', 0.5) or 0.0)*100:.0f}% → {_mn*100:.0f}% equity")
+        cfg.max_net_exposure_pct = _mn
+    if req.max_sector_pct is not None:
+        _msc = max(0.0, min(2.0, float(req.max_sector_pct)))
+        if abs(_msc - float(getattr(cfg, "max_sector_pct", 0.35) or 0.0)) > 1e-9:
+            changes.append(f"сектор: {float(getattr(cfg, 'max_sector_pct', 0.35) or 0.0)*100:.0f}% → {_msc*100:.0f}% equity")
+        cfg.max_sector_pct = _msc
+    if req.max_margin_use_pct is not None:
+        _mmu = max(0.0, min(1.0, float(req.max_margin_use_pct)))
+        if abs(_mmu - float(getattr(cfg, "max_margin_use_pct", 0.8) or 0.0)) > 1e-9:
+            changes.append(f"маржа: {float(getattr(cfg, 'max_margin_use_pct', 0.8) or 0.0)*100:.0f}% → {_mmu*100:.0f}% equity")
+        cfg.max_margin_use_pct = _mmu
+    if req.max_stress_loss_pct is not None:
+        _mst = max(0.0, min(1.0, float(req.max_stress_loss_pct)))
+        if abs(_mst - float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.0)) > 1e-9:
+            changes.append(f"стресс-лимит: {float(getattr(cfg, 'max_stress_loss_pct', 0.1) or 0.0)*100:.0f}% → {_mst*100:.0f}% equity")
+        cfg.max_stress_loss_pct = _mst
     if req.max_short_share is not None:
         _ms = max(0.0, min(1.0, float(req.max_short_share)))
         if abs(_ms - float(getattr(cfg, "max_short_share", 0.7) or 0.0)) > 1e-9:
@@ -680,6 +708,12 @@ async def bot_ai_note_set(payload: dict) -> dict:
 async def bot_ai_notes_get(limit: int = 20) -> dict:
     """Последние заметки вахтёра позиций — для UI."""
     return {"count": 0, "notes": runtime.list_ai_notes(limit)}
+
+
+@router.get("/portfolio_summary")
+async def bot_portfolio_summary() -> dict:
+    """Сводка портфеля: экспозиции (long/short/net), сектора, маржа, стресс ±5/±10% IMOEX."""
+    return await runtime.portfolio_snapshot(ttl=3.0)
 
 
 @router.get("/ai_stats")

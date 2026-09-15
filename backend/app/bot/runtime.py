@@ -85,6 +85,11 @@ class BotConfig:
     max_positions: int = 5  # максимум одновременных позиций (0 = без лимита)
     max_exposure_pct: float = 1.0  # свои деньги в позициях <= X от equity (1.0 = 100%, 0 = без лимита)
     max_short_share: float = 0.7  # макс. доля SHORT среди позиций (0 = без лимита)
+    # --- Портфельные лимиты (в деньгах) ---
+    max_net_exposure_pct: float = 0.5   # |net notional| <= X equity (0=выкл)
+    max_sector_pct: float = 0.35        # notional сектора <= X equity (0=выкл)
+    max_margin_use_pct: float = 0.8     # starting_margin <= X equity (0=выкл)
+    max_stress_loss_pct: float = 0.10   # убыток при ±5% IMOEX <= X equity (0=выкл)
     balance_min_positions: int = 3  # баланс L/S включается при >= N позиций
     ensemble_quorum: int = 2
     ensemble_session: str = "main"
@@ -157,6 +162,7 @@ BOT_PERSIST_FIELDS = (
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
     "overnight", "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
+    "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
     "entry_confirm_closes", "entry_confirm_closes_sides",
     "loss_streak_hold", "loss_streak_n", "loss_streak_hold_min", "loss_streak_scope",
     "imoex_guard", "imoex_spike_pct", "imoex_spike_points", "imoex_spike_window_min",
@@ -460,10 +466,77 @@ class PaperBotRuntime:
         self._ai_reject_until: dict[str, datetime] = {}
         # --- Экспозиция: плечо по каждой позиции (для капа «свои ≤ equity») ---
         self._pos_leverage: dict[str, float] = {}
+        # --- Портфель: кэш меты (sector/beta) и снапшота ---
+        self._sector_meta: dict[str, dict] = {}
+        self._sector_meta_ts: float = 0.0
+        self._pf_cache: tuple[float, dict] | None = None
         # --- AI-гейт: последние решения ИИ (shadow/боевые) для UI ---
         self._ai_decisions: deque = deque(maxlen=50)
         self._ai_notes: deque = deque(maxlen=50)  # заметки вахтёра позиций (llama)
         self._ai_prompt: dict = {}  # текущий промпт/модель AI-гейта (для UI)
+
+    async def sector_meta(self) -> dict:
+        """{ticker: {sector, beta}} из instruments (кэш 10 мин)."""
+        import time as _t
+        if self._sector_meta and (_t.monotonic() - self._sector_meta_ts) < 600:
+            return self._sector_meta
+        try:
+            from sqlalchemy import text as _text
+            async with SessionLocal() as db:
+                rows = (await db.execute(_text(
+                    "SELECT ticker, figi, coalesce(sector,'other'), coalesce(imoex_beta,0) "
+                    "FROM instruments WHERE sector IS NOT NULL OR imoex_beta IS NOT NULL"
+                ))).all()
+            _m: dict[str, dict] = {}
+            for r in rows:
+                _v = {"sector": str(r[2]), "beta": float(r[3] or 0.0)}
+                _m[str(r[0]).upper()] = _v
+                if r[1]:
+                    _m[str(r[1])] = _v
+            self._sector_meta = _m
+            self._sector_meta_ts = _t.monotonic()
+        except Exception:
+            pass
+        return self._sector_meta
+
+    async def portfolio_snapshot(self, ttl: float = 10.0) -> dict:
+        """Сводка портфеля: экспозиции/сектора/маржа/стресс (кэш ttl сек)."""
+        import time as _t
+        from app.bot.portfolio import snapshot as _snap
+        if self._pf_cache and (_t.monotonic() - self._pf_cache[0]) < ttl:
+            return self._pf_cache[1]
+        equity = 0.0
+        positions: list[dict] = []
+        margin: dict = {}
+        try:
+            equity = float(await self.broker.equity() or 0.0)
+        except Exception:
+            pass
+        try:
+            for p in (await self.broker.positions()):
+                bb = self.tcs_to_bbg.get(getattr(p, "figi", ""), getattr(p, "figi", ""))
+                buf = self.buffers.get(bb)
+                last = float(buf[-1].close) if buf else float(getattr(p, "entry_price", 0) or 0)
+                positions.append({
+                    "ticker": str(getattr(p, "ticker", "") or self.tickers.get(bb, "")).upper(),
+                    "figi": bb,
+                    "side": "LONG" if str(getattr(p, "side", "")).upper() in ("LONG", "BUY") else "SHORT",
+                    "qty": abs(float(getattr(p, "qty", 0) or 0)),
+                    "entry": float(getattr(p, "entry_price", 0) or 0),
+                    "last": last,
+                })
+        except Exception:
+            pass
+        _ma_fn = getattr(self.broker, "margin_attributes", None)
+        if _ma_fn is not None:
+            try:
+                margin = await _ma_fn() or {}
+            except Exception:
+                margin = {}
+        meta = await self.sector_meta()
+        snap = _snap(equity, positions, meta, margin)
+        self._pf_cache = (_t.monotonic(), snap)
+        return snap
 
     def _pos_pct(self) -> float:
         """Доля equity на одну позицию (слот). Настраивается (PATCH /config), по умолчанию 40%."""
@@ -3079,6 +3152,30 @@ class PaperBotRuntime:
             qty=qty,
             meta={**dict(meta or {}), "leverage": float(_used_lev)},
         )
+        # --- Портфельные лимиты (net exposure / сектор / маржа / стресс) ---
+        if action == "open":
+            try:
+                from app.bot.portfolio import PortfolioLimits as _PL, check_order as _pcheck
+                _snap = await self.portfolio_snapshot()
+                _lim = _PL(
+                    max_net_exposure_pct=float(getattr(cfg, "max_net_exposure_pct", 0.5) or 0.0),
+                    max_sector_pct=float(getattr(cfg, "max_sector_pct", 0.35) or 0.0),
+                    max_margin_use_pct=float(getattr(cfg, "max_margin_use_pct", 0.8) or 0.0),
+                    max_stress_loss_pct=float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.0),
+                )
+                # лот: из universe
+                _lot_pf = next((u.get("lot") for u in self.universe if u.get("figi") == figi), 1) or 1
+                _notional = float(price) * int(qty) * int(_lot_pf)
+                _ok_pf, _why_pf = _pcheck(_snap, side, _notional, ticker,
+                                          await self.sector_meta(), _lim)
+                if not _ok_pf:
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: портфельный лимит — {_why_pf}")
+                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                    reason="PORTFOLIO_LIMIT", detail=_why_pf)
+                    self._log_no_trade(figi, "portfolio_limit")
+                    return
+            except Exception as _e:
+                self._log(f"ПОРТФЕЛЬ-ЛИМИТ {ticker}: проверка не удалась ({type(_e).__name__}) — пропускаю")
         # --- Лимит числа одновременных позиций ---
         if action == "open":
             try:

@@ -2102,6 +2102,26 @@ export async function renderStats() {
         ` · L/S: ${ls.longs ?? "—"}/${ls.shorts ?? "—"}`;
     }
   } catch { /* ignore */ }
+  // Блок портфеля: экспозиции/сектора/маржа/стресс.
+  try {
+    const pfEl = $("an-portfolio");
+    if (pfEl) {
+      const pf = await fetch(`${API}/api/v1/bot/portfolio_summary`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (pf && pf.equity != null) {
+        const sec = Object.entries(pf.sector_pct || {}).sort((a: any, b: any) => b[1] - a[1]).slice(0, 4)
+          .map(([k, v]: [string, any]) => `${k} ${Math.round(Number(v) * 100)}%`).join(", ");
+        const st = pf.stress_pct || {};
+        pfEl.innerHTML =
+          `<div class="an-ag-head">📦 Портфель: L ${Math.round((pf.long_exposure_pct || 0) * 100)}% · ` +
+          `S ${Math.round((pf.short_exposure_pct || 0) * 100)}% · net ${Math.round((pf.net_exposure_pct || 0) * 100)}%` +
+          ` · gross ×${pf.gross_leverage ?? "—"} · маржа ${Math.round((pf.margin_use_pct || 0) * 100)}%` +
+          ` · стресс ±5%: ${Math.round((st["imoex_+5%"] || 0) * 100)}% / ${Math.round((st["imoex_-5%"] || 0) * 100)}%</div>` +
+          (sec ? `<div class="an-ag-prov">Сектора: ${sec}</div>` : "");
+      }
+    }
+  } catch { /* ignore */ }
+
   // Блок AI-гейта: «сэкономлено/упущено» по контрфакту (трекер).
   try {
     const ag = $("an-aigate");

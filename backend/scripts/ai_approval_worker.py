@@ -52,6 +52,10 @@ SYSTEM = """Ты — риск-менеджер торгового бота (MOEX
    а вход согласован с направлением индекса/трендом.
 5a. БАЛАНС L/S: если long_short.shorts заметно больше longs (short_share > 0.7) — к SELL-входам
    относись строже (перекос в шорты), а BUY-входы приветствуются для баланса.
+5b. ПОРТФЕЛЬ (portfolio): net_exposure_pct (|net| > 0.5 = перекос в одну сторону), sector_pct
+   (сектор > 0.35), margin_use_pct (> 0.8 = мало запаса до маржин-колл), stress_pct
+   (убыток при ±5% IMOEX). Если stress_worst < -10% или лимит превышен — REJECT входы
+   в ту же сторону/сектор, в advice предложи уменьшить размер или хедж.
 6. skip — если данных мало или случай спорный (пусть решит таймаут/человек).
 
 СОВЕТ (advice) — всегда заполняй, 1 короткая фраза, конкретное действие, например:
@@ -163,6 +167,10 @@ def _ctx_compact(api: str, order: dict) -> dict:
         out["risk"] = r.get("risk")
         out["long_short"] = r.get("long_short")
         out["loss_streak"] = r.get("loss_streak")
+        try:
+            out["portfolio"] = _http("GET", f"{api}/api/v1/bot/portfolio_summary", timeout=20)
+        except Exception:
+            pass
         _sess = r.get("session")
         out["session"] = (_sess.get("state") if isinstance(_sess, dict) else _sess)
     except Exception:
@@ -294,6 +302,8 @@ hold (держать), tighten (подтянуть стоп), close (закры�
 4. pnl > 0 и dist_tp_atr > 2 → hold (пусть работает).
 5. Плохой контекст (серия убытков, вход против IMOEX-всплеска, риск не NORMAL) → close/tighten.
 6. Нет причин → hold.
+7. ПОРТФЕЛЬ (portfolio): если stress_pct при ±5% IMOEX < -10% или margin_use_pct > 0.8 —
+   приоритет защите: подтягивай SL/TP, сокращай риск; в advice укажи хедж/сокращение.
 
 ЦЕНА И СТАКАН (если переданы):
 - candles_1m — последние 5 минутных свечей: если 3+ свечи идут ПРОТИВ позиции,
@@ -426,6 +436,8 @@ levels.sl_suggest/tp_suggest — подставляй ИХ (не копируй 
 5. Цена/стакан против позиции (candles_1m 3+ свечи против; orderbook.imbalance против стороны;
    широкий спред/тонкий стакан) и есть прибыль → tighten TP к цене, SL не хуже безубытка.
 6. Нет причин → hold.
+7. ПОРТФЕЛЬ (portfolio): если stress_pct при ±5% IMOEX < -10% или margin_use_pct > 0.8 —
+   приоритет защите: подтягивай SL/TP, сокращай риск; в advice укажи хедж/сокращение.
 
 Ты НЕ управляешь ботом сам: уровни применяет система с лимитами (буфер 0.3 ATR, шаг ≤2 ATR),
 остальное — совет человеку. Не выдумывай данные, опирайся только на переданный JSON."""
@@ -681,9 +693,15 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                 item["levels"] = _suggest_levels(p)
                 item.update(_watch_market_ctx(args.api, str(p.get("figi") or "")))
                 items.append(item)
+            _pf = None
+            try:
+                _pf = _http("GET", f"{args.api}/api/v1/bot/portfolio_summary", timeout=20)
+            except Exception:
+                _pf = None
             ctx = {"now_msk": datetime.now(timezone.utc).astimezone(MSK).strftime("%Y-%m-%d %H:%M"),
                    "guard": guard, "risk": risk,
                    "long_short": (stt or {}).get("long_short") if isinstance(stt, dict) else None,
+                   "portfolio": _pf,
                    "positions": items}
 
             def _one(prov: str):
