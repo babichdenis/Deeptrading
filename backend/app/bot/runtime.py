@@ -535,6 +535,7 @@ class PaperBotRuntime:
                 margin = {}
         meta = await self.sector_meta()
         snap = _snap(equity, positions, meta, margin)
+        snap["skip_counts"] = self.get_no_trade_stats()
         self._pf_cache = (_t.monotonic(), snap)
         return snap
 

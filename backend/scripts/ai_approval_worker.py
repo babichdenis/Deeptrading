@@ -501,58 +501,59 @@ def _apply_ai_levels(args, api: str, p: dict, new_sl: float | None, new_tp: floa
     buf = float(args.ai_sl_buffer_atr) * atr
     step = float(args.ai_sl_max_step_atr) * atr
     applied: dict = {}
+    moved: dict = {}
+    target: dict = {}
+    clamped: dict = {}
     errs: list[str] = []
+    long_ = side == "LONG"
 
     if new_sl is not None:
+        target["sl"] = round(new_sl, 6)
         if sl0 is None:
             errs.append("нет текущего SL")
-        elif side == "LONG":
-            if new_sl <= sl0:
-                errs.append(f"SL {new_sl:.4f} не выше текущего {sl0:.4f}")
-            else:
-                _t = min(new_sl, sl0 + step)  # шаг не больше лимита
-                if _t >= last - buf:
-                    errs.append(f"SL близко к цене (буфер {buf:.4f})")
-                else:
-                    applied["sl"] = round(_t, 6)
         else:
-            if new_sl >= sl0:
-                errs.append(f"SL {new_sl:.4f} не ниже текущего {sl0:.4f}")
+            if long_:
+                _t = min(new_sl, sl0 + step)   # шаг
+                _t = min(_t, last - buf)       # буфер: не ближе к цене
+                _ok = _t > sl0 + 1e-12
             else:
                 _t = max(new_sl, sl0 - step)
-                if _t <= last + buf:
-                    errs.append(f"SL близко к цене (буфер {buf:.4f})")
-                else:
-                    applied["sl"] = round(_t, 6)
+                _t = max(_t, last + buf)
+                _ok = _t < sl0 - 1e-12
+            if not _ok:
+                errs.append(f"SL не подтянуть (буфер {buf:.4f})")
+            else:
+                applied["sl"] = round(_t, 6)
+                moved["sl"] = [round(sl0, 6), round(_t, 6)]
+                clamped["sl"] = abs(_t - new_sl) > 1e-9
 
     if new_tp is not None:
+        target["tp"] = round(new_tp, 6)
         if tp0 is None:
             errs.append("нет текущего TP (трейлинг?)")
-        elif side == "LONG":
-            if new_tp >= tp0:
-                errs.append(f"TP {new_tp:.4f} не ниже текущего {tp0:.4f}")
-            else:
-                _t = max(new_tp, tp0 - step)
-                if _t <= last + buf:
-                    errs.append(f"TP близко к цене (буфер {buf:.4f})")
-                else:
-                    applied["tp"] = round(_t, 6)
         else:
-            if new_tp <= tp0:
-                errs.append(f"TP {new_tp:.4f} не выше текущего {tp0:.4f}")
+            if long_:
+                _t = max(new_tp, tp0 - step)
+                _t = max(_t, last + buf)
+                _ok = _t < tp0 - 1e-12
             else:
                 _t = min(new_tp, tp0 + step)
-                if _t >= last - buf:
-                    errs.append(f"TP близко к цене (буфер {buf:.4f})")
-                else:
-                    applied["tp"] = round(_t, 6)
+                _t = min(_t, last - buf)
+                _ok = _t > tp0 + 1e-12
+            if not _ok:
+                errs.append(f"TP не подтянуть (буфер {buf:.4f})")
+            else:
+                applied["tp"] = round(_t, 6)
+                moved["tp"] = [round(tp0, 6), round(_t, 6)]
+                clamped["tp"] = abs(_t - new_tp) > 1e-9
 
     if not applied:
         return {"ok": False, "error": "; ".join(errs) or "нечего применять"}
     try:
         res = _http("POST", f"{api}/api/v1/bot/positions/levels",
                     {"ticker": p.get("ticker"), **applied})
-        return {"ok": True, "applied": applied, "errors": errs, "result": res}
+        return {"ok": True, "applied": applied, "moved": moved, "target": target,
+                "clamped": clamped, "errors": errs, "result": res}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:100]}"}
 
@@ -737,23 +738,34 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                     if not d:
                         continue
                     act = d.get("action", "watch")
-                    prev = _seen.get(tk)
-                    if prev and prev[0] == act and (time.monotonic() - prev[1]) < 600:
-                        continue
-                    _seen[tk] = (act, time.monotonic())
                     item = next((x for x in items if str(x.get("ticker") or "").upper() == tk), {})
                     d = _normalize_levels(d, p, item.get("levels") or {})
+                    _want = bool(d.get("sl") or d.get("tp"))
+                    _dedup = (max(60.0, float(args.watch_interval))
+                              if (act == "tighten" and _want) else 600.0)
+                    prev = _seen.get(tk)
+                    if prev and prev[0] == act and (time.monotonic() - prev[1]) < _dedup:
+                        continue
+                    _seen[tk] = (act, time.monotonic())
                     rec = {"ticker": tk, "side": p.get("side"), "action": act,
                            "note": d.get("reason", ""), "advice": d.get("advice", ""),
                            "model": models.get(prov, ""), "provider": prov, "latency_ms": lat,
                            "dist_sl_atr": p.get("dist_sl_atr"), "dist_tp_atr": p.get("dist_tp_atr"),
                            "pnl": p.get("pnl")}
-                    _want = bool(d.get("sl") or d.get("tp"))
                     if args.ai_sl_manage and _is_apply and act == "tighten" and _want:
                         _ap = _apply_ai_levels(args, args.api, p, d.get("sl"), d.get("tp"))
                         rec["applied_levels"] = _ap
                         if _ap.get("ok"):
-                            rec["advice"] = f"{rec['advice']} → применено: {_ap.get('applied')}"
+                            _mv = _ap.get("moved") or {}
+                            _parts = [f"{_k.upper()} {_mv[_k][0]}→{_mv[_k][1]}"
+                                      for _k in ("sl", "tp") if _mv.get(_k)]
+                            _s = " · ".join(_parts) or str(_ap.get("applied"))
+                            _cl = [k for k in ("sl", "tp") if (_ap.get("clamped") or {}).get(k)]
+                            if _cl:
+                                _tg = _ap.get("target") or {}
+                                _s += " (шаг ограничен: " + ", ".join(
+                                    f"цель {k.upper()} {_tg.get(k)}" for k in _cl) + ")"
+                            rec["advice"] = f"{rec['advice']} → применено: {_s}"
                         else:
                             rec["note"] = f"{rec['note']} | уровни отклонены: {_ap.get('error')}"
                     elif args.ai_sl_manage and not _is_apply and _want:
@@ -793,7 +805,7 @@ def main() -> None:
                     help="наблюдать позиции ближе N ATR к SL/TP (и все убыточные)")
     ap.add_argument("--ai-sl-manage", action="store_true",
                     help="разрешить llama ПОДТЯГИВАТЬ SL (только в сторону прибыли, с лимитами)")
-    ap.add_argument("--ai-sl-max-step-atr", type=float, default=2.0)
+    ap.add_argument("--ai-sl-max-step-atr", type=float, default=5.0)
     ap.add_argument("--ai-sl-buffer-atr", type=float, default=0.3)
     ap.add_argument("--watch-max", type=int, default=8, help="макс. позиций в одном батч-запросе вахтёра")
     args = ap.parse_args()

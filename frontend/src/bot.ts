@@ -2112,12 +2112,24 @@ export async function renderStats() {
         const sec = Object.entries(pf.sector_pct || {}).sort((a: any, b: any) => b[1] - a[1]).slice(0, 4)
           .map(([k, v]: [string, any]) => `${k} ${Math.round(Number(v) * 100)}%`).join(", ");
         const st = pf.stress_pct || {};
+        const RU: Record<string, string> = {
+          portfolio_limit: "портфель", max_positions: "слоты", max_exposure: "экспозиция",
+          ls_balance: "L/S", ai_reject: "AI-отказ", ai_reject_cooldown: "AI-кулдаун",
+          ai_already_pending: "AI-очередь", imoex_guard: "IMOEX", loss_streak_hold: "серия убытков",
+          already_held: "уже в позиции", cooldown: "кулдаун", session_filter: "сессия",
+          trend_alignment: "тренд", entries_paused: "пауза", long_disabled: "лонги off",
+          short_disabled: "шорты off", opposite_hold: "противоположная",
+        };
+        const skips = Object.entries(pf.skip_counts || {})
+          .sort((a: any, b: any) => b[1] - a[1]).slice(0, 5)
+          .map(([k, v]: [string, any]) => `${RU[k] || k} ${v}`).join(" · ");
         pfEl.innerHTML =
           `<div class="an-ag-head">📦 Портфель: L ${Math.round((pf.long_exposure_pct || 0) * 100)}% · ` +
           `S ${Math.round((pf.short_exposure_pct || 0) * 100)}% · net ${Math.round((pf.net_exposure_pct || 0) * 100)}%` +
           ` · gross ×${pf.gross_leverage ?? "—"} · маржа ${Math.round((pf.margin_use_pct || 0) * 100)}%` +
           ` · стресс ±5%: ${Math.round((st["imoex_+5%"] || 0) * 100)}% / ${Math.round((st["imoex_-5%"] || 0) * 100)}%</div>` +
-          (sec ? `<div class="an-ag-prov">Сектора: ${sec}</div>` : "");
+          (sec ? `<div class="an-ag-prov">Сектора: ${sec}</div>` : "") +
+          (skips ? `<div class="an-ag-prov">⛔ Пропуски входа: ${skips}</div>` : "");
       }
     }
   } catch { /* ignore */ }
