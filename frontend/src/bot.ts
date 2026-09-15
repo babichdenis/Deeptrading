@@ -2135,11 +2135,22 @@ export async function renderStats() {
         const skips = Object.entries(pf.skip_counts || {})
           .sort((a: any, b: any) => b[1] - a[1]).slice(0, 5)
           .map(([k, v]: [string, any]) => `${RU[k] || k} ${v}`).join(" · ");
+        const rg = pf.regime || {};
+        const _rgRu: Record<string, string> = { bear: "🐻 bear", bull: "🐂 bull",
+                                                reversal: "⚠ разворот", neutral: "→ нейтраль" };
+        const rgTxt = rg.state
+          ? ` · режим: ${_rgRu[rg.state] || rg.state}${rg.pct_20m != null ? ` (20м ${rg.pct_20m >= 0 ? "+" : ""}${Number(rg.pct_20m).toFixed(2)}%)` : ""}`
+          : "";
+        const qn = (pf.queue || []).length;
+        const qTop = qn ? ` · очередь: ${qn} (топ ${pf.queue[0]?.ticker} ${Math.round(pf.queue[0]?.score || 0)})` : "";
+        const dd = pf.dd || {};
+        const ddTxt = dd.peak ? ` · просадка ${Math.round((dd.dd_pct || 0) * 1000) / 10}% от пика` : "";
         pfEl.innerHTML =
           `<div class="an-ag-head">📦 Портфель: L ${Math.round((pf.long_exposure_pct || 0) * 100)}% · ` +
           `S ${Math.round((pf.short_exposure_pct || 0) * 100)}% · net ${Math.round((pf.net_exposure_pct || 0) * 100)}%` +
           ` · gross ×${pf.gross_leverage ?? "—"} · маржа ${Math.round((pf.margin_use_pct || 0) * 100)}%` +
-          ` · стресс ±5%: ${Math.round((st["imoex_+5%"] || 0) * 100)}% / ${Math.round((st["imoex_-5%"] || 0) * 100)}%</div>` +
+          ` · стресс ±5%: ${Math.round((st["imoex_+5%"] || 0) * 100)}% / ${Math.round((st["imoex_-5%"] || 0) * 100)}%` +
+          rgTxt + qTop + ddTxt + `</div>` +
           (sec ? `<div class="an-ag-prov">Сектора: ${sec}</div>` : "") +
           (skips ? `<div class="an-ag-prov">⛔ Пропуски входа: ${skips}</div>` : "");
       }

@@ -90,6 +90,12 @@ class BotConfig:
     max_sector_pct: float = 0.35        # notional сектора <= X equity (0=выкл)
     max_margin_use_pct: float = 0.8     # starting_margin <= X equity (0=выкл)
     max_stress_loss_pct: float = 0.10   # убыток при ±5% IMOEX <= X equity (0=выкл)
+    queue_enabled: bool = True           # очередь кандидатов: топ-1 по силе входит с бустом
+    queue_ttl_min: int = 30              # время жизни кандидата в очереди (мин)
+    queue_interval_sec: int = 120        # период проверки очереди (сек)
+    top_boost: float = 2.0               # множитель слота для топ-1 кандидата
+    dd_reduce1_pct: float = 0.05         # просадка от пика equity → закрыть 50% позиций
+    dd_reduce2_pct: float = 0.10         # просадка от пика equity → закрыть 80% позиций
     balance_min_positions: int = 3  # баланс L/S включается при >= N позиций
     ensemble_quorum: int = 2
     ensemble_session: str = "main"
@@ -163,6 +169,8 @@ BOT_PERSIST_FIELDS = (
     "overnight", "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
+    "queue_enabled", "queue_ttl_min", "queue_interval_sec", "top_boost",
+    "dd_reduce1_pct", "dd_reduce2_pct",
     "entry_confirm_closes", "entry_confirm_closes_sides",
     "loss_streak_hold", "loss_streak_n", "loss_streak_hold_min", "loss_streak_scope",
     "imoex_guard", "imoex_spike_pct", "imoex_spike_points", "imoex_spike_window_min",
@@ -470,6 +478,10 @@ class PaperBotRuntime:
         self._sector_meta: dict[str, dict] = {}
         self._sector_meta_ts: float = 0.0
         self._pf_cache: tuple[float, dict] | None = None
+        self._regime_cache: tuple[float, dict] | None = None
+        self._cand_queue: dict[str, dict] = {}
+        self._equity_peak: float = 0.0
+        self._dd_level_done: int = 0
         # --- AI-гейт: последние решения ИИ (shadow/боевые) для UI ---
         self._ai_decisions: deque = deque(maxlen=50)
         self._ai_notes: deque = deque(maxlen=50)  # заметки вахтёра позиций (llama)
@@ -536,8 +548,211 @@ class PaperBotRuntime:
         meta = await self.sector_meta()
         snap = _snap(equity, positions, meta, margin)
         snap["skip_counts"] = self.get_no_trade_stats()
+        try:
+            snap["regime"] = await self.market_regime()
+        except Exception:
+            snap["regime"] = {}
+        snap["queue"] = sorted(
+            [{"ticker": c.get("ticker"), "side": c.get("side"), "score": c.get("score"),
+              "why": c.get("why"), "ts": c.get("ts")} for c in self._cand_queue.values()],
+            key=lambda x: x.get("score") or 0, reverse=True)[:10]
+        snap["dd"] = {"peak": round(self._equity_peak, 2),
+                      "dd_pct": round(max(0.0, (self._equity_peak - equity) / self._equity_peak), 4)
+                      if self._equity_peak > 0 else 0.0,
+                      "level_done": self._dd_level_done}
         self._pf_cache = (_t.monotonic(), snap)
         return snap
+
+    async def market_regime(self, ttl: float = 30.0) -> dict:
+        """Режим рынка: bear/bull/neutral/reversal по IMOEX (20м/60м/день) + breadth."""
+        import time as _t
+        if self._regime_cache and (_t.monotonic() - self._regime_cache[0]) < ttl:
+            return self._regime_cache[1]
+        now = self._bot_now()
+        last_v = self._imoex_buf[-1][1] if self._imoex_buf else None
+
+        def _pct(mins: int) -> float | None:
+            if last_v is None:
+                return None
+            target = now - timedelta(minutes=mins)
+            ref = next((v for t, v in reversed(self._imoex_buf) if t <= target), None)
+            return ((last_v - ref) / ref * 100) if ref else None
+
+        p20, p60 = _pct(20), _pct(60)
+        pday = None
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+            _msk = _ZI("Europe/Moscow")
+            _day = now.astimezone(_msk).date()
+            _dv = [v for t, v in self._imoex_buf if t.astimezone(_msk).date() == _day]
+            if _dv and last_v:
+                pday = (last_v - _dv[0]) / _dv[0] * 100
+        except Exception:
+            pass
+        br_up = None
+        try:
+            from app.api.routes.screener import market_breadth
+            br_up = (market_breadth() or {}).get("up_pct")
+        except Exception:
+            br_up = None
+        st = "neutral"
+        if p20 is not None and p60 is not None:
+            if p60 <= -0.3 and p20 <= 0.1 and (br_up is None or br_up <= 50):
+                st = "bear"
+            elif p60 >= 0.3 and p20 >= -0.1 and (br_up is None or br_up >= 50):
+                st = "bull"
+            if (p60 <= -0.3 and p20 >= 0.25) or (p60 >= 0.3 and p20 <= -0.25):
+                st = "reversal"
+        out = {"state": st,
+               "pct_20m": round(p20, 3) if p20 is not None else None,
+               "pct_60m": round(p60, 3) if p60 is not None else None,
+               "pct_day": round(pday, 3) if pday is not None else None,
+               "breadth_up_pct": br_up,
+               "ts": datetime.now(timezone.utc).isoformat()}
+        self._regime_cache = (_t.monotonic(), out)
+        return out
+
+    def _strength_for(self, bb: str, ticker: str, side: str) -> dict:
+        """Сила кандидата: ret20m vs IMOEX (beta-adj) + объём + breadth."""
+        from app.bot.portfolio import strength_score as _ss, meta_for as _mf
+        try:
+            ret_tk = 0.0
+            vol_ratio = 1.0
+            buf = self.buffers.get(bb)
+            if buf and len(buf) > 21:
+                _b = list(buf)  # deque не поддерживает срезы
+                c_now = float(_b[-1].close)
+                c_20 = float(_b[-21].close)
+                ret_tk = (c_now - c_20) / c_20 if c_20 else 0.0
+                vols = [float(getattr(c, "volume", 0) or 0) for c in _b[-51:-1]]
+                avg = sum(vols) / len(vols) if vols else 0.0
+                v_now = float(getattr(_b[-1], "volume", 0) or 0)
+                vol_ratio = (v_now / avg) if avg > 0 else 1.0
+            beta = float((_mf(self._sector_meta, ticker).get("beta")) or 1.0)
+            reg = self._regime_cache[1] if self._regime_cache else {}
+            ret_idx = float(reg.get("pct_20m") or 0.0) / 100.0
+            br = reg.get("breadth_up_pct")
+            return _ss(ret_ticker=ret_tk, ret_index=ret_idx, beta=beta,
+                       vol_ratio=vol_ratio,
+                       breadth_up_pct=br if br is not None else 50.0, side=side)
+        except Exception:
+            return {"score": 50.0}
+
+    async def _enqueue_candidate(self, figi: str, ticker: str, side: str, why: str) -> None:
+        """Кандидат, отклонённый лимитом, встаёт в очередь приоритетного входа."""
+        import time as _t
+        try:
+            cfg = self.config
+            ttl = float(getattr(cfg, "queue_ttl_min", 30) or 30) * 60
+            now = _t.monotonic()
+            for f, c in list(self._cand_queue.items()):
+                if now - c.get("ts_mono", 0) > ttl:
+                    self._cand_queue.pop(f, None)
+            s = self._strength_for(self.tcs_to_bbg.get(figi, figi), ticker, side)
+            self._cand_queue[figi] = {
+                "ticker": ticker, "side": side, "why": why,
+                "score": s.get("score", 50.0), "rs": s.get("rs"),
+                "ts_mono": now,
+                "ts": datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M:%S"),
+            }
+            if len(self._cand_queue) > 20:
+                _w = min(self._cand_queue.items(), key=lambda kv: kv[1].get("score", 0))
+                self._cand_queue.pop(_w[0], None)
+            self._log(f"ОЧЕРЕДЬ {ticker} {side}: сила {s.get('score')} (rs {s.get('rs')}) — {why}")
+        except Exception:
+            pass
+
+    async def _priority_entry_loop(self) -> None:
+        """Очередь кандидатов: топ-1 по силе входит с бустом слота, когда лимит позволяет."""
+        import time as _t
+        while self.running:
+            try:
+                await asyncio.sleep(max(30.0, float(getattr(self.config, "queue_interval_sec", 120) or 120)))
+                cfg = self.config
+                if not bool(getattr(cfg, "queue_enabled", True)) or not self._cand_queue:
+                    continue
+                ttl = float(getattr(cfg, "queue_ttl_min", 30) or 30) * 60
+                now = _t.monotonic()
+                self._cand_queue = {f: c for f, c in self._cand_queue.items()
+                                    if now - c.get("ts_mono", 0) <= ttl and f not in self._held}
+                if not self._cand_queue:
+                    continue
+                f, c = max(self._cand_queue.items(), key=lambda kv: kv[1].get("score", 0))
+                self._cand_queue.pop(f, None)
+                _mx = int(getattr(cfg, "max_positions", 0) or 0)
+                if _mx > 0 and len(self._held) >= _mx:
+                    continue
+                _boost = float(getattr(cfg, "top_boost", 2.0) or 2.0)
+                self._log(f"ПРИОРИТЕТ {c.get('ticker')}: сила {c.get('score')} → вход ×{_boost:g} слот")
+                await self._submit_order(f, str(c.get("ticker") or ""), "open",
+                                         str(c.get("side") or "BUY"),
+                                         meta={"priority": True, "queue_score": c.get("score")})
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                pass
+
+    async def reduce_positions(self, close_pct: float, reason: str, side: str = "") -> dict:
+        """Закрыть долю позиций (худшие по P&L) — трейлинг-стоп портфеля/разворот."""
+        positions = await self.broker.positions()
+        items = []
+        for p in positions:
+            if side and str(getattr(p, "side", "")).upper() != side.upper():
+                continue
+            bb = self.tcs_to_bbg.get(p.figi, p.figi)
+            buf = self.buffers.get(bb) or self.buffers.get(p.figi)
+            last = float(buf[-1].close) if buf else float(getattr(p, "entry_price", 0) or 0)
+            entry = float(getattr(p, "entry_price", 0) or 0)
+            qty = float(getattr(p, "qty", 0) or 0)
+            long_ = str(getattr(p, "side", "")).upper() in ("LONG", "BUY")
+            pnl = (last - entry) * qty * (1 if long_ else -1)
+            items.append((pnl, p, bb, last))
+        items.sort(key=lambda x: x[0])
+        n = max(1, int(round(len(items) * float(close_pct)))) if items else 0
+        closed = []
+        for pnl, p, bb, last in items[:n]:
+            try:
+                trade = await self.broker.close_position(p.figi, last, reason)
+            except Exception as e:
+                self._log(f"ОШИБКА ЗАКРЫТИЯ {getattr(p, 'ticker', '')}: {type(e).__name__}")
+                continue
+            self._held.discard(p.figi)
+            self._held.discard(bb)
+            self._clear_exit_state(bb)
+            closed.append({"figi": p.figi, "ticker": getattr(p, "ticker", ""),
+                           "pnl": round(pnl, 2), "price": round(last, 6),
+                           "net_pnl": float(trade.net_pnl) if trade else None})
+            self.events.log("POSITION_CLOSED", figi=p.figi, ticker=getattr(p, "ticker", ""),
+                            reason=reason, net_pnl=closed[-1]["net_pnl"])
+        return {"closed": len(closed), "positions": closed, "reason": reason}
+
+    async def _portfolio_guard_loop(self) -> None:
+        """Трейлинг-стоп портфеля: просадка от пика equity → сокращаем позиции."""
+        from app.bot.portfolio import drawdown_action as _dd
+        while self.running:
+            try:
+                await asyncio.sleep(60.0)
+                cfg = self.config
+                eq = float(await self.broker.equity() or 0.0)
+                if eq <= 0:
+                    continue
+                if eq > self._equity_peak:
+                    self._equity_peak = eq
+                    self._dd_level_done = 0
+                act = _dd(eq, self._equity_peak,
+                          reduce1=float(getattr(cfg, "dd_reduce1_pct", 0.05) or 0.05),
+                          reduce2=float(getattr(cfg, "dd_reduce2_pct", 0.10) or 0.10))
+                if act["level"] > self._dd_level_done:
+                    self._dd_level_done = act["level"]
+                    r = await self.reduce_positions(act["close_pct"], f"portfolio_dd_L{act['level']}")
+                    self._log(f"🛡 ТРЕЙЛИНГ ПОРТФЕЛЯ: просадка {act['dd']*100:.1f}% от пика "
+                              f"{self._equity_peak:.0f}₽ → закрыто {r['closed']} поз.")
+                    self.events.log("PORTFOLIO_DD", level=act["level"], dd=act["dd"],
+                                    closed=r["closed"], peak=round(self._equity_peak, 2))
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                pass
 
     def _pos_pct(self) -> float:
         """Доля equity на одну позицию (слот). Настраивается (PATCH /config), по умолчанию 40%."""
@@ -2527,6 +2742,8 @@ class PaperBotRuntime:
         self._metrics_task = asyncio.create_task(self._metrics_loop())
         self._intrabar_task = asyncio.create_task(self._intrabar_exit_loop())
         self._imoex_task = asyncio.create_task(self._imoex_loop())
+        self._queue_task = asyncio.create_task(self._priority_entry_loop())
+        self._guard_task = asyncio.create_task(self._portfolio_guard_loop())
         try:
             async for candle in feed.stream():
                 if not self.running:
@@ -2983,6 +3200,8 @@ class PaperBotRuntime:
         # Инверсия уже применена на уровне сигнала (см. _process_candle) — здесь НЕ дублируем.
         qty = cfg.qty_per_trade
         _used_lev = 1.0
+        _boost = (float(getattr(cfg, "top_boost", 2.0) or 2.0)
+                  if (meta or {}).get("priority") else 1.0)
         if action == "open":
             buf = self.buffers.get(figi)
             price = float(buf[-1].close) if buf else 0.0
@@ -2999,11 +3218,12 @@ class PaperBotRuntime:
                     # брокер (см. блок MARGIN ниже) — НЕ до максимума портфеля.
                     _eq = await self.broker.equity()
                     _free = await self.broker.free_funds()
-                    budget = min(_eq * self._pos_pct(), _free) if _free > 0 else _eq * self._pos_pct()
+                    _slot_pct = self._pos_pct() * _boost
+                    budget = min(_eq * _slot_pct, _free) if _free > 0 else _eq * _slot_pct()
                 except Exception:
                     try:
                         live_cash = await self.broker.cash()
-                        budget = live_cash * self._pos_pct()
+                        budget = live_cash * self._pos_pct() * _boost
                     except Exception:
                         pass
             elif isinstance(self.broker, PaperBroker):
@@ -3020,10 +3240,10 @@ class PaperBotRuntime:
                     _eq = float(_acc.cash or 0.0) + _pv
                     if _eq <= 0:
                         _eq = float(cfg.initial_cash)
-                    budget = _eq * self._pos_pct()
+                    budget = _eq * self._pos_pct() * _boost
                     self._log(
                         f"TEST BUDGET {ticker}: equity≈{_eq:.0f}₽ → слот {budget:.0f}₽ "
-                        f"(слот {self._pos_pct()*100:.0f}% от EQ) · initial={cfg.initial_cash:.0f}₽"
+                        f"(слот {self._pos_pct()*_boost*100:.0f}% от EQ) · initial={cfg.initial_cash:.0f}₽"
                     )
                 except Exception as e:
                     self._log(f"TEST BUDGET FAIL {ticker}: {type(e).__name__}: {str(e)[:80]} — слот {budget:.0f}₽")
@@ -3174,24 +3394,40 @@ class PaperBotRuntime:
         # --- Портфельные лимиты (net exposure / сектор / маржа / стресс) ---
         if action == "open":
             try:
-                from app.bot.portfolio import PortfolioLimits as _PL, check_order as _pcheck
+                from app.bot.portfolio import (PortfolioLimits as _PL, check_order as _pcheck,
+                                               regime_limits as _rlim)
                 _snap = await self.portfolio_snapshot()
-                _lim = _PL(
+                _regime = await self.market_regime()
+                _base = _PL(
                     max_net_exposure_pct=float(getattr(cfg, "max_net_exposure_pct", 0.5) or 0.0),
                     max_sector_pct=float(getattr(cfg, "max_sector_pct", 0.35) or 0.0),
                     max_margin_use_pct=float(getattr(cfg, "max_margin_use_pct", 0.8) or 0.0),
                     max_stress_loss_pct=float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.0),
                 )
+                _lim = _rlim(_base, _regime)
                 # лот: из universe
                 _lot_pf = next((u.get("lot") for u in self.universe if u.get("figi") == figi), 1) or 1
                 _notional = float(price) * int(qty) * int(_lot_pf)
+                # Разворот рынка против книги: не добавляем в убыточную сторону.
+                _net = float(_snap.get("net_notional") or 0.0)
+                if str(_regime.get("state")) == "reversal" and (
+                        (_net < 0 and side == "SELL") or (_net > 0 and side == "BUY")):
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: разворот рынка против книги "
+                              f"(net {_net:+.0f}₽, IMOEX 20м {_regime.get('pct_20m')}%)")
+                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                    reason="MARKET_REVERSAL")
+                    self._log_no_trade(figi, "market_reversal")
+                    return
                 _ok_pf, _why_pf = _pcheck(_snap, side, _notional, ticker,
                                           await self.sector_meta(), _lim)
                 if not _ok_pf:
-                    self._log(f"ПРОПУСК ВХОДА {ticker}: портфельный лимит — {_why_pf}")
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: портфельный лимит — {_why_pf}"
+                              + (f" [режим {_regime.get('state')}]" if _regime.get("state") != "neutral" else ""))
                     self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                     reason="PORTFOLIO_LIMIT", detail=_why_pf)
                     self._log_no_trade(figi, "portfolio_limit")
+                    if bool(getattr(cfg, "queue_enabled", True)) and not (meta or {}).get("priority"):
+                        await self._enqueue_candidate(figi, ticker, side, _why_pf)
                     return
             except Exception as _e:
                 self._log(f"ПОРТФЕЛЬ-ЛИМИТ {ticker}: проверка не удалась ({type(_e).__name__}) — пропускаю")

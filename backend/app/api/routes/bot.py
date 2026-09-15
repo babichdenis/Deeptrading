@@ -53,6 +53,12 @@ def _config_payload(cfg: BotConfig) -> dict:
         "max_sector_pct": float(getattr(cfg, "max_sector_pct", 0.35) or 0.0),
         "max_margin_use_pct": float(getattr(cfg, "max_margin_use_pct", 0.8) or 0.0),
         "max_stress_loss_pct": float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.0),
+        "queue_enabled": bool(getattr(cfg, "queue_enabled", True)),
+        "queue_ttl_min": int(getattr(cfg, "queue_ttl_min", 30) or 30),
+        "queue_interval_sec": int(getattr(cfg, "queue_interval_sec", 120) or 120),
+        "top_boost": float(getattr(cfg, "top_boost", 2.0) or 2.0),
+        "dd_reduce1_pct": float(getattr(cfg, "dd_reduce1_pct", 0.05) or 0.05),
+        "dd_reduce2_pct": float(getattr(cfg, "dd_reduce2_pct", 0.10) or 0.10),
         "commission_rate": cfg.commission_rate,
         "overnight": cfg.overnight,
         "reentry_cooldown_bars": cfg.reentry_cooldown_bars,
@@ -214,6 +220,12 @@ class BotConfigPatch(BaseModel):
     max_sector_pct: float | None = None        # сектор <= X equity
     max_margin_use_pct: float | None = None    # starting_margin <= X equity
     max_stress_loss_pct: float | None = None   # убыток при ±5% IMOEX <= X equity
+    queue_enabled: bool | None = None          # очередь кандидатов (топ-1 входит с бустом)
+    queue_ttl_min: int | None = None           # время жизни кандидата (мин)
+    queue_interval_sec: int | None = None      # период проверки очереди (сек)
+    top_boost: float | None = None             # множитель слота топ-1 (2.0 = 80% equity)
+    dd_reduce1_pct: float | None = None        # просадка → закрыть 50%
+    dd_reduce2_pct: float | None = None        # просадка → закрыть 80%
     commission_rate: float | None = None
     overnight: bool | None = None
     reentry_cooldown_bars: int | None = None
@@ -349,6 +361,24 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         if abs(_mmu - float(getattr(cfg, "max_margin_use_pct", 0.8) or 0.0)) > 1e-9:
             changes.append(f"маржа: {float(getattr(cfg, 'max_margin_use_pct', 0.8) or 0.0)*100:.0f}% → {_mmu*100:.0f}% equity")
         cfg.max_margin_use_pct = _mmu
+    if req.queue_enabled is not None:
+        cfg.queue_enabled = bool(req.queue_enabled)
+        changes.append(f"очередь кандидатов: {'вкл' if cfg.queue_enabled else 'выкл'}")
+    if req.queue_ttl_min is not None:
+        cfg.queue_ttl_min = max(1, min(240, int(req.queue_ttl_min)))
+        changes.append(f"TTL кандидата: {cfg.queue_ttl_min} мин")
+    if req.queue_interval_sec is not None:
+        cfg.queue_interval_sec = max(30, min(900, int(req.queue_interval_sec)))
+        changes.append(f"период очереди: {cfg.queue_interval_sec}с")
+    if req.top_boost is not None:
+        cfg.top_boost = max(1.0, min(5.0, float(req.top_boost)))
+        changes.append(f"буст топ-1: ×{cfg.top_boost:g} слота")
+    if req.dd_reduce1_pct is not None:
+        cfg.dd_reduce1_pct = max(0.01, min(0.5, float(req.dd_reduce1_pct)))
+        changes.append(f"просадка-1: {cfg.dd_reduce1_pct*100:.0f}% → закрыть 50%")
+    if req.dd_reduce2_pct is not None:
+        cfg.dd_reduce2_pct = max(0.02, min(0.6, float(req.dd_reduce2_pct)))
+        changes.append(f"просадка-2: {cfg.dd_reduce2_pct*100:.0f}% → закрыть 80%")
     if req.max_stress_loss_pct is not None:
         _mst = max(0.0, min(1.0, float(req.max_stress_loss_pct)))
         if abs(_mst - float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.0)) > 1e-9:

@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass
@@ -137,3 +137,58 @@ def check_order(snap: dict, side: str, notional: float, ticker: str,
             return False, (f"стресс ±5% IMOEX: убыток {worst/eq:.0%} > "
                            f"{lim.max_stress_loss_pct:.0%} (equity)")
     return True, "ok"
+
+
+def regime_limits(base: PortfolioLimits, regime: dict | None = None) -> PortfolioLimits:
+    """Адаптивные лимиты по режиму рынка (bear/bull/reversal/neutral).
+
+    bear/bull — направленный тренд: разрешаем net до 100% equity (концентрация
+    в сильнейшем), сектор до 40%, но запас маржи и стресс-лимит жёстче.
+    reversal — разворот против книги: всё зажимаем.
+    """
+    r = str((regime or {}).get("state") or "neutral").lower()
+    lim = replace(base)
+    if r in ("bear", "bull"):
+        lim.max_net_exposure_pct = max(lim.max_net_exposure_pct, 1.0)
+        lim.max_sector_pct = max(lim.max_sector_pct, 0.40)
+        lim.max_margin_use_pct = min(lim.max_margin_use_pct or 0.8, 0.75)
+        lim.max_stress_loss_pct = min(lim.max_stress_loss_pct or 0.10, 0.08)
+    elif r == "reversal":
+        lim.max_net_exposure_pct = min(lim.max_net_exposure_pct or 0.5, 0.35)
+        lim.max_margin_use_pct = min(lim.max_margin_use_pct or 0.8, 0.60)
+        lim.max_stress_loss_pct = min(lim.max_stress_loss_pct or 0.10, 0.06)
+    return lim
+
+
+def strength_score(*, ret_ticker: float, ret_index: float, beta: float = 1.0,
+                   vol_ratio: float = 1.0, breadth_up_pct: float = 50.0,
+                   side: str = "SELL") -> dict:
+    """Оценка силы кандидата (0–100) в направлении сделки.
+
+    rs = ret_ticker − beta × ret_index (относительная сила к рынку).
+    Для SELL сильнее тот, у кого rs ниже (слабее рынка), для BUY — выше.
+    Бонусы: объём (vol_ratio) и breadth (совпадение с направлением рынка).
+    """
+    is_long = str(side).upper() in ("BUY", "LONG")
+    rs = float(ret_ticker or 0.0) - float(beta or 0.0) * float(ret_index or 0.0)
+    base = rs if is_long else -rs
+    rs_pts = base * 300.0   # 1% относительной силы = 3 балла (доминирует)
+    vol_bonus = min(max((float(vol_ratio or 1.0) - 1.0) * 6.0, -6.0), 6.0)
+    br = float(breadth_up_pct if breadth_up_pct is not None else 50.0)
+    br_bonus = min(max(((br - 50.0) if is_long else (50.0 - br)) * 0.1, -5.0), 5.0)
+    score = 50.0 + rs_pts + vol_bonus + br_bonus
+    return {"score": round(max(0.0, min(100.0, score)), 1), "rs": round(rs, 4),
+            "vol_bonus": round(vol_bonus, 1), "breadth_bonus": round(br_bonus, 1)}
+
+
+def drawdown_action(equity: float, peak: float, reduce1: float = 0.05,
+                    reduce2: float = 0.10, pct1: float = 0.5, pct2: float = 0.8) -> dict:
+    """Трейлинг-стоп портфеля: какую долю позиций закрыть по просадке от пика equity."""
+    if peak <= 0 or equity <= 0:
+        return {"dd": 0.0, "close_pct": 0.0, "level": 0}
+    dd = max(0.0, (float(peak) - float(equity)) / float(peak))
+    if dd >= reduce2:
+        return {"dd": round(dd, 4), "close_pct": pct2, "level": 2}
+    if dd >= reduce1:
+        return {"dd": round(dd, 4), "close_pct": pct1, "level": 1}
+    return {"dd": round(dd, 4), "close_pct": 0.0, "level": 0}

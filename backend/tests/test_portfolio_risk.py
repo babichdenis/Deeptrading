@@ -74,3 +74,45 @@ def test_check_order_ok():
     lim = PortfolioLimits()
     ok, why = check_order(snap, "BUY", 500, "GAZP", META, lim)
     assert ok and why == "ok"
+
+
+def test_regime_limits_bear_expands_net():
+    from app.bot.portfolio import regime_limits
+    base = PortfolioLimits()
+    lim = regime_limits(base, {"state": "bear"})
+    assert lim.max_net_exposure_pct == 1.0
+    assert lim.max_sector_pct == 0.40
+    assert lim.max_margin_use_pct == 0.75
+    assert lim.max_stress_loss_pct == 0.08
+    neutral = regime_limits(base, {"state": "neutral"})
+    assert neutral.max_net_exposure_pct == 0.5
+    rev = regime_limits(base, {"state": "reversal"})
+    assert rev.max_net_exposure_pct == 0.35 and rev.max_stress_loss_pct == 0.06
+
+
+def test_strength_score_short_prefers_weak_vs_market():
+    from app.bot.portfolio import strength_score
+    weak = strength_score(ret_ticker=-0.01, ret_index=0.0, beta=1.0, side="SELL")
+    strong = strength_score(ret_ticker=+0.01, ret_index=0.0, beta=1.0, side="SELL")
+    assert weak["score"] > 50 > strong["score"]
+    assert weak["rs"] < 0 < strong["rs"]
+    assert weak["score"] - strong["score"] > 5.0   # rs доминирует
+
+
+def test_strength_score_bonuses():
+    from app.bot.portfolio import strength_score
+    plain = strength_score(ret_ticker=-0.005, ret_index=0.0, side="SELL")
+    boosted = strength_score(ret_ticker=-0.005, ret_index=0.0, side="SELL",
+                             vol_ratio=1.8, breadth_up_pct=30)
+    assert boosted["score"] > plain["score"]
+    assert boosted["vol_bonus"] == 4.8 and boosted["breadth_bonus"] == 2.0
+
+
+def test_drawdown_action_levels():
+    from app.bot.portfolio import drawdown_action
+    assert drawdown_action(10000, 10000)["level"] == 0
+    a = drawdown_action(9400, 10000)   # -6%
+    assert a["level"] == 1 and a["close_pct"] == 0.5
+    b = drawdown_action(8800, 10000)   # -12%
+    assert b["level"] == 2 and b["close_pct"] == 0.8
+    assert drawdown_action(0, 10000)["level"] == 0
