@@ -1023,8 +1023,7 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   }
 
   // IMOEX guard: всплеск индекса (блокировки против входа) + свежесть свечей MOEX.
-  const igEl = $("bs-imoex-guard");
-  const igText = $("bs-imoex-text");
+  const igEl = $("bs-imoex-guard");  const igText = $("bs-imoex-text");
   if (igEl && igText) {
     const ig = bst ? bst.imoex_guard : null;
     igEl.classList.remove("on", "off");
@@ -1069,6 +1068,9 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     igText.textContent = igTxt;
     igEl.title = igTitle;
   }
+
+  // AI-гейт (4-я вкладка правого сайдбара): обновляем, если открыта.
+  if (!$("sr-pane-aigate")?.classList.contains("hidden")) void renderAiGate();
 
   $("btn-bot-start").classList.toggle("hidden", engineRunning);
   $("btn-bot-stop").classList.toggle("hidden", !engineRunning);
@@ -1672,6 +1674,81 @@ function _renderCarouselStatus(c: CarouselStatus | undefined) {
     (logHtml ? `<div class="sr-cs-log">${logHtml}</div>` : "");
 }
 
+function _agEsc(s: unknown): string {
+  return String(s ?? "").replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+}
+
+// AI-гейт (4-я вкладка правого сайдбара): ожидающие заявки + решения нейросети.
+async function renderAiGate() {
+  const list = $("ag-list");
+  const sub = $("ag-sub");
+  const summ = $("ag-summary");
+  if (!list) return;
+  let approvals: any = null;
+  let decs: any[] = [];
+  try {
+    const [a, d] = await Promise.all([
+      fetch(`${API}/api/v1/bot/approvals`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`${API}/api/v1/bot/ai_decisions?limit=30`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ]);
+    approvals = a;
+    decs = (d && d.decisions) || [];
+  } catch { /* сеть/бэкенд недоступны */ }
+  const shadow = decs.some((x) => !!x.shadow);
+  if (sub) sub.textContent = approvals && approvals.enabled ? (shadow ? "shadow (не применяет)" : "боевой") : "выключен";
+  if (summ) {
+    if (!approvals) {
+      summ.textContent = "нет данных";
+    } else {
+      const pend = (approvals.pending || []) as any[];
+      summ.innerHTML = `таймаут ${Math.round(Number(approvals.timeout_sec) || 0)}с · default <b>${_agEsc(approvals.default)}</b> · ожидают: <b>${pend.length}</b>` +
+        (pend.length ? " · " + pend.map((p) => `${_agEsc(p.ticker)} ${_agEsc(p.side)}`).join(", ") : "");
+    }
+  }
+  if (!decs.length) {
+    list.innerHTML = '<span class="ag-empty">нет решений</span>';
+    return;
+  }
+  list.innerHTML = decs.slice().reverse().map((d) => {
+    const dec = String(d.decision || "").toLowerCase();
+    const cls = dec === "approve" ? "approve" : dec === "reject" ? "reject" : "skip";
+    const label = dec === "approve" ? "✓ одобрил" : dec === "reject" ? "✕ отклонил" : "… пропуск";
+    const t = d.ts ? new Date(d.ts).toLocaleTimeString("ru-RU", { hour12: false }) : "";
+    const conf = d.confidence != null ? ` · conf ${Number(d.confidence).toFixed(2)}` : "";
+    const lat = d.latency_ms != null ? ` · ${Math.round(Number(d.latency_ms))}мс` : "";
+    return `<div class="ag-row ${cls}${d.shadow ? " shadow" : ""}" title="${_agEsc(d.reason)}">
+      <div class="ag-r1">
+        <span class="ag-t">${_agEsc(t)}</span>
+        <span class="ag-tk">${_agEsc(d.ticker)} ${_agEsc(d.side)}${d.qty ? " ×" + _agEsc(d.qty) : ""}</span>
+        <span class="ag-dec">${label}</span>
+      </div>
+      <div class="ag-r2">${_agEsc(d.reason)}<span class="ag-meta">${_agEsc(d.model || "")}${conf}${lat}${d.shadow ? " · shadow" : ""}</span></div>
+      ${d.advice ? `<div class="ag-advice" title="совет нейросети">💡 ${_agEsc(d.advice)}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+async function loadAiPrompt() {
+  const pre = $("ag-prompt");
+  if (!pre) return;
+  try {
+    const r = await fetch(`${API}/api/v1/bot/ai_prompt`);
+    const d = r.ok ? await r.json() : null;
+    if (!d || !d.system) {
+      pre.textContent = "промпт ещё не получен (воркер не запущен)";
+      return;
+    }
+    const schema = d.context_schema ? JSON.stringify(d.context_schema, null, 2) : "—";
+    pre.textContent =
+      `Провайдер: ${d.provider || "—"} · модель: ${d.model || "—"} · ` +
+      `${d.shadow ? "shadow (не применяет)" : "боевой"} · обновлён: ${d.updated_ts || "—"}\n\n` +
+      `— SYSTEM —\n${d.system}\n\n— Контекст заявки (JSON) —\n${schema}`;
+  } catch {
+    pre.textContent = "ошибка загрузки промпта";
+  }
+}
+
 function initScreener() {
   document.querySelectorAll("#sr-table thead th").forEach((th) => {
     th.addEventListener("click", () => {
@@ -1731,10 +1808,22 @@ function initScreener() {
       $("sr-pane-market")?.classList.toggle("hidden", tab !== "market");
       $("sr-pane-votes")?.classList.toggle("hidden", tab !== "votes");
       $("sr-pane-stats")?.classList.toggle("hidden", tab !== "stats");
+      $("sr-pane-aigate")?.classList.toggle("hidden", tab !== "aigate");
       if (tab === "stats") void renderStats();
+      if (tab === "aigate") void renderAiGate();
     });
   });
   $("stats-refresh")?.addEventListener("click", () => { void renderStats(); });
+  $("ag-refresh")?.addEventListener("click", () => { void renderAiGate(); });
+  $("ag-prompt-btn")?.addEventListener("click", () => {
+    const p = $("ag-prompt");
+    if (!p) return;
+    p.classList.toggle("hidden");
+    if (!p.classList.contains("hidden")) void loadAiPrompt();
+  });
+  $("ag-full")?.addEventListener("click", () => {
+    $("sr-pane-aigate")?.classList.toggle("sr-fullscreen");
+  });
   $("stats-apply")?.addEventListener("click", () => { void renderStats(); });
   ($("stats-mode") as HTMLSelectElement | null)?.addEventListener("change", () => { void renderStats(); });
   $("stats-cmp-toggle")?.addEventListener("click", () => {

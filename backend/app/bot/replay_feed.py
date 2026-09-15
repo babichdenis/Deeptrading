@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time as _time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Iterable
@@ -105,6 +106,10 @@ class ReplayFeed(CandleFeed):
         first = min(by_ts)
         last = max(by_ts) if _e is None else _e.replace(microsecond=0, second=0)
         cur = first
+        # wall-режим: держим реальный темп ОТНОСИТЕЛЬНО старта реплея
+        # (сравнение с wall-clock now не работает для исторических дат).
+        _wall_t0: float | None = None
+        _wall_first: datetime | None = None
         while cur <= last:
             if self._stop_requested:
                 self._emit("replay stream stopped by request")
@@ -123,9 +128,13 @@ class ReplayFeed(CandleFeed):
                     )
                     self._now = r.ts
                     if self.pace == "wall":
-                        wait = (r.ts - datetime.now(timezone.utc)).total_seconds()
-                        if wait > 0:
-                            await asyncio.sleep(wait)
+                        if _wall_t0 is None:
+                            _wall_t0 = _time.monotonic()
+                            _wall_first = r.ts
+                        _target = (r.ts - _wall_first).total_seconds()
+                        _wait = _target - (_time.monotonic() - _wall_t0)
+                        if _wait > 0:
+                            await asyncio.sleep(_wait)
                     yield cc
                     if self._stop_requested:
                         return

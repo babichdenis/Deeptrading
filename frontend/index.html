@@ -552,6 +552,7 @@
           <button class="sr-tab active" data-srtab="market">📊 Рынок</button>
           <button class="sr-tab" data-srtab="votes">🗳 Голоса</button>
           <button class="sr-tab" data-srtab="stats">📈 Статистика</button>
+          <button class="sr-tab" data-srtab="aigate">🤖 AI-гейт</button>
         </div>
         <div class="sr-tabpane" id="sr-pane-market">
         <div class="sr-head">
@@ -624,6 +625,18 @@
           </div>
           <div class="stats-cmp-result" id="stats-cmp-result"></div>
           <div class="stats-body" id="stats-body"></div>
+        </div>
+        <div class="sr-tabpane hidden" id="sr-pane-aigate">
+          <div class="sr-head">
+            <span class="sr-title">🤖 AI-гейт входов</span>
+            <span class="sr-sub" id="ag-sub">—</span>
+            <button class="sr-refresh btn-secondary btn-xs" id="ag-refresh" title="Обновить">⟳</button>
+            <button class="sr-refresh btn-secondary btn-xs" id="ag-prompt-btn" title="Показать промпт нейросети">📄</button>
+            <button class="sr-refresh btn-secondary btn-xs" id="ag-full" title="На весь экран">⛶</button>
+          </div>
+          <pre class="ag-prompt hidden" id="ag-prompt">загрузка…</pre>
+          <div class="ag-summary" id="ag-summary">—</div>
+          <div class="ag-list" id="ag-list"><span class="ag-empty">нет решений</span></div>
         </div>
       </aside>
     </div>

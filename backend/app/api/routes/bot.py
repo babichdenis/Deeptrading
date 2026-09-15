@@ -194,6 +194,20 @@ class BotConfigPatch(BaseModel):
     ensemble_entry_tf: str | None = None
     ensemble_entry_from_setups: bool | None = None
     ensemble_direction_sid: str | None = None
+    entry_confirm_closes: int | None = None
+    entry_confirm_closes_sides: list[str] | None = None
+    # HOLD после серии убытков
+    loss_streak_hold: bool | None = None
+    loss_streak_n: int | None = None
+    loss_streak_hold_min: float | None = None
+    loss_streak_scope: str | None = None
+    # AI-гейт входов
+    ai_approval: bool | None = None
+    ai_approval_timeout_sec: float | None = None
+    ai_approval_default: str | None = None
+    # IMOEX guard
+    imoex_guard: bool | None = None
+    imoex_chase_block_pct: float | None = None
 
 
 @router.patch("/config")
@@ -308,6 +322,49 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         if req.ensemble_direction_sid != getattr(cfg, "ensemble_direction_sid", ""):
             changes.append(f"direction_sid: {getattr(cfg, 'ensemble_direction_sid', '') or '—'} → {req.ensemble_direction_sid or '—'}")
         cfg.ensemble_direction_sid = req.ensemble_direction_sid
+    if req.entry_confirm_closes is not None:
+        _n = max(0, min(5, int(req.entry_confirm_closes)))
+        if _n != int(getattr(cfg, "entry_confirm_closes", 0) or 0):
+            changes.append(f"подтверждение входа: {getattr(cfg, 'entry_confirm_closes', 0)}×1м → {_n}×1м")
+        cfg.entry_confirm_closes = _n
+    if req.entry_confirm_closes_sides is not None:
+        _sd = [s for s in req.entry_confirm_closes_sides if s in ("BUY", "SELL")]
+        if _sd != list(getattr(cfg, "entry_confirm_closes_sides", []) or []):
+            changes.append(f"подтверждение сторон: {'/'.join(getattr(cfg, 'entry_confirm_closes_sides', []) or []) or '—'} → {'/'.join(_sd) or '—'}")
+        cfg.entry_confirm_closes_sides = _sd
+    if req.loss_streak_hold is not None and req.loss_streak_hold != getattr(cfg, "loss_streak_hold", True):
+        changes.append(f"HOLD после убытков: {'вкл' if getattr(cfg, 'loss_streak_hold', True) else 'выкл'} → {'вкл' if req.loss_streak_hold else 'выкл'}")
+        cfg.loss_streak_hold = req.loss_streak_hold
+    if req.loss_streak_n is not None:
+        _n = max(2, min(10, int(req.loss_streak_n)))
+        if _n != int(getattr(cfg, "loss_streak_n", 2) or 2):
+            changes.append(f"HOLD убытков подряд: {getattr(cfg, 'loss_streak_n', 2)} → {_n}")
+        cfg.loss_streak_n = _n
+    if req.loss_streak_hold_min is not None:
+        _m = max(1.0, min(1440.0, float(req.loss_streak_hold_min)))
+        if _m != float(getattr(cfg, "loss_streak_hold_min", 60.0) or 60.0):
+            changes.append(f"HOLD пауза: {getattr(cfg, 'loss_streak_hold_min', 60.0)} → {_m} мин")
+        cfg.loss_streak_hold_min = _m
+    if req.loss_streak_scope is not None and req.loss_streak_scope in ("ticker", "global"):
+        cfg.loss_streak_scope = req.loss_streak_scope
+    if req.ai_approval is not None and req.ai_approval != getattr(cfg, "ai_approval", False):
+        changes.append(f"AI-гейт входов: {'вкл' if getattr(cfg, 'ai_approval', False) else 'выкл'} → {'вкл' if req.ai_approval else 'выкл'}")
+        cfg.ai_approval = req.ai_approval
+    if req.ai_approval_timeout_sec is not None:
+        new_to = max(5.0, min(600.0, float(req.ai_approval_timeout_sec)))
+        if new_to != float(getattr(cfg, "ai_approval_timeout_sec", 45.0)):
+            changes.append(f"AI-таймаут: {getattr(cfg, 'ai_approval_timeout_sec', 45.0)} → {new_to}")
+        cfg.ai_approval_timeout_sec = new_to
+    if req.ai_approval_default is not None and req.ai_approval_default in ("approve", "reject"):
+        if req.ai_approval_default != getattr(cfg, "ai_approval_default", "approve"):
+            changes.append(f"AI-таймаут default: {getattr(cfg, 'ai_approval_default', 'approve')} → {req.ai_approval_default}")
+        cfg.ai_approval_default = req.ai_approval_default
+    if req.imoex_guard is not None and req.imoex_guard != getattr(cfg, "imoex_guard", True):
+        changes.append(f"IMOEX guard: {'вкл' if getattr(cfg, 'imoex_guard', True) else 'выкл'} → {'вкл' if req.imoex_guard else 'выкл'}")
+        cfg.imoex_guard = req.imoex_guard
+    if req.imoex_chase_block_pct is not None:
+        new_cp = max(0.0, float(req.imoex_chase_block_pct))
+        cfg.imoex_chase_block_pct = new_cp
     if changes:
         runtime._log("⚙ КОНФИГ: " + " | ".join(changes))
     await save_bot_settings(cfg)
@@ -381,13 +438,15 @@ class ModeRequest(BaseModel):
     replay_pace: str = "fast"
 
 
-def _write_env_mode(mode: str, test_name: str = "", replay_start: str = "", replay_end: str = "") -> None:
+def _write_env_mode(mode: str, test_name: str = "", replay_start: str = "", replay_end: str = "",
+                    replay_pace: str = "fast") -> None:
     """Обновить BOT_MODE (и параметры теста) в backend/.env — переживают рестарт uvicorn."""
     import os
     from pathlib import Path
     env_path = Path(__file__).resolve().parents[3] / ".env"
     pairs = {"BOT_MODE": mode, "BOT_TEST_NAME": test_name,
-             "BOT_TEST_START": replay_start, "BOT_TEST_END": replay_end}
+             "BOT_TEST_START": replay_start, "BOT_TEST_END": replay_end,
+             "BOT_TEST_PACE": replay_pace}
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
         out, have = [], set()
@@ -406,6 +465,7 @@ def _write_env_mode(mode: str, test_name: str = "", replay_start: str = "", repl
         os.environ["BOT_TEST_NAME"] = test_name
         os.environ["BOT_TEST_START"] = replay_start
         os.environ["BOT_TEST_END"] = replay_end
+        os.environ["BOT_TEST_PACE"] = replay_pace
     except Exception:
         pass
 
@@ -482,8 +542,9 @@ async def bot_set_mode(req: ModeRequest) -> dict:
             raise HTTPException(400, "test_name пуст после нормализации")
     else:
         name = req.test_name
+    pace = req.replay_pace if req.replay_pace in ("fast", "wall") else "fast"
     _write_env_mode(mode, test_name=name, replay_start=req.replay_start.strip(),
-                    replay_end=req.replay_end.strip())
+                    replay_end=req.replay_end.strip(), replay_pace=pace)
     try:
         from app.config import get_settings
         get_settings.cache_clear()
@@ -501,10 +562,10 @@ async def bot_set_mode(req: ModeRequest) -> dict:
             mode, test_name=name,
             replay_start=req.replay_start.strip(),
             replay_end=req.replay_end.strip(),
-            replay_pace="fast"))
+            replay_pace=pace))
     except Exception as e:
         raise HTTPException(500, f"restart failed: {e}")
-    return {"mode": mode, "test_name": name or None, "restarted": was_running}
+    return {"mode": mode, "test_name": name or None, "restarted": was_running, "replay_pace": pace}
 
 
 class PauseRequest(BaseModel):
@@ -525,6 +586,60 @@ async def bot_cancel_pending() -> dict:
 async def bot_orders(limit: int = 50) -> dict:
     items = list(runtime.orders)[-limit:]
     return {"count": len(items), "orders": [o.to_dict() for o in reversed(items)]}
+
+
+@router.get("/approvals")
+async def bot_approvals() -> dict:
+    """Ожидающие подтверждения входы (AI-гейт) + настройки гейта."""
+    cfg = runtime.config
+    return {
+        "enabled": bool(getattr(cfg, "ai_approval", False)),
+        "timeout_sec": float(getattr(cfg, "ai_approval_timeout_sec", 45.0) or 45.0),
+        "default": str(getattr(cfg, "ai_approval_default", "approve") or "approve"),
+        "pending": runtime.list_approvals(),
+    }
+
+
+@router.post("/ai_decisions")
+async def bot_ai_decision(payload: dict) -> dict:
+    """Записать решение AI-гейта (в т.ч. shadow) — воркер шлёт сюда свои вердикты для UI."""
+    return runtime.add_ai_decision(payload or {})
+
+
+@router.get("/ai_decisions")
+async def bot_ai_decisions(limit: int = 20) -> dict:
+    """Последние решения AI-гейта (для UI/мониторинга)."""
+    return {"count": 0, "decisions": runtime.list_ai_decisions(limit)}
+
+
+@router.post("/ai_prompt")
+async def bot_ai_prompt_set(payload: dict) -> dict:
+    """Сохранить текущий промпт/конфиг AI-гейта (воркер шлёт при старте)."""
+    return runtime.set_ai_prompt(payload or {})
+
+
+@router.get("/ai_prompt")
+async def bot_ai_prompt_get() -> dict:
+    """Текущий промпт AI-гейта (system + модель + схема контекста) — для UI."""
+    return runtime.get_ai_prompt()
+
+
+@router.post("/approvals/{order_id}/approve")
+async def bot_approval_approve(order_id: str, payload: dict | None = None) -> dict:
+    """Одобрить вход, ожидающий AI-подтверждения (исполнится на следующем баре)."""
+    res = runtime.approve_order(order_id, str((payload or {}).get("reason") or ""))
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error", "error"))
+    return res
+
+
+@router.post("/approvals/{order_id}/reject")
+async def bot_approval_reject(order_id: str, payload: dict | None = None) -> dict:
+    """Отклонить вход, ожидающий AI-подтверждения (заявка снимается)."""
+    res = runtime.reject_order(order_id, str((payload or {}).get("reason") or ""))
+    if not res.get("ok"):
+        raise HTTPException(404, res.get("error", "error"))
+    return res
 
 
 @router.get("/events")

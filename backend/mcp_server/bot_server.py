@@ -297,6 +297,20 @@ def get_orders(limit: int = 20) -> dict:
     return _get("/api/v1/bot/orders", limit=limit)
 
 
+@mcp.tool()
+def get_approvals() -> dict:
+    """AI-гейт: входы, ожидающие подтверждения (id/тикер/сторона/qty/цена/ожидание/meta),
+    плюс настройки гейта (enabled, timeout_sec, default)."""
+    return _get("/api/v1/bot/approvals")
+
+
+@mcp.tool()
+def get_ai_decisions(limit: int = 10) -> dict:
+    """Последние решения AI-гейта (approve/reject/skip) с причинами, моделью и shadow-флагом.
+    В shadow-режиме решения не применяются — это подсказки/наблюдение."""
+    return _get("/api/v1/bot/ai_decisions", limit=limit)
+
+
 # ------------------------------------------------------------------ WRITE tools
 
 @mcp.tool()
@@ -381,20 +395,53 @@ def cancel_pending(confirm: bool = False, reason: str = "") -> dict:
 
 
 @mcp.tool()
+def approve_order(order_id: str, reason: str = "", confirm: bool = False) -> dict:
+    """Одобрить вход из AI-гейта (исполнится на следующем баре).
+
+    order_id бери из get_approvals(). Сначала confirm=false (превью), затем confirm=true.
+    """
+    d = _get("/api/v1/bot/approvals")
+    order = next((o for o in (d.get("pending") or []) if o.get("id") == order_id), None)
+    if not order:
+        return {"ok": False, "error": f"заявка {order_id} не найдена среди ожидающих"}
+    preview = {"order": order, "decision": "APPROVE", "reason": reason}
+    return _guarded("approve_order", {"order_id": order_id}, confirm, reason, preview,
+                    lambda: _post(f"/api/v1/bot/approvals/{order_id}/approve", {"reason": reason}))
+
+
+@mcp.tool()
+def reject_order(order_id: str, reason: str = "", confirm: bool = False) -> dict:
+    """Отклонить вход из AI-гейта (заявка снимается).
+
+    order_id бери из get_approvals(). Сначала confirm=false (превью), затем confirm=true.
+    """
+    d = _get("/api/v1/bot/approvals")
+    order = next((o for o in (d.get("pending") or []) if o.get("id") == order_id), None)
+    if not order:
+        return {"ok": False, "error": f"заявка {order_id} не найдена среди ожидающих"}
+    preview = {"order": order, "decision": "REJECT", "reason": reason}
+    return _guarded("reject_order", {"order_id": order_id}, confirm, reason, preview,
+                    lambda: _post(f"/api/v1/bot/approvals/{order_id}/reject", {"reason": reason}))
+
+
+@mcp.tool()
 def run_test(name: str, replay_start: str, replay_end: str = "",
-             confirm: bool = False, reason: str = "") -> dict:
+             pace: str = "fast", confirm: bool = False, reason: str = "") -> dict:
     """Запустить replay-тест (paper): переключает бота в mode=test и проигрывает период.
 
     name — имя теста (в него помечаются сделки), replay_start/replay_end — ISO UTC.
+    pace: "fast" — максимально быстро; "wall" — поминутно в реальном времени
+    (нужно для AI-гейта/наблюдения за ботом в живом темпе).
     Бот будет остановлен и перезапущен в тестовом режиме. Сначала превью.
     """
+    pace = pace if pace in ("fast", "wall") else "fast"
     preview = {"test_name": name, "replay_start": replay_start,
-               "replay_end": replay_end or "(до конца данных)",
+               "replay_end": replay_end or "(до конца данных)", "pace": pace,
                "current_mode": _mode()}
     return _guarded("run_test", {"name": name, "replay_start": replay_start,
-                                 "replay_end": replay_end}, confirm, reason, preview,
+                                 "replay_end": replay_end, "pace": pace}, confirm, reason, preview,
                     lambda: _post("/api/v1/bot/mode", {
-                        "mode": "test", "test_name": name,
+                        "mode": "test", "test_name": name, "replay_pace": pace,
                         "replay_start": replay_start, "replay_end": replay_end}, timeout=120))
 
 
@@ -472,6 +519,25 @@ def safe_writes() -> str:
             "(зачем это делается); (4) в live-режиме записи запрещены сервером; "
             "(5) после выполнения покажи результат и новое состояние (get_state). "
             "Никогда не выполняй серию write-действий без подтверждения каждого шага.")
+
+
+@mcp.prompt()
+def approval_gate() -> str:
+    """Политика AI-гейта: как решать approve/reject по входам бота."""
+    return (
+        "AI-гейт: новые входы бота ждут решения. Вызови get_approvals, по каждой заявке:\n"
+        "1) Собери контекст: get_state (позиции, P&L, equity), get_guard (всплеск IMOEX), "
+        "get_risk (daily_pnl/лимит), get_trades(limit=10) (недавние исходы).\n"
+        "2) Реши approve/reject по правилам:\n"
+        "   - REJECT, если вход ПРОТИВ направления свежего всплеска IMOEX (guard.active против стороны);\n"
+        "   - REJECT, если дневной убыток близок к лимиту (risk.state != NORMAL) или уже много позиций "
+        "в ту же сторону (концентрация);\n"
+        "   - REJECT при явно плохом контексте (серия стопов по этому тикеру в get_trades, "
+        "stale-данные IMOEX);\n"
+        "   - APPROVE, если противопоказаний нет — бот уже прошёл свои фильтры (кворум, режим, guard).\n"
+        "3) Применяй: approve_order(id) / reject_order(id, reason) — с confirm=true и короткой "
+        "причиной на русском. Спорные случаи — оставь человеку (не решай), пусть сработает таймаут.\n"
+        "4) Отчитайся списком: тикер — решение — причина (1 строка на заявку).")
 
 
 # ------------------------------------------------------------------- RESOURCES

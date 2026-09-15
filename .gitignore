@@ -229,3 +229,6 @@ backend/scripts/test_stream_timeout.py
 
 # MCP audit (runtime artifact)
 backend/mcp_server/audit.jsonl
+
+# MCP venv
+backend/.venv-mcp/

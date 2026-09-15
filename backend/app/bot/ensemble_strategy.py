@@ -45,6 +45,9 @@ class EnsembleParams:
     vol_thr: float = 0.0
     neutral_mode: str | None = None
     entry_confirm_bars: int = 0  # ждать N подряд подтверждающих свечей в сторону входа; 0 = без подтверждения
+    entry_confirm_closes: int = 0  # N 1м-закрытий строго по направлению (BUY: каждое выше предыдущего)
+    entry_confirm_closes_sides: list = field(default_factory=lambda: ["BUY"])  # к каким сторонам применять
+    skip_entry_side: str = ""  # "BUY"|"SELL": не рассматривать входы этой стороны (held-позиция)
     # --- EXP-008: минуточный MACD-фильтр (гистограмма 1m в сторону входа) ---
     entry_macd_1m: bool = False
     entry_from_setups: bool = False  # вход (и сторона) из сигналов стратегий, не micro_breakout
@@ -142,6 +145,11 @@ class EnsembleV4Strategy:
             }
             if self.p.entry_confirm_bars and self.p.entry_confirm_bars > 0:
                 req["entry_confirm_bars"] = self.p.entry_confirm_bars
+            if self.p.entry_confirm_closes and self.p.entry_confirm_closes > 0:
+                req["entry_confirm_closes"] = self.p.entry_confirm_closes
+                req["entry_confirm_closes_sides"] = list(self.p.entry_confirm_closes_sides or ["BUY"])
+            if self.p.skip_entry_side:
+                req["skip_entry_side"] = self.p.skip_entry_side
             if self.p.vol_thr and self.p.vol_thr > 0:
                 req["volume_filter_threshold"] = self.p.vol_thr
             if self.p.neutral_mode:

@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     bot_test_name: str = ""
     bot_test_start: str = ""
     bot_test_end: str = ""
+    bot_test_pace: str = "fast"  # fast | wall (wall = поминутно, реальное время)
     log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR
     log_debug_engine: bool = False  # подробные debug-логи движка (hot path)
 

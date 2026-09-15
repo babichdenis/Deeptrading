@@ -21,7 +21,22 @@ Guard считает ход индекса за окно `window_min` минут
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+MSK = timezone(timedelta(hours=3))
+
+
+def imoex_session(now: datetime) -> bool:
+    """IMOEX (индекс) обновляется только в основную сессию: 09:50–19:00 МСК, пн-пт.
+
+    Утром (06:50–09:50) и вечером (19:00–23:50) индекс не рассчитывается —
+    guard в это время не имеет данных и не должен считаться «устаревшим».
+    """
+    t = now.astimezone(MSK)
+    if t.weekday() >= 5:
+        return False
+    hm = t.hour * 60 + t.minute
+    return (9 * 60 + 50) <= hm < (19 * 60)
 
 
 @dataclass

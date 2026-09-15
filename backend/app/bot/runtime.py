@@ -86,6 +86,14 @@ class BotConfig:
     ensemble_entry_tf: str = "5min"  # ТФ свечей входа (micro_breakout): 1min | 5min | 10min | 15min
     ensemble_entry_from_setups: bool = True  # True: сторона из ансамблей; False: из micro_breakout
     ensemble_direction_sid: str = ""  # Путь 2: направление только от этой стратегии (пусто = общий режим)
+    # --- Тройное подтверждение входа на 1м свечах ---
+    entry_confirm_closes: int = 3  # N 1м-закрытий строго по направлению (BUY: каждое выше предыдущего)
+    entry_confirm_closes_sides: list = field(default_factory=lambda: ["BUY"])  # к каким сторонам применять
+    # --- HOLD после серии убытков ---
+    loss_streak_hold: bool = True       # пауза входов после серии убытков
+    loss_streak_n: int = 2              # сколько убытков подряд
+    loss_streak_hold_min: float = 60.0  # длительность паузы, минут
+    loss_streak_scope: str = "ticker"   # ticker | global
     # --- Оверрайд SL/TP (0 = брать per-ticker optuna) ---
     ensemble_sl_mult: float = 0.0
     ensemble_rr: float = 0.0
@@ -127,6 +135,10 @@ class BotConfig:
     imoex_refresh_sec: float = 60.0   # период догрузки 1м свечей IMOEX (live), сек
     imoex_guard_min_beta: float = 0.0  # 0 = блокировать все; >0 = только бумаги с beta >= порога
     imoex_chase_block_pct: float = 1.5  # второй уровень: при |ходе| >= N% блокировать и входы ПО индексу (0=выкл)
+    # --- AI-гейт подтверждения входов (approval gate) ---
+    ai_approval: bool = False              # True = новые входы ждут подтверждения ИИ/человека
+    ai_approval_timeout_sec: float = 45.0  # сколько ждать решение, сек
+    ai_approval_default: str = "approve"   # approve | reject — что делать по таймауту
 
 
 # Поля BotConfig, которые сохраняются в БД и восстанавливаются при старте бота.
@@ -138,8 +150,11 @@ BOT_PERSIST_FIELDS = (
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
     "overnight", "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
+    "entry_confirm_closes", "entry_confirm_closes_sides",
+    "loss_streak_hold", "loss_streak_n", "loss_streak_hold_min", "loss_streak_scope",
     "imoex_guard", "imoex_spike_pct", "imoex_spike_points", "imoex_spike_window_min",
     "imoex_release_frac", "imoex_min_block_min", "imoex_guard_min_beta", "imoex_chase_block_pct",
+    "ai_approval", "ai_approval_timeout_sec", "ai_approval_default",
 )
 
 
@@ -304,6 +319,19 @@ def _new_order_id() -> str:
     return f"paper-{uuid.uuid4().hex[:12]}"
 
 
+def _loss_hold_left(now: datetime, count: int, last_ts: datetime | None,
+                    n: int, hold_min: float) -> float:
+    """Сколько минут ещё действует пауза после серии убытков (0 = нет паузы).
+
+    Чистая функция (для тестов): count >= n убытков подряд, последний — last_ts,
+    пауза hold_min минут от последнего убытка.
+    """
+    if count < n or last_ts is None or hold_min <= 0:
+        return 0.0
+    left = hold_min - (now - last_ts).total_seconds() / 60.0
+    return left if left > 0 else 0.0
+
+
 from app.engine.sessions import is_session_active as _sessions_allowed, should_force_close as _should_force_close, is_clearing_gap as _is_clearing_gap
 
 
@@ -413,6 +441,16 @@ class PaperBotRuntime:
         self._imoex_tick_err: str = ""
         self._imoex_beta: dict[str, float] = {}  # figi -> beta к IMOEX (instruments.imoex_beta)
         self._imoex_stale_warn_ts: float = 0.0  # throttle предупреждений об устаревании
+        # --- AI-гейт: заявки на подтверждение входа (order_id -> monotonic) ---
+        self._approvals_since: dict[str, float] = {}
+        # --- HOLD после серии убытков (loss streak) ---
+        self._loss_streak: dict[str, int] = {}          # figi -> подряд убытков
+        self._last_loss_ts: dict[str, datetime] = {}    # figi -> время последнего убытка
+        self._global_loss_streak: int = 0
+        self._global_last_loss_ts: datetime | None = None
+        # --- AI-гейт: последние решения ИИ (shadow/боевые) для UI ---
+        self._ai_decisions: deque = deque(maxlen=50)
+        self._ai_prompt: dict = {}  # текущий промпт/модель AI-гейта (для UI)
 
     def _log(self, msg: str, level: str = "info", source: str = "bot") -> None:
         ts = datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S")
@@ -525,6 +563,8 @@ class PaperBotRuntime:
             entry_tf=str(getattr(self.config, "ensemble_entry_tf", "5min") or "5min"),
             entry_from_setups=bool(getattr(self.config, "ensemble_entry_from_setups", True)),
             entry_direction_sid=str(getattr(self.config, "ensemble_direction_sid", "") or ""),
+            entry_confirm_closes=int(getattr(self.config, "entry_confirm_closes", 0) or 0),
+            entry_confirm_closes_sides=list(getattr(self.config, "entry_confirm_closes_sides", None) or ["BUY"]),
             entry_macd_1m=True,
             bias_tf=str(_bias.get("tf", "hour")),
             bias_period=int(_bias.get("period", 50)),
@@ -677,6 +717,13 @@ class PaperBotRuntime:
                     exit_comm = costs.commission(float(exit_price) * int(row.qty))
                     row.commission = round(entry_comm + exit_comm, 4)
                     await db.commit()
+                    # --- HOLD после серии убытков: обновляем счётчик ---
+                    try:
+                        _net = float(net) if net is not None else (
+                            float(row.net_pnl) if row.net_pnl is not None else None)
+                        self._update_loss_streak(figi, _net)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -762,6 +809,7 @@ class PaperBotRuntime:
             "mode": self.mode, "running": bool(self.running),
             "equity": None, "positions": [], "alerts": [],
             "imoex_guard": self._imoex_guard_snapshot(),
+            "pending_approvals": self.list_approvals(),
         }
         try:
             out["equity"] = float(await self.broker.equity())
@@ -981,8 +1029,8 @@ class PaperBotRuntime:
             age_sec = None
         _trading = False
         try:
-            from app.bot.session import session_state as _ss, trading_session as _ts
-            _trading = (_ss(now=now) in ("trading", "pre_open")) and (_ts(now=now) is not None)
+            from app.bot.imoex_guard import imoex_session as _isess
+            _trading = _isess(now)  # IMOEX живёт только 09:50–19:00 МСК
         except Exception:
             pass
         _stale_sec = float(getattr(cfg, "imoex_stale_sec", 300.0) or 300.0)
@@ -1005,6 +1053,7 @@ class PaperBotRuntime:
             "age_sec": round(age_sec, 1) if age_sec is not None else None,
             "stale": _stale,
             "trading": bool(_trading),
+            "index_session": bool(_trading),
         }
 
     async def _imoex_loop(self) -> None:
@@ -1134,6 +1183,14 @@ class PaperBotRuntime:
             },
             "carousel": self.carousel_diag,
             "imoex_guard": self._imoex_guard_snapshot(),
+            "loss_streak": self.loss_streak_snapshot(),
+            "ai_approval": {
+                "enabled": bool(getattr(self.config, "ai_approval", False)),
+                "pending": len(self.list_approvals()),
+                "timeout_sec": float(getattr(self.config, "ai_approval_timeout_sec", 45.0) or 45.0),
+                "default": str(getattr(self.config, "ai_approval_default", "approve") or "approve"),
+            },
+            "ai_decisions": self.list_ai_decisions(8),
             "metrics": dict(self.metrics),
         }
 
@@ -1597,9 +1654,138 @@ class PaperBotRuntime:
             order.status = "CANCELLED"
             cancelled.append(order.to_dict())
             del self.pending_orders[figi]
+            self._approvals_since.pop(order.id, None)
             self.events.log("ORDER_CANCELLED", figi=figi, ticker=order.ticker,
                             reason="manual", order_id=order.id)
         return {"cancelled": len(cancelled), "orders": cancelled}
+
+    # --- AI-гейт: ожидающие входы и решения (approve/reject) ---
+
+    # --- HOLD после серии убытков ---
+
+    def _update_loss_streak(self, figi: str, net: float | None) -> None:
+        """Обновить счётчик серии убытков по закрытой сделке (вызывается из _st_close)."""
+        if net is None:
+            return
+        now = self._bot_now()
+        if net < 0:
+            self._loss_streak[figi] = self._loss_streak.get(figi, 0) + 1
+            self._last_loss_ts[figi] = now
+            self._global_loss_streak += 1
+            self._global_last_loss_ts = now
+            _n = max(2, int(getattr(self.config, "loss_streak_n", 2) or 2))
+            if self._loss_streak[figi] >= _n and bool(getattr(self.config, "loss_streak_hold", True)):
+                self._log(f"HOLD: {self.tickers.get(figi, figi[-6:])} — {self._loss_streak[figi]} убытка подряд, "
+                          f"входы на паузе {float(getattr(self.config, 'loss_streak_hold_min', 60.0) or 0):.0f} мин")
+                self.events.log("LOSS_STREAK_HOLD", figi=figi, ticker=self.tickers.get(figi, ""),
+                                streak=self._loss_streak[figi])
+        else:
+            self._loss_streak[figi] = 0
+            self._global_loss_streak = 0
+
+    def _loss_streak_block(self, figi: str) -> tuple[bool, str]:
+        """Активна ли пауза входов после серии убытков (per-ticker или global)."""
+        cfg = self.config
+        if not getattr(cfg, "loss_streak_hold", False):
+            return (False, "")
+        n = max(2, int(getattr(cfg, "loss_streak_n", 2) or 2))
+        mins = float(getattr(cfg, "loss_streak_hold_min", 60.0) or 0.0)
+        scope = str(getattr(cfg, "loss_streak_scope", "ticker") or "ticker")
+        if scope == "global":
+            cnt, ts = self._global_loss_streak, self._global_last_loss_ts
+        else:
+            cnt, ts = self._loss_streak.get(figi, 0), self._last_loss_ts.get(figi)
+        left = _loss_hold_left(self._bot_now(), cnt, ts, n, mins)
+        if left > 0:
+            return (True, f"{cnt} убытков подряд, пауза ещё {left:.0f} мин")
+        return (False, "")
+
+    def loss_streak_snapshot(self) -> dict:
+        """Активные HOLD-паузы (для UI/AI-гейта)."""
+        out = []
+        for f, cnt in self._loss_streak.items():
+            _ok, why = self._loss_streak_block(f)
+            if _ok:
+                out.append({"figi": f, "ticker": self.tickers.get(f, f[-6:]),
+                            "count": cnt, "why": why})
+        return {"holds": out, "global_streak": self._global_loss_streak}
+
+    def list_approvals(self) -> list[dict]:
+        """Заявки на вход, ожидающие решения (order_id, тикер, сторона, qty, ожидание, meta)."""
+        out = []
+        for _figi, o in list(self.pending_orders.items()):
+            if o.status != "PENDING_APPROVAL":
+                continue
+            d = o.to_dict()
+            d["meta"] = o.meta
+            d["waiting_sec"] = round(_time.monotonic() - self._approvals_since.get(o.id, _time.monotonic()), 1)
+            out.append(d)
+        return out
+
+    def add_ai_decision(self, payload: dict) -> dict:
+        """Записать решение AI-гейта (в т.ч. shadow) — для UI и истории."""
+        rec = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "order_id": str(payload.get("order_id") or ""),
+            "ticker": str(payload.get("ticker") or ""),
+            "side": str(payload.get("side") or ""),
+            "qty": payload.get("qty"),
+            "decision": str(payload.get("decision") or ""),
+            "reason": str(payload.get("reason") or "")[:300],
+            "advice": str(payload.get("advice") or "")[:300],
+            "confidence": payload.get("confidence"),
+            "model": str(payload.get("model") or ""),
+            "latency_ms": payload.get("latency_ms"),
+            "shadow": bool(payload.get("shadow", False)),
+        }
+        self._ai_decisions.append(rec)
+        self.events.log("AI_DECISION", figi=payload.get("figi"), ticker=rec["ticker"],
+                        decision=rec["decision"], shadow=rec["shadow"], reason=rec["reason"][:120])
+        return {"ok": True, "record": rec}
+
+    def list_ai_decisions(self, limit: int = 20) -> list[dict]:
+        return list(self._ai_decisions)[-max(1, min(int(limit), 50)):]
+
+    def set_ai_prompt(self, payload: dict) -> dict:
+        """Сохранить текущий промпт/конфиг AI-гейта (воркер присылает при старте)."""
+        self._ai_prompt = {
+            "updated_ts": datetime.now(timezone.utc).isoformat(),
+            "provider": str(payload.get("provider") or ""),
+            "model": str(payload.get("model") or ""),
+            "shadow": bool(payload.get("shadow", False)),
+            "system": str(payload.get("system") or ""),
+            "context_schema": payload.get("context_schema"),
+        }
+        return {"ok": True, "updated_ts": self._ai_prompt["updated_ts"]}
+
+    def get_ai_prompt(self) -> dict:
+        return self._ai_prompt or {}
+
+    def approve_order(self, order_id: str, reason: str = "") -> dict:
+        """Одобрить ожидающий вход (исполнится на следующем баре)."""
+        for o in list(self.pending_orders.values()):
+            if o.id == order_id and o.status == "PENDING_APPROVAL":
+                o.status = "APPROVED"
+                o.meta = {**(o.meta or {}), "ai_decision": "approve", "ai_reason": reason}
+                self._log(f"AI-ГЕЙТ: вход {o.ticker} {o.side} ОДОБРЕН ({reason or 'без причины'})")
+                self.events.log("AI_APPROVAL_APPROVED", figi=o.figi, ticker=o.ticker,
+                                order_id=o.id, reason=reason)
+                return {"ok": True, "order_id": order_id, "status": "APPROVED"}
+        return {"ok": False, "error": "order not found or not pending approval"}
+
+    def reject_order(self, order_id: str, reason: str = "") -> dict:
+        """Отклонить ожидающий вход (заявка снимается)."""
+        for figi, o in list(self.pending_orders.items()):
+            if o.id == order_id and o.status == "PENDING_APPROVAL":
+                o.status = "REJECTED"
+                o.meta = {**(o.meta or {}), "ai_decision": "reject", "ai_reason": reason}
+                self._approvals_since.pop(o.id, None)
+                del self.pending_orders[figi]
+                self._log(f"AI-ГЕЙТ: вход {o.ticker} {o.side} ОТКЛОНЁН — {reason or 'без причины'}")
+                self.events.log("AI_APPROVAL_REJECTED", figi=figi, ticker=o.ticker,
+                                order_id=o.id, reason=reason)
+                return {"ok": True, "order_id": order_id, "status": "REJECTED"}
+        return {"ok": False, "error": "order not found or not pending approval"}
 
     async def close_all(self) -> dict:
         positions = await self.broker.positions()
@@ -2363,6 +2549,18 @@ class PaperBotRuntime:
             return
         self._signal_busy.add(figi)
         try:
+            # Held-тикер: не рассматривать входы В СТОРОНУ открытой позиции
+            # (экономия CPU/AI-гейта). Противоположные сигналы остаются — они нужны
+            # для сигнальных выходов и флипов.
+            try:
+                _pos_side = ""
+                if figi in self._held:
+                    _s = str(self._exit_side.get(figi) or "").upper()
+                    _pos_side = "BUY" if _s == "LONG" else ("SELL" if _s == "SHORT" else "")
+                if hasattr(strategy, "p") and hasattr(strategy.p, "skip_entry_side"):
+                    strategy.p.skip_entry_side = _pos_side
+            except Exception:
+                pass
             _t2 = _time.perf_counter()
             sig = await asyncio.to_thread(strategy.on_bar, list(buffer))
             # Инверсия на уровне СИГНАЛА: тогда вход, встречный сигнал и выходы
@@ -2432,7 +2630,20 @@ class PaperBotRuntime:
             return
         self.signals_seen += 1
         ticker = self.tickers.get(figi, "")
-        self._log(f"СИГНАЛ {ticker} {sig.side.value} ({sig.kind}) sid={getattr(sig,'strategy_id','?')} reason={getattr(sig,'reason','?')}")
+        # Held-тикер: входные сигналы не спамим и не рассматриваем.
+        #  - сигнал В СТОРОНУ позиции — молча пропускаем (входов в held не бывает);
+        #  - противоположный — это кандидат на выход/флип, логируем как ВЫХОД.
+        if figi in self._held:
+            _cur = str(self._exit_side.get(figi) or "").upper()
+            _pos_buy = _cur in ("LONG", "BUY")
+            _sig_buy = sig.side.value == "BUY"
+            if _cur and (_sig_buy == _pos_buy):
+                self._log_no_trade(figi, "already_held")
+                return
+            self._log(f"СИГНАЛ-ВЫХОД {ticker} {sig.side.value} (против позиции {_cur or '?'}) "
+                      f"sid={getattr(sig,'strategy_id','?')}")
+        else:
+            self._log(f"СИГНАЛ {ticker} {sig.side.value} ({sig.kind}) sid={getattr(sig,'strategy_id','?')} reason={getattr(sig,'reason','?')}")
         self.events.log("SIGNAL_CREATED", figi=figi, ticker=ticker,
                         side=sig.side.value)
 
@@ -2506,6 +2717,13 @@ class PaperBotRuntime:
                                     reason=f"TREND_ALIGN_{_reg_name}")
                     self._log_no_trade(figi, "trend_alignment")
                     return
+            # HOLD после серии убытков: пауза входов (per-ticker или global).
+            _hold, _hold_why = self._loss_streak_block(figi)
+            if _hold:
+                self._log(f"ПРОПУСК ВХОДА {ticker}: HOLD после убытков — {_hold_why}")
+                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="LOSS_STREAK_HOLD")
+                self._log_no_trade(figi, "loss_streak_hold")
+                return
             # IMOEX guard: не входить против всплеска индекса, пока он не стабилизируется.
             _imoex_why = self._imoex_block_reason(sig.side.value, figi)
             if _imoex_why:
@@ -2711,6 +2929,15 @@ class PaperBotRuntime:
             qty=qty,
             meta={**dict(meta or {}), "leverage": float(_used_lev)},
         )
+        # --- AI-гейт: новые входы ждут подтверждения (ИИ/человек) ---
+        if action == "open" and bool(getattr(cfg, "ai_approval", False)):
+            order.status = "PENDING_APPROVAL"
+            self._approvals_since[order.id] = _time.monotonic()
+            self._log(f"AI-ГЕЙТ: вход {ticker} {side} qty={qty} ждёт подтверждения "
+                      f"(таймаут {float(getattr(cfg, 'ai_approval_timeout_sec', 45.0)):.0f}с, "
+                      f"default={getattr(cfg, 'ai_approval_default', 'approve')})")
+            self.events.log("AI_APPROVAL_REQUESTED", figi=figi, ticker=ticker,
+                            order_id=order.id, side=side, qty=qty)
         self.pending_orders[figi] = order
         self.orders.append(order)
         self.events.log("ORDER_SUBMITTED", figi=figi, ticker=ticker,
@@ -2729,6 +2956,34 @@ class PaperBotRuntime:
             self.events.log("ORDER_CANCELLED", figi=figi, ticker=order.ticker,
                             order_id=order.id, action="open", reason="entries_paused")
             return False
+        # --- AI-гейт: ждём решение по входу (approve/reject), иначе таймаут → default ---
+        if order.status == "PENDING_APPROVAL":
+            _since = self._approvals_since.get(order.id, _time.monotonic())
+            _tmo = float(getattr(cfg, "ai_approval_timeout_sec", 45.0) or 45.0)
+            if (_time.monotonic() - _since) >= _tmo:
+                _dflt = str(getattr(cfg, "ai_approval_default", "approve") or "approve").lower()
+                if _dflt == "reject":
+                    order.status = "CANCELLED"
+                    self._approvals_since.pop(order.id, None)
+                    self._log(f"AI-ГЕЙТ: таймаут {_tmo:.0f}с — вход {order.ticker} отклонён (default=reject)")
+                    self.events.log("AI_APPROVAL_TIMEOUT", figi=figi, ticker=order.ticker,
+                                    order_id=order.id, decision="reject")
+                    return False
+                order.status = "APPROVED"
+                self._log(f"AI-ГЕЙТ: таймаут {_tmo:.0f}с — вход {order.ticker} одобрен (default=approve)")
+                self.events.log("AI_APPROVAL_TIMEOUT", figi=figi, ticker=order.ticker,
+                                order_id=order.id, decision="approve")
+            if order.status == "PENDING_APPROVAL":
+                self.pending_orders[figi] = order  # решение ещё не пришло — вернуть в очередь
+                return False
+            if order.status == "REJECTED":
+                self._approvals_since.pop(order.id, None)
+                _why = str((order.meta or {}).get("ai_reason") or "")[:120]
+                self._log(f"AI-ГЕЙТ: вход {order.ticker} ОТКЛОНЁН — {_why}")
+                self.events.log("AI_APPROVAL_REJECTED", figi=figi, ticker=order.ticker,
+                                order_id=order.id, reason=(order.meta or {}).get("ai_reason"))
+                return False
+            self._approvals_since.pop(order.id, None)
         if order.action == "close":
             trade = await self.broker.close_position(figi, c.open, "signal_exit")
             actual_exit = price_from_trade(trade) if trade else c.open

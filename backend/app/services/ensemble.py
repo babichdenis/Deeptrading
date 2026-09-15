@@ -809,6 +809,53 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         ]
     else:
         entries_raw = micro_breakout(entry_candles, entry_lookback)
+
+    # --- Тройное подтверждение входа на 1м свечах (monotonic closes) ---
+    # req["entry_confirm_closes"] = N: для сторон из entry_confirm_closes_sides требуем,
+    # чтобы последние N ЗАКРЫТИЙ 1м были строго по направлению входа:
+    # BUY — каждое выше предыдущего, SELL — каждое ниже. Сигнальный бар — последний из N.
+    _ecb = int(req.get("entry_confirm_closes", 0) or 0)
+    _ecb_rej = 0
+    if _ecb >= 2 and entries_raw:
+        _ecb_sides = {str(s).upper() for s in (req.get("entry_confirm_closes_sides") or ["BUY"])}
+        _idx_by_ts = {c.ts: i for i, c in enumerate(candles)}
+        _kept = []
+        for _e in entries_raw:
+            _side = str(_e.get("side") or "").upper()
+            if _side not in _ecb_sides:
+                _kept.append(_e)
+                continue
+            _ts = _e.get("ts")
+            if isinstance(_ts, str):
+                try:
+                    _ts = datetime.fromisoformat(_ts)
+                except Exception:
+                    _ts = None
+            _i = _idx_by_ts.get(_ts) if _ts is not None else None
+            if _i is None or _i < _ecb - 1:
+                _kept.append(_e)  # нет истории — не режем
+                continue
+            _cl = [float(candles[_i - k].close) for k in range(_ecb)]
+            if _side == "BUY":
+                _ok = all(_cl[k] > _cl[k + 1] for k in range(_ecb - 1))
+            else:
+                _ok = all(_cl[k] < _cl[k + 1] for k in range(_ecb - 1))
+            if _ok:
+                _kept.append(_e)
+            else:
+                _ecb_rej += 1
+        entries_raw = _kept
+
+    # --- Held-тикер: не рассматриваем входы В СТОРОНУ открытой позиции ---
+    # req["skip_entry_side"] = "BUY"|"SELL": отбрасываем только эти входы
+    # (противоположные остаются — они нужны для сигнальных выходов/флипов).
+    _skip_side = str(req.get("skip_entry_side") or "").upper()
+    _skip_rej = 0
+    if _skip_side in ("BUY", "SELL") and entries_raw:
+        _before = len(entries_raw)
+        entries_raw = [e for e in entries_raw if str(e.get("side") or "").upper() != _skip_side]
+        _skip_rej = _before - len(entries_raw)
+
     unique_raw_ts = len({s["ts"] for _, sigs in setup_runs for s in sigs})
 
     # Volume Exhaustion (VOLUME_EXHAUSTION_2026.md Шаг 1): серия фич по закрытым 5m-барам.
@@ -1393,6 +1440,8 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             "quorum_BUY": sum(1 for q in quorum_sigs if q["side"] == "BUY"),
             "quorum_SELL": sum(1 for q in quorum_sigs if q["side"] == "SELL"),
             "entries_raw": len(entries_raw),
+            "entry_confirm_rejected": _ecb_rej,
+            "skip_side_rejected": _skip_rej,
             "accepted_decisions": len(accepted),
             "unique_entry_episodes": len(entry_episodes),
             "entries_rejected": len(rejected),
