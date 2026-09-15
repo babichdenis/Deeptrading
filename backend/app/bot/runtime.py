@@ -94,6 +94,7 @@ class BotConfig:
     queue_ttl_min: int = 30              # время жизни кандидата в очереди (мин)
     queue_interval_sec: int = 120        # период проверки очереди (сек)
     queue_min_turnover: float = 300_000.0  # мин. дневной оборот тикера (₽) — иначе вето illiquid
+    queue_adv_multiple: float = 200.0    # слот ≤ 1/N дневного оборота (ликвидность под размер)
     queue_history_veto: bool = True      # вето на явно токсичную историю (n≥20, net<−50₽, WR<25%)
     top_boost: float = 2.0               # множитель слота для топ-1 кандидата
     dd_reduce1_pct: float = 0.05         # просадка от пика equity → закрыть 50% позиций
@@ -172,7 +173,7 @@ BOT_PERSIST_FIELDS = (
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
     "queue_enabled", "queue_ttl_min", "queue_interval_sec", "top_boost",
-    "queue_min_turnover", "queue_history_veto",
+    "queue_min_turnover", "queue_adv_multiple", "queue_history_veto",
     "dd_reduce1_pct", "dd_reduce2_pct",
     "entry_confirm_closes", "entry_confirm_closes_sides",
     "loss_streak_hold", "loss_streak_n", "loss_streak_hold_min", "loss_streak_scope",
@@ -673,6 +674,20 @@ class PaperBotRuntime:
             pass
         return self._hist_cache
 
+    def _min_turnover(self, snap: dict | None) -> float:
+        """Порог ликвидности: max(floor, слот × multiple) — растёт вместе с капиталом."""
+        from app.bot.portfolio import min_turnover_for_slot as _mt
+        cfg = self.config
+        floor = float(getattr(cfg, "queue_min_turnover", 300_000) or 0.0)
+        mult = float(getattr(cfg, "queue_adv_multiple", 200.0) or 0.0)
+        try:
+            eq = float((snap or {}).get("equity") or 0.0)
+            boost = float(getattr(cfg, "top_boost", 2.0) or 2.0)
+            slot = eq * self._pos_pct() * boost if eq > 0 else 0.0
+        except Exception:
+            slot = 0.0
+        return _mt(slot, mult, floor)
+
     def _fit_score(self, snap: dict | None, ticker: str) -> float:
         """Насколько кандидат вписывается в лимиты (0..1): мин. запас net/сектор/маржа/стресс."""
         if not snap:
@@ -728,7 +743,7 @@ class PaperBotRuntime:
                        vol_ratio=vol_ratio,
                        regime=str(reg.get("state") or "neutral"),
                        fit=self._fit_score(snap, tk),
-                       min_turnover=float(getattr(self.config, "queue_min_turnover", 300_000) or 0.0),
+                       min_turnover=self._min_turnover(snap),
                        history_veto=bool(getattr(self.config, "queue_history_veto", True)))
         except Exception:
             return {"score": 50.0, "factors": {}, "veto": []}

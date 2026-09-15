@@ -58,6 +58,7 @@ def _config_payload(cfg: BotConfig) -> dict:
         "queue_interval_sec": int(getattr(cfg, "queue_interval_sec", 120) or 120),
         "top_boost": float(getattr(cfg, "top_boost", 2.0) or 2.0),
         "queue_min_turnover": float(getattr(cfg, "queue_min_turnover", 300000) or 0.0),
+        "queue_adv_multiple": float(getattr(cfg, "queue_adv_multiple", 200.0) or 0.0),
         "queue_history_veto": bool(getattr(cfg, "queue_history_veto", True)),
         "dd_reduce1_pct": float(getattr(cfg, "dd_reduce1_pct", 0.05) or 0.05),
         "dd_reduce2_pct": float(getattr(cfg, "dd_reduce2_pct", 0.10) or 0.10),
@@ -227,6 +228,7 @@ class BotConfigPatch(BaseModel):
     queue_interval_sec: int | None = None      # период проверки очереди (сек)
     top_boost: float | None = None             # множитель слота топ-1 (2.0 = 80% equity)
     queue_min_turnover: float | None = None    # мин. оборот ₽/день (вето illiquid)
+    queue_adv_multiple: float | None = None    # слот ≤ 1/N дневного оборота
     queue_history_veto: bool | None = None     # вето на токсичную историю
     dd_reduce1_pct: float | None = None        # просадка → закрыть 50%
     dd_reduce2_pct: float | None = None        # просадка → закрыть 80%
@@ -377,6 +379,9 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.queue_min_turnover is not None:
         cfg.queue_min_turnover = max(0.0, min(100e6, float(req.queue_min_turnover)))
         changes.append(f"мин. оборот: {cfg.queue_min_turnover/1e6:.2f}M ₽/день")
+    if req.queue_adv_multiple is not None:
+        cfg.queue_adv_multiple = max(0.0, min(10000.0, float(req.queue_adv_multiple)))
+        changes.append(f"ликвидность: слот ≤ 1/{cfg.queue_adv_multiple:g} оборота")
     if req.queue_history_veto is not None:
         cfg.queue_history_veto = bool(req.queue_history_veto)
         changes.append(f"вето истории: {'вкл' if cfg.queue_history_veto else 'выкл'}")

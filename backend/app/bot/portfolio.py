@@ -181,6 +181,15 @@ def strength_score(*, ret_ticker: float, ret_index: float, beta: float = 1.0,
             "vol_bonus": round(vol_bonus, 1), "breadth_bonus": round(br_bonus, 1)}
 
 
+def min_turnover_for_slot(slot_notional: float, adv_multiple: float = 200.0,
+                          floor: float = 300_000.0) -> float:
+    """Порог ликвидности под размер позиции: ADV ≥ слот × multiple (позиция ≤ 1/multiple ADV).
+
+    Слот 5к₽, multiple 200 → 1M₽/день. Слот 100к₽ → 20M₽/день. floor — минимум для мелких.
+    """
+    return max(float(floor or 0.0), float(slot_notional or 0.0) * float(adv_multiple or 0.0))
+
+
 def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
 

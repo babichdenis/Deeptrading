@@ -170,3 +170,11 @@ def test_candidate_score_regime_and_fit():
     low_fit = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", fit=0.0)
     high_fit = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", fit=1.0)
     assert high_fit["score"] > low_fit["score"]
+
+
+def test_min_turnover_scales_with_slot():
+    from app.bot.portfolio import min_turnover_for_slot
+    assert min_turnover_for_slot(5000, 200, 300_000) == 1_000_000       # слот 5к → 1M
+    assert min_turnover_for_slot(100_000, 200, 300_000) == 20_000_000   # слот 100к → 20M
+    assert min_turnover_for_slot(1000, 200, 300_000) == 300_000         # floor держит минимум
+    assert min_turnover_for_slot(0, 200, 300_000) == 300_000
