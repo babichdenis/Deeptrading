@@ -1137,7 +1137,25 @@ class PaperBotRuntime:
             pass
         _stale_sec = float(getattr(cfg, "imoex_stale_sec", 300.0) or 300.0)
         _stale = bool(_trading and (age_sec is None or age_sec > _stale_sec))
+        # Направление индекса: изменение за 5м и 20м (по буферу 1м свечей).
+        _p5 = _p20 = None
+        if self._imoex_buf:
+            _last_v = self._imoex_buf[-1][1]
+            for _mins in (5, 20):
+                _target = now - timedelta(minutes=_mins)
+                _ref = next((v for t, v in reversed(self._imoex_buf) if t <= _target), None)
+                if _ref:
+                    _v = (_last_v - _ref) / _ref * 100
+                    if _mins == 5:
+                        _p5 = _v
+                    else:
+                        _p20 = _v
+        _dp = _p20 if _p20 is not None else 0.0
+        _dir = "up" if _dp > 0.05 else ("down" if _dp < -0.05 else "flat")
         return {
+            "dir": _dir,
+            "dir_pct_5m": round(_p5, 3) if _p5 is not None else None,
+            "dir_pct_20m": round(_p20, 3) if _p20 is not None else None,
             "enabled": bool(getattr(cfg, "imoex_guard", True)),
             "active": int(st.active) if st else 0,
             "since": st.since.isoformat() if (st is not None and st.since) else None,

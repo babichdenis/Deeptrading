@@ -957,8 +957,15 @@ async def bot_status() -> dict:
         except Exception:
             portfolio = {}
 
+    _breadth = {}
+    try:
+        from app.api.routes.screener import market_breadth
+        _breadth = market_breadth()
+    except Exception:
+        _breadth = {}
     return {
         **status,
+        "breadth": _breadth,
         "portfolio": {
             "cash": portfolio.get("cash", 0),
             "initial_cash": portfolio.get("initial_cash", 10000),

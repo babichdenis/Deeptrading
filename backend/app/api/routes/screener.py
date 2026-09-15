@@ -29,7 +29,7 @@ TQBR_URL = (
 CACHE_TTL = 30  # сек — MOEX ISS обновляет TQBR quotes каждые 2-5с в сессию
 STALE_TTL = 600  # сек — старый кэш отдаём как fallback при сбое MOEX
 MICRO_CACHE_TTL = 2
-_cached: dict = {"ts": 0.0, "quotes": None}
+_cached: dict = {"ts": 0.0, "quotes": None, "breadth": {}}
 _refresh_lock = asyncio.Lock()
 _refresh_task: asyncio.Task | None = None
 
@@ -67,6 +67,7 @@ def _fetch_quotes_uncached() -> dict:
         hi = _f(r, "HIGH")
         lo = _f(r, "LOW")
         val = _f(r, "VALTODAY")
+        chg = _f(r, "LASTTOPREVPRICE")
         price = last if last and last > 0 else wap
         rng = ((hi - lo) / wap * 100) if (wap and wap > 0 and hi and lo and hi > 0) else 0.0
         out[secid] = {
@@ -74,8 +75,41 @@ def _fetch_quotes_uncached() -> dict:
             "price": price or 0.0,
             "turnover": val or 0.0,
             "rng_pct": rng,
+            "chg_pct": chg,
         }
     return out
+
+
+def _breadth_from_quotes(quotes: dict) -> dict:
+    """Breadth по обороту TQBR: доля ₽-оборота растущих vs падающих бумаг."""
+    up_rub = down_rub = 0.0
+    up_n = down_n = flat_n = 0
+    for q in (quotes or {}).values():
+        chg = q.get("chg_pct")
+        val = float(q.get("turnover") or 0.0)
+        if chg is None or val < 1_000_000:
+            continue
+        if chg > 0.05:
+            up_rub += val
+            up_n += 1
+        elif chg < -0.05:
+            down_rub += val
+            down_n += 1
+        else:
+            flat_n += 1
+    total = up_rub + down_rub
+    return {
+        "up_rub": round(up_rub), "down_rub": round(down_rub),
+        "up_pct": round(up_rub / total * 100, 1) if total else 50.0,
+        "up_n": up_n, "down_n": down_n, "flat_n": flat_n,
+    }
+
+
+def market_breadth() -> dict:
+    """Кэшированный breadth (без сетевых вызовов; пусто, если данных нет)."""
+    if _cached["quotes"] is None or (time.monotonic() - _cached["ts"]) > STALE_TTL:
+        return {}
+    return _cached.get("breadth") or {}
 
 
 def _schedule_refresh() -> None:
@@ -87,7 +121,8 @@ def _schedule_refresh() -> None:
         async with _refresh_lock:
             try:
                 quotes = await asyncio.to_thread(_fetch_quotes_uncached)
-                _cached.update(ts=time.monotonic(), quotes=quotes)
+                _cached.update(ts=time.monotonic(), quotes=quotes,
+                               breadth=_breadth_from_quotes(quotes))
             except Exception:
                 pass
     _refresh_task = asyncio.create_task(_worker())
@@ -106,7 +141,7 @@ def fetch_tqbr_market() -> dict:
         return _cached["quotes"]
     try:
         quotes = _fetch_quotes_uncached()
-        _cached.update(ts=now, quotes=quotes)
+        _cached.update(ts=now, quotes=quotes, breadth=_breadth_from_quotes(quotes))
         return quotes
     except Exception:
         return {}

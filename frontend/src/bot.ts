@@ -1030,6 +1030,12 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     igText.classList.remove("pos", "neg", "warn");
     let igTxt = "—";
     let igTitle = "IMOEX guard: нет данных";
+    const _d5 = ig?.dir_pct_5m != null ? Number(ig.dir_pct_5m) : null;
+    const _d20 = ig?.dir_pct_20m != null ? Number(ig.dir_pct_20m) : 0;
+    const _br = (bst as any)?.breadth;
+    const _brTxt = _br && _br.up_pct != null
+      ? ` · объём: ↑${Number(_br.up_pct).toFixed(0)}% / ↓${(100 - Number(_br.up_pct)).toFixed(0)}%`
+      : "";
     if (!ig) {
       igEl.classList.add("off");
     } else if (!ig.enabled) {
@@ -1046,16 +1052,22 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     } else if (ig.active > 0) {
       igTxt = `↑${Number(ig.pct).toFixed(2)}% блок SELL`;
       igText.classList.add("neg");
-      igTitle = "Всплеск IMOEX ВВЕРХ — SELL-входы запрещены (блокировок: " + (ig.blocks ?? 0) + ")";
+      igTitle = `Всплеск IMOEX ВВЕРХ — SELL-входы запрещены (блокировок: ${ig.blocks ?? 0})`
+        + ` · 20м ${_d20 >= 0 ? "+" : ""}${_d20.toFixed(2)}%${_brTxt}`;
     } else if (ig.active < 0) {
       igTxt = `↓${Number(ig.pct).toFixed(2)}% блок BUY`;
       igText.classList.add("neg");
-      igTitle = "Всплеск IMOEX ВНИЗ — BUY-входы запрещены (блокировок: " + (ig.blocks ?? 0) + ")";
+      igTitle = `Всплеск IMOEX ВНИЗ — BUY-входы запрещены (блокировок: ${ig.blocks ?? 0})`
+        + ` · 20м ${_d20 >= 0 ? "+" : ""}${_d20.toFixed(2)}%${_brTxt}`;
     } else {
-      igTxt = "ок";
-      igText.classList.add("pos");
+      const arrow = _d20 > 0.05 ? "↑" : _d20 < -0.05 ? "↓" : "→";
+      igTxt = `${arrow}${_d20 >= 0 ? "+" : ""}${_d20.toFixed(2)}%`;
+      igText.classList.add(_d20 > 0.05 ? "pos" : _d20 < -0.05 ? "neg" : "warn");
       const ageMin = ig.age_sec != null ? Math.round(Number(ig.age_sec) / 60) : null;
-      igTitle = `IMOEX guard активен, всплеска нет · ход ${Number(ig.pct ?? 0).toFixed(2)}%`
+      igTitle = `IMOEX ${arrow} ${_d20 >= 0 ? "+" : ""}${_d20.toFixed(2)}% за 20м`
+        + (_d5 != null ? ` · 5м ${_d5 >= 0 ? "+" : ""}${_d5.toFixed(2)}%` : "")
+        + _brTxt
+        + (_br && _br.up_n != null ? ` (бумаг: ↑${_br.up_n} / ↓${_br.down_n})` : "")
         + ` · свеча: ${ig.last_candle ? new Date(ig.last_candle).toLocaleTimeString("ru-RU", { hour12: false }) : "—"}`
         + (ageMin != null ? ` (${ageMin} мин)` : "")
         + ` · блокировок: ${ig.blocks ?? 0}`;
