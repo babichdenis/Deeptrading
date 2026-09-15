@@ -72,6 +72,10 @@ SYSTEM = """Ты — риск-менеджер торгового бота (MOEX
 - вход BUY, а последние 3+ свечи падают → то же зеркально;
 - volume.ratio < 0.5 → низкая ликвидность: совет уменьшить размер или подождать;
 - volume.ratio > 3 и сторона против бара → возможен выброс: осторожно, совет подождать.
+- orderbook (если есть): spread_bps — ширина спреда (широкий > 15–20 б.п. → плохая точка входа,
+  совет подождать/лимитником); imbalance — перевес бидов (+ покупатели, − продавцы):
+  SELL при imbalance > +0.3 или BUY при imbalance < −0.3 → вход против потока заявок,
+  осторожно/отклонить; depth_rub — плотность стакана (мало, < ~100 тыс ₽ → совет уменьшить размер).
 
 Не выдумывай данные, опирайся только на переданный JSON. Учитывай сессию (МСК): утро/вечер
 менее ликвидны, вечером движения чаще ложные."""
@@ -203,6 +207,17 @@ def _ctx_compact(api: str, order: dict) -> dict:
                              "ratio": (round(_last / _mean, 2) if _mean > 0 else None)}
     except Exception as e:
         out["candles_error"] = f"{type(e).__name__}: {str(e)[:80]}"
+    # Стакан (order book) — ликвидность и перевес заявок на момент входа.
+    try:
+        _figi_ob = str(order.get("figi") or "")
+        ob = _http("GET", f"{api}/api/v1/bot/orderbook/{_figi_ob}?depth=10", timeout=30)
+        if isinstance(ob, dict) and ob.get("spread_bps") is not None:
+            out["orderbook"] = {k: ob.get(k) for k in
+                                ("last", "best_bid", "best_ask", "spread_bps",
+                                 "bid_qty", "ask_qty", "imbalance", "depth_rub",
+                                 "top_bids", "top_asks")}
+    except Exception as e:
+        out["orderbook_error"] = f"{type(e).__name__}: {str(e)[:80]}"
     # Фичи сигнала (голоса/объёмные фичи), если есть в meta заявки.
     try:
         _feats = {k: meta.get(k) for k in

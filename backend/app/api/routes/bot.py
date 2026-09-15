@@ -885,6 +885,54 @@ async def bot_reset(initial_cash: float = 10_000.0) -> dict:
     return {"reset": True}
 
 
+@router.get("/orderbook/{figi}")
+async def bot_orderbook(figi: str, depth: int = 10) -> dict:
+    """Стакан (order book) на момент запроса: топ-N уровней + метрики для AI-гейта.
+
+    spread_bps — ширина спреда (б.п.); imbalance — перевес бидов (-1..+1);
+    depth_rub — ликвидность в топе (₽). В реплее/вне торгов может быть недоступен.
+    """
+    import asyncio as _aio
+    from t_tech.invest import Client
+    from app.config import get_settings
+    _s = get_settings()
+    _depth = max(1, min(int(depth), 20))
+
+    def _fetch():
+        with Client(_s.feed_token) as c:
+            ob = c.market_data.get_order_book(figi=figi, depth=_depth)
+
+            def _q(v):
+                return float(v.units) + float(v.nano) / 1e9 if v is not None else 0.0
+
+            bids = [{"p": _q(b.price), "q": int(b.quantity)} for b in (ob.bids or [])]
+            asks = [{"p": _q(a.price), "q": int(a.quantity)} for a in (ob.asks or [])]
+            return bids, asks, _q(ob.last_price), getattr(ob, "order_book_ts", None)
+
+    try:
+        bids, asks, last, ts = await _aio.to_thread(_fetch)
+    except Exception as e:
+        raise HTTPException(502, f"orderbook: {type(e).__name__}: {str(e)[:120]}")
+
+    bb = bids[0]["p"] if bids else None
+    ba = asks[0]["p"] if asks else None
+    mid = ((bb + ba) / 2) if (bb and ba) else (last or 0.0)
+    spread_bps = ((ba - bb) / mid * 10000) if (bb and ba and mid > 0) else None
+    bq = sum(b["q"] for b in bids)
+    aq = sum(a["q"] for a in asks)
+    imb = (bq - aq) / (bq + aq) if (bq + aq) > 0 else None
+    depth_rub = sum(b["p"] * b["q"] for b in bids) + sum(a["p"] * a["q"] for a in asks)
+    return {
+        "figi": figi, "ts": str(ts) if ts else None, "last": last,
+        "best_bid": bb, "best_ask": ba,
+        "spread_bps": round(spread_bps, 1) if spread_bps is not None else None,
+        "bid_qty": bq, "ask_qty": aq,
+        "imbalance": round(imb, 3) if imb is not None else None,
+        "depth_rub": round(depth_rub, 0),
+        "top_bids": bids[:5], "top_asks": asks[:5],
+    }
+
+
 @router.get("/trading_status")
 async def bot_trading_status() -> dict:
     """Возвращает реальный торговый статус MOEX через market_data.get_trading_status."""
