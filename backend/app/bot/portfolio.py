@@ -181,6 +181,70 @@ def strength_score(*, ret_ticker: float, ret_index: float, beta: float = 1.0,
             "vol_bonus": round(vol_bonus, 1), "breadth_bonus": round(br_bonus, 1)}
 
 
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+
+def candidate_score(*, ret_ticker: float, ret_index: float, beta: float = 1.0,
+                    side: str = "SELL", hist: dict | None = None, turnover: float = 0.0,
+                    votes: int = 0, total_members: int = 0, vol_ratio: float = 1.0,
+                    regime: str = "neutral", fit: float = 1.0) -> dict:
+    """Комплексная оценка кандидата (0–100) с расшифровкой.
+
+    Веса: относительная сила к IMOEX 30%, история сделок по тикеру 25%,
+    уверенность сигнала (кворум + объём) 20%, ликвидность 15%, вписываемость в лимиты 10%.
+    Вето: неликвид (<1 млн ₽/день) и стабильно убыточная история (n≥10, net<0, WR<35%).
+    """
+    is_long = str(side).upper() in ("BUY", "LONG")
+    rs = float(ret_ticker or 0.0) - float(beta or 0.0) * float(ret_index or 0.0)
+    base = rs if is_long else -rs
+    f_rs = _clamp01(0.5 + base * 15.0)
+    h = hist or {}
+    n = int(h.get("n") or 0)
+    if n <= 0:
+        f_hist = 0.5
+    else:
+        wr = float(h.get("wr") or 0.0)
+        wr5 = float(h.get("wr5") or wr)
+        net = float(h.get("net") or 0.0)
+        f_hist = _clamp01(0.5 * _clamp01((wr - 0.30) / 0.40)
+                          + 0.3 * _clamp01((wr5 - 0.30) / 0.40)
+                          + 0.2 * (1.0 if net > 0 else 0.0))
+    f_q = (_clamp01(float(votes or 0) / max(1.0, float(total_members) * 0.6))
+           if total_members else 0.5)
+    f_vol = _clamp01(float(vol_ratio or 1.0) / 2.0)
+    f_conf = 0.6 * f_q + 0.4 * f_vol
+    t = float(turnover or 0.0)
+    f_liq = (1.0 if t > 50e6 else 0.75 if t > 10e6 else 0.5 if t > 1e6
+             else 0.2 if t > 0 else 0.5)
+    f_fit = _clamp01(fit if fit is not None else 1.0)
+    reg = str(regime or "neutral").lower()
+    adj = 0.0
+    if reg in ("bear", "bull"):
+        aligned = (reg == "bear" and not is_long) or (reg == "bull" and is_long)
+        adj = 0.05 if aligned else -0.05
+    elif reg == "reversal":
+        adj = -0.15
+    total = (0.30 * f_rs + 0.25 * f_hist + 0.20 * f_conf
+             + 0.15 * f_liq + 0.10 * f_fit + adj)
+    veto: list[str] = []
+    if 0 < t < 1e6:
+        veto.append("illiquid")
+    if n >= 10 and float(h.get("net") or 0.0) < 0 and float(h.get("wr") or 0.0) < 0.35:
+        veto.append("bad_history")
+    return {
+        "score": round(_clamp01(total) * 100.0, 1),
+        "rs": round(rs, 4),
+        "factors": {"rs": round(f_rs, 3), "hist": round(f_hist, 3),
+                    "conf": round(f_conf, 3), "liq": round(f_liq, 3), "fit": round(f_fit, 3)},
+        "regime_adj": round(adj, 3),
+        "veto": veto,
+        "hist": ({"n": n, "wr": round(float(h.get("wr") or 0.0), 3),
+                  "wr5": round(float(h.get("wr5") or 0.0), 3),
+                  "net": round(float(h.get("net") or 0.0), 2)} if n else None),
+    }
+
+
 def drawdown_action(equity: float, peak: float, reduce1: float = 0.05,
                     reduce2: float = 0.10, pct1: float = 0.5, pct2: float = 0.8) -> dict:
     """Трейлинг-стоп портфеля: какую долю позиций закрыть по просадке от пика equity."""

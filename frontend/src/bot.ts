@@ -2142,7 +2142,13 @@ export async function renderStats() {
           ? ` · режим: ${_rgRu[rg.state] || rg.state}${rg.pct_20m != null ? ` (20м ${rg.pct_20m >= 0 ? "+" : ""}${Number(rg.pct_20m).toFixed(2)}%)` : ""}`
           : "";
         const qn = (pf.queue || []).length;
-        const qTop = qn ? ` · очередь: ${qn} (топ ${pf.queue[0]?.ticker} ${Math.round(pf.queue[0]?.score || 0)})` : "";
+        const q0 = pf.queue?.[0];
+        const qf = q0?.factors || {};
+        const qTop = qn
+          ? ` · очередь: ${qn} (топ ${q0?.ticker} ${Math.round(q0?.score || 0)}` +
+            ` · hist ${qf.hist ?? "—"} rs ${qf.rs ?? "—"} conf ${qf.conf ?? "—"} liq ${qf.liq ?? "—"} fit ${qf.fit ?? "—"})` +
+            (q0?.veto?.length ? ` ⛔${q0.veto.join(",")}` : "")
+          : "";
         const dd = pf.dd || {};
         const ddTxt = dd.peak ? ` · просадка ${Math.round((dd.dd_pct || 0) * 1000) / 10}% от пика` : "";
         pfEl.innerHTML =

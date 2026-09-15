@@ -479,6 +479,9 @@ class PaperBotRuntime:
         self._sector_meta_ts: float = 0.0
         self._pf_cache: tuple[float, dict] | None = None
         self._regime_cache: tuple[float, dict] | None = None
+        self._hist_cache: dict[str, dict] = {}
+        self._hist_ts: float = 0.0
+        self._turnover_cache: dict[str, float] = {}
         self._cand_queue: dict[str, dict] = {}
         self._equity_peak: float = 0.0
         self._dd_level_done: int = 0
@@ -549,11 +552,16 @@ class PaperBotRuntime:
         snap = _snap(equity, positions, meta, margin)
         snap["skip_counts"] = self.get_no_trade_stats()
         try:
+            await self.trade_history()
+        except Exception:
+            pass
+        try:
             snap["regime"] = await self.market_regime()
         except Exception:
             snap["regime"] = {}
         snap["queue"] = sorted(
             [{"ticker": c.get("ticker"), "side": c.get("side"), "score": c.get("score"),
+              "factors": c.get("factors"), "veto": c.get("veto"), "hist": c.get("hist"),
               "why": c.get("why"), "ts": c.get("ts")} for c in self._cand_queue.values()],
             key=lambda x: x.get("score") or 0, reverse=True)[:10]
         snap["dd"] = {"peak": round(self._equity_peak, 2),
@@ -612,9 +620,75 @@ class PaperBotRuntime:
         self._regime_cache = (_t.monotonic(), out)
         return out
 
-    def _strength_for(self, bb: str, ticker: str, side: str) -> dict:
+    async def trade_history(self) -> dict:
+        """История сделок по тикерам: {ticker: {n, wr, wr5, net}} + ликвидность (кэш 10 мин)."""
+        import time as _t
+        if self._hist_cache and (_t.monotonic() - self._hist_ts) < 600:
+            return self._hist_cache
+        try:
+            from sqlalchemy import text as _text
+            async with SessionLocal() as db:
+                rows = (await db.execute(_text(
+                    "SELECT ticker, net_pnl FROM sandbox_trades "
+                    "WHERE net_pnl IS NOT NULL AND exit_time IS NOT NULL "
+                    "ORDER BY exit_time DESC"
+                ))).all()
+                uni = (await db.execute(_text(
+                    "SELECT ticker, coalesce(avg_daily_turnover, 0) FROM universe"
+                ))).all()
+            out: dict[str, dict] = {}
+            for r in rows:
+                tk = str(r[0] or "").upper()
+                if not tk:
+                    continue
+                pnl = float(r[1] or 0.0)
+                d = out.setdefault(tk, {"n": 0, "wins": 0, "net": 0.0, "last5": []})
+                d["n"] += 1
+                d["net"] += pnl
+                if pnl > 0:
+                    d["wins"] += 1
+                if len(d["last5"]) < 5:
+                    d["last5"].append(1 if pnl > 0 else 0)
+            for d in out.values():
+                d["wr"] = d["wins"] / d["n"] if d["n"] else 0.0
+                d["wr5"] = (sum(d["last5"]) / len(d["last5"])) if d["last5"] else d["wr"]
+                d.pop("last5", None)
+            self._hist_cache = out
+            self._turnover_cache = {str(r[0] or "").upper(): float(r[1] or 0.0) for r in uni}
+            self._hist_ts = _t.monotonic()
+        except Exception:
+            pass
+        return self._hist_cache
+
+    def _fit_score(self, snap: dict | None, ticker: str) -> float:
+        """Насколько кандидат вписывается в лимиты (0..1): мин. запас net/сектор/маржа/стресс."""
+        if not snap:
+            return 0.5
+        try:
+            from app.bot.portfolio import meta_for as _mf
+            sec = str(_mf(self._sector_meta, ticker).get("sector") or "other")
+            cfg = self.config
+
+            def _room(used: float, lim: float) -> float:
+                return max(0.0, 1.0 - float(used) / max(0.01, float(lim)))
+
+            net_room = _room(abs(float(snap.get("net_exposure_pct") or 0.0)),
+                             float(getattr(cfg, "max_net_exposure_pct", 0.5) or 0.5))
+            sec_room = _room(float((snap.get("sector_pct") or {}).get(sec) or 0.0),
+                             float(getattr(cfg, "max_sector_pct", 0.35) or 0.35))
+            mar_room = _room(float(snap.get("margin_use_pct") or 0.0),
+                             float(getattr(cfg, "max_margin_use_pct", 0.8) or 0.8))
+            st = snap.get("stress_pct") or {}
+            worst = abs(min(0.0, min(st.values()))) if st else 0.0
+            st_room = _room(worst, float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.1))
+            return round(min(net_room, sec_room, mar_room, st_room), 3)
+        except Exception:
+            return 0.5
+
+    def _strength_for(self, bb: str, ticker: str, side: str, meta: dict | None = None,
+                      snap: dict | None = None) -> dict:
         """Сила кандидата: ret20m vs IMOEX (beta-adj) + объём + breadth."""
-        from app.bot.portfolio import strength_score as _ss, meta_for as _mf
+        from app.bot.portfolio import candidate_score as _cs, meta_for as _mf
         try:
             ret_tk = 0.0
             vol_ratio = 1.0
@@ -631,14 +705,21 @@ class PaperBotRuntime:
             beta = float((_mf(self._sector_meta, ticker).get("beta")) or 1.0)
             reg = self._regime_cache[1] if self._regime_cache else {}
             ret_idx = float(reg.get("pct_20m") or 0.0) / 100.0
-            br = reg.get("breadth_up_pct")
-            return _ss(ret_ticker=ret_tk, ret_index=ret_idx, beta=beta,
+            tk = str(ticker or "").upper()
+            qe = ((meta or {}).get("quorum_event") or {}) if isinstance(meta, dict) else {}
+            return _cs(ret_ticker=ret_tk, ret_index=ret_idx, beta=beta, side=side,
+                       hist=(self._hist_cache or {}).get(tk) or {},
+                       turnover=float((self._turnover_cache or {}).get(tk) or 0.0),
+                       votes=int(qe.get("votes") or 0),
+                       total_members=int(qe.get("total_members") or 0),
                        vol_ratio=vol_ratio,
-                       breadth_up_pct=br if br is not None else 50.0, side=side)
+                       regime=str(reg.get("state") or "neutral"),
+                       fit=self._fit_score(snap, tk))
         except Exception:
-            return {"score": 50.0}
+            return {"score": 50.0, "factors": {}, "veto": []}
 
-    async def _enqueue_candidate(self, figi: str, ticker: str, side: str, why: str) -> None:
+    async def _enqueue_candidate(self, figi: str, ticker: str, side: str, why: str,
+                                 meta: dict | None = None, snap: dict | None = None) -> None:
         """Кандидат, отклонённый лимитом, встаёт в очередь приоритетного входа."""
         import time as _t
         try:
@@ -648,17 +729,25 @@ class PaperBotRuntime:
             for f, c in list(self._cand_queue.items()):
                 if now - c.get("ts_mono", 0) > ttl:
                     self._cand_queue.pop(f, None)
-            s = self._strength_for(self.tcs_to_bbg.get(figi, figi), ticker, side)
+            s = self._strength_for(self.tcs_to_bbg.get(figi, figi), ticker, side,
+                                   meta=meta, snap=snap)
             self._cand_queue[figi] = {
                 "ticker": ticker, "side": side, "why": why,
                 "score": s.get("score", 50.0), "rs": s.get("rs"),
+                "factors": s.get("factors") or {}, "veto": s.get("veto") or [],
+                "hist": s.get("hist"),
                 "ts_mono": now,
                 "ts": datetime.now(timezone(timedelta(hours=3))).strftime("%H:%M:%S"),
             }
             if len(self._cand_queue) > 20:
                 _w = min(self._cand_queue.items(), key=lambda kv: kv[1].get("score", 0))
                 self._cand_queue.pop(_w[0], None)
-            self._log(f"ОЧЕРЕДЬ {ticker} {side}: сила {s.get('score')} (rs {s.get('rs')}) — {why}")
+            _f = s.get("factors") or {}
+            self._log(f"ОЧЕРЕДЬ {ticker} {side}: score {s.get('score')} "
+                      f"(hist {_f.get('hist')} rs {_f.get('rs')} conf {_f.get('conf')} "
+                      f"liq {_f.get('liq')} fit {_f.get('fit')})"
+                      + (f" ⛔{','.join(s.get('veto') or [])}" if s.get("veto") else "")
+                      + f" — {why}")
         except Exception:
             pass
 
@@ -679,6 +768,9 @@ class PaperBotRuntime:
                     continue
                 f, c = max(self._cand_queue.items(), key=lambda kv: kv[1].get("score", 0))
                 self._cand_queue.pop(f, None)
+                if c.get("veto"):
+                    self._log(f"ОЧЕРЕДЬ {c.get('ticker')}: отклонён (вето {','.join(c['veto'])})")
+                    continue
                 _mx = int(getattr(cfg, "max_positions", 0) or 0)
                 if _mx > 0 and len(self._held) >= _mx:
                     continue
@@ -3427,7 +3519,8 @@ class PaperBotRuntime:
                                     reason="PORTFOLIO_LIMIT", detail=_why_pf)
                     self._log_no_trade(figi, "portfolio_limit")
                     if bool(getattr(cfg, "queue_enabled", True)) and not (meta or {}).get("priority"):
-                        await self._enqueue_candidate(figi, ticker, side, _why_pf)
+                        await self._enqueue_candidate(figi, ticker, side, _why_pf,
+                                                      meta=meta, snap=_snap)
                     return
             except Exception as _e:
                 self._log(f"ПОРТФЕЛЬ-ЛИМИТ {ticker}: проверка не удалась ({type(_e).__name__}) — пропускаю")

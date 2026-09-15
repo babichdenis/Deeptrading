@@ -116,3 +116,35 @@ def test_drawdown_action_levels():
     b = drawdown_action(8800, 10000)   # -12%
     assert b["level"] == 2 and b["close_pct"] == 0.8
     assert drawdown_action(0, 10000)["level"] == 0
+
+
+def test_candidate_score_history_matters():
+    from app.bot.portfolio import candidate_score
+    good = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL",
+                           hist={"n": 30, "wr": 0.55, "wr5": 0.6, "net": 120.0},
+                           turnover=50e6, votes=3, total_members=5, vol_ratio=1.6)
+    bad = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL",
+                          hist={"n": 30, "wr": 0.15, "wr5": 0.0, "net": -90.0},
+                          turnover=50e6, votes=3, total_members=5, vol_ratio=1.6)
+    assert good["score"] > bad["score"] + 15
+    assert good["factors"]["hist"] > 0.7 > bad["factors"]["hist"]
+    assert bad["veto"] == ["bad_history"]
+    assert good["veto"] == []
+
+
+def test_candidate_score_vetoes_illiquid():
+    from app.bot.portfolio import candidate_score
+    r = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", turnover=0.5e6)
+    assert "illiquid" in r["veto"]
+    r2 = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", turnover=20e6)
+    assert r2["veto"] == []
+
+
+def test_candidate_score_regime_and_fit():
+    from app.bot.portfolio import candidate_score
+    bear_short = candidate_score(ret_ticker=-0.01, ret_index=-0.005, side="SELL", regime="bear")
+    bull_short = candidate_score(ret_ticker=-0.01, ret_index=-0.005, side="SELL", regime="bull")
+    assert bear_short["score"] > bull_short["score"]
+    low_fit = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", fit=0.0)
+    high_fit = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", fit=1.0)
+    assert high_fit["score"] > low_fit["score"]
