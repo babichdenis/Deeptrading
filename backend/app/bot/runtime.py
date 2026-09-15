@@ -508,12 +508,14 @@ class PaperBotRuntime:
             from sqlalchemy import text as _text
             async with SessionLocal() as db:
                 rows = (await db.execute(_text(
-                    "SELECT ticker, figi, coalesce(sector,'other'), coalesce(imoex_beta,0) "
+                    "SELECT ticker, figi, coalesce(sector,'other'), coalesce(imoex_beta,0), "
+                    "coalesce(dlong,0), coalesce(dshort,0) "
                     "FROM instruments WHERE sector IS NOT NULL OR imoex_beta IS NOT NULL"
                 ))).all()
             _m: dict[str, dict] = {}
             for r in rows:
-                _v = {"sector": str(r[2]), "beta": float(r[3] or 0.0)}
+                _v = {"sector": str(r[2]), "beta": float(r[3] or 0.0),
+                      "dlong": float(r[4] or 0.0), "dshort": float(r[5] or 0.0)}
                 _m[str(r[0]).upper()] = _v
                 if r[1]:
                     _m[str(r[1])] = _v
@@ -3428,9 +3430,17 @@ class PaperBotRuntime:
                         f"budget={budget:.0f} lot_cost={lot_cost:.0f}"
                     )
                     if use_margin and _mrgn_lots > 0:
-                        # Плечо: не выше одобренного брокером (ml.leverage) и не выше
-                        # выбранного ползунком (margin_leverage; 0 = Max).
-                        _max_lev = ml.leverage
+                        # Плечо: риск-ставка брокера по инструменту (dlong/dshort) — это
+                        # реальное обеспечение; ml.leverage из GetMaxLots зависит от
+                        # свободных денег счёта и часто врёт (×1.00 при марже).
+                        _m_risk = (self._sector_meta or {}).get(str(ticker).upper()) or {}
+                        _risk = float(_m_risk.get("dshort" if side == "SELL" else "dlong") or 0.0)
+                        _lev_src = "риск-ставка"
+                        if 0 < _risk < 1:
+                            _max_lev = 1.0 / _risk
+                        else:
+                            _max_lev = ml.leverage
+                            _lev_src = "max_lots"
                         _want = float(cfg.margin_leverage or 0.0)
                         lev = _max_lev if _want <= 0 else min(_max_lev, _want)
                         if lev < 1.0:
@@ -3444,7 +3454,8 @@ class PaperBotRuntime:
                         else:
                             own_per_lot = lot_cost
                             _pos, _own = budget, budget / lev
-                        self._log(f"MARGIN LEV {ticker}: брокер ×{_max_lev:.2f} · "
+                        self._log(f"MARGIN LEV {ticker}: брокер ×{_max_lev:.2f} ({_lev_src}"
+                                  + (f", риск {_risk:.3f}" if 0 < _risk < 1 else "") + ") · "
                                   f"выбрано {'Max' if _want <= 0 else '×'+format(_want, 'g')} → ×{lev:.2f} · "
                                   f"режим={cfg.margin_sizing} (позиция {_pos:.0f}₽ = свои {_own:.0f}₽ + заём {_pos-_own:.0f}₽)")
                 except Exception as e:

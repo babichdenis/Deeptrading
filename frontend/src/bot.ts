@@ -1262,8 +1262,8 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
         const closeAction = p.side.toUpperCase() === "LONG" ? "Продать" : "Купить";
         const closeClass = p.side.toUpperCase() === "LONG" ? "btn-sell" : "btn-buy";
         const lev = p.leverage || 1;
-        const notional = p.entry_price * p.qty;
-        const own = notional / lev;
+        const notional = p.notional ?? (p.entry_price * p.qty);
+        const own = p.own_money ?? (notional / lev);
         const pnl = p.unrealized_pnl ?? ((p.current_price - p.entry_price) * p.qty);
         const roi = own > 0 ? (pnl / own * 100) : 0;
         const reg = p.regime || "";
@@ -1290,7 +1290,7 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
           `<td>${sideIcon(p.side)}</td>` +
           `<td class="num">${p.qty}</td>` +
           `<td class="num">${price(p.entry_price)}</td>` +
-          `<td class="num dim">${money(notional)}₽ <span class="dim">(${money(own)}₽ own)</span></td>` +
+          `<td class="num dim">${money(notional)}₽ <span class="dim">(${money(own)}₽ обесп.${p.risk_rate ? `, риск ${(p.risk_rate * 100).toFixed(1)}%` : ""})</span></td>` +
           `<td class="num${trend}">${price(p.current_price)}</td>` +
           `<td class="num ${pnl >= 0 ? "pos" : "neg"}" title="gross (без комиссий)${p.net_pnl_est != null ? " · net ≈ " + money(p.net_pnl_est) + "₽ (с комиссией)" : ""}">${pnl >= 0 ? "+" : ""}${money(pnl)}₽${p.net_pnl_est != null ? `<span class="dim" style="font-size:9px"> / ${p.net_pnl_est >= 0 ? "+" : ""}${money(p.net_pnl_est)}₽</span>` : ""}</td>` +
           `<td class="num ${roi >= 0 ? "pos" : "neg"}">${roi >= 0 ? "+" : ""}${roi.toFixed(1)}%</td>` +

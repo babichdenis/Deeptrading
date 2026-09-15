@@ -604,6 +604,7 @@ export interface SandboxPositionRow {
   trail_active?: boolean;
   strategy_id: string;
   leverage: number; own_money: number; leveraged: number;
+  notional?: number; trade_leverage?: number; risk_rate?: number | null;
   regime: string;
   regime_reason: string;
   regime_atr_pct: number | null;

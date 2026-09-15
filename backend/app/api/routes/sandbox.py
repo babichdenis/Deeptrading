@@ -695,6 +695,20 @@ async def sandbox_positions():
                         trade_et[f] = et.isoformat() if hasattr(et, "isoformat") else str(et)
         except Exception:
             pass
+        # Риск-ставки брокера по инструментам (обеспечение): dlong/dshort из instruments.
+        risk_map: dict[str, tuple[float, float]] = {}
+        try:
+            from app.database import SessionLocal as _SL3
+            from sqlalchemy import text as _text3
+            async with _SL3() as db:
+                rr = await db.execute(_text3(
+                    "SELECT ticker, coalesce(dlong,0), coalesce(dshort,0) FROM instruments "
+                    "WHERE dlong IS NOT NULL OR dshort IS NOT NULL"
+                ))
+                risk_map = {str(t).upper(): (float(dl or 0), float(ds or 0))
+                            for t, dl, ds in rr.all()}
+        except Exception:
+            pass
         # regime + vol из живого детектора (runtime._regimes), маппинг по ticker
         regime_map: dict[str, dict] = {}
         try:
@@ -756,8 +770,20 @@ async def sandbox_positions():
             trail_active = rt_trail
             if prev_close is None:
                 prev_close = last_close
-            lev = max(1.0, trade_lev.get(pos.figi, 1.0))
-            own = avg * abs(qty) / lev
+            lev_trade = max(1.0, trade_lev.get(pos.figi, 1.0))
+            notional = avg * abs(qty)
+            # Обеспечение = номинал × риск-ставка брокера (dlong/dshort) — так же, как
+            # в кабинете Т-Инвестиций. Fallback — записанное плечо сделки.
+            _rr = risk_map.get(str(ticker).upper())
+            _risk = (_rr[1] if side == "SHORT" else _rr[0]) if _rr else 0.0
+            if 0 < _risk < 1:
+                # Брокер считает обеспечение от ТЕКУЩЕЙ стоимости позиции (проверено:
+                # 901.3₽ против 901.71₽ у брокера).
+                own = cur * abs(qty) * _risk
+                lev = 1.0 / _risk
+            else:
+                lev = lev_trade
+                own = notional / lev
             pnl = (cur - avg) * abs(qty) if qty > 0 else (avg - cur) * abs(qty)
             rg = regime_map.get(ticker) or {}
             rg_state = (rg.get("state") or {}) or {}
@@ -776,9 +802,12 @@ async def sandbox_positions():
                 "net_pnl_est": round(pnl - _comm_rate * (avg + cur) * abs(qty), 2),
                 "roi_pct": round(pnl / own * 100, 2) if own > 0 else 0,
                 "sell_value": round(own + pnl, 2),
-                "leverage": round(lev, 1),
+                "leverage": round(lev, 2),
+                "trade_leverage": round(lev_trade, 2),
+                "risk_rate": round(_risk, 4) if 0 < _risk < 1 else None,
+                "notional": round(notional, 2),
                 "own_money": round(own, 2),
-                "leveraged": round(avg * abs(qty) - own, 2),
+                "leveraged": round(notional - own, 2),
                 "regime": rg_state.get("state") or "",
                 "regime_reason": rg_state.get("reason") or "",
                 "regime_atr_pct": (rg_state.get("features") or {}).get("atr_pct"),
