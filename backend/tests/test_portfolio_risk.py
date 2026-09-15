@@ -178,3 +178,16 @@ def test_min_turnover_scales_with_slot():
     assert min_turnover_for_slot(100_000, 200, 300_000) == 20_000_000   # слот 100к → 20M
     assert min_turnover_for_slot(1000, 200, 300_000) == 300_000         # floor держит минимум
     assert min_turnover_for_slot(0, 200, 300_000) == 300_000
+
+
+def test_rank_ok_explore_then_top():
+    from app.bot.portfolio import rank_ok
+    hist = {"AAA": {"n": 30, "net": 100.0}, "BBB": {"n": 30, "net": 50.0},
+            "CCC": {"n": 30, "net": -200.0}, "DDD": {"n": 3, "net": 0.0}}
+    assert rank_ok(hist, "DDD", top_n=2, explore=10)[0] is True       # разведка
+    assert rank_ok(hist, "AAA", top_n=2, explore=10)[0] is True       # топ-2
+    assert rank_ok(hist, "BBB", top_n=2, explore=10)[0] is True
+    ok, why = rank_ok(hist, "CCC", top_n=2, explore=10)
+    assert ok is False and "не в топ-2" in why
+    assert rank_ok(hist, "CCC", top_n=2, explore=10, min_hist=50)[0] is False
+    assert rank_ok(hist, "AAA", top_n=0, explore=0)[0] is True        # топ выключен

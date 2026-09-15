@@ -181,6 +181,29 @@ def strength_score(*, ret_ticker: float, ret_index: float, beta: float = 1.0,
             "vol_bonus": round(vol_bonus, 1), "breadth_bonus": round(br_bonus, 1)}
 
 
+def rank_ok(hist: dict | None, ticker: str, top_n: int = 10, explore: int = 10,
+            min_hist: int = 5) -> tuple[bool, str]:
+    """Политика ранжирования тикеров: разведка K сделок, затем только топ-N по прошлому net.
+
+    hist: {ticker: {n, net, wr, wr5}}. Возвращает (ok, reason).
+    """
+    h = hist or {}
+    tk = str(ticker or "").upper()
+    me = h.get(tk) or {}
+    n = int(me.get("n") or 0)
+    if int(explore or 0) > 0 and n < int(explore):
+        return True, f"разведка {n}/{explore}"
+    if int(top_n or 0) <= 0:
+        return True, "топ выкл"
+    ranked = sorted(((k, float(v.get("net") or 0.0)) for k, v in h.items()
+                     if int(v.get("n") or 0) >= int(min_hist or 0)),
+                    key=lambda kv: -kv[1])
+    top = [k for k, _ in ranked[:int(top_n)]]
+    if tk in top:
+        return True, f"топ-{top_n}"
+    return False, f"не в топ-{top_n} (net {me.get('net')}₽, n={n})"
+
+
 def min_turnover_for_slot(slot_notional: float, adv_multiple: float = 200.0,
                           floor: float = 300_000.0) -> float:
     """Порог ликвидности под размер позиции: ADV ≥ слот × multiple (позиция ≤ 1/multiple ADV).

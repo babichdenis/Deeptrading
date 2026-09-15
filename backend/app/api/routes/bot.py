@@ -59,6 +59,10 @@ def _config_payload(cfg: BotConfig) -> dict:
         "top_boost": float(getattr(cfg, "top_boost", 2.0) or 2.0),
         "queue_min_turnover": float(getattr(cfg, "queue_min_turnover", 300000) or 0.0),
         "queue_adv_multiple": float(getattr(cfg, "queue_adv_multiple", 200.0) or 0.0),
+        "rank_enabled": bool(getattr(cfg, "rank_enabled", True)),
+        "rank_top_n": int(getattr(cfg, "rank_top_n", 10) or 0),
+        "rank_explore": int(getattr(cfg, "rank_explore", 10) or 0),
+        "rank_min_hist": int(getattr(cfg, "rank_min_hist", 5) or 0),
         "queue_history_veto": bool(getattr(cfg, "queue_history_veto", True)),
         "dd_reduce1_pct": float(getattr(cfg, "dd_reduce1_pct", 0.05) or 0.05),
         "dd_reduce2_pct": float(getattr(cfg, "dd_reduce2_pct", 0.10) or 0.10),
@@ -229,6 +233,10 @@ class BotConfigPatch(BaseModel):
     top_boost: float | None = None             # множитель слота топ-1 (2.0 = 80% equity)
     queue_min_turnover: float | None = None    # мин. оборот ₽/день (вето illiquid)
     queue_adv_multiple: float | None = None    # слот ≤ 1/N дневного оборота
+    rank_enabled: bool | None = None           # ранжирование тикеров (разведка → топ-N)
+    rank_top_n: int | None = None              # сколько тикеров торгуем
+    rank_explore: int | None = None            # пробных сделок каждому тикеру
+    rank_min_hist: int | None = None           # мин. история для рейтинга
     queue_history_veto: bool | None = None     # вето на токсичную историю
     dd_reduce1_pct: float | None = None        # просадка → закрыть 50%
     dd_reduce2_pct: float | None = None        # просадка → закрыть 80%
@@ -379,6 +387,18 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.queue_min_turnover is not None:
         cfg.queue_min_turnover = max(0.0, min(100e6, float(req.queue_min_turnover)))
         changes.append(f"мин. оборот: {cfg.queue_min_turnover/1e6:.2f}M ₽/день")
+    if req.rank_enabled is not None:
+        cfg.rank_enabled = bool(req.rank_enabled)
+        changes.append(f"ранжирование: {'вкл' if cfg.rank_enabled else 'выкл'}")
+    if req.rank_top_n is not None:
+        cfg.rank_top_n = max(0, min(50, int(req.rank_top_n)))
+        changes.append(f"торгуем топ-{cfg.rank_top_n} тикеров")
+    if req.rank_explore is not None:
+        cfg.rank_explore = max(0, min(100, int(req.rank_explore)))
+        changes.append(f"разведка: {cfg.rank_explore} сделок/тикер")
+    if req.rank_min_hist is not None:
+        cfg.rank_min_hist = max(0, min(50, int(req.rank_min_hist)))
+        changes.append(f"мин. история для рейтинга: {cfg.rank_min_hist}")
     if req.queue_adv_multiple is not None:
         cfg.queue_adv_multiple = max(0.0, min(10000.0, float(req.queue_adv_multiple)))
         changes.append(f"ликвидность: слот ≤ 1/{cfg.queue_adv_multiple:g} оборота")

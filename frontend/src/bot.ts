@@ -2149,6 +2149,10 @@ export async function renderStats() {
             ` · hist ${qf.hist ?? "—"} rs ${qf.rs ?? "—"} conf ${qf.conf ?? "—"} liq ${qf.liq ?? "—"} fit ${qf.fit ?? "—"})` +
             (q0?.veto?.length ? ` ⛔${q0.veto.join(",")}` : "")
           : "";
+        const rk = pf.rank || {};
+        const rkTxt = rk.enabled && rk.top
+          ? ` · рейтинг: топ-${rk.top_n} (разведка ${rk.explore}) — ${rk.top.slice(0, 5).join(", ")}`
+          : "";
         const dd = pf.dd || {};
         const ddTxt = dd.peak ? ` · просадка ${Math.round((dd.dd_pct || 0) * 1000) / 10}% от пика` : "";
         pfEl.innerHTML =
@@ -2156,7 +2160,7 @@ export async function renderStats() {
           `S ${Math.round((pf.short_exposure_pct || 0) * 100)}% · net ${Math.round((pf.net_exposure_pct || 0) * 100)}%` +
           ` · gross ×${pf.gross_leverage ?? "—"} · маржа ${Math.round((pf.margin_use_pct || 0) * 100)}%` +
           ` · стресс ±5%: ${Math.round((st["imoex_+5%"] || 0) * 100)}% / ${Math.round((st["imoex_-5%"] || 0) * 100)}%` +
-          rgTxt + qTop + ddTxt + `</div>` +
+          rgTxt + qTop + rkTxt + ddTxt + `</div>` +
           (sec ? `<div class="an-ag-prov">Сектора: ${sec}</div>` : "") +
           (skips ? `<div class="an-ag-prov">⛔ Пропуски входа: ${skips}</div>` : "");
       }

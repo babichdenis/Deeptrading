@@ -94,6 +94,10 @@ class BotConfig:
     queue_ttl_min: int = 30              # время жизни кандидата в очереди (мин)
     queue_interval_sec: int = 120        # период проверки очереди (сек)
     queue_min_turnover: float = 300_000.0  # мин. дневной оборот тикера (₽) — иначе вето illiquid
+    rank_enabled: bool = True            # ранжирование тикеров: разведка → топ-N по прошлому net
+    rank_top_n: int = 10                 # сколько тикеров торгуем после разведки
+    rank_explore: int = 10               # пробных сделок каждому тикеру
+    rank_min_hist: int = 5               # мин. история для попадания в рейтинг
     queue_adv_multiple: float = 200.0    # слот ≤ 1/N дневного оборота (ликвидность под размер)
     queue_history_veto: bool = True      # вето на явно токсичную историю (n≥20, net<−50₽, WR<25%)
     top_boost: float = 2.0               # множитель слота для топ-1 кандидата
@@ -174,6 +178,7 @@ BOT_PERSIST_FIELDS = (
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
     "queue_enabled", "queue_ttl_min", "queue_interval_sec", "top_boost",
     "queue_min_turnover", "queue_adv_multiple", "queue_history_veto",
+    "rank_enabled", "rank_top_n", "rank_explore", "rank_min_hist",
     "dd_reduce1_pct", "dd_reduce2_pct",
     "entry_confirm_closes", "entry_confirm_closes_sides",
     "loss_streak_hold", "loss_streak_n", "loss_streak_hold_min", "loss_streak_scope",
@@ -568,6 +573,18 @@ class PaperBotRuntime:
               "factors": c.get("factors"), "veto": c.get("veto"), "hist": c.get("hist"),
               "why": c.get("why"), "ts": c.get("ts")} for c in self._cand_queue.values()],
             key=lambda x: x.get("score") or 0, reverse=True)[:10]
+        try:
+            _ranked = sorted(((k, float(v.get("net") or 0.0)) for k, v in (self._hist_cache or {}).items()
+                              if int(v.get("n") or 0) >= int(getattr(self.config, "rank_min_hist", 5) or 0)),
+                             key=lambda kv: -kv[1])
+            snap["rank"] = {
+                "enabled": bool(getattr(self.config, "rank_enabled", True)),
+                "top_n": int(getattr(self.config, "rank_top_n", 10) or 0),
+                "explore": int(getattr(self.config, "rank_explore", 10) or 0),
+                "top": [k for k, _ in _ranked[:int(getattr(self.config, "rank_top_n", 10) or 0)]],
+            }
+        except Exception:
+            snap["rank"] = {}
         snap["dd"] = {"peak": round(self._equity_peak, 2),
                       "dd_pct": round(max(0.0, (self._equity_peak - equity) / self._equity_peak), 4)
                       if self._equity_peak > 0 else 0.0,
@@ -673,6 +690,16 @@ class PaperBotRuntime:
         except Exception:
             pass
         return self._hist_cache
+
+    def _rank_ok(self, ticker: str) -> tuple[bool, str]:
+        from app.bot.portfolio import rank_ok as _rk
+        cfg = self.config
+        if not bool(getattr(cfg, "rank_enabled", True)):
+            return True, "выкл"
+        return _rk(self._hist_cache or {}, ticker,
+                   top_n=int(getattr(cfg, "rank_top_n", 10) or 0),
+                   explore=int(getattr(cfg, "rank_explore", 10) or 0),
+                   min_hist=int(getattr(cfg, "rank_min_hist", 5) or 0))
 
     def _min_turnover(self, snap: dict | None) -> float:
         """Порог ликвидности: max(floor, слот × multiple) — растёт вместе с капиталом."""
@@ -3513,6 +3540,19 @@ class PaperBotRuntime:
             qty=qty,
             meta={**dict(meta or {}), "leverage": float(_used_lev)},
         )
+        # --- Ранжирование: разведка K сделок, затем только топ-N по прошлому net ---
+        if action == "open":
+            try:
+                await self.trade_history()
+                _rok, _rwhy = self._rank_ok(ticker)
+                if not _rok:
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: рейтинг — {_rwhy}")
+                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                    reason="RANK_FILTER", detail=_rwhy)
+                    self._log_no_trade(figi, "rank_filter")
+                    return
+            except Exception:
+                pass
         # --- Портфельные лимиты (net exposure / сектор / маржа / стресс) ---
         if action == "open":
             try:
