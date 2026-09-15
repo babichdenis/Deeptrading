@@ -226,3 +226,6 @@ backend/scripts/test_pf_debug.py
 backend/scripts/test_portfolio_stream.py
 backend/scripts/test_positions_stream.py
 backend/scripts/test_stream_timeout.py
+
+# MCP audit (runtime artifact)
+backend/mcp_server/audit.jsonl

@@ -161,3 +161,48 @@
   |ход|≥1.5% не было BUY-сигналов (логика покрыта юнит-тестом).
 - .3: guard, beta (26), chase/min_beta в `/status`; оба бэкенда перезапущены;
   старый зависший uvicorn (PID 87318) убит, чтобы не было двух ботов.
+
+---
+
+## 7. MCP-обвязка (расширение + перенос на .2) и локальная LLM
+
+### 7.1 MCP v2 (`backend/mcp_server/bot_server.py`)
+Было 6 инструментов, без промтов/ресурсов/гардов и без клиента. Стало:
+- **21 инструмент**: 14 чтения (status/state/positions/guard/risk/trades/events/logs/
+  tests/test_stats/trading_status/config/screener/orders) + 7 записи
+  (set_levels/close_position/close_all/pause_entries/cancel_pending/run_test/stop_bot).
+- **Гарды записи**: `confirm=false` → dry-run превью; live-блок без `MCP_ALLOW_LIVE=1`;
+  аудит `audit.jsonl` (ts/tool/args/reason/dry_run/result).
+- **6 промтов** (digest, positions_review, incident, guard_help, research_loop,
+  safe_writes) + **4 ресурса** (`bot://state|status|guard|config`) + `instructions`
+  (системные правила для модели).
+- **Тест-клиент** `mcp_server/test_client.py` — чек-лист (21 tool, read, dry-run,
+  промты, ресурсы) → **PASS на .3 и .2**.
+- Документация: `docs/MCP_GUIDE.md` (гайд + готовый системный промт + примеры),
+  `docs/roadmap/MCP_AUDIT.md` обновлён (закрыто 5 из 6 проблем).
+
+### 7.2 Перенос на .2
+- `.venv-mcp` на .2 (Python 3.12, mcp 2.2.0, httpx), файлы скопированы, тест PASS.
+- opencode на .2: `~/.config/opencode/opencode.jsonc` → MCP-сервер `deeptrading-bot`
+  (`BOT_API_URL=http://127.0.0.1:8000`) + локальный провайдер `ollama`
+  (`llama3.2:3b`, `qwen2.5-coder:3b`).
+
+### 7.3 RAM-чистка .2 (системно)
+- Найдено 4 uvicorn-процесса (накопились при рестартах): 4.2 ГБ + 1.7 ГБ + 2×0.37 ГБ.
+  Три зависших убиты, основной перезапущен начисто → свободная RAM **0.36 ГБ → 3.97 ГБ**.
+- Отключены лишние службы: SysMain, WSearch, DiagTrack, dmwappushservice,
+  Xbox-сервисы, Fax, RemoteRegistry, MapsBroker, RetailDemo, WMPNetworkSvc (DISABLED).
+- Осталось по желанию: OneDrive, Opera в автозапуске, chrome-хелперы.
+
+### 7.4 Локальная LLM (.2) — тесты
+| Модель | Tool-calling | Скорость | Вывод |
+|---|---|---|---|
+| qwen2.5-coder:3b | **нет** (JSON текстом) | ~9 tok/s | для MCP не годится |
+| llama3.2:3b | **да** (полный цикл) | ~8 tok/s | рабочий локальный вариант |
+
+- Ollama: GUI-приложение падает (`Unable to init instance`), `ollama serve` работает;
+  создана задача планировщика `ollama_serve` (ONSTART, SYSTEM, OLLAMA_MODELS).
+- GPU: GTX 750 Ti, Ollama offload ~42% (Vulkan), 2 ГБ VRAM.
+- Рекомендация: локально — лёгкие сводки/мониторинг (llama3.2:3b); сложные
+  многошаговые задачи — провайдеры (deepseek/openai/openrouter уже в opencode);
+  апгрейд 16 ГБ RAM позволит 7-8B Q4 локально.
