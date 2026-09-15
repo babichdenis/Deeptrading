@@ -570,11 +570,14 @@ def _test_position_row(r, cur: float | None) -> dict:
     _sl = float(r.stop_loss) if r.stop_loss is not None else None
     _tp = float(r.take_profit) if r.take_profit is not None else None
     _atr = None
+    _cr = 0.0005
     try:
         from app.bot.runtime import runtime as _rt
         _atr = _rt.atr_now(r.figi)
+        _cr = float(getattr(_rt.config, "commission_rate", 0.0005) or 0.0005)
     except Exception:
         _atr = None
+    _net_est = pnl - _cr * (entry + cur) * qty
     return {
         "figi": r.figi, "ticker": r.ticker, "side": side, "qty": qty,
         "entry_price": round(entry, 6),
@@ -586,6 +589,7 @@ def _test_position_row(r, cur: float | None) -> dict:
         "current_price": round(cur, 6),
         "prev_close": None,
         "unrealized_pnl": round(pnl, 2),
+        "net_pnl_est": round(_net_est, 2),
         "roi_pct": round(pnl / own * 100, 2) if own else 0,
         "sell_value": round(own + pnl, 2),
         "leverage": round(lev, 1),
@@ -703,6 +707,12 @@ async def sandbox_positions():
                     regime_map[_t] = _r
         except Exception:
             pass
+        _comm_rate = 0.0005
+        try:
+            from app.bot.runtime import runtime as _rtc
+            _comm_rate = float(getattr(_rtc.config, "commission_rate", 0.0005) or 0.0005)
+        except Exception:
+            pass
         items = []
         for pos in p.positions:
             if pos.figi in CASH_FIGI or pos.instrument_type == "currency":
@@ -763,6 +773,7 @@ async def sandbox_positions():
                 "current_price": round(cur, 6),
                 "prev_close": round(prev_close, 6) if prev_close is not None else None,
                 "unrealized_pnl": round(pnl, 2),
+                "net_pnl_est": round(pnl - _comm_rate * (avg + cur) * abs(qty), 2),
                 "roi_pct": round(pnl / own * 100, 2) if own > 0 else 0,
                 "sell_value": round(own + pnl, 2),
                 "leverage": round(lev, 1),

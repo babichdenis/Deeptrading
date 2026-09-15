@@ -266,8 +266,22 @@ def _extract_json(txt: str) -> str:
 SYSTEM_WATCH = """Ты — вахтёр ОТКРЫТЫХ ПОЗИЦИЙ торгового бота (MOEX). По позиции реши:
 hold (держать), tighten (подтянуть стоп), close (закрыть), watch (наблюдать).
 Отвечай СТРОГО JSON:
-{"action": "hold"|"tighten"|"close"|"watch", "reason": "коротко по-русски",
- "advice": "что сделать (уровень/цена)", "confidence": 0.0-1.0}
+{"action": "hold"|"tighten"|"close"|"watch", "sl": <число или null>, "tp": <число или null>,
+ "reason": "коротко по-русски", "advice": "что сделать", "confidence": 0.0-1.0}
+
+В контексте есть levels.sl_suggest / levels.tp_suggest — готовые безопасные уровни.
+Если решаешь tighten — просто подставь их в поля sl/tp (или свой более осторожный уровень).
+Поле "sl" — НОВАЯ цена стопа, если action=tighten (иначе null):
+- LONG: новая цена ВЫШЕ текущего стопа и НИЖЕ текущей цены (подтягиваем вверх);
+- SHORT: новая цена НИЖЕ текущего стопа и ВЫШЕ текущей цены (подтягиваем вниз);
+- не дальше ~2 ATR от текущего стопа за один шаг; не ставь стоп вплотную к цене
+  (оставляй запас ~0.3 ATR), иначе выбьет шумом.
+Поле "tp" — НОВАЯ цена цели (только ПОДТЯНУТЬ к цене, если позиция в плюсе, но цена
+развернулась против неё — «забрать прибыль»):
+- LONG: новая цена НИЖЕ текущей цели и ВЫШЕ текущей цены (+запас ~0.3 ATR);
+- SHORT: новая цена ВЫШЕ текущей цели и НИЖЕ текущей цены (−запас ~0.3 ATR);
+- не двигай TP дальше от цены и не ставь его, если позиция в минусе;
+- за один шаг — не более ~2 ATR.
 
 Правила (по приоритету):
 1. dist_sl_atr <= 1.0 → позиция почти у стопа: close или tighten (защитить остаток).
@@ -289,6 +303,12 @@ def _parse_watch(txt: str) -> dict:
     if a not in ("hold", "tighten", "close", "watch"):
         a = "watch"
     d["action"] = a
+    for _k in ("sl", "tp"):
+        _v = d.get(_k)
+        try:
+            d[_k] = float(_v) if _v not in (None, "", "null") else None
+        except Exception:
+            d[_k] = None
     _r = str(d.get("reason") or "").strip()
     for _junk in ("коротко по-русски,", "коротко по-русски", "коротко,"):
         if _r.lower().startswith(_junk):
@@ -369,6 +389,87 @@ def _log(rec: dict) -> None:
     print(json.dumps(rec, ensure_ascii=False, default=str), flush=True)
 
 
+def _apply_ai_levels(args, api: str, p: dict, new_sl: float | None, new_tp: float | None) -> dict:
+    """Применить SL/TP от ИИ с жёсткими правилами.
+
+    SL — только подтяжка (в сторону прибыли); TP — только подтяжка к цене (защита прибыли).
+    Не ближе buffer ATR к цене; шаг не больше max_step ATR. Иначе — отказ с причиной.
+    """
+    side = str(p.get("side") or "").upper()
+    last = p.get("last")
+    sl0 = p.get("sl")
+    tp0 = p.get("tp")
+    atr = p.get("atr")
+    if not (last and atr):
+        return {"ok": False, "error": "нет данных (last/atr)"}
+    try:
+        last = float(last)
+        atr = float(atr)
+        sl0 = float(sl0) if sl0 else None
+        tp0 = float(tp0) if tp0 else None
+        new_sl = float(new_sl) if new_sl else None
+        new_tp = float(new_tp) if new_tp else None
+    except Exception:
+        return {"ok": False, "error": "нечисловые данные"}
+    buf = float(args.ai_sl_buffer_atr) * atr
+    step = float(args.ai_sl_max_step_atr) * atr
+    applied: dict = {}
+    errs: list[str] = []
+
+    if new_sl is not None:
+        if sl0 is None:
+            errs.append("нет текущего SL")
+        elif side == "LONG":
+            if new_sl <= sl0:
+                errs.append(f"SL {new_sl:.4f} не выше текущего {sl0:.4f}")
+            elif new_sl >= last - buf:
+                errs.append(f"SL близко к цене (буфер {buf:.4f})")
+            elif new_sl - sl0 > step:
+                errs.append(f"шаг SL {new_sl - sl0:.4f} > лимита {step:.4f}")
+            else:
+                applied["sl"] = round(new_sl, 6)
+        else:
+            if new_sl >= sl0:
+                errs.append(f"SL {new_sl:.4f} не ниже текущего {sl0:.4f}")
+            elif new_sl <= last + buf:
+                errs.append(f"SL близко к цене (буфер {buf:.4f})")
+            elif sl0 - new_sl > step:
+                errs.append(f"шаг SL {sl0 - new_sl:.4f} > лимита {step:.4f}")
+            else:
+                applied["sl"] = round(new_sl, 6)
+
+    if new_tp is not None:
+        if tp0 is None:
+            errs.append("нет текущего TP (трейлинг?)")
+        elif side == "LONG":
+            if new_tp >= tp0:
+                errs.append(f"TP {new_tp:.4f} не ниже текущего {tp0:.4f}")
+            elif new_tp <= last + buf:
+                errs.append(f"TP близко к цене (буфер {buf:.4f})")
+            elif tp0 - new_tp > step:
+                errs.append(f"шаг TP {tp0 - new_tp:.4f} > лимита {step:.4f}")
+            else:
+                applied["tp"] = round(new_tp, 6)
+        else:
+            if new_tp <= tp0:
+                errs.append(f"TP {new_tp:.4f} не выше текущего {tp0:.4f}")
+            elif new_tp >= last - buf:
+                errs.append(f"TP близко к цене (буфер {buf:.4f})")
+            elif new_tp - tp0 > step:
+                errs.append(f"шаг TP {new_tp - tp0:.4f} > лимита {step:.4f}")
+            else:
+                applied["tp"] = round(new_tp, 6)
+
+    if not applied:
+        return {"ok": False, "error": "; ".join(errs) or "нечего применять"}
+    try:
+        res = _http("POST", f"{api}/api/v1/bot/positions/levels",
+                    {"ticker": p.get("ticker"), **applied})
+        return {"ok": True, "applied": applied, "errors": errs, "result": res}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:100]}"}
+
+
 def run_watch(args, provs: list[str], models: dict) -> None:
     """Вахтёр позиций: раз в N сек смотрит позиции у SL/TP или в минусе,
     спрашивает модели (hold/tighten/close) и пишет заметки — словами, без управления."""
@@ -393,12 +494,38 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                 if not (near or losing):
                     continue
                 tk = str(p.get("ticker") or "")
+                # Готовые уровни-подсказки (безопасные), чтобы модель не считала, а выбирала.
+                _levels: dict = {}
+                try:
+                    _last = float(p.get("last") or 0)
+                    _atr = float(p.get("atr") or 0)
+                    _sl0 = float(p.get("sl")) if p.get("sl") else None
+                    _tp0 = float(p.get("tp")) if p.get("tp") else None
+                    _side = str(p.get("side") or "").upper()
+                    if _last and _atr:
+                        if _side == "LONG":
+                            _cand = round(_last - 0.5 * _atr, 6)
+                            if _sl0 is None or _cand > _sl0:
+                                _levels["sl_suggest"] = _cand
+                            _cand_tp = round(_last + 0.5 * _atr, 6)
+                            if _tp0 is not None and _cand_tp < _tp0:
+                                _levels["tp_suggest"] = _cand_tp
+                        else:
+                            _cand = round(_last + 0.5 * _atr, 6)
+                            if _sl0 is None or _cand < _sl0:
+                                _levels["sl_suggest"] = _cand
+                            _cand_tp = round(_last - 0.5 * _atr, 6)
+                            if _tp0 is not None and _cand_tp > _tp0:
+                                _levels["tp_suggest"] = _cand_tp
+                except Exception:
+                    pass
                 ctx = {
                     "now_msk": datetime.now(timezone.utc).astimezone(MSK).strftime("%Y-%m-%d %H:%M"),
                     "position": {k: p.get(k) for k in
                                  ("ticker", "side", "qty", "entry", "last", "pnl", "sl", "tp",
                                   "atr", "dist_sl_pct", "dist_tp_pct", "dist_sl_atr", "dist_tp_atr",
                                   "regime", "trail_active")},
+                    "levels": _levels,
                     "guard": guard, "risk": risk,
                 }
 
@@ -433,6 +560,22 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                            "note": d.get("reason", ""), "advice": d.get("advice", ""),
                            "model": models.get(prov, ""), "provider": prov, "latency_ms": lat,
                            "dist_sl_atr": ds, "dist_tp_atr": dt, "pnl": pnl}
+                    # --- Применение SL/TP (если разрешено): только подтяжка, с лимитами ---
+                    if act == "tighten" and not (d.get("sl") or d.get("tp")) and _levels:
+                        if _levels.get("sl_suggest"):
+                            d["sl"] = _levels["sl_suggest"]
+                        if _levels.get("tp_suggest"):
+                            d["tp"] = _levels["tp_suggest"]
+                    _want = bool(d.get("sl") or d.get("tp"))
+                    if args.ai_sl_manage and act == "tighten" and _want and not p.get("trail_active"):
+                        _ap = _apply_ai_levels(args, args.api, p, d.get("sl"), d.get("tp"))
+                        rec["applied_levels"] = _ap
+                        if _ap.get("ok"):
+                            rec["advice"] = f"{rec['advice']} → применено: {_ap.get('applied')}"
+                        else:
+                            rec["note"] = f"{rec['note']} | уровни отклонены: {_ap.get('error')}"
+                    elif args.ai_sl_manage and act == "tighten" and _want and p.get("trail_active"):
+                        rec["note"] = f"{rec['note']} | трейлинг активен — уровни не трогаем"
                     try:
                         _http("POST", f"{args.api}/api/v1/bot/ai_notes", rec)
                     except Exception:
@@ -466,6 +609,10 @@ def main() -> None:
     ap.add_argument("--watch-interval", type=float, default=60.0)
     ap.add_argument("--watch-min-atr", type=float, default=1.5,
                     help="наблюдать позиции ближе N ATR к SL/TP (и все убыточные)")
+    ap.add_argument("--ai-sl-manage", action="store_true",
+                    help="разрешить llama ПОДТЯГИВАТЬ SL (только в сторону прибыли, с лимитами)")
+    ap.add_argument("--ai-sl-max-step-atr", type=float, default=2.0)
+    ap.add_argument("--ai-sl-buffer-atr", type=float, default=0.3)
     args = ap.parse_args()
 
     _load_env()

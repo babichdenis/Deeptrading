@@ -612,6 +612,7 @@ export interface SandboxPositionRow {
   atr?: number | null;
   dist_sl_atr?: number | null;
   dist_tp_atr?: number | null;
+  net_pnl_est?: number | null;
 }
 
 export async function sandboxPositions(): Promise<SandboxPositionRow[]> {

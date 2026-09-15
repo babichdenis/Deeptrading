@@ -1280,7 +1280,7 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
           `<td class="num">${price(p.entry_price)}</td>` +
           `<td class="num dim">${money(notional)}₽ <span class="dim">(${money(own)}₽ own)</span></td>` +
           `<td class="num${trend}">${price(p.current_price)}</td>` +
-          `<td class="num ${pnl >= 0 ? "pos" : "neg"}">${pnl >= 0 ? "+" : ""}${money(pnl)}₽</td>` +
+          `<td class="num ${pnl >= 0 ? "pos" : "neg"}" title="gross (без комиссий)${p.net_pnl_est != null ? " · net ≈ " + money(p.net_pnl_est) + "₽ (с комиссией)" : ""}">${pnl >= 0 ? "+" : ""}${money(pnl)}₽${p.net_pnl_est != null ? `<span class="dim" style="font-size:9px"> / ${p.net_pnl_est >= 0 ? "+" : ""}${money(p.net_pnl_est)}₽</span>` : ""}</td>` +
           `<td class="num ${roi >= 0 ? "pos" : "neg"}">${roi >= 0 ? "+" : ""}${roi.toFixed(1)}%</td>` +
           `<td class="num">×${lev}</td>` +
           `<td class="num" title="${p.regime_reason || ""}${p.regime_atr_pct != null ? " | ATR " + p.regime_atr_pct + "%" : ""}${p.regime_adx != null ? " | ADX " + p.regime_adx : ""}">${regChip}</td>` +
