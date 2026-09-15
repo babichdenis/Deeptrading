@@ -270,7 +270,7 @@ hold (держать), tighten (подтянуть стоп), close (закры�
  "reason": "коротко по-русски", "advice": "что сделать", "confidence": 0.0-1.0}
 
 В контексте есть levels.sl_suggest / levels.tp_suggest — готовые безопасные уровни.
-Если решаешь tighten — просто подставь их в поля sl/tp (или свой более осторожный уровень).
+Если решаешь tighten — поставь в sl/tp именно их (НЕ копируй текущие значения из position).
 Поле "sl" — НОВАЯ цена стопа, если action=tighten (иначе null):
 - LONG: новая цена ВЫШЕ текущего стопа и НИЖЕ текущей цены (подтягиваем вверх);
 - SHORT: новая цена НИЖЕ текущего стопа и ВЫШЕ текущей цены (подтягиваем вниз);
@@ -422,21 +422,21 @@ def _apply_ai_levels(args, api: str, p: dict, new_sl: float | None, new_tp: floa
         elif side == "LONG":
             if new_sl <= sl0:
                 errs.append(f"SL {new_sl:.4f} не выше текущего {sl0:.4f}")
-            elif new_sl >= last - buf:
-                errs.append(f"SL близко к цене (буфер {buf:.4f})")
-            elif new_sl - sl0 > step:
-                errs.append(f"шаг SL {new_sl - sl0:.4f} > лимита {step:.4f}")
             else:
-                applied["sl"] = round(new_sl, 6)
+                _t = min(new_sl, sl0 + step)  # шаг не больше лимита
+                if _t >= last - buf:
+                    errs.append(f"SL близко к цене (буфер {buf:.4f})")
+                else:
+                    applied["sl"] = round(_t, 6)
         else:
             if new_sl >= sl0:
                 errs.append(f"SL {new_sl:.4f} не ниже текущего {sl0:.4f}")
-            elif new_sl <= last + buf:
-                errs.append(f"SL близко к цене (буфер {buf:.4f})")
-            elif sl0 - new_sl > step:
-                errs.append(f"шаг SL {sl0 - new_sl:.4f} > лимита {step:.4f}")
             else:
-                applied["sl"] = round(new_sl, 6)
+                _t = max(new_sl, sl0 - step)
+                if _t <= last + buf:
+                    errs.append(f"SL близко к цене (буфер {buf:.4f})")
+                else:
+                    applied["sl"] = round(_t, 6)
 
     if new_tp is not None:
         if tp0 is None:
@@ -444,21 +444,21 @@ def _apply_ai_levels(args, api: str, p: dict, new_sl: float | None, new_tp: floa
         elif side == "LONG":
             if new_tp >= tp0:
                 errs.append(f"TP {new_tp:.4f} не ниже текущего {tp0:.4f}")
-            elif new_tp <= last + buf:
-                errs.append(f"TP близко к цене (буфер {buf:.4f})")
-            elif tp0 - new_tp > step:
-                errs.append(f"шаг TP {tp0 - new_tp:.4f} > лимита {step:.4f}")
             else:
-                applied["tp"] = round(new_tp, 6)
+                _t = max(new_tp, tp0 - step)
+                if _t <= last + buf:
+                    errs.append(f"TP близко к цене (буфер {buf:.4f})")
+                else:
+                    applied["tp"] = round(_t, 6)
         else:
             if new_tp <= tp0:
                 errs.append(f"TP {new_tp:.4f} не выше текущего {tp0:.4f}")
-            elif new_tp >= last - buf:
-                errs.append(f"TP близко к цене (буфер {buf:.4f})")
-            elif new_tp - tp0 > step:
-                errs.append(f"шаг TP {new_tp - tp0:.4f} > лимита {step:.4f}")
             else:
-                applied["tp"] = round(new_tp, 6)
+                _t = min(new_tp, tp0 + step)
+                if _t >= last - buf:
+                    errs.append(f"TP близко к цене (буфер {buf:.4f})")
+                else:
+                    applied["tp"] = round(_t, 6)
 
     if not applied:
         return {"ok": False, "error": "; ".join(errs) or "нечего применять"}
@@ -561,11 +561,22 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                            "model": models.get(prov, ""), "provider": prov, "latency_ms": lat,
                            "dist_sl_atr": ds, "dist_tp_atr": dt, "pnl": pnl}
                     # --- Применение SL/TP (если разрешено): только подтяжка, с лимитами ---
-                    if act == "tighten" and not (d.get("sl") or d.get("tp")) and _levels:
-                        if _levels.get("sl_suggest"):
-                            d["sl"] = _levels["sl_suggest"]
-                        if _levels.get("tp_suggest"):
-                            d["tp"] = _levels["tp_suggest"]
+                    # Нормализация уровней: если модель не дала числа или просто
+                    # скопировала текущие значения — подставляем безопасные предложения.
+                    if act == "tighten":
+                        try:
+                            _cur_sl = float(p.get("sl")) if p.get("sl") else None
+                            _cur_tp = float(p.get("tp")) if p.get("tp") else None
+                            _got_sl = d.get("sl")
+                            _got_tp = d.get("tp")
+                            if _levels.get("sl_suggest") and (
+                                    not _got_sl or (_cur_sl is not None and abs(float(_got_sl) - _cur_sl) < 1e-9)):
+                                d["sl"] = _levels["sl_suggest"]
+                            if _levels.get("tp_suggest") and (
+                                    not _got_tp or (_cur_tp is not None and abs(float(_got_tp) - _cur_tp) < 1e-9)):
+                                d["tp"] = _levels["tp_suggest"]
+                        except Exception:
+                            pass
                     _want = bool(d.get("sl") or d.get("tp"))
                     if args.ai_sl_manage and act == "tighten" and _want and not p.get("trail_active"):
                         _ap = _apply_ai_levels(args, args.api, p, d.get("sl"), d.get("tp"))
