@@ -642,6 +642,18 @@ async def bot_ai_prompt_get() -> dict:
     return runtime.get_ai_prompt()
 
 
+@router.post("/ai_notes")
+async def bot_ai_note_set(payload: dict) -> dict:
+    """Заметка вахтёра позиций (llama/AI): hold|tighten|close|watch — словами, без управления."""
+    return runtime.add_ai_note(payload or {})
+
+
+@router.get("/ai_notes")
+async def bot_ai_notes_get(limit: int = 20) -> dict:
+    """Последние заметки вахтёра позиций — для UI."""
+    return {"count": 0, "notes": runtime.list_ai_notes(limit)}
+
+
 @router.post("/approvals/{order_id}/approve")
 async def bot_approval_approve(order_id: str, payload: dict | None = None) -> dict:
     """Одобрить вход, ожидающий AI-подтверждения (исполнится на следующем баре)."""

@@ -230,11 +230,12 @@ def _ctx_compact(api: str, order: dict) -> dict:
     return out
 
 
-def _ask_deepseek(order: dict, ctx: dict, model: str, base: str, key: str) -> dict:
+def _ask_deepseek(order: dict, ctx: dict, model: str, base: str, key: str,
+                  system: str = SYSTEM, parser=None) -> dict:
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": json.dumps({"order": order, "context": ctx},
                                                    ensure_ascii=False, default=str)[:12000]},
         ],
@@ -248,7 +249,7 @@ def _ask_deepseek(order: dict, ctx: dict, model: str, base: str, key: str) -> di
         r.raise_for_status()
         data = r.json()
     txt = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "{}"
-    return _parse_decision(txt)
+    return (parser or _parse_decision)(txt)
 
 
 def _extract_json(txt: str) -> str:
@@ -260,6 +261,41 @@ def _extract_json(txt: str) -> str:
             t = t[4:]
     i, j = t.find("{"), t.rfind("}")
     return t[i:j + 1] if i >= 0 and j > i else t
+
+
+SYSTEM_WATCH = """Ты — вахтёр ОТКРЫТЫХ ПОЗИЦИЙ торгового бота (MOEX). По позиции реши:
+hold (держать), tighten (подтянуть стоп), close (закрыть), watch (наблюдать).
+Отвечай СТРОГО JSON:
+{"action": "hold"|"tighten"|"close"|"watch", "reason": "коротко по-русски",
+ "advice": "что сделать (уровень/цена)", "confidence": 0.0-1.0}
+
+Правила (по приоритету):
+1. dist_sl_atr <= 1.0 → позиция почти у стопа: close или tighten (защитить остаток).
+2. dist_tp_atr <= 1.0 → цель близко: hold или tighten (зафиксировать прибыль).
+3. pnl < 0 и цена идёт против позиции (last хуже entry) → tighten или close.
+4. pnl > 0 и dist_tp_atr > 2 → hold (пусть работает).
+5. Плохой контекст (серия убытков, вход против IMOEX-всплеска, риск не NORMAL) → close/tighten.
+6. Нет причин → hold.
+
+Только слова: ты НЕ управляешь ботом, твой ответ — совет человеку. Не выдумывай данные."""
+
+
+def _parse_watch(txt: str) -> dict:
+    try:
+        d = json.loads(_extract_json(txt))
+    except Exception:
+        d = {"action": "watch", "reason": f"parse_error: {txt[:80]}", "confidence": 0.0}
+    a = str(d.get("action", "watch")).lower()
+    if a not in ("hold", "tighten", "close", "watch"):
+        a = "watch"
+    d["action"] = a
+    _r = str(d.get("reason") or "").strip()
+    for _junk in ("коротко по-русски,", "коротко по-русски", "коротко,"):
+        if _r.lower().startswith(_junk):
+            _r = _r[len(_junk):].strip()
+    d["reason"] = _r[:300]
+    d["advice"] = str(d.get("advice") or "")[:300]
+    return d
 
 
 def _parse_decision(txt: str) -> dict:
@@ -274,12 +310,13 @@ def _parse_decision(txt: str) -> dict:
     return d
 
 
-def _ask_ollama(order: dict, ctx: dict, model: str, base: str) -> dict:
+def _ask_ollama(order: dict, ctx: dict, model: str, base: str,
+                system: str = SYSTEM, parser=None) -> dict:
     """Локальный Ollama на .2 (OpenAI-совместимый /v1). Бесплатно, без лимитов."""
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": system},
             {"role": "user", "content": json.dumps({"order": order, "context": ctx},
                                                    ensure_ascii=False, default=str)[:12000]},
         ],
@@ -292,10 +329,11 @@ def _ask_ollama(order: dict, ctx: dict, model: str, base: str) -> dict:
         r.raise_for_status()
         data = r.json()
     txt = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "{}"
-    return _parse_decision(txt)
+    return (parser or _parse_decision)(txt)
 
 
-def _ask_opencode(order: dict, ctx: dict, model: str, url: str) -> dict:
+def _ask_opencode(order: dict, ctx: dict, model: str, url: str,
+                  system: str = SYSTEM, parser=None) -> dict:
     """Big Pickle и другие модели opencode zen — через локальный `opencode serve`
     (бесплатный tier Zen работает только внутри opencode)."""
     url = url.rstrip("/")
@@ -304,7 +342,7 @@ def _ask_opencode(order: dict, ctx: dict, model: str, url: str) -> dict:
         try:
             body = {
                 "model": {"providerID": "opencode", "modelID": model},
-                "system": SYSTEM,
+                "system": system,
                 "parts": [{"type": "text", "text": json.dumps(
                     {"order": order, "context": ctx}, ensure_ascii=False, default=str)[:12000]}],
             }
@@ -313,7 +351,7 @@ def _ask_opencode(order: dict, ctx: dict, model: str, url: str) -> dict:
             d = r.json()
             txt = "".join(p.get("text", "") for p in (d.get("parts") or [])
                           if p.get("type") == "text")
-            return _parse_decision(txt)
+            return (parser or _parse_decision)(txt)
         finally:
             try:
                 c.delete(f"{url}/session/{sid}")
@@ -329,6 +367,82 @@ def _log(rec: dict) -> None:
     except Exception:
         pass
     print(json.dumps(rec, ensure_ascii=False, default=str), flush=True)
+
+
+def run_watch(args, provs: list[str], models: dict) -> None:
+    """Вахтёр позиций: раз в N сек смотрит позиции у SL/TP или в минусе,
+    спрашивает модели (hold/tighten/close) и пишет заметки — словами, без управления."""
+    _seen: dict[str, tuple[str, float]] = {}
+    MSK = timezone(timedelta(hours=3))
+    print(f"[ai-watch] providers={','.join(provs)} interval={args.watch_interval}s "
+          f"min_atr={args.watch_min_atr}", flush=True)
+    while True:
+        try:
+            st = _http("GET", f"{args.api}/api/v1/bot/state")
+            stt = _http("GET", f"{args.api}/api/v1/bot/status")
+            poss = (st.get("positions") or []) if isinstance(st, dict) else []
+            guard = (stt or {}).get("imoex_guard") if isinstance(stt, dict) else None
+            risk = (stt or {}).get("risk") if isinstance(stt, dict) else None
+            for p in poss:
+                ds = p.get("dist_sl_atr")
+                dt = p.get("dist_tp_atr")
+                pnl = p.get("pnl")
+                near = ((ds is not None and ds <= float(args.watch_min_atr))
+                        or (dt is not None and dt <= float(args.watch_min_atr)))
+                losing = (pnl is not None and pnl < 0)
+                if not (near or losing):
+                    continue
+                tk = str(p.get("ticker") or "")
+                ctx = {
+                    "now_msk": datetime.now(timezone.utc).astimezone(MSK).strftime("%Y-%m-%d %H:%M"),
+                    "position": {k: p.get(k) for k in
+                                 ("ticker", "side", "qty", "entry", "last", "pnl", "sl", "tp",
+                                  "atr", "dist_sl_pct", "dist_tp_pct", "dist_sl_atr", "dist_tp_atr",
+                                  "regime", "trail_active")},
+                    "guard": guard, "risk": risk,
+                }
+
+                def _one(prov: str):
+                    _t = time.monotonic()
+                    try:
+                        if prov == "opencode":
+                            d = _ask_opencode(p, ctx, models.get("opencode", "big-pickle"),
+                                              args.opencode_url, system=SYSTEM_WATCH, parser=_parse_watch)
+                        elif prov == "ollama":
+                            d = _ask_ollama(p, ctx, models.get("ollama", "llama3.2:3b"),
+                                            args.ollama_url, system=SYSTEM_WATCH, parser=_parse_watch)
+                        else:
+                            d = _ask_deepseek(p, ctx, models.get("deepseek", "deepseek-chat"),
+                                              os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                                              os.environ.get("DEEPSEEK_API_KEY", ""), system=SYSTEM_WATCH, parser=_parse_watch)
+                    except Exception as e:
+                        d = {"action": "watch", "reason": f"error: {type(e).__name__}: {str(e)[:80]}",
+                             "advice": ""}
+                    return d, int((time.monotonic() - _t) * 1000)
+
+                with ThreadPoolExecutor(max_workers=max(1, len(provs))) as ex:
+                    futs = {pr: ex.submit(_one, pr) for pr in provs}
+                    out = {pr: f.result() for pr, f in futs.items()}
+                for prov, (d, lat) in out.items():
+                    act = d.get("action", "watch")
+                    prev = _seen.get(tk)
+                    if prev and prev[0] == act and (time.monotonic() - prev[1]) < 600:
+                        continue  # не спамим одинаковым советом
+                    _seen[tk] = (act, time.monotonic())
+                    rec = {"ticker": tk, "side": p.get("side"), "action": act,
+                           "note": d.get("reason", ""), "advice": d.get("advice", ""),
+                           "model": models.get(prov, ""), "provider": prov, "latency_ms": lat,
+                           "dist_sl_atr": ds, "dist_tp_atr": dt, "pnl": pnl}
+                    try:
+                        _http("POST", f"{args.api}/api/v1/bot/ai_notes", rec)
+                    except Exception:
+                        pass
+                    _log({"kind": "position_watch", **rec})
+        except KeyboardInterrupt:
+            return
+        except Exception as e:
+            print(f"[ai-watch] cycle error: {type(e).__name__}: {str(e)[:120]}", flush=True)
+        time.sleep(max(15.0, float(args.watch_interval)))
 
 
 def main() -> None:
@@ -347,6 +461,11 @@ def main() -> None:
     ap.add_argument("--selftest", action="store_true", help="проверить провайдера синтетической заявкой и выйти")
     ap.add_argument("--full-context", action="store_true",
                     help="слать полный контекст (state+portfolio+8 сделок); по умолчанию — компактный")
+    ap.add_argument("--watch-positions", action="store_true",
+                    help="режим вахтёра позиций: hold/tighten/close словами (без управления)")
+    ap.add_argument("--watch-interval", type=float, default=60.0)
+    ap.add_argument("--watch-min-atr", type=float, default=1.5,
+                    help="наблюдать позиции ближе N ATR к SL/TP (и все убыточные)")
     args = ap.parse_args()
 
     _load_env()
@@ -407,6 +526,10 @@ def main() -> None:
                     print(f"SELFTEST[{p}]:", json.dumps(f.result(), ensure_ascii=False), flush=True)
                 except Exception as e:
                     print(f"SELFTEST[{p}]: ERROR {type(e).__name__}: {e}", flush=True)
+        return
+
+    if args.watch_positions:
+        run_watch(args, _provs, _models)
         return
 
     while True:

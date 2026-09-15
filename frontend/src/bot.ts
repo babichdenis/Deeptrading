@@ -1261,6 +1261,11 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
           RANGE: "Range", NEUTRAL: "Neutral",
         };
         const regChip = reg ? `<span style="font-size:10px;color:${regColor};font-weight:600">${regLabel[reg] || reg}</span>` : "—";
+        // Подсветка SL/TP, если цена ближе 1.5 ATR к уровню.
+        const nearSl = p.dist_sl_atr != null && p.dist_sl_atr <= 1.5;
+        const nearTp = p.dist_tp_atr != null && p.dist_tp_atr <= 1.5;
+        const atrTitle = (v2: number | null | undefined, lbl: string) =>
+          v2 != null ? `${lbl}: ${v2.toFixed(2)} ATR до уровня` : lbl;
         const v = p.vol;
         // Стрелка направления объёма относительно среднего: ×≥1 — повышенный (↑), <1 — пониженный (↓).
         const vArrow = v != null ? (v >= 1 ? "↑" : "↓") : "";
@@ -1280,8 +1285,8 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
           `<td class="num">×${lev}</td>` +
           `<td class="num" title="${p.regime_reason || ""}${p.regime_atr_pct != null ? " | ATR " + p.regime_atr_pct + "%" : ""}${p.regime_adx != null ? " | ADX " + p.regime_adx : ""}">${regChip}</td>` +
           `<td class="num${p.vol != null && p.vol >= 1 ? " pos" : ""}" title="Vol = объём бара / средний объём (×50 бар). ↑ — выше среднего, ↓ — ниже">${volCell}</td>` +
-          `<td class="num" style="color:${p.trail_active ? "#f39c12" : "var(--text-dim)"}" title="${p.trail_active ? "трейлинг активен" : "статичный SL"}">${p.stop_loss != null ? Number(p.stop_loss).toFixed(4) : "—"}${p.trail_active ? " ◆" : ""}</td>` +
-          `<td class="num" title="${p.trail_active ? "P&L при выходе по стопу" : ""}">${p.trail_active && p.stop_loss != null
+          `<td class="num${nearSl ? " near-sl" : ""}" style="color:${p.trail_active ? "#f39c12" : "var(--text-dim)"}" title="${atrTitle(p.dist_sl_atr, "SL")}${p.trail_active ? " · трейлинг активен" : " · статичный SL"}">${p.stop_loss != null ? Number(p.stop_loss).toFixed(4) : "—"}${p.trail_active ? " ◆" : ""}</td>` +
+          `<td class="num${nearTp ? " near-tp" : ""}" title="${atrTitle(p.dist_tp_atr, "TP")}${p.trail_active ? " · P&L при выходе по стопу" : ""}">${p.trail_active && p.stop_loss != null
               ? `<span style="color:#3b82f6">${pnlAtStop(p) >= 0 ? "+" : ""}${money(pnlAtStop(p))}₽</span>`
               : p.take_profit != null ? price(p.take_profit) : "—"}</td>` +
           `<td><button class="btn-sm ${closeClass}" onclick="window.__closePosition('${p.ticker}','${p.side}',${p.qty})">${closeAction}</button></td>` +
@@ -1687,13 +1692,16 @@ async function renderAiGate() {
   if (!list) return;
   let approvals: any = null;
   let decs: any[] = [];
+  let notes: any[] = [];
   try {
-    const [a, d] = await Promise.all([
+    const [a, d, n] = await Promise.all([
       fetch(`${API}/api/v1/bot/approvals`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
       fetch(`${API}/api/v1/bot/ai_decisions?limit=30`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`${API}/api/v1/bot/ai_notes?limit=10`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
     ]);
     approvals = a;
     decs = (d && d.decisions) || [];
+    notes = (n && n.notes) || [];
   } catch { /* сеть/бэкенд недоступны */ }
   const shadow = decs.some((x) => !!x.shadow);
   if (sub) sub.textContent = approvals && approvals.enabled ? (shadow ? "shadow (не применяет)" : "боевой") : "выключен";
@@ -1708,9 +1716,8 @@ async function renderAiGate() {
   }
   if (!decs.length) {
     list.innerHTML = '<span class="ag-empty">нет решений</span>';
-    return;
-  }
-  list.innerHTML = decs.slice().reverse().map((d) => {
+  } else {
+    list.innerHTML = decs.slice().reverse().map((d) => {
     const dec = String(d.decision || "").toLowerCase();
     const cls = dec === "approve" ? "approve" : dec === "reject" ? "reject" : "skip";
     const label = dec === "approve" ? "✓ одобрил" : dec === "reject" ? "✕ отклонил" : "… пропуск";
@@ -1729,7 +1736,33 @@ async function renderAiGate() {
       <div class="ag-r2">${_agEsc(d.reason)}<span class="ag-meta">${_agEsc(d.model || "")}${prov}${conf}${lat}${agree}${applied}</span></div>
       ${d.advice ? `<div class="ag-advice" title="совет нейросети">💡 ${_agEsc(d.advice)}</div>` : ""}
     </div>`;
-  }).join("");
+    }).join("");
+  }
+  // Вахтёр позиций: заметки llama (hold/tighten/close) — словами, без управления.
+  const notesEl = $("ag-notes");
+  const notesSub = $("ag-watch-sub");
+  if (notesEl) {
+    if (notesSub) notesSub.textContent = notes.length ? `${notes.length} свежих` : "—";
+    if (!notes.length) {
+      notesEl.innerHTML = '<span class="ag-empty">нет заметок (позиции вне риска или вахтёр не запущен)</span>';
+    } else {
+      const actLabel: Record<string, string> = {
+        hold: "✋ держать", tighten: "🔧 подтянуть стоп", close: "✕ закрыть", watch: "… наблюдать",
+      };
+      notesEl.innerHTML = notes.slice().reverse().map((n) => {
+        const act = String(n.action || "watch").toLowerCase();
+        const t = n.ts ? new Date(n.ts).toLocaleTimeString("ru-RU", { hour12: false }) : "";
+        const dsl = n.dist_sl_atr != null ? ` · ${Number(n.dist_sl_atr).toFixed(2)} ATR до SL` : "";
+        const dtp = n.dist_tp_atr != null ? ` · ${Number(n.dist_tp_atr).toFixed(2)} ATR до TP` : "";
+        const pnl = n.pnl != null ? ` · P&L ${Number(n.pnl) >= 0 ? "+" : ""}${Math.round(Number(n.pnl))}₽` : "";
+        return `<div class="ag-note ${act}" title="${_agEsc(n.note)}">
+          <div class="ag-r1"><span class="ag-t">${_agEsc(t)}</span><span class="ag-tk">${_agEsc(n.ticker)} ${_agEsc(n.side)}</span><span class="ag-dec">${actLabel[act] || act}</span></div>
+          <div class="ag-r2">${_agEsc(n.note)}<span class="ag-meta">${_agEsc(n.model || "")}${dsl}${dtp}${pnl}</span></div>
+          ${n.advice ? `<div class="ag-advice">💡 ${_agEsc(n.advice)}</div>` : ""}
+        </div>`;
+      }).join("");
+    }
+  }
 }
 
 async function loadAiPrompt() {

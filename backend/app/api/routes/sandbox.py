@@ -567,12 +567,20 @@ def _test_position_row(r, cur: float | None) -> dict:
     lev = max(1.0, float(r.leverage or 1.0))
     own = notional / lev          # свои средства (обеспечение)
     borrowed = notional - own     # заёмные (маржа)
+    _sl = float(r.stop_loss) if r.stop_loss is not None else None
+    _tp = float(r.take_profit) if r.take_profit is not None else None
+    _atr = None
+    try:
+        from app.bot.runtime import runtime as _rt
+        _atr = _rt.atr_now(r.figi)
+    except Exception:
+        _atr = None
     return {
         "figi": r.figi, "ticker": r.ticker, "side": side, "qty": qty,
         "entry_price": round(entry, 6),
         "entry_time": str(r.entry_time),
-        "stop_loss": round(float(r.stop_loss), 6) if r.stop_loss is not None else None,
-        "take_profit": round(float(r.take_profit), 6) if r.take_profit is not None else None,
+        "stop_loss": round(_sl, 6) if _sl is not None else None,
+        "take_profit": round(_tp, 6) if _tp is not None else None,
         "trail_active": bool(r.trailing_active),
         "strategy_id": "v4_enhanced",
         "current_price": round(cur, 6),
@@ -585,6 +593,9 @@ def _test_position_row(r, cur: float | None) -> dict:
         "own_money": round(own, 2),
         "borrowed": round(borrowed, 2),
         "leveraged": round(borrowed, 2),
+        "atr": round(_atr, 6) if _atr else None,
+        "dist_sl_atr": (round(abs(cur - _sl) / _atr, 2) if (_atr and _sl) else None),
+        "dist_tp_atr": (round(abs(_tp - cur) / _atr, 2) if (_atr and _tp) else None),
         "regime": "", "regime_reason": "", "regime_atr_pct": None, "regime_adx": None, "vol": None,
     }
 
@@ -762,6 +773,9 @@ async def sandbox_positions():
                 "regime_atr_pct": (rg_state.get("features") or {}).get("atr_pct"),
                 "regime_adx": (rg_state.get("features") or {}).get("adx"),
                 "vol": rg_vol if rg_vol is not None else None,
+                "atr": round(atr, 6) if atr else None,
+                "dist_sl_atr": (round(abs(cur - sl) / atr, 2) if (atr and sl) else None),
+                "dist_tp_atr": (round(abs(tp - cur) / atr, 2) if (atr and tp) else None),
             })
         return {"count": len(items), "positions": items}
     except Exception as e:

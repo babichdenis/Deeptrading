@@ -609,6 +609,9 @@ export interface SandboxPositionRow {
   regime_atr_pct: number | null;
   regime_adx: number | null;
   vol: number | null;
+  atr?: number | null;
+  dist_sl_atr?: number | null;
+  dist_tp_atr?: number | null;
 }
 
 export async function sandboxPositions(): Promise<SandboxPositionRow[]> {

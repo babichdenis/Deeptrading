@@ -454,6 +454,7 @@ class PaperBotRuntime:
         self._ai_reject_until: dict[str, datetime] = {}
         # --- AI-гейт: последние решения ИИ (shadow/боевые) для UI ---
         self._ai_decisions: deque = deque(maxlen=50)
+        self._ai_notes: deque = deque(maxlen=50)  # заметки вахтёра позиций (llama)
         self._ai_prompt: dict = {}  # текущий промпт/модель AI-гейта (для UI)
 
     def _log(self, msg: str, level: str = "info", source: str = "bot") -> None:
@@ -837,6 +838,9 @@ class PaperBotRuntime:
             pnl = (last - entry) * qty * (1 if long_ else -1) if (last and entry) else None
             d_sl = abs(last - sl) / last * 100 if (last and sl) else None
             d_tp = abs(tp - last) / last * 100 if (last and tp) else None
+            _atr = self.atr_now(bb)
+            _dsa = (abs(last - sl) / _atr) if (last and sl and _atr) else None
+            _dta = (abs(tp - last) / _atr) if (last and tp and _atr) else None
             reg = (self._regimes.get(bb) or {}).get("state")
             reg_name = reg.get("state") if isinstance(reg, dict) else reg
             out["positions"].append({
@@ -845,6 +849,7 @@ class PaperBotRuntime:
                 "entry": entry, "last": last, "pnl": pnl,
                 "sl": sl, "tp": tp,
                 "dist_sl_pct": d_sl, "dist_tp_pct": d_tp,
+                "atr": _atr, "dist_sl_atr": _dsa, "dist_tp_atr": _dta,
                 "regime": reg_name, "trail_active": bool(self._trail_active.get(bb)),
             })
         for pos in out["positions"]:
@@ -852,6 +857,9 @@ class PaperBotRuntime:
                 d = pos.get(key)
                 if d is not None and d <= 0.7:
                     out["alerts"].append(f"{pos['ticker']}: {d:.2f}% до {lbl} (P&L {pos['pnl']:+.1f}₽)")
+            _dsa = pos.get("dist_sl_atr")
+            if _dsa is not None and _dsa <= 1.5:
+                out["alerts"].append(f"{pos['ticker']}: {_dsa:.2f} ATR до SL (близко)")
         return out
 
     async def _intrabar_exit_loop(self) -> None:
@@ -1195,6 +1203,7 @@ class PaperBotRuntime:
                 "default": str(getattr(self.config, "ai_approval_default", "approve") or "approve"),
             },
             "ai_decisions": self.list_ai_decisions(8),
+            "ai_notes": self.list_ai_notes(5),
             "metrics": dict(self.metrics),
         }
 
@@ -1752,6 +1761,44 @@ class PaperBotRuntime:
 
     def list_ai_decisions(self, limit: int = 20) -> list[dict]:
         return list(self._ai_decisions)[-max(1, min(int(limit), 50)):]
+
+    def atr_now(self, figi: str) -> float | None:
+        """Текущий ATR (1м, период из конфига) по буферу — для подсветки SL/TP и вахтёра."""
+        try:
+            from app.engine.indicators import atr as _atr
+            buf = self.buffers.get(figi)
+            if not buf:
+                return None
+            _p = int(getattr(self.config, "atr_period", 14) or 14)
+            vals = _atr(list(buf), _p)
+            v = vals[-1] if vals else None
+            return float(v) if v else None
+        except Exception:
+            return None
+
+    def add_ai_note(self, payload: dict) -> dict:
+        """Заметка вахтёра позиций (llama/AI) — словами, без управления."""
+        rec = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "ticker": str(payload.get("ticker") or ""),
+            "side": str(payload.get("side") or ""),
+            "action": str(payload.get("action") or ""),      # hold | tighten | close | watch
+            "note": str(payload.get("note") or payload.get("reason") or "")[:400],
+            "advice": str(payload.get("advice") or "")[:300],
+            "model": str(payload.get("model") or ""),
+            "provider": str(payload.get("provider") or ""),
+            "latency_ms": payload.get("latency_ms"),
+            "dist_sl_atr": payload.get("dist_sl_atr"),
+            "dist_tp_atr": payload.get("dist_tp_atr"),
+            "pnl": payload.get("pnl"),
+        }
+        self._ai_notes.append(rec)
+        self.events.log("AI_POSITION_NOTE", ticker=rec["ticker"], action=rec["action"],
+                        note=rec["note"][:120])
+        return {"ok": True, "record": rec}
+
+    def list_ai_notes(self, limit: int = 20) -> list[dict]:
+        return list(self._ai_notes)[-max(1, min(int(limit), 50)):]
 
     def set_ai_prompt(self, payload: dict) -> dict:
         """Сохранить текущий промпт/конфиг AI-гейта (воркер присылает при старте)."""
