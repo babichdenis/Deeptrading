@@ -472,6 +472,7 @@ class PaperBotRuntime:
         self.broker_mode = "paper"
         self.events = EventLog()
         self.strategies: dict[str, object] = {}
+        self.tcs_to_bbg: dict[str, str] = {}   # figi T-Invest → BBG (заполняется на старте)
         self.buffers: dict[str, deque] = {}
         self.tickers: dict[str, str] = {}
         self.pending_orders: dict[str, BotOrder] = {}
@@ -4094,7 +4095,7 @@ class PaperBotRuntime:
                 pass
         # --- Якорь кворума: обязательный голос (напр. macd_cross) + минимум голосов ---
         if action == "open" and not _is_momentum:
-            _req_mem
+            _req_mem = str(getattr(cfg, "ensemble_require_member", "") or "").strip()
             if _req_mem:
                 _qe = ((meta or {}).get("quorum_event") or {}) if isinstance(meta, dict) else {}
                 _mem = [str(x) for x in (_qe.get("members_for") or [])]
