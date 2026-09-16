@@ -3860,13 +3860,13 @@ class PaperBotRuntime:
             budget = cfg.ensemble_capital
             if isinstance(self.broker, LiveBroker):
                 try:
-                    # Бюджет на ОДИН слот = pos_pct (по умолчанию 40%) от equity.
-                    # Плечо маржи доводит размер позиции до максимума, который разрешит
-                    # брокер (см. блок MARGIN ниже) — НЕ до максимума портфеля.
+                    # Бюджет на ОДИН слот = pos_pct от equity. НЕ режем по свободному
+                    # кэшу: маржа (риск-ставка брокера) позволяет позиции больше кэша,
+                    # а реальный потолок qty ставит блок MARGIN (max_lots брокера).
                     _eq = await self.broker.equity()
                     _free = await self.broker.free_funds()
                     _slot_pct = self._pos_pct() * _boost
-                    budget = min(_eq * _slot_pct, _free) if _free > 0 else _eq * _slot_pct()
+                    budget = _eq * _slot_pct
                 except Exception:
                     try:
                         live_cash = await self.broker.cash()
