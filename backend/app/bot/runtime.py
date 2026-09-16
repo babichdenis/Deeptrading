@@ -2978,10 +2978,61 @@ class PaperBotRuntime:
                     if _real is not None:
                         self._log(f"RECONCILE: orphan {figi[-6:]} — у брокера позиция есть, не трогаю")
                         continue
+                    # Реальная цена/P&L: позиция могла быть закрыта вручную/стопом
+                    # у брокера — тогда net=0 недопустим. Берём из операций брокера,
+                    # fallback — последняя известная цена.
+                    _exit_px = None
+                    _net = None
+                    try:
+                        import asyncio as _aio
+                        from app.api.routes.sandbox import _get_operations
+                        _ops = await _aio.to_thread(_get_operations, 3)
+                        _pay = 0.0
+                        _pxs: list[float] = []
+                        for _op in (getattr(_ops, "operations", None) or []):
+                            try:
+                                if str(getattr(_op, "figi", "")) != figi:
+                                    continue
+                                _t = getattr(_op, "date", None)
+                                if (_t is not None and r.entry_time is not None
+                                        and _t < r.entry_time):
+                                    continue
+                                _mv = getattr(_op, "payment", None)
+                                if _mv is not None:
+                                    _pay += float(getattr(_mv, "units", 0) or 0) + \
+                                            float(getattr(_mv, "nano", 0) or 0) / 1e9
+                                _pm = getattr(_op, "price", None)
+                                if _pm is not None:
+                                    _p = float(getattr(_pm, "units", 0) or 0) + \
+                                         float(getattr(_pm, "nano", 0) or 0) / 1e9
+                                    if _p > 0:
+                                        _pxs.append(_p)
+                            except Exception:
+                                continue
+                        if abs(_pay) > 1e-9:
+                            _net = round(_pay, 4)
+                        if _pxs:
+                            _exit_px = round(sum(_pxs) / len(_pxs), 6)
+                    except Exception:
+                        pass
+                    if _net is None:
+                        # fallback: последняя известная цена − комиссии
+                        try:
+                            _buf = self.buffers.get(figi)
+                            _lp = float(_buf[-1].close) if _buf else None
+                        except Exception:
+                            _lp = None
+                        if _lp:
+                            _q = abs(float(r.qty or 0))
+                            _lng = str(r.side).upper() in ("BUY", "LONG")
+                            _pnl = (_lp - float(r.entry_price or 0.0)) * _q * (1 if _lng else -1)
+                            _cr = float(getattr(self.config, "commission_rate", 0.0005) or 0.0005)
+                            _net = round(_pnl - _cr * (float(r.entry_price or 0.0) + _lp) * _q, 4)
+                            _exit_px = _lp
                     r.exit_time = now
-                    r.exit_price = float(r.entry_price or 0.0)
-                    r.exit_reason = "orphan_cleanup"
-                    r.net_pnl = 0.0
+                    r.exit_price = float(_exit_px or r.entry_price or 0.0)
+                    r.exit_reason = "closed_at_broker"
+                    r.net_pnl = _net
                     closed_here += 1
                 closed += closed_here
                 if closed_here:
