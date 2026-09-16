@@ -258,3 +258,19 @@ def test_macd_state_side_and_trend():
     r2 = macd_state(dn)
     assert r2["ok"] and r2["side"] == "SELL"
     assert macd_state([1.0, 2.0])["ok"] is False
+
+
+def test_eod_close_only_at_last_session_end():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.engine.sessions import eod_close_due
+    msk = ZoneInfo("Europe/Moscow")
+    S = ["morning", "day", "evening"]
+    day_end = datetime(2026, 9, 16, 18, 40, tzinfo=msk)      # конец дня — НЕ закрываем
+    evening_soon = datetime(2026, 9, 16, 23, 45, tzinfo=msk)  # конец вечера — закрываем
+    morning_soon = datetime(2026, 9, 16, 9, 45, tzinfo=msk)   # конец утра — НЕ закрываем
+    assert eod_close_due(day_end, S) is False
+    assert eod_close_due(morning_soon, S) is False
+    assert eod_close_due(evening_soon, S) is True
+    assert eod_close_due(evening_soon, ["day"]) is True       # вне сессий — fallback закрывает
+    assert eod_close_due(day_end, ["day"]) is True

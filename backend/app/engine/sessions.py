@@ -139,10 +139,12 @@ def eod_close_due(ts, sessions: list[str] | None = None, minutes_before: int = 1
     mins = msk.hour * 60 + msk.minute
     if not is_session_active(ts, sessions):
         return True
-    for s in sessions:
-        a, b = SESSION_WINDOWS.get(s, (0, 0))
-        if a <= mins < b and mins >= b - int(minutes_before):
-            return True
+    # Закрываемся только перед концом ПОСЛЕДНЕЙ сессии дня (вечерней),
+    # а не на конце каждой (иначе бот не торговал бы вечернюю сессию).
+    _ends = [SESSION_WINDOWS.get(_s, (0, 0))[1] for _s in sessions]
+    _last_end = max(_ends) if _ends else 0
+    if _last_end and (int(_last_end) - int(minutes_before)) <= mins < int(_last_end):
+        return True
     return False
 
 

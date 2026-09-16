@@ -3188,26 +3188,28 @@ class PaperBotRuntime:
                                         _pxs.append(_p)
                             except Exception:
                                 continue
-                        if abs(_pay) > 1e-9:
-                            _net = round(_pay, 4)
+                        # ВАЖНО: _pay суммирует все операции по figi (могут быть чужие
+                        # сделки/маржа) — для net используем цены входа/выхода ниже,
+                        # операции берём только как источник цены выхода.
                         if _pxs:
                             _exit_px = round(sum(_pxs) / len(_pxs), 6)
                     except Exception:
                         pass
-                    if _net is None:
-                        # fallback: последняя известная цена − комиссии
+                    # P&L считаем по ценам: (выход − вход) × qty × направление − комиссии.
+                    _px_out = float(_exit_px or 0.0)
+                    if _px_out <= 0:
                         try:
                             _buf = self.buffers.get(figi)
-                            _lp = float(_buf[-1].close) if _buf else None
+                            _px_out = float(_buf[-1].close) if _buf else 0.0
                         except Exception:
-                            _lp = None
-                        if _lp:
-                            _q = abs(float(r.qty or 0))
-                            _lng = str(r.side).upper() in ("BUY", "LONG")
-                            _pnl = (_lp - float(r.entry_price or 0.0)) * _q * (1 if _lng else -1)
-                            _cr = float(getattr(self.config, "commission_rate", 0.0005) or 0.0005)
-                            _net = round(_pnl - _cr * (float(r.entry_price or 0.0) + _lp) * _q, 4)
-                            _exit_px = _lp
+                            _px_out = 0.0
+                    if _px_out > 0:
+                        _q = abs(float(r.qty or 0))
+                        _lng = str(r.side).upper() in ("BUY", "LONG")
+                        _pnl = (_px_out - float(r.entry_price or 0.0)) * _q * (1 if _lng else -1)
+                        _cr = float(getattr(self.config, "commission_rate", 0.0005) or 0.0005)
+                        _net = round(_pnl - _cr * (float(r.entry_price or 0.0) + _px_out) * _q, 4)
+                        _exit_px = _px_out
                     r.exit_time = now
                     r.exit_price = float(_exit_px or r.entry_price or 0.0)
                     r.exit_reason = "closed_at_broker"
