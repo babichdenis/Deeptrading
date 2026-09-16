@@ -72,6 +72,8 @@ def _config_payload(cfg: BotConfig) -> dict:
         "queue_min_turnover": float(getattr(cfg, "queue_min_turnover", 300000) or 0.0),
         "queue_adv_multiple": float(getattr(cfg, "queue_adv_multiple", 200.0) or 0.0),
         "eod_close_min_before": int(getattr(cfg, "eod_close_min_before", 10) or 10),
+        "mtf_align": bool(getattr(cfg, "mtf_align", False)),
+        "mtf_trigger": bool(getattr(cfg, "mtf_trigger", False)),
         "daily_bias": bool(getattr(cfg, "daily_bias", True)),
         "daily_bias_mode": str(getattr(cfg, "daily_bias_mode", "veto")),
         "top_sizing": str(getattr(cfg, "top_sizing", "multiply")),
@@ -253,6 +255,8 @@ class BotConfigPatch(BaseModel):
     rank_enabled: bool | None = None           # ранжирование тикеров (разведка → топ-N)
     eod_close_min_before: int | None = None    # за N минут до конца сессии закрывать (overnight=False)
     daily_bias: bool | None = None             # дневной MACD-bias (veto входов против направления)
+    mtf_align: bool | None = None              # H1 MACD подтверждает дневной bias
+    mtf_trigger: bool | None = None            # M5 MACD триггер разворота
     daily_bias_mode: str | None = None         # veto | info
     top_sizing: str | None = None              # режим размера топ-1 (divide|multiply)
     top_relax_caps: bool | None = None         # топ-1: сектор off, net до 100%
@@ -409,6 +413,12 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.queue_min_turnover is not None:
         cfg.queue_min_turnover = max(0.0, min(100e6, float(req.queue_min_turnover)))
         changes.append(f"мин. оборот: {cfg.queue_min_turnover/1e6:.2f}M ₽/день")
+    if req.mtf_align is not None:
+        cfg.mtf_align = bool(req.mtf_align)
+        changes.append(f"MTF H1-подтверждение: {'вкл' if cfg.mtf_align else 'выкл'}")
+    if req.mtf_trigger is not None:
+        cfg.mtf_trigger = bool(req.mtf_trigger)
+        changes.append(f"MTF M5-триггер: {'вкл' if cfg.mtf_trigger else 'выкл'}")
     if req.daily_bias is not None:
         cfg.daily_bias = bool(req.daily_bias)
         changes.append(f"дневной bias: {'вкл' if cfg.daily_bias else 'выкл'}")

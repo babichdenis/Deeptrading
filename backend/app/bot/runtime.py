@@ -137,6 +137,8 @@ class BotConfig:
     eod_close_min_before: int = 10  # закрывать за N минут до конца последней сессии (overnight=False)
     daily_bias: bool = True          # дневной MACD-bias: блокировать входы против дневного направления
     daily_bias_mode: str = "veto"    # veto | info
+    mtf_align: bool = False          # H1 MACD должен совпадать с дневным bias (подтверждение)
+    mtf_trigger: bool = False        # M5 MACD гистограмма должна разворачиваться в сторону входа
     # --- Margin ---
     use_margin: bool = True  # использовать маржинальное кредитование
     margin_sessions: list = field(default_factory=lambda: ["day"])  # сессии с маржой: morning/day/evening
@@ -179,6 +181,7 @@ BOT_PERSIST_FIELDS = (
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
     "overnight", "eod_close_min_before", "daily_bias", "daily_bias_mode",
+    "mtf_align", "mtf_trigger",
     "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
@@ -500,6 +503,8 @@ class PaperBotRuntime:
         self._turnover_cache: dict[str, float] = {}
         self._cand_queue: dict[str, dict] = {}
         self._equity_peak: float = 0.0
+        self._mtf_cache: dict[str, dict] = {}
+        self._mtf_ts: float = 0.0
         self._daily_bias_cache: dict[str, dict] = {}
         self._daily_bias_ts: float = 0.0
         self._overnight_cache: list[str] | None = None
@@ -577,6 +582,14 @@ class PaperBotRuntime:
             await self.trade_history()
         except Exception:
             pass
+        try:
+            _mtfm = await self.mtf_macd_map()
+            snap["mtf"] = {k: {"h1": (v.get("h1") or {}).get("side"),
+                               "m5": (v.get("m5") or {}).get("side"),
+                               "m5_trend": (v.get("m5") or {}).get("trend")}
+                           for k, v in list(_mtfm.items())[:40]}
+        except Exception:
+            snap["mtf"] = {}
         try:
             _dbm = await self.daily_bias_map()
             snap["daily_bias"] = {k: v.get("bias") for k, v in list(_dbm.items())[:40]}
@@ -752,6 +765,50 @@ class PaperBotRuntime:
         except Exception:
             pass
         return self._daily_bias_cache
+
+    async def mtf_macd_map(self, ttl: float = 900.0) -> dict[str, dict]:
+        """M5 и H1 MACD по тикерам (кэш 15 мин): {ticker: {m5: {...}, h1: {...}}}."""
+        import time as _t
+        if self._mtf_cache and (_t.monotonic() - self._mtf_ts) < ttl:
+            return self._mtf_cache
+        from app.bot.daily_bias import macd_state as _ms
+        out: dict[str, dict] = {}
+        try:
+            from sqlalchemy import text as _text
+            _figs = [u.get("figi") for u in (self.universe or []) if u.get("figi")]
+            if not _figs:
+                return self._mtf_cache
+            async with SessionLocal() as db:
+                rows = (await db.execute(_text(
+                    "SELECT figi, ts, close FROM candles WHERE interval = 5 "
+                    "AND figi = ANY(:fs) AND ts > now() - interval '20 days' "
+                    "ORDER BY figi, ts"
+                ), {"fs": _figs})).all()
+            by_figi: dict[str, list[tuple]] = {}
+            for figi, ts, close in rows:
+                by_figi.setdefault(str(figi), []).append((ts, float(close or 0.0)))
+            for figi, seq in by_figi.items():
+                tk = str(self.tickers.get(figi, "") or "").upper()
+                if not tk:
+                    continue
+                m5 = _ms([c for _ts, c in seq])
+                # H1: последнее закрытие каждого часового бакета
+                h1: list[float] = []
+                bucket = None
+                last_close = None
+                for ts, c in seq:
+                    b = ts.replace(minute=0, second=0, microsecond=0)
+                    if bucket is not None and b != bucket and last_close is not None:
+                        h1.append(last_close)
+                    bucket, last_close = b, c
+                if last_close is not None:
+                    h1.append(last_close)
+                out[tk] = {"m5": m5, "h1": _ms(h1)}
+            self._mtf_cache = out
+            self._mtf_ts = _t.monotonic()
+        except Exception:
+            pass
+        return self._mtf_cache
 
     def _rank_ok(self, ticker: str) -> tuple[bool, str]:
         from app.bot.portfolio import rank_ok as _rk
@@ -3740,6 +3797,44 @@ class PaperBotRuntime:
                         return
                     self._log(f"ДНЕВНОЙ BIAS {ticker}: {side} против {_bias} "
                               f"(hist {_hist:+}, info-режим) — пропускаю дальше")
+            except Exception:
+                pass
+        # --- MTF: H1 MACD должен подтверждать дневной bias; M5 — триггер разворота ---
+        if action == "open" and (bool(getattr(cfg, "mtf_align", False))
+                                 or bool(getattr(cfg, "mtf_trigger", False))):
+            try:
+                _mtf = (await self.mtf_macd_map()).get(str(ticker).upper()) or {}
+                _h1 = _mtf.get("h1") or {}
+                _m5 = _mtf.get("m5") or {}
+                _bias = ((await self.daily_bias_map()).get(str(ticker).upper()) or {}).get("bias")
+                _want = "BUY" if side == "BUY" else "SELL"
+                if bool(getattr(cfg, "mtf_align", False)) and _h1.get("ok"):
+                    _h1_side = str(_h1.get("side") or "")
+                    if _h1_side and _h1_side != _want:
+                        self._log(f"ПРОПУСК ВХОДА {ticker}: H1 MACD {_h1_side} против {_want} "
+                                  f"(hist {_h1.get('hist'):+})")
+                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                        reason="MTF_H1_ALIGN", detail=_h1_side)
+                        self._log_no_trade(figi, "mtf_h1_align")
+                        return
+                    if _bias in ("up", "down"):
+                        _bias_side = "BUY" if _bias == "up" else "SELL"
+                        if _h1_side and _h1_side != _bias_side:
+                            self._log(f"ПРОПУСК ВХОДА {ticker}: H1 MACD {_h1_side} против дневного "
+                                      f"bias {_bias}")
+                            self._log_no_trade(figi, "mtf_h1_align")
+                            return
+                if bool(getattr(cfg, "mtf_trigger", False)) and _m5.get("ok"):
+                    _tr = str(_m5.get("trend") or "")
+                    _ok_tr = ((_want == "BUY" and _tr == "rising")
+                              or (_want == "SELL" and _tr == "falling"))
+                    if not _ok_tr:
+                        self._log(f"ПРОПУСК ВХОДА {ticker}: M5 MACD триггер не в сторону {_want} "
+                                  f"(trend {_tr}, hist {_m5.get('hist'):+})")
+                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                        reason="MTF_M5_TRIGGER", detail=_tr)
+                        self._log_no_trade(figi, "mtf_m5_trigger")
+                        return
             except Exception:
                 pass
         # --- Ранжирование: разведка K сделок, затем только топ-N по прошлому net ---

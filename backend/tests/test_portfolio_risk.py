@@ -247,3 +247,14 @@ def test_daily_bias_macd():
     # EMA и MACD считаются
     assert len(ema([1.0, 2.0, 3.0], 2)) == 3
     assert macd(up)["ok"] is True
+
+
+def test_macd_state_side_and_trend():
+    from app.bot.daily_bias import macd_state
+    up = [100.0 + i * 1.0 for i in range(60)]
+    r = macd_state(up)
+    assert r["ok"] and r["side"] == "BUY" and r["trend"] in ("rising", "falling")
+    dn = [160.0 - i * 1.0 for i in range(60)]
+    r2 = macd_state(dn)
+    assert r2["ok"] and r2["side"] == "SELL"
+    assert macd_state([1.0, 2.0])["ok"] is False

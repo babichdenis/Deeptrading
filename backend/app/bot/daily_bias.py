@@ -31,6 +31,23 @@ def macd(closes: list[float], fast: int = 12, slow: int = 26, signal: int = 9) -
             "hist": round(hist, 6), "bars": n}
 
 
+def macd_state(closes: list[float], fast: int = 12, slow: int = 26,
+               signal: int = 9) -> dict:
+    """Состояние MACD: сторона, гистограмма и тренд гистограммы (rising/falling)."""
+    n = len(closes or [])
+    if n < slow + signal + 1:
+        return {"ok": False, "reason": f"мало свечей ({n} < {slow + signal + 1})"}
+    ef, es = ema(closes, fast), ema(closes, slow)
+    line = [a - b for a, b in zip(ef, es)]
+    sig = ema(line, signal)
+    hist = [m - s for m, s in zip(line, sig)]
+    h_now, h_prev = hist[-1], hist[-2]
+    return {"ok": True, "side": "BUY" if line[-1] > sig[-1] else "SELL",
+            "hist": round(h_now, 6), "prev_hist": round(h_prev, 6),
+            "trend": "rising" if h_now > h_prev else "falling",
+            "macd": round(line[-1], 6), "signal": round(sig[-1], 6), "bars": n}
+
+
 def bias_from_closes(closes: list[float], fast: int = 12, slow: int = 26,
                      signal: int = 9) -> dict:
     """Дневной bias: 'up' если MACD выше сигнальной, 'down' если ниже, иначе 'flat'."""
