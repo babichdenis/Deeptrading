@@ -80,6 +80,13 @@ def _config_payload(cfg: BotConfig) -> dict:
         "queue_min_turnover": float(getattr(cfg, "queue_min_turnover", 300000) or 0.0),
         "queue_adv_multiple": float(getattr(cfg, "queue_adv_multiple", 200.0) or 0.0),
         "eod_close_min_before": int(getattr(cfg, "eod_close_min_before", 10) or 10),
+        "ensemble_require_member": str(getattr(cfg, "ensemble_require_member", "") or ""),
+        "momentum_short": bool(getattr(cfg, "momentum_short", False)),
+        "momentum_n": int(getattr(cfg, "momentum_n", 63) or 63),
+        "momentum_k": int(getattr(cfg, "momentum_k", 3) or 3),
+        "momentum_stop_pct": float(getattr(cfg, "momentum_stop_pct", 0.03) or 0.03),
+        "momentum_entry_time": str(getattr(cfg, "momentum_entry_time", "10:30") or "10:30"),
+        "momentum_max_lev": float(getattr(cfg, "momentum_max_lev", 2.0) or 2.0),
         "mtf_align": bool(getattr(cfg, "mtf_align", False)),
         "mtf_trigger": bool(getattr(cfg, "mtf_trigger", False)),
         "daily_bias": bool(getattr(cfg, "daily_bias", True)),
@@ -264,6 +271,13 @@ class BotConfigPatch(BaseModel):
     eod_close_min_before: int | None = None    # за N минут до конца сессии закрывать (overnight=False)
     daily_bias: bool | None = None             # дневной MACD-bias (veto входов против направления)
     mtf_align: bool | None = None              # H1 MACD подтверждает дневной bias
+    ensemble_require_member: str | None = None  # обязательный голос кворума (macd_cross)
+    momentum_short: bool | None = None          # режим «моментум-шорт»
+    momentum_n: int | None = None               # окно моментума (дней)
+    momentum_k: int | None = None               # сколько имён шортить
+    momentum_stop_pct: float | None = None      # стоп (доля)
+    momentum_entry_time: str | None = None      # время входа МСК "10:30"
+    momentum_max_lev: float | None = None       # кап плеча
     mtf_trigger: bool | None = None            # M5 MACD триггер разворота
     daily_bias_mode: str | None = None         # veto | info
     top_sizing: str | None = None              # режим размера топ-1 (divide|multiply)
@@ -421,6 +435,27 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.queue_min_turnover is not None:
         cfg.queue_min_turnover = max(0.0, min(100e6, float(req.queue_min_turnover)))
         changes.append(f"мин. оборот: {cfg.queue_min_turnover/1e6:.2f}M ₽/день")
+    if req.momentum_short is not None:
+        cfg.momentum_short = bool(req.momentum_short)
+        changes.append(f"моментум-шорт: {'вкл' if cfg.momentum_short else 'выкл'}")
+    if req.momentum_n is not None:
+        cfg.momentum_n = max(5, min(250, int(req.momentum_n)))
+        changes.append(f"окно моментума: {cfg.momentum_n} дн.")
+    if req.momentum_k is not None:
+        cfg.momentum_k = max(1, min(10, int(req.momentum_k)))
+        changes.append(f"моментум-имён: {cfg.momentum_k}")
+    if req.momentum_stop_pct is not None:
+        cfg.momentum_stop_pct = max(0.005, min(0.2, float(req.momentum_stop_pct)))
+        changes.append(f"моментум-стоп: {cfg.momentum_stop_pct*100:.1f}%")
+    if req.momentum_entry_time is not None:
+        cfg.momentum_entry_time = str(req.momentum_entry_time or "10:30").strip()
+        changes.append(f"время входа: {cfg.momentum_entry_time} МСК")
+    if req.momentum_max_lev is not None:
+        cfg.momentum_max_lev = max(1.0, min(5.0, float(req.momentum_max_lev)))
+        changes.append(f"кап плеча: ×{cfg.momentum_max_lev:g}")
+    if req.ensemble_require_member is not None:
+        cfg.ensemble_require_member = str(req.ensemble_require_member or "").strip()
+        changes.append(f"якорь кворума: {cfg.ensemble_require_member or '—'}")
     if req.mtf_align is not None:
         cfg.mtf_align = bool(req.mtf_align)
         changes.append(f"MTF H1-подтверждение: {'вкл' if cfg.mtf_align else 'выкл'}")

@@ -67,7 +67,7 @@ def lev_for(meta: dict, ticker: str, side: str, max_lev: float) -> float:
 
 
 def run(days_sorted, by_day, meta, *, n=21, k=5, side="ls", pos_pct=0.5,
-        max_lev=3.0, equity0=50000.0, stop_pct=0.0, hold="oc") -> dict:
+        max_lev=3.0, equity0=50000.0, stop_pct=0.0, hold="oc", pick="bottom") -> dict:
     """hold: "oc" = вход на открытии, выход на закрытии дня;
              "cc" = вход на закрытии дня D, выход на закрытии D+1."""
     equity = equity0
@@ -93,10 +93,17 @@ def run(days_sorted, by_day, meta, *, n=21, k=5, side="ls", pos_pct=0.5,
             continue
         ranked = sorted(mom.items(), key=lambda x: -x[1])
         picks = []
-        if side in ("ls", "long"):
-            picks += [(t, "LONG") for t, _ in ranked[:k]]
-        if side in ("ls", "short"):
-            picks += [(t, "SHORT") for t, _ in ranked[-k:]]
+        if pick == "top":
+            # шорт/лонг ЛИДЕРОВ (верх моментума)
+            if side in ("ls", "long"):
+                picks += [(t, "LONG") for t, _ in ranked[:k]]
+            if side in ("ls", "short"):
+                picks += [(t, "SHORT") for t, _ in ranked[:k]]
+        else:
+            if side in ("ls", "long"):
+                picks += [(t, "LONG") for t, _ in ranked[-k:]]
+            if side in ("ls", "short"):
+                picks += [(t, "SHORT") for t, _ in ranked[-k:]]
         if not picks:
             continue
         per = equity * pos_pct / max(1, len(picks))   # свои средства на позицию
@@ -166,6 +173,8 @@ async def main() -> None:
     ap.add_argument("--stop", type=float, default=0.0, help="внутридневной стоп, доля (0.03)")
     ap.add_argument("--hold", default="oc", choices=("oc", "cc"))
     ap.add_argument("--grid", action="store_true", help="сетка: шорт × плечо × стоп")
+    ap.add_argument("--pick", default="bottom", choices=("bottom", "top"),
+                    help="bottom = шорт аутсайдеров (моментум), top = шорт лидеров (mean-reversion)")
     args = ap.parse_args()
 
     days_sorted, by_day, meta = await load(args.days)
@@ -187,14 +196,16 @@ async def main() -> None:
         for k in (3, 5, 10):
             for side in ("long", "short", "ls"):
                 r = run(days_sorted, by_day, meta, n=n, k=k, side=side,
-                        pos_pct=args.pos_pct, max_lev=args.max_lev, equity0=args.equity)
+                        pos_pct=args.pos_pct, max_lev=args.max_lev, equity0=args.equity,
+                        stop_pct=args.stop, hold=args.hold, pick=args.pick)
                 name = f"n{n} k{k} {side}"
                 print(f"{name:<34}{r['n']:>6}{r['net']:>10.1f}{r['ret_pct']:>8.1f}"
                       f"{r['wr']:>7.1f}{r['pf']:>6.2f}{r['maxdd']:>8.1f}")
     # лучший вариант — по тикерам
     best = max(
         ((n, k, s, run(days_sorted, by_day, meta, n=n, k=k, side=s,
-                       pos_pct=args.pos_pct, max_lev=args.max_lev, equity0=args.equity))
+                       pos_pct=args.pos_pct, max_lev=args.max_lev, equity0=args.equity,
+                       stop_pct=args.stop, hold=args.hold, pick=args.pick))
          for n in (args.n, 63) for k in (3, 5, 10) for s in ("long", "short", "ls")),
         key=lambda x: x[3]["net"])
     print(f"\nлучший: n{best[0]} k{best[1]} {best[2]} → {best[3]['net']:+.1f}₽ "

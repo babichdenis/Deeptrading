@@ -138,6 +138,13 @@ class BotConfig:
     daily_bias: bool = True          # дневной MACD-bias: блокировать входы против дневного направления
     daily_bias_mode: str = "veto"    # veto | info
     mtf_align: bool = False          # H1 MACD должен совпадать с дневным bias (подтверждение)
+    ensemble_require_member: str = ""  # обязательный голос кворума (напр. "macd_cross")
+    momentum_short: bool = False     # режим «моментум-шорт»: утром шорт низ-K по N-дневному падению
+    momentum_n: int = 63             # окно моментума (торговых дней)
+    momentum_k: int = 3              # сколько имён шортить
+    momentum_stop_pct: float = 0.03  # внутридневной стоп (доля от входа)
+    momentum_entry_time: str = "10:30"  # время входа (МСК)
+    momentum_max_lev: float = 2.0    # кап плеча для моментум-входа
     mtf_trigger: bool = False        # M5 MACD гистограмма должна разворачиваться в сторону входа
     # --- Margin ---
     use_margin: bool = True  # использовать маржинальное кредитование
@@ -181,7 +188,9 @@ BOT_PERSIST_FIELDS = (
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
     "overnight", "eod_close_min_before", "daily_bias", "daily_bias_mode",
-    "mtf_align", "mtf_trigger",
+    "mtf_align", "mtf_trigger", "ensemble_require_member",
+    "momentum_short", "momentum_n", "momentum_k", "momentum_stop_pct",
+    "momentum_entry_time", "momentum_max_lev",
     "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
@@ -276,18 +285,61 @@ def default_ensemble_config() -> dict:
 
 
 # Тестовые оверрайды конфига (применяются ТОЛЬКО в mode=test, live не трогают).
+# Стратегия теста: H1 bias + сетапы 10м (ensemble_config.test.json) + триггер 5м.
 TEST_MODE_OVERRIDES: dict = {
-    "mtf_align": True,        # H1 MACD подтверждает дневной bias (по бэктесту: PF 0.70 → 0.81)
-    "mtf_trigger": False,     # M5 триггер отдельно вредит (PF 0.67) — не включаем
-    "daily_bias": True,
-    "daily_bias_mode": "veto",
+    "entry_from_setups": False,   # триггер входа = микро-брейкаут (entry_tf), кворум фильтрует
+    "ensemble_entry_from_setups": False,
+    "ensemble_entry_tf": "5min",
+    "mtf_align": False,
+    "mtf_trigger": False,
+    "daily_bias": False,
+    "daily_bias_mode": "info",
+}
+# Гейты: как на .2 (вкл) / полностью выкл. Управление: env TEST_GATES=on|off.
+TEST_GATES_ON: dict = {
+    "imoex_guard": True,
+    "reentry_cooldown_bars": 15,
+    "confirm_flip": 2,
+    "trend_alignment": False,
+    "ai_approval": False,
+    "loss_streak_hold": True,
+    "entry_confirm_closes": 0,
+    "rank_enabled": True,
+    "queue_enabled": True,
+}
+TEST_GATES_OFF: dict = {
+    "imoex_guard": False,
+    "reentry_cooldown_bars": 0,
+    "confirm_flip": 0,
+    "trend_alignment": False,
+    "ai_approval": False,
+    "loss_streak_hold": False,
+    "entry_confirm_closes": 0,
+    "rank_enabled": False,
+    "queue_enabled": False,
+}
+
+
+TEST_VARIANTS: dict = {
+    "base": {},
+    "macd1": {"ensemble_require_member": "macd_cross", "ensemble_quorum": 2},
+    "macd2": {"ensemble_require_member": "macd_cross", "ensemble_quorum": 3},
 }
 
 
 def apply_test_overrides(cfg) -> list[str]:
-    """Применить тестовые оверрайды (mode=test). Возвращает список применённых."""
+    """Применить тестовые оверрайды (mode=test). Возвращает список применённых.
+
+    env: TEST_GATES=on|off (гейты как на .2 / выкл), TEST_VARIANT=base|macd1|macd2.
+    """
+    import os as _os
     applied: list[str] = []
-    for _k, _v in TEST_MODE_OVERRIDES.items():
+    _gates = str(_os.environ.get("TEST_GATES", "on") or "on").lower()
+    _variant = str(_os.environ.get("TEST_VARIANT", "base") or "base").lower()
+    _src = dict(TEST_MODE_OVERRIDES)
+    _src.update(TEST_GATES_ON if _gates != "off" else TEST_GATES_OFF)
+    _src.update(TEST_VARIANTS.get(_variant, {}))
+    for _k, _v in _src.items():
         try:
             setattr(cfg, _k, _v)
             applied.append(f"{_k}={_v}")
@@ -296,16 +348,25 @@ def apply_test_overrides(cfg) -> list[str]:
     return applied
 
 
-async def load_ensemble_config() -> dict:
-    """Состав кворума из data/ensemble_config.json (источник правды), дефолт если нет."""
-    try:
-        _p = Path(_ENSEMBLE_CONFIG_FILE)
-        if _p.exists():
-            _d = json.loads(_p.read_text(encoding="utf-8"))
-            if isinstance(_d, dict) and _d.get("setups"):
-                return _d
-    except Exception:
-        pass
+async def load_ensemble_config(mode: str = "") -> dict:
+    """Состав кворума из data/ensemble_config.json (источник правды), дефолт если нет.
+
+    Для mode="test" приоритет — data/ensemble_config.test.json (тестовые сетапы,
+    чтобы не менять live-конфиг).
+    """
+    _files = []
+    if str(mode) == "test":
+        _files.append(str(Path(_ENSEMBLE_CONFIG_FILE).with_name("ensemble_config.test.json")))
+    _files.append(_ENSEMBLE_CONFIG_FILE)
+    for _f in _files:
+        try:
+            _p = Path(_f)
+            if _p.exists():
+                _d = json.loads(_p.read_text(encoding="utf-8"))
+                if isinstance(_d, dict) and _d.get("setups"):
+                    return _d
+        except Exception:
+            continue
     return default_ensemble_config()
 
 
@@ -526,6 +587,9 @@ class PaperBotRuntime:
         self._equity_peak: float = 0.0
         self._mtf_cache: dict[str, dict] = {}
         self._mtf_ts: float = 0.0
+        self._momentum_done: object = None
+        self._momentum_cache: dict[str, float] = {}
+        self._momentum_ts: float = 0.0
         self._daily_bias_cache: dict[str, dict] = {}
         self._daily_bias_ts: float = 0.0
         self._overnight_cache: list[str] | None = None
@@ -838,6 +902,101 @@ class PaperBotRuntime:
         except Exception:
             pass
         return self._mtf_cache
+
+    async def momentum_map(self, ttl: float = 1800.0) -> dict[str, float]:
+        """{ticker: изменение за N дней, %} по дневным барам (кэш 30 мин)."""
+        import time as _t
+        _replay = str(getattr(self.config, "feed", "")) == "replay"
+        if not _replay and self._momentum_cache and (_t.monotonic() - self._momentum_ts) < ttl:
+            return self._momentum_cache
+        _n = max(2, int(getattr(self.config, "momentum_n", 63) or 63))
+        _cutoff = self._bot_now()
+        out: dict[str, float] = {}
+        try:
+            from sqlalchemy import text as _text
+            _figs = [u.get("figi") for u in (self.universe or []) if u.get("figi")]
+            if not _figs:
+                return self._momentum_cache
+            async with SessionLocal() as db:
+                rows = (await db.execute(_text(
+                    "SELECT figi, close FROM candles WHERE interval = 24 "
+                    "AND figi = ANY(:fs) AND ts <= :cut ORDER BY figi, ts"
+                ), {"fs": _figs, "cut": _cutoff})).all()
+            by: dict[str, list[float]] = {}
+            for figi, close in rows:
+                by.setdefault(str(figi), []).append(float(close or 0.0))
+            for figi, closes in by.items():
+                tk = str(self.tickers.get(figi, "") or "").upper()
+                if not tk or len(closes) < _n + 1:
+                    continue
+                c0, c1 = closes[-_n - 1], closes[-1]
+                if c0 > 0:
+                    out[tk] = round((c1 / c0 - 1.0) * 100.0, 1)
+            self._momentum_cache = out
+            self._momentum_ts = _t.monotonic()
+        except Exception:
+            pass
+        return self._momentum_cache
+
+    async def _momentum_loop(self) -> None:
+        """Моментум-шорт: в окне времени входа шортим низ-K по N-дневному падению.
+
+        Выход — вечерний EOD (overnight=false), стоп — momentum_stop_pct (3%).
+        """
+        from zoneinfo import ZoneInfo as _ZI
+        _msk = _ZI("Europe/Moscow")
+        while self.running:
+            try:
+                await asyncio.sleep(30.0)
+                cfg = self.config
+                if not bool(getattr(cfg, "momentum_short", False)):
+                    continue
+                now = self._bot_now()
+                msk = now.astimezone(_msk)
+                if msk.weekday() >= 5:
+                    continue
+                _et = str(getattr(cfg, "momentum_entry_time", "10:30") or "10:30")
+                try:
+                    _eh, _em = (int(x) for x in _et.split(":"))
+                except Exception:
+                    _eh, _em = 10, 30
+                _mins = msk.hour * 60 + msk.minute
+                _from = _eh * 60 + _em
+                if not (_from <= _mins < _from + 30):
+                    continue
+                if self._momentum_done == msk.date():
+                    continue
+                self._momentum_done = msk.date()
+                if self._held:
+                    self._log("МОМЕНТУМ-ШОРТ: пропуск — в портфеле уже есть позиции")
+                    continue
+                await self._momentum_enter()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                pass
+
+    async def _momentum_enter(self) -> None:
+        """Вход: низ-K по моментуму (только падающие), через _submit_order(momentum)."""
+        cfg = self.config
+        mm = await self.momentum_map()
+        if not mm:
+            self._log("МОМЕНТУМ-ШОРТ: нет данных моментума")
+            return
+        k = max(1, int(getattr(cfg, "momentum_k", 3) or 3))
+        ranked = sorted(mm.items(), key=lambda kv: kv[1])
+        picks = [(t, ch) for t, ch in ranked[:k] if ch < 0]
+        if not picks:
+            self._log("МОМЕНТУМ-ШОРТ: нет падающих кандидатов")
+            return
+        self._log("МОМЕНТУМ-ШОРТ: " + ", ".join(f"{t} {ch:+.1f}%" for t, ch in picks))
+        for t, ch in picks:
+            _figi = next((u.get("figi") for u in (self.universe or [])
+                          if str(u.get("ticker", "")).upper() == t), None)
+            if not _figi:
+                continue
+            await self._submit_order(_figi, t, "open", "SELL",
+                                     meta={"momentum": True, "priority": True, "mom_chg": ch})
 
     def _rank_ok(self, ticker: str) -> tuple[bool, str]:
         from app.bot.portfolio import rank_ok as _rk
@@ -1234,7 +1393,7 @@ class PaperBotRuntime:
         opt = (row[0] if row else None) or {}
 
         from app.bot.ensemble_strategy import EnsembleParams
-        ec = await load_ensemble_config()
+        ec = await load_ensemble_config(str(getattr(self.config, "mode", "") or ""))
         _setups = [
             {"strategy_id": s["strategy_id"], "tf": s.get("tf", "5min"), "params": s.get("params", {})}
             for s in ec.get("setups", []) if s.get("enabled")
@@ -3198,6 +3357,7 @@ class PaperBotRuntime:
         self._intrabar_task = asyncio.create_task(self._intrabar_exit_loop())
         self._imoex_task = asyncio.create_task(self._imoex_loop())
         self._queue_task = asyncio.create_task(self._priority_entry_loop())
+        self._momentum_task = asyncio.create_task(self._momentum_loop())
         self._guard_task = asyncio.create_task(self._portfolio_guard_loop())
         try:
             async for candle in feed.stream():
@@ -3655,6 +3815,7 @@ class PaperBotRuntime:
         # Инверсия уже применена на уровне сигнала (см. _process_candle) — здесь НЕ дублируем.
         qty = cfg.qty_per_trade
         _used_lev = 1.0
+        _is_momentum = bool((meta or {}).get("momentum"))
         _is_priority = bool((meta or {}).get("priority"))
         _boost = (float(getattr(cfg, "top_boost", 2.0) or 2.0) if _is_priority else 1.0)
         _sizing = str(getattr(cfg, "margin_sizing", "divide") or "divide").lower()
@@ -3690,12 +3851,18 @@ class PaperBotRuntime:
                 try:
                     _acc = await self.broker.ensure_account(cfg.initial_cash)
                     _pos_list = await self.broker.positions()
-                    _pv = 0.0
+                    # PaperBroker: cash = свои минус комиссии, номинал не списывается,
+                    # поэтому equity = cash + НЕРЕАЛИЗОВАННЫЙ P&L позиций
+                    # (прежняя формула cash + Σ|qty×price| удваивала шорты: 10к → 16к).
+                    _pnl_open = 0.0
                     for _p in _pos_list:
                         _pb = self.buffers.get(getattr(_p, "figi", ""))
                         _ppx = float(_pb[-1].close) if _pb else float(getattr(_p, "entry_price", 0) or 0)
-                        _pv += abs(float(getattr(_p, "qty", 0) or 0)) * _ppx
-                    _eq = float(_acc.cash or 0.0) + _pv
+                        _q = abs(float(getattr(_p, "qty", 0) or 0))
+                        _ep = float(getattr(_p, "entry_price", 0) or 0)
+                        _short = str(getattr(_p, "side", "")).upper() in ("SELL", "SHORT")
+                        _pnl_open += ((_ep - _ppx) if _short else (_ppx - _ep)) * _q
+                    _eq = float(_acc.cash or 0.0) + _pnl_open
                     if _eq <= 0:
                         _eq = float(cfg.initial_cash)
                     budget = _eq * self._pos_pct() * _boost
@@ -3736,6 +3903,9 @@ class PaperBotRuntime:
                         f"use_margin={use_margin} margin_sessions={'/'.join(cfg.margin_sessions) or '—'} "
                         f"budget={budget:.0f} lot_cost={lot_cost:.0f}"
                     )
+                    if _is_momentum:
+                        # Максимальное плечо по риск-ставке с капом momentum_max_lev
+                        _mstop_lev = float(getattr(cfg, "momentum_max_lev", 2.0) or 2.0)
                     if use_margin and _mrgn_lots > 0:
                         # Плечо: риск-ставка брокера по инструменту (dlong/dshort) — это
                         # реальное обеспечение; ml.leverage из GetMaxLots зависит от
@@ -3750,6 +3920,8 @@ class PaperBotRuntime:
                             _lev_src = "max_lots"
                         _want = float(cfg.margin_leverage or 0.0)
                         lev = _max_lev if _want <= 0 else min(_max_lev, _want)
+                        if _is_momentum:
+                            lev = min(lev, float(getattr(cfg, "momentum_max_lev", 2.0) or 2.0))
                         if lev < 1.0:
                             lev = 1.0
                         # Режим размера позиции:
@@ -3860,7 +4032,7 @@ class PaperBotRuntime:
             meta={**dict(meta or {}), "leverage": float(_used_lev)},
         )
         # --- Дневной MACD-bias: входы против дневного направления (veto) ---
-        if action == "open" and bool(getattr(cfg, "daily_bias", False)):
+        if action == "open" and not _is_momentum and bool(getattr(cfg, "daily_bias", False)):
             try:
                 _db = (await self.daily_bias_map()).get(str(ticker).upper()) or {}
                 _bias = str(_db.get("bias") or "")
@@ -3880,7 +4052,7 @@ class PaperBotRuntime:
             except Exception:
                 pass
         # --- MTF: H1 MACD должен подтверждать дневной bias; M5 — триггер разворота ---
-        if action == "open" and (bool(getattr(cfg, "mtf_align", False))
+        if action == "open" and not _is_momentum and (bool(getattr(cfg, "mtf_align", False))
                                  or bool(getattr(cfg, "mtf_trigger", False))):
             try:
                 _mtf = (await self.mtf_macd_map()).get(str(ticker).upper()) or {}
@@ -3917,8 +4089,23 @@ class PaperBotRuntime:
                         return
             except Exception:
                 pass
+        # --- Якорь кворума: обязательный голос (напр. macd_cross) + минимум голосов ---
+        if action == "open" and not _is_momentum:
+            _req_mem
+            if _req_mem:
+                _qe = ((meta or {}).get("quorum_event") or {}) if isinstance(meta, dict) else {}
+                _mem = [str(x) for x in (_qe.get("members_for") or [])]
+                _votes = int(_qe.get("votes") or 0)
+                _min_v = int(getattr(cfg, "ensemble_quorum", 2) or 2)
+                if _req_mem not in _mem or _votes < _min_v:
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: якорь {_req_mem} не в кворуме "
+                              f"(голоса {_votes}/{_min_v}, members: {','.join(_mem) or '—'})")
+                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                    reason="REQUIRE_MEMBER", detail=f"{_req_mem}|{_votes}")
+                    self._log_no_trade(figi, "require_member")
+                    return
         # --- Ранжирование: разведка K сделок, затем только топ-N по прошлому net ---
-        if action == "open":
+        if action == "open" and not _is_momentum:
             try:
                 await self.trade_history()
                 _rok, _rwhy = self._rank_ok(ticker)
@@ -3991,9 +4178,9 @@ class PaperBotRuntime:
             except Exception:
                 pass
         # --- Баланс LONG/SHORT: не даём уйти в односторонний шорт ---
-        if action == "open" and side == "SELL":
+        if action == "open" and side == "SELL" and not _is_momentum:
             try:
-                _share = float(getattr(cfg, "max_short_share", 0.0) or 0.0)
+                _share
                 _min_total = int(getattr(cfg, "balance_min_positions", 3) or 3)
                 if _share > 0 and len(self._held) >= _min_total:
                     _shorts = sum(1 for _f in self._held
@@ -4009,7 +4196,7 @@ class PaperBotRuntime:
             except Exception:
                 pass
         # --- AI-гейт: дедуп и пауза после отклонения ---
-        if action == "open" and bool(getattr(cfg, "ai_approval", False)):
+        if action == "open" and not _is_momentum and bool(getattr(cfg, "ai_approval", False)):
             _pend = self.pending_orders.get(figi)
             if _pend is not None and getattr(_pend, "status", "") == "PENDING_APPROVAL":
                 self._log(f"AI-ГЕЙТ: {ticker} уже ждёт решения — новую заявку не создаём")
@@ -4109,7 +4296,13 @@ class PaperBotRuntime:
             # Проскальзывание на входе (adverse) — parity с бэктестом (fill_price).
             _cm = CostModel(commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps)
             _fill = _cm.fill_price(float(c.open), side)
-            if cfg.sl_mode == "fixed":
+            if (order.meta or {}).get("momentum"):
+                # Моментум-режим: стоп momentum_stop_pct (3%), TP не ставим (выход — EOD)
+                exit_policy = FixedSlTpPolicy(
+                    stop_pct=float(getattr(cfg, "momentum_stop_pct", 0.03) or 0.03),
+                    target_pct=10.0)
+                plan = exit_policy.plan_entry(side, _fill, [])
+            elif cfg.sl_mode == "fixed":
                 exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
                 plan = exit_policy.plan_entry(side, _fill, [])
             else:
