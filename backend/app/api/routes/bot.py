@@ -72,6 +72,8 @@ def _config_payload(cfg: BotConfig) -> dict:
         "queue_min_turnover": float(getattr(cfg, "queue_min_turnover", 300000) or 0.0),
         "queue_adv_multiple": float(getattr(cfg, "queue_adv_multiple", 200.0) or 0.0),
         "eod_close_min_before": int(getattr(cfg, "eod_close_min_before", 10) or 10),
+        "daily_bias": bool(getattr(cfg, "daily_bias", True)),
+        "daily_bias_mode": str(getattr(cfg, "daily_bias_mode", "veto")),
         "top_sizing": str(getattr(cfg, "top_sizing", "multiply")),
         "top_relax_caps": bool(getattr(cfg, "top_relax_caps", True)),
         "rank_enabled": bool(getattr(cfg, "rank_enabled", True)),
@@ -250,6 +252,8 @@ class BotConfigPatch(BaseModel):
     queue_adv_multiple: float | None = None    # слот ≤ 1/N дневного оборота
     rank_enabled: bool | None = None           # ранжирование тикеров (разведка → топ-N)
     eod_close_min_before: int | None = None    # за N минут до конца сессии закрывать (overnight=False)
+    daily_bias: bool | None = None             # дневной MACD-bias (veto входов против направления)
+    daily_bias_mode: str | None = None         # veto | info
     top_sizing: str | None = None              # режим размера топ-1 (divide|multiply)
     top_relax_caps: bool | None = None         # топ-1: сектор off, net до 100%
     rank_top_n: int | None = None              # сколько тикеров торгуем
@@ -405,6 +409,12 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.queue_min_turnover is not None:
         cfg.queue_min_turnover = max(0.0, min(100e6, float(req.queue_min_turnover)))
         changes.append(f"мин. оборот: {cfg.queue_min_turnover/1e6:.2f}M ₽/день")
+    if req.daily_bias is not None:
+        cfg.daily_bias = bool(req.daily_bias)
+        changes.append(f"дневной bias: {'вкл' if cfg.daily_bias else 'выкл'}")
+    if req.daily_bias_mode is not None and req.daily_bias_mode in ("veto", "info"):
+        cfg.daily_bias_mode = req.daily_bias_mode
+        changes.append(f"дневной bias режим: {cfg.daily_bias_mode}")
     if req.eod_close_min_before is not None:
         cfg.eod_close_min_before = max(0, min(60, int(req.eod_close_min_before)))
         changes.append(f"EOD-закрытие за {cfg.eod_close_min_before} мин до конца сессии")
@@ -473,7 +483,7 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.invert_signals is not None and req.invert_signals != cfg.invert_signals:
         changes.append(f"инверсия сигналов: {'вкл' if cfg.invert_signals else 'выкл'} → {'вкл' if req.invert_signals else 'выкл'}")
         cfg.invert_signals = req.invert_signals
-    if req.ensemble_entry_tf is not None and req.ensemble_entry_tf in ("1min", "5min", "10min", "15min"):
+    if req.ensemble_entry_tf is not None and req.ensemble_entry_tf in ("1min", "5min", "10min", "15min", "hour"):
         if req.ensemble_entry_tf != getattr(cfg, "ensemble_entry_tf", "5min"):
             changes.append(f"entry_tf: {getattr(cfg, 'ensemble_entry_tf', '5min')} → {req.ensemble_entry_tf}")
         cfg.ensemble_entry_tf = req.ensemble_entry_tf

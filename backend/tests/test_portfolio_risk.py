@@ -226,3 +226,24 @@ def test_eod_close_due():
     assert eod_close_due(clearing, S) is False
     assert eod_close_due(night, S, overnight=True) is False
     assert eod_close_due(late, S, minutes_before=20) is True
+
+
+def test_daily_bias_macd():
+    from app.bot.daily_bias import bias_allows, bias_from_closes, ema, macd
+    # 40 дней роста → MACD выше сигнальной → up
+    up = [100.0 + i * 1.0 for i in range(40)]
+    r_up = bias_from_closes(up)
+    assert r_up["bias"] == "up" and r_up["hist"] > 0
+    # 40 дней падения → down
+    dn = [140.0 - i * 1.0 for i in range(40)]
+    r_dn = bias_from_closes(dn)
+    assert r_dn["bias"] == "down" and r_dn["hist"] < 0
+    # мало данных
+    assert bias_from_closes([1.0, 2.0])["bias"] == "unknown"
+    # veto-логика
+    assert bias_allows("up", "BUY") is True and bias_allows("up", "SELL") is False
+    assert bias_allows("down", "SELL") is True and bias_allows("down", "BUY") is False
+    assert bias_allows("unknown", "SELL") is True
+    # EMA и MACD считаются
+    assert len(ema([1.0, 2.0, 3.0], 2)) == 3
+    assert macd(up)["ok"] is True

@@ -135,6 +135,8 @@ class BotConfig:
     # --- Overnight ---
     overnight: bool = False  # по умолчанию закрывать на конец торгового дня; True = держать через ночь
     eod_close_min_before: int = 10  # закрывать за N минут до конца последней сессии (overnight=False)
+    daily_bias: bool = True          # дневной MACD-bias: блокировать входы против дневного направления
+    daily_bias_mode: str = "veto"    # veto | info
     # --- Margin ---
     use_margin: bool = True  # использовать маржинальное кредитование
     margin_sessions: list = field(default_factory=lambda: ["day"])  # сессии с маржой: morning/day/evening
@@ -176,7 +178,8 @@ BOT_PERSIST_FIELDS = (
     "trail_distance_atr", "trail_compress_r", "trail_min_factor", "trail_min_atr", "trail_vol_boost",
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
-    "overnight", "eod_close_min_before", "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
+    "overnight", "eod_close_min_before", "daily_bias", "daily_bias_mode",
+    "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
     "queue_enabled", "queue_ttl_min", "queue_interval_sec", "top_boost",
@@ -497,6 +500,8 @@ class PaperBotRuntime:
         self._turnover_cache: dict[str, float] = {}
         self._cand_queue: dict[str, dict] = {}
         self._equity_peak: float = 0.0
+        self._daily_bias_cache: dict[str, dict] = {}
+        self._daily_bias_ts: float = 0.0
         self._overnight_cache: list[str] | None = None
         self._overnight_ts: float = 0.0
         self._dd_level_done: int = 0
@@ -572,6 +577,11 @@ class PaperBotRuntime:
             await self.trade_history()
         except Exception:
             pass
+        try:
+            _dbm = await self.daily_bias_map()
+            snap["daily_bias"] = {k: v.get("bias") for k, v in list(_dbm.items())[:40]}
+        except Exception:
+            snap["daily_bias"] = {}
         try:
             snap["regime"] = await self.market_regime()
         except Exception:
@@ -698,6 +708,43 @@ class PaperBotRuntime:
         except Exception:
             pass
         return self._hist_cache
+
+    async def daily_bias_map(self, ttl: float = 900.0) -> dict[str, dict]:
+        """Дневной MACD-bias по тикерам (кэш 15 мин): {ticker: {bias, hist, bars}}."""
+        import time as _t
+        if self._daily_bias_cache and (_t.monotonic() - self._daily_bias_ts) < ttl:
+            return self._daily_bias_cache
+        from app.bot.daily_bias import bias_from_closes as _bfc
+        out: dict[str, dict] = {}
+        try:
+            from sqlalchemy import text as _text
+            async with SessionLocal() as db:
+                _figs = [u.get("figi") for u in (self.universe or []) if u.get("figi")]
+                if not _figs:
+                    return self._daily_bias_cache
+                rows = (await db.execute(_text(
+                    "SELECT figi, d, close FROM ("
+                    "  SELECT figi, (ts AT TIME ZONE 'Europe/Moscow')::date AS d, ts, close,"
+                    "         row_number() OVER (PARTITION BY figi,"
+                    "                            (ts AT TIME ZONE 'Europe/Moscow')::date"
+                    "                            ORDER BY ts DESC) AS rn"
+                    "  FROM candles WHERE interval = 5 AND figi = ANY(:fs)"
+                    "        AND ts > now() - interval '90 days'"
+                    ") t WHERE rn = 1 ORDER BY figi, d"
+                ), {"fs": _figs})).all()
+            by_figi: dict[str, list[float]] = {}
+            for figi, _d, close in rows:
+                by_figi.setdefault(str(figi), []).append(float(close or 0.0))
+            for figi, closes in by_figi.items():
+                tk = str(self.tickers.get(figi, "") or "").upper()
+                if not tk:
+                    continue
+                out[tk] = _bfc(closes)
+            self._daily_bias_cache = out
+            self._daily_bias_ts = _t.monotonic()
+        except Exception:
+            pass
+        return self._daily_bias_cache
 
     def _rank_ok(self, ticker: str) -> tuple[bool, str]:
         from app.bot.portfolio import rank_ok as _rk
@@ -3668,6 +3715,26 @@ class PaperBotRuntime:
             qty=qty,
             meta={**dict(meta or {}), "leverage": float(_used_lev)},
         )
+        # --- Дневной MACD-bias: входы против дневного направления (veto) ---
+        if action == "open" and bool(getattr(cfg, "daily_bias", False)):
+            try:
+                _db = (await self.daily_bias_map()).get(str(ticker).upper()) or {}
+                _bias = str(_db.get("bias") or "")
+                _against = ((_bias == "up" and side == "SELL")
+                            or (_bias == "down" and side == "BUY"))
+                if _against:
+                    _hist = _db.get("hist")
+                    if str(getattr(cfg, "daily_bias_mode", "veto")).lower() == "veto":
+                        self._log(f"ПРОПУСК ВХОДА {ticker}: дневной MACD-bias {_bias} "
+                                  f"(hist {_hist:+}) против {side} · {_db.get('bars')} дн.")
+                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                        reason="DAILY_BIAS", detail=_bias)
+                        self._log_no_trade(figi, "daily_bias")
+                        return
+                    self._log(f"ДНЕВНОЙ BIAS {ticker}: {side} против {_bias} "
+                              f"(hist {_hist:+}, info-режим) — пропускаю дальше")
+            except Exception:
+                pass
         # --- Ранжирование: разведка K сделок, затем только топ-N по прошлому net ---
         if action == "open":
             try:
