@@ -2233,6 +2233,27 @@ export async function renderStats() {
       }
     }
   } catch { /* ignore */ }
+  // Блок AI-отчёта: разбор рынка + предложения по механизму бота.
+  try {
+    const ar = $("an-aireport");
+    if (ar) {
+      const rp = await fetch(`${API}/api/v1/bot/ai_report`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (rp && rp.analysis) {
+        const sugg = (rp.suggestions || []).map((x: any) => `<li>${_agEsc(String(x))}</li>`).join("");
+        const acts = (rp.actions || []).map((a: any) =>
+          `<span class="ar-act">${_agEsc(a.action || "")} ${_agEsc(a.ticker || "")}` +
+          `${a.side ? " " + _agEsc(a.side) : ""}</span>`).join(" ");
+        ar.innerHTML = `<div class="an-ag-head">🧠 AI о рынке <span class="dim">${_agEsc(rp.model || "")}` +
+          `${rp.now_msk ? " · " + _agEsc(rp.now_msk) : ""}</span></div>` +
+          `<div class="ar-text">${_agEsc(rp.analysis)}</div>` +
+          (sugg ? `<div class="ar-sugg"><b>Предложения по механизму бота:</b><ul>${sugg}</ul></div>` : "") +
+          (acts ? `<div class="ar-acts">Действия: ${acts}</div>` : "");
+      } else {
+        ar.innerHTML = '<div class="an-ag-head">🧠 AI о рынке: отчёт ещё не получен (ai_trader не запущен)</div>';
+      }
+    }
+  } catch { /* ignore */ }
   const body = $("stats-body");
   if (!body) return;
   body.innerHTML = `<div class="mini-hint">загрузка…</div>`;

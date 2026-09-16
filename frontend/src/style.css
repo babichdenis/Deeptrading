@@ -777,6 +777,13 @@ body {
 #page-analytics .stats-overall { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
 #page-analytics .stats-cmp-result { overflow: visible; }
 
+.an-aireport { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-soft); display: flex; flex-direction: column; gap: 6px; }
+.an-aireport .ar-text { font-size: 12px; line-height: 1.5; color: #ffffff; white-space: pre-wrap; }
+.an-aireport .ar-sugg { font-size: 12px; color: var(--text-dim); }
+.an-aireport .ar-sugg ul { margin: 4px 0 0 16px; padding: 0; }
+.an-aireport .ar-sugg li { margin-bottom: 3px; line-height: 1.4; }
+.an-aireport .ar-acts { font-size: 11px; color: var(--text-faint); }
+.an-aireport .ar-act { display: inline-block; margin-right: 8px; padding: 1px 6px; border-radius: 6px; background: rgba(120,154,194,.12); }
 .an-aigate { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-soft); display: flex; flex-direction: column; gap: 4px; }
 .an-aigate .an-ag-head { font-size: 12px; }
 .an-aigate .an-ag-head b.pos { color: var(--up); }
