@@ -4292,7 +4292,15 @@ class PaperBotRuntime:
                 return False
             self._approvals_since.pop(order.id, None)
         if order.action == "close":
-            trade = await self.broker.close_position(figi, c.open, "signal_exit")
+            try:
+                trade = await self.broker.close_position(figi, c.open, "signal_exit")
+            except Exception as _e:
+                order.status = "REJECTED"
+                self._log(f"⛔ ЗАКРЫТИЕ ОТКЛОНЕНО БРОКЕРОМ {order.ticker}: "
+                          f"{type(_e).__name__}: {str(_e)[:140]}")
+                self.events.log("ORDER_REJECTED", figi=figi, ticker=order.ticker,
+                                order_id=order.id, action="close", error=str(_e)[:200])
+                return False
             actual_exit = price_from_trade(trade) if trade else c.open
             order.status = "FILLED"
             order.filled_at = datetime.now(timezone.utc)
@@ -4356,16 +4364,26 @@ class PaperBotRuntime:
             _cm = CostModel(commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps)
             _fill = _cm.fill_price(float(c.open), side)
             plan = exit_policy.plan_entry(side, _fill, [])
-        actual_entry = await self.broker.open_position(
-            figi=figi,
-            ticker=order.ticker,
-            side=order.side,
-            qty=order.qty,
-            price=_fill,
-            stop_loss=round(plan.stop_loss, 6) if plan.stop_loss is not None else None,
-            take_profit=round(plan.take_profit, 6) if plan.take_profit is not None else None,
-            strategy_id=cfg.strategy_id,
-        )
+        try:
+            actual_entry = await self.broker.open_position(
+                figi=figi,
+                ticker=order.ticker,
+                side=order.side,
+                qty=order.qty,
+                price=_fill,
+                stop_loss=round(plan.stop_loss, 6) if plan.stop_loss is not None else None,
+                take_profit=round(plan.take_profit, 6) if plan.take_profit is not None else None,
+                strategy_id=cfg.strategy_id,
+            )
+        except Exception as _e:
+            # Ошибка брокера (нехватка средств, отказ биржи) НЕ должна ронять рантайм:
+            # помечаем ордер REJECTED, логируем — бот продолжает работать.
+            order.status = "REJECTED"
+            self._log(f"⛔ ОРДЕР ОТКЛОНЁН БРОКЕРОМ {order.ticker} {order.side} "
+                      f"qty={order.qty}: {type(_e).__name__}: {str(_e)[:140]}")
+            self.events.log("ORDER_REJECTED", figi=figi, ticker=order.ticker,
+                            order_id=order.id, action="open", error=str(_e)[:200])
+            return False
         entry_px = actual_entry if actual_entry and actual_entry > 0 else c.open
         order.status = "FILLED"
         order.filled_at = datetime.now(timezone.utc)
