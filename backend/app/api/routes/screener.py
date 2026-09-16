@@ -221,14 +221,45 @@ async def _compute_movers(top: int = 5) -> dict:
         by.setdefault(f, []).append((ts, float(close or 0.0)))
     out: dict = {}
     for days, label in _HORIZONS:
-        items = []
+        # дневные закрытия по всем тикерам (для истории групп/стажа)
+        series: dict[str, list[float]] = {}
         for f, bars in by.items():
-            bars = [b for b in bars if b[0].astimezone(_msk).date() != today]
-            if len(bars) < days + 1 or bars[-days - 1][1] <= 0:
+            bb = [b for b in bars if b[0].astimezone(_msk).date() != today]
+            if len(bb) >= days + 1:
+                series[names[f]] = [x[1] for x in bb]
+        items = []
+        for tk, cl in series.items():
+            if cl[-days - 1] <= 0:
                 continue
-            ch = (bars[-1][1] / bars[-days - 1][1] - 1) * 100
-            items.append({"ticker": names[f], "chg": round(ch, 1), "price": round(bars[-1][1], 2)})
+            ch = (cl[-1] / cl[-days - 1] - 1) * 100
+            items.append({"ticker": tk, "chg": round(ch, 1), "price": round(cl[-1], 2)})
         items.sort(key=lambda x: -x["chg"])
+        # стаж: сколько дней подряд тикер в той же группе (топ-N / низ-N).
+        # Считаем членство за последние _sw дней (нужна история days+_sw баров).
+        streaks: dict[str, int] = {}
+        _sw = 30
+        try:
+            if series and max(len(cl) for cl in series.values()) >= days + _sw + 1:
+                for k_off in range(_sw, -1, -1):
+                    m: dict[str, float] = {}
+                    for tk, cl in series.items():
+                        i_now = len(cl) - 1 - k_off
+                        i_old = i_now - days
+                        if i_now >= 0 and i_old >= 0 and cl[i_old] > 0:
+                            m[tk] = cl[i_now] / cl[i_old] - 1.0
+                    if len(m) < 2 * top:
+                        continue
+                    r = sorted(m, key=lambda x: -m[x])
+                    up_set, dn_set = set(r[:top]), set(r[-top:])
+                    for tk in list(streaks):
+                        if tk not in up_set and tk not in dn_set:
+                            streaks.pop(tk, None)
+                    for tk in up_set | dn_set:
+                        streaks[tk] = streaks.get(tk, 0) + 1
+        except Exception:
+            streaks = {}
+        for x in items:
+            x["streak"] = streaks.get(x["ticker"], 0)
         out[label] = {
             "n": len(items),
             "up": items[:top],

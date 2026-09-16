@@ -2122,7 +2122,8 @@ export async function renderStats() {
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
       if (mv && mv.ok && mv.horizons) {
         const fmt = (arr: any[]) => (arr || []).map((x: any) =>
-          `<span class="mv-tk">${x.ticker}</span> <span class="${x.chg >= 0 ? "mv-up" : "mv-dn"}">${x.chg > 0 ? "+" : ""}${x.chg}%</span>`).join("<br>");
+          `<span class="mv-tk">${x.ticker}</span> <span class="${x.chg >= 0 ? "mv-up" : "mv-dn"}">${x.chg > 0 ? "+" : ""}${x.chg}%</span>` +
+          (x.streak ? ` <span class="dim">${x.streak}д</span>` : "")).join("<br>");
         const rows = Object.entries(mv.horizons).map(([lbl, h]: [string, any]) => {
           const c = h.counts || {};
           const cnt = `≥5%: ${c["5"]?.[0] ?? 0}/${c["5"]?.[1] ?? 0}<br>≥10%: ${c["10"]?.[0] ?? 0}/${c["10"]?.[1] ?? 0}<br>≥20%: ${c["20"]?.[0] ?? 0}/${c["20"]?.[1] ?? 0}`;
