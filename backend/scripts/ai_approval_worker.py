@@ -928,6 +928,16 @@ def main() -> None:
                 _log(rec)
         except Exception as e:
             print(f"[ai-gate] order {order.get('ticker')}: {type(e).__name__}: {str(e)[:100]}", flush=True)
+
+    while True:
+        try:
+            if not _prompt_sent:
+                _prompt_sent = post_prompt()
+            d = _http("GET", f"{args.api}/api/v1/bot/approvals")
+            pending = d.get("pending") or []
+            if not d.get("enabled"):
+                time.sleep(args.interval)
+                continue
             todo = []
             for order in pending:
                 wait = float(order.get("waiting_sec") or 0)
