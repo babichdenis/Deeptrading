@@ -87,6 +87,7 @@ def _config_payload(cfg: BotConfig) -> dict:
         "momentum_stop_pct": float(getattr(cfg, "momentum_stop_pct", 0.03) or 0.03),
         "momentum_entry_time": str(getattr(cfg, "momentum_entry_time", "10:30") or "10:30"),
         "momentum_max_lev": float(getattr(cfg, "momentum_max_lev", 2.0) or 2.0),
+        "momentum_only": bool(getattr(cfg, "momentum_only", False)),
         "mtf_align": bool(getattr(cfg, "mtf_align", False)),
         "mtf_trigger": bool(getattr(cfg, "mtf_trigger", False)),
         "daily_bias": bool(getattr(cfg, "daily_bias", True)),
@@ -278,6 +279,7 @@ class BotConfigPatch(BaseModel):
     momentum_stop_pct: float | None = None      # стоп (доля)
     momentum_entry_time: str | None = None      # время входа МСК "10:30"
     momentum_max_lev: float | None = None       # кап плеча
+    momentum_only: bool | None = None           # только моментум (сигналы ансамбля игнор.)
     mtf_trigger: bool | None = None            # M5 MACD триггер разворота
     daily_bias_mode: str | None = None         # veto | info
     top_sizing: str | None = None              # режим размера топ-1 (divide|multiply)
@@ -435,6 +437,9 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.queue_min_turnover is not None:
         cfg.queue_min_turnover = max(0.0, min(100e6, float(req.queue_min_turnover)))
         changes.append(f"мин. оборот: {cfg.queue_min_turnover/1e6:.2f}M ₽/день")
+    if req.momentum_only is not None:
+        cfg.momentum_only = bool(req.momentum_only)
+        changes.append(f"только моментум: {'вкл' if cfg.momentum_only else 'выкл'}")
     if req.momentum_short is not None:
         cfg.momentum_short = bool(req.momentum_short)
         changes.append(f"моментум-шорт: {'вкл' if cfg.momentum_short else 'выкл'}")

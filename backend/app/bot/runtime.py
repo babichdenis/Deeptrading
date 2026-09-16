@@ -145,6 +145,7 @@ class BotConfig:
     momentum_stop_pct: float = 0.03  # внутридневной стоп (доля от входа)
     momentum_entry_time: str = "10:30"  # время входа (МСК)
     momentum_max_lev: float = 2.0    # кап плеча для моментум-входа
+    momentum_only: bool = False      # только моментум: сигналы ансамбля игнорируются
     mtf_trigger: bool = False        # M5 MACD гистограмма должна разворачиваться в сторону входа
     # --- Margin ---
     use_margin: bool = True  # использовать маржинальное кредитование
@@ -190,7 +191,7 @@ BOT_PERSIST_FIELDS = (
     "overnight", "eod_close_min_before", "daily_bias", "daily_bias_mode",
     "mtf_align", "mtf_trigger", "ensemble_require_member",
     "momentum_short", "momentum_n", "momentum_k", "momentum_stop_pct",
-    "momentum_entry_time", "momentum_max_lev",
+    "momentum_entry_time", "momentum_max_lev", "momentum_only",
     "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
@@ -324,6 +325,9 @@ TEST_VARIANTS: dict = {
     "base": {},
     "macd1": {"ensemble_require_member": "macd_cross", "ensemble_quorum": 2},
     "macd2": {"ensemble_require_member": "macd_cross", "ensemble_quorum": 3},
+    "momentum": {"momentum_short": True, "momentum_k": 3, "momentum_n": 63,
+                 "momentum_stop_pct": 0.03, "momentum_entry_time": "10:30",
+                 "momentum_max_lev": 2.0, "momentum_only": True},
 }
 
 
@@ -3773,6 +3777,9 @@ class PaperBotRuntime:
                                 reason=f"RISK_{risk.state}",
                                 daily_pnl=risk.daily_pnl)
                 self._log_no_trade(figi, f"risk_{risk.state.lower()}")
+                return
+            if bool(getattr(self.config, "momentum_only", False)):
+                self._log(f"МОМЕНТУМ-ONLY: сигнал ансамбля {ticker} {sig.side.value} игнорируется")
                 return
             await self._submit_order(figi, ticker, "open", sig.side.value, meta=dict(sig.features or {}))
         elif action is DecisionAction.ACCEPT_EXIT:
