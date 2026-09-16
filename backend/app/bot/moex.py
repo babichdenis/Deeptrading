@@ -23,10 +23,10 @@ def _sync_engine():
     return _ENGINE_CACHE
 
 
-def moex_candles(ticker: str, from_date: str, till_date: str) -> list[dict]:
-    """1-мин свечи из свободного MOEX ISS (без T-Invest лимитов)."""
+def moex_candles(ticker: str, from_date: str, till_date: str, interval: int = 1) -> list[dict]:
+    """Свечи MOEX ISS (без T-Invest лимитов). interval: 1/10/60 мин, 24 = день, 7 = неделя."""
     url = (f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR"
-           f"/securities/{ticker}/candles.json?from={from_date}&till={till_date}&interval=1")
+           f"/securities/{ticker}/candles.json?from={from_date}&till={till_date}&interval={int(interval)}")
     last_err: Exception | None = None
     for attempt in range(3):
         try:
@@ -178,6 +178,27 @@ def sync_moex_sync(figi: str, ticker: str, days: int = 10) -> int:
                     SET open=:o,high=:h,low=:l,close=:c,volume=:v
                 """), {"figi": figi, "ts": c["ts"], "o": c["open"], "h": c["high"],
                         "l": c["low"], "c": c["close"], "v": c["volume"]})
+    return len(candles)
+
+
+def sync_moex_daily(figi: str, ticker: str, days: int = 400) -> int:
+    """Дневные свечи (interval=24) из MOEX ISS → candles(interval=24)."""
+    now = datetime.now(timezone.utc)
+    from_ = now - timedelta(days=max(30, int(days)))
+    candles = moex_candles(ticker, from_.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d"),
+                           interval=24)
+    if not candles:
+        return 0
+    engine = _sync_engine()
+    with engine.begin() as db:
+        for c in candles:
+            db.execute(text("""
+                INSERT INTO candles (figi,interval,ts,open,high,low,close,volume)
+                VALUES (:figi,24,:ts,:o,:h,:l,:c,:v)
+                ON CONFLICT (figi,interval,ts) DO UPDATE
+                SET open=:o,high=:h,low=:l,close=:c,volume=:v
+            """), {"figi": figi, "ts": c["ts"], "o": c["open"], "h": c["high"],
+                    "l": c["low"], "c": c["close"], "v": c["volume"]})
     return len(candles)
 
 

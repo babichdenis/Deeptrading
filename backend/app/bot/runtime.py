@@ -722,18 +722,25 @@ class PaperBotRuntime:
                 _figs = [u.get("figi") for u in (self.universe or []) if u.get("figi")]
                 if not _figs:
                     return self._daily_bias_cache
+                # Дневные бары (interval=24, качаются scripts/download_daily_candles.py)
                 rows = (await db.execute(_text(
-                    "SELECT figi, d, close FROM ("
-                    "  SELECT figi, (ts AT TIME ZONE 'Europe/Moscow')::date AS d, ts, close,"
-                    "         row_number() OVER (PARTITION BY figi,"
-                    "                            (ts AT TIME ZONE 'Europe/Moscow')::date"
-                    "                            ORDER BY ts DESC) AS rn"
-                    "  FROM candles WHERE interval = 5 AND figi = ANY(:fs)"
-                    "        AND ts > now() - interval '90 days'"
-                    ") t WHERE rn = 1 ORDER BY figi, d"
+                    "SELECT figi, close FROM candles WHERE interval = 24 "
+                    "AND figi = ANY(:fs) ORDER BY figi, ts"
                 ), {"fs": _figs})).all()
+                if not rows:
+                    # fallback: собираем дневные закрытия из 5м свечей
+                    rows = (await db.execute(_text(
+                        "SELECT figi, close FROM ("
+                        "  SELECT figi, (ts AT TIME ZONE 'Europe/Moscow')::date AS d, ts, close,"
+                        "         row_number() OVER (PARTITION BY figi,"
+                        "                            (ts AT TIME ZONE 'Europe/Moscow')::date"
+                        "                            ORDER BY ts DESC) AS rn"
+                        "  FROM candles WHERE interval = 5 AND figi = ANY(:fs)"
+                        "        AND ts > now() - interval '90 days'"
+                        ") t WHERE rn = 1 ORDER BY figi, d"
+                    ), {"fs": _figs})).all()
             by_figi: dict[str, list[float]] = {}
-            for figi, _d, close in rows:
+            for figi, close in rows:
                 by_figi.setdefault(str(figi), []).append(float(close or 0.0))
             for figi, closes in by_figi.items():
                 tk = str(self.tickers.get(figi, "") or "").upper()
