@@ -878,65 +878,73 @@ def main() -> None:
         run_watch(args, _provs, _models)
         return
 
-    while True:
+    def _process_order(order: dict, tmo: float) -> None:
+        """Одна заявка: контекст → вердикты провайдеров → применение → запись решений."""
+        oid = order.get("id")
         try:
-            if not _prompt_sent:
-                _prompt_sent = post_prompt()
-            d = _http("GET", f"{args.api}/api/v1/bot/approvals")
-            pending = d.get("pending") or []
-            if not d.get("enabled"):
-                time.sleep(args.interval)
-                continue
+            ctx = _ctx(args.api) if args.full_context else _ctx_compact(args.api, order)
+
+            def _timed(p: str):
+                _t = time.monotonic()
+                try:
+                    _d = decide(p, order, ctx)
+                except Exception as e:
+                    _d = {"decision": "skip",
+                          "reason": f"{p}_error: {type(e).__name__}: {str(e)[:120]}",
+                          "advice": "", "confidence": 0.0}
+                return _d, int((time.monotonic() - _t) * 1000)
+
+            with ThreadPoolExecutor(max_workers=max(1, len(_provs))) as ex:
+                futs = {p: ex.submit(_timed, p) for p in _provs}
+                out = {p: f.result() for p, f in futs.items()}
+            decs = {p: out[p][0] for p in _provs}
+            agree = len({str(decs[p].get("decision")) for p in _provs}) == 1
+            applied_dec = decs.get(_apply, {})
+            applied_res = None
+            if not args.dry_run and applied_dec.get("decision") in ("approve", "reject"):
+                try:
+                    applied_res = _http(
+                        "POST", f"{args.api}/api/v1/bot/approvals/{oid}/{applied_dec['decision']}",
+                        {"reason": f"AI[{_apply}]: {applied_dec.get('reason', '')[:200]}"})
+                except Exception as e:
+                    applied_res = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+            for p in _provs:
+                d = decs[p]
+                rec = {"ts": datetime.now(timezone.utc).isoformat(), "order_id": oid,
+                       "ticker": order.get("ticker"), "side": order.get("side"),
+                       "qty": order.get("qty"), "figi": order.get("figi"),
+                       "provider": p, "model": _models.get(p, ""),
+                       "decision": d.get("decision"), "reason": d.get("reason", ""),
+                       "advice": d.get("advice", ""), "confidence": d.get("confidence"),
+                       "latency_ms": out[p][1], "agreement": agree,
+                       "applied": bool(p == _apply and applied_res is not None),
+                       "dry_run": args.dry_run, "shadow": args.dry_run}
+                if p == _apply and applied_res is not None:
+                    rec["apply_result"] = applied_res
+                try:
+                    _http("POST", f"{args.api}/api/v1/bot/ai_decisions", rec)
+                except Exception as e:
+                    rec["ui_post_error"] = f"{type(e).__name__}: {str(e)[:80]}"
+                _log(rec)
+        except Exception as e:
+            print(f"[ai-gate] order {order.get('ticker')}: {type(e).__name__}: {str(e)[:100]}", flush=True)
+            todo = []
             for order in pending:
-                oid = order.get("id")
                 wait = float(order.get("waiting_sec") or 0)
                 tmo = float(d.get("timeout_sec") or 45.0)
                 if wait > tmo * 0.75:
                     continue  # поздно решать — пусть сработает таймаут/default
-                ctx = _ctx(args.api) if args.full_context else _ctx_compact(args.api, order)
-
-                def _timed(p: str):
-                    _t = time.monotonic()
-                    try:
-                        _d = decide(p, order, ctx)
-                    except Exception as e:
-                        _d = {"decision": "skip",
-                              "reason": f"{p}_error: {type(e).__name__}: {str(e)[:120]}",
-                              "advice": "", "confidence": 0.0}
-                    return _d, int((time.monotonic() - _t) * 1000)
-
-                with ThreadPoolExecutor(max_workers=max(1, len(_provs))) as ex:
-                    futs = {p: ex.submit(_timed, p) for p in _provs}
-                    out = {p: f.result() for p, f in futs.items()}
-                decs = {p: out[p][0] for p in _provs}
-                agree = len({str(decs[p].get("decision")) for p in _provs}) == 1
-                applied_dec = decs.get(_apply, {})
-                applied_res = None
-                if not args.dry_run and applied_dec.get("decision") in ("approve", "reject"):
-                    try:
-                        applied_res = _http(
-                            "POST", f"{args.api}/api/v1/bot/approvals/{oid}/{applied_dec['decision']}",
-                            {"reason": f"AI[{_apply}]: {applied_dec.get('reason', '')[:200]}"})
-                    except Exception as e:
-                        applied_res = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
-                for p in _provs:
-                    d = decs[p]
-                    rec = {"ts": datetime.now(timezone.utc).isoformat(), "order_id": oid,
-                           "ticker": order.get("ticker"), "side": order.get("side"),
-                           "qty": order.get("qty"), "figi": order.get("figi"),
-                           "provider": p, "model": _models.get(p, ""),
-                           "decision": d.get("decision"), "reason": d.get("reason", ""),
-                           "advice": d.get("advice", ""), "confidence": d.get("confidence"),
-                           "latency_ms": out[p][1], "agreement": agree,
-                           "applied": bool(p == _apply and applied_res is not None),
-                           "dry_run": args.dry_run, "shadow": args.dry_run}
-                    if p == _apply and applied_res is not None:
-                        rec["apply_result"] = applied_res
-                    try:
-                        _http("POST", f"{args.api}/api/v1/bot/ai_decisions", rec)
-                    except Exception as e:
-                        rec["ui_post_error"] = f"{type(e).__name__}: {str(e)[:80]}"
-                    _log(rec)
+                todo.append((order, tmo))
+            if todo:
+                # Параллельно: раньше заявки обрабатывались по очереди и вердикты
+                # опаздывали (4 сигнала × ~30с = 2 мин > таймаут 55с → default approve).
+                with ThreadPoolExecutor(max_workers=min(3, len(todo))) as ex:
+                    futs = [ex.submit(_process_order, o, t) for o, t in todo]
+                    for f in futs:
+                        try:
+                            f.result()
+                        except Exception as e:
+                            print(f"[ai-gate] order error: {type(e).__name__}: {str(e)[:100]}", flush=True)
         except KeyboardInterrupt:
             print("stop", flush=True)
             return

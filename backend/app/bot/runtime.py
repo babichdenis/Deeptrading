@@ -879,11 +879,18 @@ class PaperBotRuntime:
             self._held.discard(p.figi)
             self._held.discard(bb)
             self._clear_exit_state(bb)
+            _net = float(trade.net_pnl) if trade else None
+            _px = float(trade.price) if (trade and getattr(trade, "price", None)) else last
+            try:
+                await self._st_close(p.figi, _px, reason=reason, net=_net,
+                                     meta={"source": "reduce_positions", "close_pct": close_pct})
+            except Exception as _e:
+                self._log(f"ST_CLOSE FAIL {getattr(p, 'ticker', '')}: {type(_e).__name__}")
             closed.append({"figi": p.figi, "ticker": getattr(p, "ticker", ""),
-                           "pnl": round(pnl, 2), "price": round(last, 6),
-                           "net_pnl": float(trade.net_pnl) if trade else None})
+                           "pnl": round(pnl, 2), "price": round(_px, 6),
+                           "net_pnl": _net})
             self.events.log("POSITION_CLOSED", figi=p.figi, ticker=getattr(p, "ticker", ""),
-                            reason=reason, net_pnl=closed[-1]["net_pnl"])
+                            reason=reason, net_pnl=_net)
         return {"closed": len(closed), "positions": closed, "reason": reason}
 
     async def _overnight_positions(self) -> list[str]:
@@ -2441,6 +2448,13 @@ class PaperBotRuntime:
             self._held.discard(p.figi)
             self._clear_exit_state(p.figi)
             self._entry_bar_index.pop(p.figi, None)
+            try:
+                await self._st_close(p.figi,
+                                     float(trade.price) if (trade and getattr(trade, "price", None)) else price,
+                                     reason="kill_switch_close_all",
+                                     net=float(trade.net_pnl) if trade else None)
+            except Exception:
+                pass
             closed.append({"figi": p.figi, "ticker": p.ticker,
                            "price": round(price, 6),
                            "net_pnl": float(trade.net_pnl) if trade else None})
@@ -2814,6 +2828,15 @@ class PaperBotRuntime:
                 closed_here = 0
                 for r in lst:
                     if (now - (r.entry_time or now)).total_seconds() < _grace:
+                        continue
+                    # Двойная проверка: снапшот positions() мог быть неполным (рестарт,
+                    # сбой API) — если позиция у брокера есть, НЕ помечаем orphan'ом.
+                    try:
+                        _real = await self.broker.get_position(figi)
+                    except Exception:
+                        _real = None
+                    if _real is not None:
+                        self._log(f"RECONCILE: orphan {figi[-6:]} — у брокера позиция есть, не трогаю")
                         continue
                     r.exit_time = now
                     r.exit_price = float(r.entry_price or 0.0)
