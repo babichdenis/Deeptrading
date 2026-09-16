@@ -274,3 +274,15 @@ def test_eod_close_only_at_last_session_end():
     assert eod_close_due(evening_soon, S) is True
     assert eod_close_due(evening_soon, ["day"]) is True       # вне сессий — fallback закрывает
     assert eod_close_due(day_end, ["day"]) is True
+
+
+def test_regime_limits_do_not_enable_disabled_net_limit():
+    from app.bot.portfolio import PortfolioLimits, regime_limits
+    base = PortfolioLimits(max_net_exposure_pct=0.0, max_sector_pct=0.0)
+    for state in ("bear", "bull", "reversal", "neutral"):
+        lim = regime_limits(base, {"state": state})
+        assert lim.max_net_exposure_pct == 0.0, state
+        assert lim.max_sector_pct == 0.0, state
+    on = PortfolioLimits(max_net_exposure_pct=0.5, max_sector_pct=0.35)
+    assert regime_limits(on, {"state": "bear"}).max_net_exposure_pct >= 1.0
+    assert regime_limits(on, {"state": "reversal"}).max_net_exposure_pct == 0.35

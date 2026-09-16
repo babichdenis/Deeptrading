@@ -162,7 +162,8 @@ def regime_limits(base: PortfolioLimits, regime: dict | None = None) -> Portfoli
         lim.max_margin_use_pct = min(lim.max_margin_use_pct or 0.8, 0.75)
         lim.max_stress_loss_pct = min(lim.max_stress_loss_pct or 0.10, 0.08)
     elif r == "reversal":
-        lim.max_net_exposure_pct = min(lim.max_net_exposure_pct or 0.5, 0.35)
+        if lim.max_net_exposure_pct > 0:   # 0 = выключен — не включаем режимом
+            lim.max_net_exposure_pct = min(lim.max_net_exposure_pct, 0.35)
         lim.max_margin_use_pct = min(lim.max_margin_use_pct or 0.8, 0.60)
         lim.max_stress_loss_pct = min(lim.max_stress_loss_pct or 0.10, 0.06)
     return lim
