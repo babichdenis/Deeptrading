@@ -111,10 +111,61 @@ async def lifespan(app: FastAPI):
 
     _imoex_task = asyncio.create_task(_imoex_keepalive())
 
+    # Daily bars keepalive: дневные бары (interval=24) для bias/аналитики.
+    # Проверяем каждые 30 мин; синк — раз в сутки после вечерней сессии (00:00–01:00 МСК)
+    # или при старте, если бары устарели (>2 дней).
+    async def _daily_bars_keepalive() -> None:
+        import logging as _logging
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from zoneinfo import ZoneInfo as _ZI
+        _log = _logging.getLogger("uvicorn")
+        _msk = _ZI("Europe/Moscow")
+        _last_run = None
+        await asyncio.sleep(20.0)
+        while True:
+            try:
+                from app.bot.moex import sync_moex_daily
+                from app.database import SessionLocal as _SL
+                from sqlalchemy import text as _text
+                now = _dt.now(_tz.utc)
+                msk = now.astimezone(_msk)
+                # устарели ли дневные бары (последний бар старше 2 суток)?
+                _stale = True
+                try:
+                    async with _SL() as db:
+                        _mx = (await db.execute(_text(
+                            "SELECT max(ts) FROM candles WHERE interval = 24"))).scalar()
+                    _stale = (_mx is None) or ((now - _mx) > _td(days=2))
+                except Exception:
+                    _stale = False
+                _window = (msk.hour == 0) or (msk.hour == 23 and msk.minute >= 55)
+                _due = _last_run is None or (now - _last_run) > _td(hours=20)
+                if _stale or (_window and _due):
+                    _last_run = now
+                    async with _SL() as db:
+                        rows = (await db.execute(_text(
+                            "SELECT figi, ticker FROM universe"))).all()
+                    _n = _ok = 0
+                    for _f, _t in rows:
+                        try:
+                            _k = await asyncio.to_thread(sync_moex_daily, str(_f), str(_t), 400)
+                            _n += _k
+                            _ok += 1 if _k else 0
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.25)
+                    _log.info("daily bars keepalive: %s тикеров, %s баров", _ok, _n)
+            except Exception as e:
+                _log.warning("daily bars keepalive: %s", str(e)[:120])
+            await asyncio.sleep(1800.0)
+
+    _daily_task = asyncio.create_task(_daily_bars_keepalive())
+
     try:
         yield
     finally:
         _imoex_task.cancel()
+        _daily_task.cancel()
         queue_dispatcher.stop()
         ens_dispatcher.stop()
         await engine.dispose()
