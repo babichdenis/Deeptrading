@@ -864,6 +864,18 @@ async def bot_ai_prompt_get() -> dict:
     return runtime.get_ai_prompt()
 
 
+@router.post("/ai_report")
+async def bot_ai_report_set(payload: dict) -> dict:
+    """Отчёт AI о рынке + предложения по механизму бота (ai_trader шлёт каждый цикл)."""
+    return runtime.set_ai_report(payload or {})
+
+
+@router.get("/ai_report")
+async def bot_ai_report_get() -> dict:
+    """Последний отчёт AI о рынке — для вкладки «Анализ»."""
+    return runtime.get_ai_report()
+
+
 @router.post("/ai_notes")
 async def bot_ai_note_set(payload: dict) -> dict:
     """Заметка вахтёра позиций (llama/AI): hold|tighten|close|watch — словами, без управления."""

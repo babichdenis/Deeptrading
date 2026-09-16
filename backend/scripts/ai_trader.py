@@ -41,11 +41,17 @@ SYSTEM = """Ты — автономный трейдер на MOEX (sandbox-сч
 
 Правила:
 - маржа: бот не даст превысить 80% equity; стресс ±5% IMOEX ≤ 10% equity;
-- максимум 5 позиций одновременно;
+- максимум 6 позиций одновременно;
 - на каждый тикер — одно действие за цикл;
 - не открывай больше 3 новых позиций за цикл;
 - стоп обязателен (sl_pct 0.01-0.05), тейк по желанию (tp_pct, 0 = без тейка);
 - закрывай позиции, если тезис сломан, и фиксируй прибыль при достижении цели.
+- ВЫЖИМАЙ МАКСИМУМ: если позиция в плюсе и прибыль начала угасать (цена развернулась от
+  максимума, импульс/стакан против, momentum слабеет) — ЗАКРЫВАЙ или подтяни TP, не отдавай
+  нажитое. Лучше зафиксировать меньше, чем отдать всё. Это твоя главная работа по позициям.
+- ДОЛГИЕ СДЕЛКИ: если видишь, что падение/рост надолго (дни, а не часы: 3м-движение, стаж
+  в группе, дневной тренд) — можешь открывать swing-сделку: в action open добавь
+  "hold": "swing" (по умолчанию "intraday" — закроется в конце дня).
 
 Отвечай СТРОГО JSON-объектом (без текста вокруг):
 {
@@ -53,14 +59,19 @@ SYSTEM = """Ты — автономный трейдер на MOEX (sandbox-сч
                как это связано с текущими позициями, общий план на цикл (5-10 предложений)",
   "actions": [
     {"action":"open","ticker":"SBER","side":"SELL","notional_pct":1.0,"sl_pct":0.03,"tp_pct":0.06,
+     "hold":"intraday|swing",
      "reason":"почему именно эта сделка: что в данных говорит за вход, почему эта сторона,
                где стоп/тейк и что подтверждает/опровергает тезис (2-4 предложения)"},
     {"action":"close","ticker":"GAZP",
      "reason":"почему закрываю: что изменилось в данных/тезисе (2-4 предложения)"}
+  ],
+  "suggestions": [
+    "предложения по механизму бота: что мешает зарабатывать, какие гейты/лимиты поправить,
+     что добавить (0-5 конкретных пунктов, каждый 1-2 предложения)"
   ]
 }
 Если действий нет — "actions": []. notional_pct: 1.0 = стандартный слот (60% equity с плечом до ×2).
-Пиши содержательно: по твоему analysis и reason мы будем понимать и править логику.
+Пиши содержательно: по твоему analysis, reason и suggestions мы правим логику бота.
 """
 
 
@@ -90,11 +101,12 @@ def _ask(system: str, user: dict, model: str, url: str) -> tuple:
                 try:
                     obj = json.loads(m.group(0))
                     if isinstance(obj, dict) and "actions" in obj:
-                        return [obj.get("analysis") or "", obj.get("actions") or []]
+                        return [obj.get("analysis") or "", obj.get("actions") or [],
+                                obj.get("suggestions") or []]
                 except Exception:
                     pass
             m2 = re.search(r"\[.*\]", txt, re.S)
-            return ["", json.loads(m2.group(0))] if m2 else ["", []]
+            return ["", json.loads(m2.group(0)), []] if m2 else ["", [], []]
         finally:
             try:
                 c.delete(f"{url}/session/{sid}")
@@ -197,10 +209,35 @@ def main() -> None:
     ap.add_argument("--model", default="big-pickle")
     ap.add_argument("--interval", type=float, default=300.0)
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--report-only", action="store_true",
+                    help="только отчёт/предложения и закрытия, без открытия позиций")
     args = ap.parse_args()
 
+    def post_prompt() -> None:
+        try:
+            _http("POST", f"{args.api}/api/v1/bot/ai_prompt", {
+                "provider": "opencode", "model": args.model, "shadow": False,
+                "system": SYSTEM,
+                "context_schema": {
+                    "portfolio": "equity/cash/маржа, long_short",
+                    "positions[]": "entry/last/pnl/sl/tp/dist_*_atr/regime + orderbook + m5/h1 свечи",
+                    "orderbooks{}": "стакан кандидатов (imbalance, depth_rub)",
+                    "movers": "1д/1н/1м/3м + streak",
+                    "universe[]": "price/turnover/rng_pct",
+                    "imoex": "dir/pct_20m/pct_60m/pct_day, breadth_up_pct",
+                    "recent_trades": "последние сделки",
+                },
+            }, timeout=20)
+        except Exception:
+            pass
+
     print(f"[ai-trader] api={args.api} model={args.model} interval={args.interval}s", flush=True)
+    post_prompt()
+    _cycle = 0
     while True:
+        _cycle += 1
+        if _cycle % 100 == 0:
+            post_prompt()
         t0 = time.monotonic()
         try:
             ctx = _context(args.api)
@@ -208,7 +245,7 @@ def main() -> None:
             eq = (ctx.get("portfolio") or {}).get("equity")
             print(f"[ai-trader] контекст: позиций {n_pos}, equity {eq}, "
                   f"тикеров {len(ctx.get('universe') or [])}", flush=True)
-            analysis, acts = _ask(SYSTEM, ctx, args.model, args.opencode_url)
+            analysis, acts, sugg = _ask(SYSTEM, ctx, args.model, args.opencode_url)
             if analysis:
                 print(f"[ai-trader] РАЗБОР: {analysis}", flush=True)
                 try:
@@ -219,12 +256,23 @@ def main() -> None:
                     }, timeout=20)
                 except Exception:
                     pass
+                try:
+                    _http("POST", f"{args.api}/api/v1/bot/ai_report", {
+                        "model": args.model, "analysis": str(analysis)[:6000],
+                        "suggestions": sugg[:8], "actions": acts[:10],
+                        "now_msk": ctx.get("now_msk"),
+                    }, timeout=20)
+                except Exception:
+                    pass
             print(f"[ai-trader] действий: {len(acts)}", flush=True)
             for a in acts[:6]:
                 try:
                     act = str(a.get("action") or "").lower()
                     tk = str(a.get("ticker") or "").upper()
                     if not tk:
+                        continue
+                    if args.report_only and act == "open":
+                        print(f"[ai-trader] open {tk} пропущен (--report-only)", flush=True)
                         continue
                     if act == "close":
                         r = _http("POST", f"{args.api}/api/v1/bot/ai_trade",
@@ -234,6 +282,7 @@ def main() -> None:
                             "ticker": tk, "action": "open", "side": str(a.get("side") or "SELL"),
                             "notional_pct": a.get("notional_pct"), "sl_pct": a.get("sl_pct"),
                             "tp_pct": a.get("tp_pct"), "reason": a.get("reason", ""),
+                            "hold": str(a.get("hold") or "intraday"),
                         })
                     else:
                         continue

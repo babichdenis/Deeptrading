@@ -307,6 +307,11 @@ hold (держать), tighten (подтянуть стоп), close (закры�
 - за один шаг — не более ~2 ATR.
 
 Правила (по приоритету):
+0. ВЫЖИМАЙ МАКСИМУМ ПРИБЫЛИ (главное): если позиция в плюсе и прибыль НАЧАЛА УГАСАТЬ —
+   цена развернулась от максимума (2+ свечи против позиции), импульс/стакан/momentum против,
+   pnl откатился от лучшего — ЗАКРЫВАЙ (close) или подтягивай TP (tp ближе к цене). Не отдавай
+   нажитое: лучше зафиксировать меньше, чем отдать всё. Держи (hold) только если тренд живой
+   и цель ещё далеко.
 1. dist_sl_atr <= 1.0 → позиция почти у стопа: close или tighten (защитить остаток).
 2. dist_tp_atr <= 1.0 → цель близко: hold или tighten (зафиксировать прибыль).
 3. pnl < 0 и цена идёт против позиции (last хуже entry) → tighten или close.
@@ -939,9 +944,12 @@ def main() -> None:
         except Exception as e:
             print(f"[ai-gate] order {order.get('ticker')}: {type(e).__name__}: {str(e)[:100]}", flush=True)
 
+    _cycle = 0
     while True:
         try:
-            if not _prompt_sent:
+            _cycle += 1
+            # Re-post раз в ~100 циклов: рантайм хранит промпт в памяти и теряет его при рестарте
+            if not _prompt_sent or _cycle % 100 == 0:
                 _prompt_sent = post_prompt()
             d = _http("GET", f"{args.api}/api/v1/bot/approvals")
             pending = d.get("pending") or []

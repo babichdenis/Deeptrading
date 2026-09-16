@@ -605,6 +605,7 @@ class PaperBotRuntime:
         self._ai_decisions: deque = deque(maxlen=50)
         self._ai_notes: deque = deque(maxlen=50)  # заметки вахтёра позиций (llama)
         self._ai_prompt: dict = {}  # текущий промпт/модель AI-гейта (для UI)
+        self._ai_report: dict = {}  # отчёт AI о рынке + предложения по боту (для UI)
 
     async def sector_meta(self) -> dict:
         """{ticker: {sector, beta}} из instruments (кэш 10 мин)."""
@@ -2725,6 +2726,21 @@ class PaperBotRuntime:
 
     def get_ai_prompt(self) -> dict:
         return self._ai_prompt or {}
+
+    def set_ai_report(self, payload: dict) -> dict:
+        """Сохранить отчёт AI о рынке (ai_trader присылает каждый цикл)."""
+        self._ai_report = {
+            "updated_ts": datetime.now(timezone.utc).isoformat(),
+            "model": str(payload.get("model") or ""),
+            "analysis": str(payload.get("analysis") or ""),
+            "suggestions": payload.get("suggestions") or [],
+            "actions": payload.get("actions") or [],
+            "now_msk": str(payload.get("now_msk") or ""),
+        }
+        return {"ok": True, "updated_ts": self._ai_report["updated_ts"]}
+
+    def get_ai_report(self) -> dict:
+        return self._ai_report or {}
 
     def approve_order(self, order_id: str, reason: str = "") -> dict:
         """Одобрить ожидающий вход (исполнится на следующем баре)."""
