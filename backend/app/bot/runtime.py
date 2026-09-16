@@ -146,6 +146,7 @@ class BotConfig:
     momentum_entry_time: str = "10:30"  # время входа (МСК)
     momentum_max_lev: float = 2.0    # кап плеча для моментум-входа
     momentum_only: bool = False      # только моментум: сигналы ансамбля игнорируются
+    momentum_side: str = "short"     # направление моментума: short | long | both
     mtf_trigger: bool = False        # M5 MACD гистограмма должна разворачиваться в сторону входа
     # --- Margin ---
     use_margin: bool = True  # использовать маржинальное кредитование
@@ -191,7 +192,7 @@ BOT_PERSIST_FIELDS = (
     "overnight", "eod_close_min_before", "daily_bias", "daily_bias_mode",
     "mtf_align", "mtf_trigger", "ensemble_require_member",
     "momentum_short", "momentum_n", "momentum_k", "momentum_stop_pct",
-    "momentum_entry_time", "momentum_max_lev", "momentum_only",
+    "momentum_entry_time", "momentum_max_lev", "momentum_only", "momentum_side",
     "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
@@ -327,7 +328,7 @@ TEST_VARIANTS: dict = {
     "macd2": {"ensemble_require_member": "macd_cross", "ensemble_quorum": 3},
     "momentum": {"momentum_short": True, "momentum_k": 3, "momentum_n": 63,
                  "momentum_stop_pct": 0.03, "momentum_entry_time": "10:30",
-                 "momentum_max_lev": 2.0, "momentum_only": True},
+                 "momentum_max_lev": 2.0, "momentum_only": True, "momentum_side": "short"},
 }
 
 
@@ -975,9 +976,6 @@ class PaperBotRuntime:
                 if self._momentum_done == msk.date():
                     continue
                 self._momentum_done = msk.date()
-                if self._held:
-                    self._log("МОМЕНТУМ-ШОРТ: пропуск — в портфеле уже есть позиции")
-                    continue
                 await self._momentum_enter()
             except asyncio.CancelledError:
                 return
@@ -992,18 +990,32 @@ class PaperBotRuntime:
             self._log("МОМЕНТУМ-ШОРТ: нет данных моментума")
             return
         k = max(1, int(getattr(cfg, "momentum_k", 3) or 3))
+        side_mode = str(getattr(cfg, "momentum_side", "short") or "short").lower()
         ranked = sorted(mm.items(), key=lambda kv: kv[1])
-        picks = [(t, ch) for t, ch in ranked[:k] if ch < 0]
+        picks: list[tuple[str, float, str]] = []
+        if side_mode in ("short", "both"):
+            picks += [(t, ch, "SELL") for t, ch in ranked[:k] if ch < 0]
+        if side_mode in ("long", "both"):
+            picks += [(t, ch, "BUY") for t, ch in ranked[-k:][::-1] if ch > 0]
         if not picks:
-            self._log("МОМЕНТУМ-ШОРТ: нет падающих кандидатов")
+            self._log(f"МОМЕНТУМ ({side_mode}): нет кандидатов")
             return
-        self._log("МОМЕНТУМ-ШОРТ: " + ", ".join(f"{t} {ch:+.1f}%" for t, ch in picks))
-        for t, ch in picks:
+        _max_pos = int(getattr(cfg, "max_positions", 0) or 0)
+        if _max_pos > 0:
+            _free = max(0, _max_pos - len(self._held))
+            picks = picks[:_free]
+            if not picks:
+                self._log(f"МОМЕНТУМ ({side_mode}): нет свободных слотов "
+                          f"({len(self._held)}/{_max_pos})")
+                return
+        self._log(f"МОМЕНТУМ ({side_mode}): "
+                  + ", ".join(f"{sd} {t} {ch:+.1f}%" for t, ch, sd in picks))
+        for t, ch, sd in picks:
             _figi = next((u.get("figi") for u in (self.universe or [])
                           if str(u.get("ticker", "")).upper() == t), None)
             if not _figi:
                 continue
-            await self._submit_order(_figi, t, "open", "SELL",
+            await self._submit_order(_figi, t, "open", sd,
                                      meta={"momentum": True, "priority": True, "mom_chg": ch})
 
     def _rank_ok(self, ticker: str) -> tuple[bool, str]:
@@ -4189,9 +4201,9 @@ class PaperBotRuntime:
             except Exception:
                 pass
         # --- Баланс LONG/SHORT: не даём уйти в односторонний шорт ---
-        if action == "open" and side == "SELL" and not _is_momentum:
+        if action == "open" and side == "SELL":
             try:
-                _share
+                _share = float(getattr(cfg, "max_short_share", 0.0) or 0.0)
                 _min_total = int(getattr(cfg, "balance_min_positions", 3) or 3)
                 if _share > 0 and len(self._held) >= _min_total:
                     _shorts = sum(1 for _f in self._held
@@ -4207,7 +4219,7 @@ class PaperBotRuntime:
             except Exception:
                 pass
         # --- AI-гейт: дедуп и пауза после отклонения ---
-        if action == "open" and not _is_momentum and bool(getattr(cfg, "ai_approval", False)):
+        if action == "open" and bool(getattr(cfg, "ai_approval", False)):
             _pend = self.pending_orders.get(figi)
             if _pend is not None and getattr(_pend, "status", "") == "PENDING_APPROVAL":
                 self._log(f"AI-ГЕЙТ: {ticker} уже ждёт решения — новую заявку не создаём")
