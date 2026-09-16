@@ -82,6 +82,11 @@ async def lifespan(app: FastAPI):
             cfg.mode = _mode
             cfg.feed = "replay" if _mode == "test" else "stream"
             if _mode == "test":
+                try:
+                    from app.bot.runtime import apply_test_overrides
+                    apply_test_overrides(cfg)
+                except Exception:
+                    pass
                 cfg.mode = "test"
                 cfg.feed = "replay"
                 cfg.test_name = _s.bot_test_name or os.environ.get("BOT_TEST_NAME", "")

@@ -275,6 +275,27 @@ def default_ensemble_config() -> dict:
             "entry_tf": "5min"}
 
 
+# Тестовые оверрайды конфига (применяются ТОЛЬКО в mode=test, live не трогают).
+TEST_MODE_OVERRIDES: dict = {
+    "mtf_align": True,        # H1 MACD подтверждает дневной bias (по бэктесту: PF 0.70 → 0.81)
+    "mtf_trigger": False,     # M5 триггер отдельно вредит (PF 0.67) — не включаем
+    "daily_bias": True,
+    "daily_bias_mode": "veto",
+}
+
+
+def apply_test_overrides(cfg) -> list[str]:
+    """Применить тестовые оверрайды (mode=test). Возвращает список применённых."""
+    applied: list[str] = []
+    for _k, _v in TEST_MODE_OVERRIDES.items():
+        try:
+            setattr(cfg, _k, _v)
+            applied.append(f"{_k}={_v}")
+        except Exception:
+            pass
+    return applied
+
+
 async def load_ensemble_config() -> dict:
     """Состав кворума из data/ensemble_config.json (источник правды), дефолт если нет."""
     try:
@@ -723,10 +744,16 @@ class PaperBotRuntime:
         return self._hist_cache
 
     async def daily_bias_map(self, ttl: float = 900.0) -> dict[str, dict]:
-        """Дневной MACD-bias по тикерам (кэш 15 мин): {ticker: {bias, hist, bars}}."""
+        """Дневной MACD-bias по тикерам (кэш 15 мин): {ticker: {bias, hist, bars}}.
+
+        В реплее кэш отключён и берётся срез на момент реплея (иначе look-ahead).
+        """
         import time as _t
-        if self._daily_bias_cache and (_t.monotonic() - self._daily_bias_ts) < ttl:
+        _replay = str(getattr(self.config, "feed", "")) == "replay"
+        if (not _replay and self._daily_bias_cache
+                and (_t.monotonic() - self._daily_bias_ts) < ttl):
             return self._daily_bias_cache
+        _cutoff = self._bot_now()
         from app.bot.daily_bias import bias_from_closes as _bfc
         out: dict[str, dict] = {}
         try:
@@ -738,8 +765,8 @@ class PaperBotRuntime:
                 # Дневные бары (interval=24, качаются scripts/download_daily_candles.py)
                 rows = (await db.execute(_text(
                     "SELECT figi, close FROM candles WHERE interval = 24 "
-                    "AND figi = ANY(:fs) ORDER BY figi, ts"
-                ), {"fs": _figs})).all()
+                    "AND figi = ANY(:fs) AND ts <= :cut ORDER BY figi, ts"
+                ), {"fs": _figs, "cut": _cutoff})).all()
                 if not rows:
                     # fallback: собираем дневные закрытия из 5м свечей
                     rows = (await db.execute(_text(
@@ -749,9 +776,9 @@ class PaperBotRuntime:
                         "                            (ts AT TIME ZONE 'Europe/Moscow')::date"
                         "                            ORDER BY ts DESC) AS rn"
                         "  FROM candles WHERE interval = 5 AND figi = ANY(:fs)"
-                        "        AND ts > now() - interval '90 days'"
+                        "        AND ts <= :cut AND ts > :cut - interval '90 days'"
                         ") t WHERE rn = 1 ORDER BY figi, d"
-                    ), {"fs": _figs})).all()
+                    ), {"fs": _figs, "cut": _cutoff})).all()
             by_figi: dict[str, list[float]] = {}
             for figi, close in rows:
                 by_figi.setdefault(str(figi), []).append(float(close or 0.0))
@@ -769,8 +796,10 @@ class PaperBotRuntime:
     async def mtf_macd_map(self, ttl: float = 900.0) -> dict[str, dict]:
         """M5 и H1 MACD по тикерам (кэш 15 мин): {ticker: {m5: {...}, h1: {...}}}."""
         import time as _t
-        if self._mtf_cache and (_t.monotonic() - self._mtf_ts) < ttl:
+        _replay = str(getattr(self.config, "feed", "")) == "replay"
+        if not _replay and self._mtf_cache and (_t.monotonic() - self._mtf_ts) < ttl:
             return self._mtf_cache
+        _cutoff = self._bot_now()
         from app.bot.daily_bias import macd_state as _ms
         out: dict[str, dict] = {}
         try:
@@ -781,9 +810,9 @@ class PaperBotRuntime:
             async with SessionLocal() as db:
                 rows = (await db.execute(_text(
                     "SELECT figi, ts, close FROM candles WHERE interval = 5 "
-                    "AND figi = ANY(:fs) AND ts > now() - interval '20 days' "
-                    "ORDER BY figi, ts"
-                ), {"fs": _figs})).all()
+                    "AND figi = ANY(:fs) AND ts <= :cut "
+                    "AND ts > :cut - interval '20 days' ORDER BY figi, ts"
+                ), {"fs": _figs, "cut": _cutoff})).all()
             by_figi: dict[str, list[tuple]] = {}
             for figi, ts, close in rows:
                 by_figi.setdefault(str(figi), []).append((ts, float(close or 0.0)))

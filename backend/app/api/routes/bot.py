@@ -34,6 +34,14 @@ async def _cfg_from_saved(mode: str = "sandbox", test_name: str = "", replay_sta
         cfg.replay_start = replay_start
         cfg.replay_end = replay_end
         cfg.replay_pace = replay_pace
+        try:
+            from app.bot.runtime import apply_test_overrides
+            _ov = apply_test_overrides(cfg)
+            if _ov:
+                import logging as _lg
+                _lg.getLogger("uvicorn").info("TEST overrides: %s", ", ".join(_ov))
+        except Exception:
+            pass
     return cfg
 
 
