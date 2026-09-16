@@ -50,8 +50,10 @@ SYSTEM = """Ты — риск-менеджер торгового бота (MOEX
    низкая ликвидность, вход против режима.
 5. APPROVE, если противопоказаний нет: бот уже прошёл свои фильтры (кворум, режим, guard),
    а вход согласован с направлением индекса/трендом.
-5a. БАЛАНС L/S: если long_short.shorts заметно больше longs (short_share > 0.7) — к SELL-входам
-   относись строже (перекос в шорты), а BUY-входы приветствуются для баланса.
+5a. БАЛАНС L/S НЕ ЯВЛЯЕТСЯ ПРИЧИНОЙ ОТКАЗА. Не отклоняй вход из-за short_share/net
+   и не жди BUY «для баланса». При < 3 позициях в портфеле short_share всегда ~1.0 —
+   это не перекос, а малая выборка. Оценивай КАЖДЫЙ вход по его собственному качеству:
+   импульс, объём, режим, кворум, guard. Перекос допустим, если каждый вход обоснован.
 5b0. РЕЖИМ РЫНКА (portfolio.regime.state): bear/bull = тренд (входы по тренду приоритетны,
    лимиты расширены до 100% net); reversal = разворот против книги — входы в сторону книги
    запрещены ботом; neutral = обычные лимиты. portfolio.queue — очередь сильнейших кандидатов
@@ -170,6 +172,9 @@ def _ctx_compact(api: str, order: dict) -> dict:
         r = _http("GET", f"{api}/api/v1/bot/status")
         out["risk"] = r.get("risk")
         out["long_short"] = r.get("long_short")
+        _ls = out.get("long_short") or {}
+        if int(_ls.get("total") or 0) < 3:
+            out["long_short_note"] = "позиций < 3: баланс L/S не учитывать как ограничение"
         out["loss_streak"] = r.get("loss_streak")
         try:
             out["portfolio"] = _http("GET", f"{api}/api/v1/bot/portfolio_summary", timeout=20)
