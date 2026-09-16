@@ -21,7 +21,6 @@ PY = str(BACKEND / ".venv" / "Scripts" / "python.exe")
 API = "http://127.0.0.1:8000"
 LOG = BACKEND / "test_variants.log"
 VARIANTS = [
-    ("h1_10m_gates", "on", "base"),
     ("momentum_v1", "on", "momentum"),
 ]
 

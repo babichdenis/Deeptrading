@@ -10,7 +10,11 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(get_settings().database_url, pool_pre_ping=True, pool_size=10, max_overflow=20, pool_timeout=60)
+_s = get_settings()
+engine = create_async_engine(_s.database_url, pool_pre_ping=True,
+                             pool_size=int(getattr(_s, "db_pool_size", 10) or 10),
+                             max_overflow=int(getattr(_s, "db_max_overflow", 20) or 20),
+                             pool_timeout=60)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 

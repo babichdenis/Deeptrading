@@ -19,7 +19,10 @@ def _sync_engine():
         s = get_settings()
         url = (f"postgresql://{s.postgres_user}:{s.postgres_password}"
                f"@{s.postgres_host}:{s.postgres_port}/{s.postgres_db}")
-        _ENGINE_CACHE = create_engine(url, pool_size=30, max_overflow=30)
+        _ENGINE_CACHE = create_engine(
+            url,
+            pool_size=int(getattr(s, "db_pool_size", 10) or 10),
+            max_overflow=int(getattr(s, "db_max_overflow", 20) or 20))
     return _ENGINE_CACHE
 
 

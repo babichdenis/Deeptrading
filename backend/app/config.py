@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_user: str = "deeptrading"
+    db_pool_size: int = 10          # размер пула соединений (для тестов на .2 — 3)
+    db_max_overflow: int = 20
     postgres_password: str = "deeptrading"
     postgres_db: str = "deeptrading"
     tinkoff_token: str = ""
