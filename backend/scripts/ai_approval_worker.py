@@ -757,7 +757,8 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                            "dist_sl_atr": p.get("dist_sl_atr"), "dist_tp_atr": p.get("dist_tp_atr"),
                            "pnl": p.get("pnl")}
                     if args.ai_sl_manage and _is_apply and act == "tighten" and _want:
-                        _ap = _apply_ai_levels(args, args.api, p, d.get("sl"), d.get("tp"))
+                        _sl_new = None if getattr(args, "ai_tp_only", False) else d.get("sl")
+                        _ap = _apply_ai_levels(args, args.api, p, _sl_new, d.get("tp"))
                         rec["applied_levels"] = _ap
                         if _ap.get("ok"):
                             _mv = _ap.get("moved") or {}
@@ -807,6 +808,8 @@ def main() -> None:
     ap.add_argument("--watch-interval", type=float, default=60.0)
     ap.add_argument("--watch-min-atr", type=float, default=1.5,
                     help="наблюдать позиции ближе N ATR к SL/TP (и все убыточные)")
+    ap.add_argument("--ai-tp-only", action="store_true",
+                    help="AI управляет только TP; SL не трогает (для вахтёра)")
     ap.add_argument("--ai-sl-manage", action="store_true",
                     help="разрешить llama ПОДТЯГИВАТЬ SL (только в сторону прибыли, с лимитами)")
     ap.add_argument("--ai-sl-max-step-atr", type=float, default=5.0)

@@ -3894,9 +3894,10 @@ class PaperBotRuntime:
                 )
                 _lim = _rlim(_base, _regime)
                 if _is_priority and bool(getattr(cfg, "top_relax_caps", True)):
-                    # Сильнейшему — большая сумма: сектор без лимита, net до 100%.
-                    # Жёсткими остаются стресс (±5% IMOEX) и маржа брокера.
-                    _lim.max_net_exposure_pct = max(_lim.max_net_exposure_pct, 1.0)
+                    # Сильнейшему — большая сумма: сектор без лимита, net до 100%
+                    # (если net-лимит вообще включён). Жёсткими остаются стресс и маржа.
+                    if _lim.max_net_exposure_pct > 0:
+                        _lim.max_net_exposure_pct = max(_lim.max_net_exposure_pct, 1.0)
                     _lim.max_sector_pct = 0.0
                 # лот: из universe
                 _lot_pf = next((u.get("lot") for u in self.universe if u.get("figi") == figi), 1) or 1

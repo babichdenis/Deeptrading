@@ -155,7 +155,8 @@ def regime_limits(base: PortfolioLimits, regime: dict | None = None) -> Portfoli
     r = str((regime or {}).get("state") or "neutral").lower()
     lim = replace(base)
     if r in ("bear", "bull"):
-        lim.max_net_exposure_pct = max(lim.max_net_exposure_pct, 1.0)
+        if lim.max_net_exposure_pct > 0:   # 0 = лимит выключен — не включаем его режимом
+            lim.max_net_exposure_pct = max(lim.max_net_exposure_pct, 1.0)
         lim.max_sector_pct = max(lim.max_sector_pct, 0.40)
         lim.max_margin_use_pct = min(lim.max_margin_use_pct or 0.8, 0.75)
         lim.max_stress_loss_pct = min(lim.max_stress_loss_pct or 0.10, 0.08)
