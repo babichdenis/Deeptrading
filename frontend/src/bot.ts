@@ -1709,7 +1709,7 @@ async function renderAiGate() {
     const [a, d, n] = await Promise.all([
       fetch(`${API}/api/v1/bot/approvals`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
       fetch(`${API}/api/v1/bot/ai_decisions?limit=30`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-      fetch(`${API}/api/v1/bot/ai_notes?limit=10`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`${API}/api/v1/bot/ai_notes?limit=30`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
     ]);
     approvals = a;
     decs = (d && d.decisions) || [];
