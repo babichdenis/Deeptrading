@@ -205,3 +205,24 @@ def test_check_order_margin_uses_risk_rate():
     # 1000₽ номинала LONG: риск 0.40 → 400₽ → 7900 < 8000 → ок
     ok2, _ = check_order(snap, "BUY", 1000, "SFIN", meta, lim)
     assert ok2
+
+
+def test_eod_close_due():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.engine.sessions import eod_close_due
+    msk = ZoneInfo("Europe/Moscow")
+    S = ["morning", "day", "evening"]
+    # среда 15.09.2026
+    inside = datetime(2026, 9, 15, 14, 0, tzinfo=msk)          # день — не пора
+    late = datetime(2026, 9, 15, 23, 45, tzinfo=msk)           # 5 мин до конца вечера
+    night = datetime(2026, 9, 15, 23, 55, tzinfo=msk)          # после вечера
+    premarket = datetime(2026, 9, 16, 6, 30, tzinfo=msk)       # перед утром
+    clearing = datetime(2026, 9, 15, 18, 55, tzinfo=msk)       # клиринг
+    assert eod_close_due(inside, S) is False
+    assert eod_close_due(late, S) is True
+    assert eod_close_due(night, S) is True
+    assert eod_close_due(premarket, S) is True
+    assert eod_close_due(clearing, S) is False
+    assert eod_close_due(night, S, overnight=True) is False
+    assert eod_close_due(late, S, minutes_before=20) is True

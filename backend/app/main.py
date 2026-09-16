@@ -65,6 +65,22 @@ async def lifespan(app: FastAPI):
                 reentry_cooldown_bars=15,
                 overnight=(_mode != "live"),
             )
+            # Сохранённые настройки пользователя (PATCH/UI) важнее хардкода:
+            # иначе рестарт сбрасывает pos_pct/margin_sizing/лимиты/rank/очередь.
+            try:
+                from app.bot.runtime import BOT_PERSIST_FIELDS, load_bot_settings
+                _saved = await load_bot_settings()
+                for _f in BOT_PERSIST_FIELDS:
+                    if _f in _saved:
+                        try:
+                            setattr(cfg, _f, _saved[_f])
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            # Режим/фид/реплей — всегда из .env, не из сохранёнок.
+            cfg.mode = _mode
+            cfg.feed = "replay" if _mode == "test" else "stream"
             if _mode == "test":
                 cfg.mode = "test"
                 cfg.feed = "replay"

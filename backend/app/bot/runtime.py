@@ -99,6 +99,8 @@ class BotConfig:
     rank_explore: int = 10               # пробных сделок каждому тикеру
     rank_min_hist: int = 5               # мин. история для попадания в рейтинг
     queue_adv_multiple: float = 200.0    # слот ≤ 1/N дневного оборота (ликвидность под размер)
+    top_sizing: str = "multiply"         # режим размера для топ-1 кандидата (divide|multiply)
+    top_relax_caps: bool = True          # топ-1: net до 100% и сектор без лимита (стресс/маржа жёсткие)
     queue_history_veto: bool = True      # вето на явно токсичную историю (n≥20, net<−50₽, WR<25%)
     top_boost: float = 2.0               # множитель слота для топ-1 кандидата
     dd_reduce1_pct: float = 0.05         # просадка от пика equity → закрыть 50% позиций
@@ -132,6 +134,7 @@ class BotConfig:
     reentry_cooldown_bars: int = 30  # баров между выходом и повторным входом (0=отключено)
     # --- Overnight ---
     overnight: bool = False  # по умолчанию закрывать на конец торгового дня; True = держать через ночь
+    eod_close_min_before: int = 10  # закрывать за N минут до конца последней сессии (overnight=False)
     # --- Margin ---
     use_margin: bool = True  # использовать маржинальное кредитование
     margin_sessions: list = field(default_factory=lambda: ["day"])  # сессии с маржой: morning/day/evening
@@ -173,11 +176,12 @@ BOT_PERSIST_FIELDS = (
     "trail_distance_atr", "trail_compress_r", "trail_min_factor", "trail_min_atr", "trail_vol_boost",
     "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
-    "overnight", "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
+    "overnight", "eod_close_min_before", "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
     "queue_enabled", "queue_ttl_min", "queue_interval_sec", "top_boost",
     "queue_min_turnover", "queue_adv_multiple", "queue_history_veto",
+    "top_sizing", "top_relax_caps",
     "rank_enabled", "rank_top_n", "rank_explore", "rank_min_hist",
     "dd_reduce1_pct", "dd_reduce2_pct",
     "entry_confirm_closes", "entry_confirm_closes_sides",
@@ -493,6 +497,8 @@ class PaperBotRuntime:
         self._turnover_cache: dict[str, float] = {}
         self._cand_queue: dict[str, dict] = {}
         self._equity_peak: float = 0.0
+        self._overnight_cache: list[str] | None = None
+        self._overnight_ts: float = 0.0
         self._dd_level_done: int = 0
         # --- AI-гейт: последние решения ИИ (shadow/боевые) для UI ---
         self._ai_decisions: deque = deque(maxlen=50)
@@ -843,11 +849,14 @@ class PaperBotRuntime:
             except Exception:
                 pass
 
-    async def reduce_positions(self, close_pct: float, reason: str, side: str = "") -> dict:
-        """Закрыть долю позиций (худшие по P&L) — трейлинг-стоп портфеля/разворот."""
+    async def reduce_positions(self, close_pct: float, reason: str, side: str = "",
+                               figis: set[str] | None = None) -> dict:
+        """Закрыть долю позиций (худшие по P&L) — трейлинг-стоп портфеля/разворот/ночь."""
         positions = await self.broker.positions()
         items = []
         for p in positions:
+            if figis is not None and p.figi not in figis:
+                continue
             if side and str(getattr(p, "side", "")).upper() != side.upper():
                 continue
             bb = self.tcs_to_bbg.get(p.figi, p.figi)
@@ -877,16 +886,87 @@ class PaperBotRuntime:
                             reason=reason, net_pnl=closed[-1]["net_pnl"])
         return {"closed": len(closed), "positions": closed, "reason": reason}
 
+    async def _overnight_positions(self) -> list[str]:
+        """figis открытых позиций, вошедших ДО сегодняшнего дня (пережили ночь)."""
+        import time as _t
+        if self._overnight_cache is not None and (_t.monotonic() - self._overnight_ts) < 120:
+            return list(self._overnight_cache)
+        _msk = timezone(timedelta(hours=3))
+        today = self._bot_now().astimezone(_msk).date()
+        out: list[str] = []
+        try:
+            from sqlalchemy import text as _text
+            async with SessionLocal() as db:
+                rows = (await db.execute(_text(
+                    "SELECT figi, entry_time FROM sandbox_trades WHERE exit_time IS NULL"
+                ))).all()
+            for f, et in rows:
+                try:
+                    if et is not None and et.astimezone(_msk).date() < today:
+                        out.append(str(f))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._overnight_cache = out
+        self._overnight_ts = _t.monotonic()
+        return out
+
     async def _portfolio_guard_loop(self) -> None:
-        """Трейлинг-стоп портфеля: просадка от пика equity → сокращаем позиции."""
+        """Трейлинг-стоп портфеля (просадка от пика) + закрытие на ночь по времени."""
         from app.bot.portfolio import drawdown_action as _dd
         while self.running:
             try:
                 await asyncio.sleep(60.0)
                 cfg = self.config
-                eq = float(await self.broker.equity() or 0.0)
+                # --- EOD: overnight=False → закрываем позиции по ВРЕМЕНИ, не по свече.
+                # (поток свечей может оборваться раньше конца сессии — тогда старое
+                #  закрытие на свече не срабатывало и позиции уходили через ночь)
+                try:
+                    if not bool(getattr(cfg, "overnight", False)) and self._held:
+                        from app.engine.sessions import eod_close_due as _eod
+                        if _eod(self._bot_now(), cfg.sessions,
+                                minutes_before=int(getattr(cfg, "eod_close_min_before", 10) or 10),
+                                overnight=False):
+                            r = await self.reduce_positions(1.0, "eod_overnight")
+                            if r.get("closed"):
+                                self._log(f"🌙 EOD: закрыто {r['closed']} поз. "
+                                          f"(overnight=False, {self._bot_now().astimezone(timezone(timedelta(hours=3))).strftime('%H:%M')} МСК)")
+                                self.events.log("EOD_CLOSE", closed=r["closed"],
+                                                reason="overnight_false")
+                except Exception as _e_eod:
+                    pass
+                # --- Уборка ночных: overnight=False, а позиция вошла до сегодня → закрыть.
+                try:
+                    if not bool(getattr(cfg, "overnight", False)) and self._held:
+                        _figs = await self._overnight_positions()
+                        if _figs:
+                            r = await self.reduce_positions(1.0, "overnight_cleanup", figis=set(_figs))
+                            if r.get("closed"):
+                                self._overnight_cache = None
+                                self._log(f"🌙 НОЧНЫЕ ЗАКРЫТЫ: {r['closed']} поз. "
+                                          f"(вошли до сегодня, overnight=False)")
+                                self.events.log("OVERNIGHT_CLEANUP", closed=r["closed"])
+                except Exception:
+                    pass
+                # Equity для DD-защиты: ликвидный портфель брокера (правда), fallback — equity().
+                eq = 0.0
+                try:
+                    _ma = await self.broker.margin_attributes() or {}
+                    eq = float(_ma.get("liquid") or 0.0)
+                except Exception:
+                    eq = 0.0
+                if eq <= 0:
+                    eq = float(await self.broker.equity() or 0.0)
                 if eq <= 0:
                     continue
+                # Мусорный пик (чужой счёт / неполный портфель в момент старта): если пик
+                # в разы больше текущего ликвидного — сбрасываем, иначе DD-защита зря
+                # режет позиции «по просадке 40%».
+                if self._equity_peak > 0 and self._equity_peak > eq * 2.0:
+                    self._log(f"⚠ пик equity сброшен: {self._equity_peak:.0f} → {eq:.0f}₽ (мусорный отсчёт)")
+                    self._equity_peak = eq
+                    self._dd_level_done = 0
                 if eq > self._equity_peak:
                     self._equity_peak = eq
                     self._dd_level_done = 0
@@ -2784,10 +2864,14 @@ class PaperBotRuntime:
 
         while self.running:
             await asyncio.sleep(3.0)
-            if not self._persist_queue and not self._persist_queue_5m:
+            if (not self._persist_queue and not self._persist_queue_5m
+                    and not self._log_persist_queue):
                 continue
             batch = _drain(self._persist_queue)
             batch5 = _drain(self._persist_queue_5m)
+            # Логи дреним ВСЕГДА (раньше: если свечей нет — continue, и логи не писались;
+            # при ошибке вставки свечей — тоже). Теперь пишем отдельной транзакцией.
+            log_rows = _drain(self._log_persist_queue)
             try:
                 _tp0 = _time.perf_counter()
                 sql = _text(
@@ -2809,16 +2893,6 @@ class PaperBotRuntime:
                         await db.execute(sql, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
                     for f, ts, o, h, l, cl, v in batch5:
                         await db.execute(sql5, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
-                    log_rows = _drain(self._log_persist_queue)
-                    if log_rows:
-                        _payload = [{"level": l, "source": s, "msg": m} for (l, s, m) in log_rows]
-                        await db.execute(
-                            _text(
-                                "INSERT INTO bot_logs (level, source, msg) "
-                                "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, msg text)"
-                            ),
-                            {"rows": json.dumps(_payload, ensure_ascii=False)},
-                        )
                     await db.commit()
                 _pt = (_time.perf_counter() - _tp0) * 1000
                 self.metrics["persist_ms_total"] += _pt
@@ -2843,6 +2917,22 @@ class PaperBotRuntime:
                 # Вернуть данные обратно в очередь, чтобы не потерять
                 self._persist_queue.extend(batch)
                 self._persist_queue_5m.extend(batch5)
+            # Логи — своей транзакцией: ошибка свечей их больше не блокирует.
+            if log_rows:
+                try:
+                    async with SessionLocal() as db:
+                        _payload = [{"level": l, "source": s, "msg": m}
+                                    for (l, s, m) in log_rows]
+                        await db.execute(
+                            _text(
+                                "INSERT INTO bot_logs (level, source, msg) "
+                                "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, msg text)"
+                            ),
+                            {"rows": json.dumps(_payload, ensure_ascii=False)},
+                        )
+                        await db.commit()
+                except Exception as e:
+                    self._log(f"PERSIST_LOG_ERR {type(e).__name__}: {str(e)[:80]}")
 
     async def _run(self) -> None:
         # Feed = источник СВЕЧЕЙ: всегда боевой токен + основной API, потому что
@@ -3351,8 +3441,11 @@ class PaperBotRuntime:
         # Инверсия уже применена на уровне сигнала (см. _process_candle) — здесь НЕ дублируем.
         qty = cfg.qty_per_trade
         _used_lev = 1.0
-        _boost = (float(getattr(cfg, "top_boost", 2.0) or 2.0)
-                  if (meta or {}).get("priority") else 1.0)
+        _is_priority = bool((meta or {}).get("priority"))
+        _boost = (float(getattr(cfg, "top_boost", 2.0) or 2.0) if _is_priority else 1.0)
+        _sizing = str(getattr(cfg, "margin_sizing", "divide") or "divide").lower()
+        if _is_priority:
+            _sizing = str(getattr(cfg, "top_sizing", "multiply") or "multiply").lower()
         if action == "open":
             buf = self.buffers.get(figi)
             price = float(buf[-1].close) if buf else 0.0
@@ -3448,7 +3541,7 @@ class PaperBotRuntime:
                         # Режим размера позиции:
                         #   divide   — позиция = бюджет (свои = бюджет / плечо)  [1-й счёт]
                         #   multiply — позиция = бюджет × плечо (свои = бюджет)  [2-й счёт]
-                        if str(cfg.margin_sizing).lower() == "multiply":
+                        if _sizing == "multiply":
                             own_per_lot = lot_cost / lev
                             _pos, _own = budget * lev, budget
                         else:
@@ -3457,7 +3550,8 @@ class PaperBotRuntime:
                         self._log(f"MARGIN LEV {ticker}: брокер ×{_max_lev:.2f} ({_lev_src}"
                                   + (f", риск {_risk:.3f}" if 0 < _risk < 1 else "") + ") · "
                                   f"выбрано {'Max' if _want <= 0 else '×'+format(_want, 'g')} → ×{lev:.2f} · "
-                                  f"режим={cfg.margin_sizing} (позиция {_pos:.0f}₽ = свои {_own:.0f}₽ + заём {_pos-_own:.0f}₽)")
+                                  f"режим={_sizing}{' [топ-1]' if _is_priority else ''} "
+                                  f"(позиция {_pos:.0f}₽ = свои {_own:.0f}₽ + заём {_pos-_own:.0f}₽)")
                 except Exception as e:
                     self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed at cfg.leverage={lev:.1f}")
             if budget < own_per_lot:
@@ -3578,6 +3672,11 @@ class PaperBotRuntime:
                     max_stress_loss_pct=float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.0),
                 )
                 _lim = _rlim(_base, _regime)
+                if _is_priority and bool(getattr(cfg, "top_relax_caps", True)):
+                    # Сильнейшему — большая сумма: сектор без лимита, net до 100%.
+                    # Жёсткими остаются стресс (±5% IMOEX) и маржа брокера.
+                    _lim.max_net_exposure_pct = max(_lim.max_net_exposure_pct, 1.0)
+                    _lim.max_sector_pct = 0.0
                 # лот: из universe
                 _lot_pf = next((u.get("lot") for u in self.universe if u.get("figi") == figi), 1) or 1
                 _notional = float(price) * int(qty) * int(_lot_pf)

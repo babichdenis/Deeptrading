@@ -117,6 +117,35 @@ def should_force_close(ts, sessions: list[str] | None = None, overnight: bool = 
     return True
 
 
+def eod_close_due(ts, sessions: list[str] | None = None, minutes_before: int = 10,
+                  overnight: bool = False) -> bool:
+    """Пора закрывать позиции на ночь — по ВРЕМЕНИ, без опоры на свечи.
+
+    True если overnight=False и:
+      - до конца текущей сессии осталось <= minutes_before (закрываем заранее, по ликвидности), ИЛИ
+      - мы вне всех сессий (после вечера / перед утром / выходной) — fallback,
+        чтобы закрыть позиции, пережившие обрыв потока свечей.
+    Клиринговый разрыв (18:45–19:05) не трогаем.
+    """
+    if overnight:
+        return False
+    if is_clearing_gap(ts, sessions):
+        return False
+    msk = ts.astimezone(_MSK_TZ)
+    if msk.weekday() >= 5:
+        return True
+    if not sessions:
+        sessions = ["day"]
+    mins = msk.hour * 60 + msk.minute
+    if not is_session_active(ts, sessions):
+        return True
+    for s in sessions:
+        a, b = SESSION_WINDOWS.get(s, (0, 0))
+        if a <= mins < b and mins >= b - int(minutes_before):
+            return True
+    return False
+
+
 def is_session_active(ts, sessions: list[str] | None = None) -> bool:
     """Check if timestamp falls within any of the given session windows (MSK).
     

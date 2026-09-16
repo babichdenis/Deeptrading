@@ -12,9 +12,14 @@ from app.bot.runtime import (BotConfig, BOT_PERSIST_FIELDS, load_bot_settings, r
 logger = logging.getLogger("bot_api")
 
 
-async def _cfg_from_saved() -> BotConfig:
-    """Собрать конфиг из сохранённых настроек (файл/БД) — для работы без запущенного бота."""
-    cfg = _build_autostart_cfg("sandbox")
+async def _cfg_from_saved(mode: str = "sandbox", test_name: str = "", replay_start: str = "",
+                         replay_end: str = "", replay_pace: str = "fast") -> BotConfig:
+    """Конфиг = хардкод-база режима + сохранённые настройки пользователя (PATCH/UI).
+
+    Режим/фид/реплей/имя теста берём из аргументов, чтобы сохранёнки их не перетёрли.
+    """
+    cfg = _build_autostart_cfg(mode, test_name=test_name, replay_start=replay_start,
+                               replay_end=replay_end, replay_pace=replay_pace)
     saved = await load_bot_settings()
     for f in BOT_PERSIST_FIELDS:
         if f in saved:
@@ -22,6 +27,13 @@ async def _cfg_from_saved() -> BotConfig:
                 setattr(cfg, f, saved[f])
             except Exception:
                 pass
+    cfg.mode = mode
+    cfg.feed = "replay" if mode == "test" else "stream"
+    if mode == "test":
+        cfg.test_name = test_name
+        cfg.replay_start = replay_start
+        cfg.replay_end = replay_end
+        cfg.replay_pace = replay_pace
     return cfg
 
 
@@ -59,6 +71,9 @@ def _config_payload(cfg: BotConfig) -> dict:
         "top_boost": float(getattr(cfg, "top_boost", 2.0) or 2.0),
         "queue_min_turnover": float(getattr(cfg, "queue_min_turnover", 300000) or 0.0),
         "queue_adv_multiple": float(getattr(cfg, "queue_adv_multiple", 200.0) or 0.0),
+        "eod_close_min_before": int(getattr(cfg, "eod_close_min_before", 10) or 10),
+        "top_sizing": str(getattr(cfg, "top_sizing", "multiply")),
+        "top_relax_caps": bool(getattr(cfg, "top_relax_caps", True)),
         "rank_enabled": bool(getattr(cfg, "rank_enabled", True)),
         "rank_top_n": int(getattr(cfg, "rank_top_n", 10) or 0),
         "rank_explore": int(getattr(cfg, "rank_explore", 10) or 0),
@@ -234,6 +249,9 @@ class BotConfigPatch(BaseModel):
     queue_min_turnover: float | None = None    # мин. оборот ₽/день (вето illiquid)
     queue_adv_multiple: float | None = None    # слот ≤ 1/N дневного оборота
     rank_enabled: bool | None = None           # ранжирование тикеров (разведка → топ-N)
+    eod_close_min_before: int | None = None    # за N минут до конца сессии закрывать (overnight=False)
+    top_sizing: str | None = None              # режим размера топ-1 (divide|multiply)
+    top_relax_caps: bool | None = None         # топ-1: сектор off, net до 100%
     rank_top_n: int | None = None              # сколько тикеров торгуем
     rank_explore: int | None = None            # пробных сделок каждому тикеру
     rank_min_hist: int | None = None           # мин. история для рейтинга
@@ -387,6 +405,16 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.queue_min_turnover is not None:
         cfg.queue_min_turnover = max(0.0, min(100e6, float(req.queue_min_turnover)))
         changes.append(f"мин. оборот: {cfg.queue_min_turnover/1e6:.2f}M ₽/день")
+    if req.eod_close_min_before is not None:
+        cfg.eod_close_min_before = max(0, min(60, int(req.eod_close_min_before)))
+        changes.append(f"EOD-закрытие за {cfg.eod_close_min_before} мин до конца сессии")
+    if req.top_sizing is not None and req.top_sizing in ("divide", "multiply"):
+        if req.top_sizing != cfg.top_sizing:
+            changes.append(f"размер топ-1: {cfg.top_sizing} → {req.top_sizing}")
+        cfg.top_sizing = req.top_sizing
+    if req.top_relax_caps is not None:
+        cfg.top_relax_caps = bool(req.top_relax_caps)
+        changes.append(f"лимиты топ-1: {'ослаблены' if cfg.top_relax_caps else 'общие'}")
     if req.rank_enabled is not None:
         cfg.rank_enabled = bool(req.rank_enabled)
         changes.append(f"ранжирование: {'вкл' if cfg.rank_enabled else 'выкл'}")
@@ -697,7 +725,7 @@ async def bot_set_mode(req: ModeRequest) -> dict:
                 break
             await asyncio.sleep(0.5)
     try:
-        await runtime.start(_build_autostart_cfg(
+        await runtime.start(await _cfg_from_saved(
             mode, test_name=name,
             replay_start=req.replay_start.strip(),
             replay_end=req.replay_end.strip(),
