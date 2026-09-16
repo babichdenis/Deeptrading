@@ -876,6 +876,47 @@ async def bot_ai_notes_get(limit: int = 20) -> dict:
     return {"count": 0, "notes": runtime.list_ai_notes(limit)}
 
 
+class AiTradeRequest(BaseModel):
+    ticker: str
+    side: str = "SELL"                 # BUY | SELL
+    action: str = "open"               # open | close
+    notional_pct: float | None = None  # доля стандартного слота (1.0 = слот)
+    sl_pct: float | None = None        # стоп, доля (0.03 = 3%)
+    tp_pct: float | None = None        # тейк (0 = без TP)
+    reason: str = ""
+
+
+@router.post("/ai_trade")
+async def bot_ai_trade(req: AiTradeRequest) -> dict:
+    """Заявка внешнего AI-трейдера: лимиты маржи/стресса действуют, AI-гейт — нет."""
+    import asyncio as _aio
+    ticker = str(req.ticker or "").strip().upper()
+    figi = next((u.get("figi") for u in (runtime.universe or [])
+                 if str(u.get("ticker", "")).upper() == ticker), None)
+    if not figi:
+        try:
+            from app.database import SessionLocal as _SL
+            from sqlalchemy import text as _text
+            async with _SL() as db:
+                row = (await db.execute(_text(
+                    "SELECT figi FROM instruments WHERE ticker = :t LIMIT 1"),
+                    {"t": ticker})).first()
+            figi = str(row[0]) if row else None
+        except Exception:
+            figi = None
+    if not figi:
+        raise HTTPException(404, f"ticker {ticker} не найден")
+    if str(req.action).lower() == "close":
+        return await bot_close_position(figi)
+    _side = "BUY" if str(req.side).upper() in ("BUY", "LONG") else "SELL"
+    await runtime._submit_order(figi, ticker, "open", _side, meta={
+        "ai_trader": True, "priority": True, "ai_reason": str(req.reason)[:200],
+        "notional_pct": req.notional_pct, "sl_pct": req.sl_pct, "tp_pct": req.tp_pct,
+    })
+    return {"ok": True, "ticker": ticker, "side": _side, "action": "open",
+            "reason": str(req.reason)[:200]}
+
+
 @router.get("/portfolio_summary")
 async def bot_portfolio_summary() -> dict:
     """Сводка портфеля: экспозиции (long/short/net), сектора, маржа, стресс ±5/±10% IMOEX."""

@@ -3839,8 +3839,11 @@ class PaperBotRuntime:
         qty = cfg.qty_per_trade
         _used_lev = 1.0
         _is_momentum = bool((meta or {}).get("momentum"))
+        _is_ai = bool((meta or {}).get("ai_trader"))
         _is_priority = bool((meta or {}).get("priority"))
         _boost = (float(getattr(cfg, "top_boost", 2.0) or 2.0) if _is_priority else 1.0)
+        if _is_ai:
+            _boost = float((meta or {}).get("notional_pct") or 1.0)
         _sizing = str(getattr(cfg, "margin_sizing", "divide") or "divide").lower()
         if _is_priority:
             _sizing = str(getattr(cfg, "top_sizing", "multiply") or "multiply").lower()
@@ -4055,7 +4058,7 @@ class PaperBotRuntime:
             meta={**dict(meta or {}), "leverage": float(_used_lev)},
         )
         # --- Дневной MACD-bias: входы против дневного направления (veto) ---
-        if action == "open" and not _is_momentum and bool(getattr(cfg, "daily_bias", False)):
+        if action == "open" and not (_is_momentum or _is_ai) and bool(getattr(cfg, "daily_bias", False)):
             try:
                 _db = (await self.daily_bias_map()).get(str(ticker).upper()) or {}
                 _bias = str(_db.get("bias") or "")
@@ -4075,7 +4078,7 @@ class PaperBotRuntime:
             except Exception:
                 pass
         # --- MTF: H1 MACD должен подтверждать дневной bias; M5 — триггер разворота ---
-        if action == "open" and not _is_momentum and (bool(getattr(cfg, "mtf_align", False))
+        if action == "open" and not (_is_momentum or _is_ai) and (bool(getattr(cfg, "mtf_align", False))
                                  or bool(getattr(cfg, "mtf_trigger", False))):
             try:
                 _mtf = (await self.mtf_macd_map()).get(str(ticker).upper()) or {}
@@ -4113,7 +4116,7 @@ class PaperBotRuntime:
             except Exception:
                 pass
         # --- Якорь кворума: обязательный голос (напр. macd_cross) + минимум голосов ---
-        if action == "open" and not _is_momentum:
+        if action == "open" and not (_is_momentum or _is_ai):
             _req_mem = str(getattr(cfg, "ensemble_require_member", "") or "").strip()
             if _req_mem:
                 _qe = ((meta or {}).get("quorum_event") or {}) if isinstance(meta, dict) else {}
@@ -4128,7 +4131,7 @@ class PaperBotRuntime:
                     self._log_no_trade(figi, "require_member")
                     return
         # --- Ранжирование: разведка K сделок, затем только топ-N по прошлому net ---
-        if action == "open" and not _is_momentum:
+        if action == "open" and not (_is_momentum or _is_ai):
             try:
                 await self.trade_history()
                 _rok, _rwhy = self._rank_ok(ticker)
@@ -4219,7 +4222,7 @@ class PaperBotRuntime:
             except Exception:
                 pass
         # --- AI-гейт: дедуп и пауза после отклонения ---
-        if action == "open" and bool(getattr(cfg, "ai_approval", False)):
+        if action == "open" and not _is_ai and bool(getattr(cfg, "ai_approval", False)):
             _pend = self.pending_orders.get(figi)
             if _pend is not None and getattr(_pend, "status", "") == "PENDING_APPROVAL":
                 self._log(f"AI-ГЕЙТ: {ticker} уже ждёт решения — новую заявку не создаём")
@@ -4319,7 +4322,14 @@ class PaperBotRuntime:
             # Проскальзывание на входе (adverse) — parity с бэктестом (fill_price).
             _cm = CostModel(commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps)
             _fill = _cm.fill_price(float(c.open), side)
-            if (order.meta or {}).get("momentum"):
+            if (order.meta or {}).get("ai_trader") and (
+                    order.meta.get("sl_pct") or order.meta.get("tp_pct")):
+                _slp = float(order.meta.get("sl_pct") or 0.03)
+                _tpp = float(order.meta.get("tp_pct") or 0.0)
+                exit_policy = FixedSlTpPolicy(stop_pct=_slp,
+                                              target_pct=_tpp if _tpp > 0 else 10.0)
+                plan = exit_policy.plan_entry(side, _fill, [])
+            elif (order.meta or {}).get("momentum"):
                 # Моментум-режим: стоп momentum_stop_pct (3%), TP не ставим (выход — EOD)
                 exit_policy = FixedSlTpPolicy(
                     stop_pct=float(getattr(cfg, "momentum_stop_pct", 0.03) or 0.03),
