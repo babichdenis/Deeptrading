@@ -917,6 +917,27 @@ async def bot_ai_trade(req: AiTradeRequest) -> dict:
             "reason": str(req.reason)[:200]}
 
 
+@router.get("/bars/{figi}")
+async def bot_bars(figi: str, tf: str = "5min", limit: int = 20) -> dict:
+    """Свечи из ЖИВОГО буфера рантайма (1м из стрима) с ресемплом в tf.
+
+    tf: 1min | 5min | 10min | 15min | hour. limit — число баров после ресемпла.
+    """
+    from app.services.ensemble import TF_SECONDS, cached_resample
+    bb = runtime.tcs_to_bbg.get(figi, figi)
+    buf = runtime.buffers.get(bb) or runtime.buffers.get(figi) or []
+    if not buf:
+        raise HTTPException(404, f"нет буфера для {figi}")
+    tf_sec = TF_SECONDS.get(tf, 300)
+    bars = list(buf)[-int(limit) * max(1, tf_sec // 60):]
+    out_bars = bars if tf_sec == 60 else cached_resample(bars, tf_sec)
+    out = [{"ts": c.ts.isoformat(), "o": float(c.open), "h": float(c.high),
+            "l": float(c.low), "c": float(c.close), "v": float(getattr(c, "volume", 0) or 0)}
+           for c in out_bars[-int(limit):]]
+    return {"figi": bb, "ticker": runtime.tickers.get(bb, ""), "tf": tf,
+            "count": len(out), "bars": out}
+
+
 @router.get("/portfolio_summary")
 async def bot_portfolio_summary() -> dict:
     """Сводка портфеля: экспозиции (long/short/net), сектора, маржа, стресс ±5/±10% IMOEX."""

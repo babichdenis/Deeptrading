@@ -32,6 +32,8 @@ SYSTEM = """Ты — автономный трейдер на MOEX (sandbox-сч
 - positions[]: открытые позиции (entry/last/pnl/sl/tp/dist_*_atr/regime) + orderbook каждой;
 - orderbooks{ticker}: ЖИВОЙ СТАКАН — last, best_bid/best_ask, spread_bps, bid_qty/ask_qty,
   imbalance (-1..+1, >0 = перевес покупок), depth_rub (глубина в рублях);
+- positions[].m5/h1 и candles{ticker}.m5/h1: ЖИВЫЕ СВЕЧИ (o/h/l/c/v, время МСК) —
+  5м (10 баров) и час (6 баров); v — объём;
 - movers: движения по горизонтам 1д/1н/1м/3м (up/down + streak = дней в группе);
 - universe[]: доступные тикеры (price/turnover/rng_pct);
 - imoex: направление индекса (dir/pct_20m/pct_60m/pct_day, breadth_up_pct);
@@ -94,6 +96,16 @@ def _orderbook(api: str, figi: str) -> dict:
         return {}
 
 
+def _bars(api: str, figi: str, tf: str = "5min", limit: int = 10) -> list:
+    """Живые свечи из буфера рантайма (последние N баров)."""
+    try:
+        r = _http("GET", f"{api}/api/v1/bot/bars/{figi}?tf={tf}&limit={limit}", timeout=20)
+        return [{"t": b["ts"][11:16], "o": b["o"], "h": b["h"], "l": b["l"],
+                 "c": b["c"], "v": b["v"]} for b in (r.get("bars") or [])]
+    except Exception:
+        return []
+
+
 def _context(api: str) -> dict:
     out: dict = {}
     st: dict = {}
@@ -115,6 +127,8 @@ def _context(api: str) -> dict:
                  ("ticker", "side", "qty", "entry", "last", "pnl", "sl", "tp",
                   "dist_sl_atr", "dist_tp_atr", "atr", "regime", "trail_active")}
             d["orderbook"] = _orderbook(api, p.get("figi"))
+            d["m5"] = _bars(api, p.get("figi"), "5min", 10)
+            d["h1"] = _bars(api, p.get("figi"), "hour", 6)
             out["positions"].append(d)
     except Exception:
         out["positions"] = []
@@ -142,6 +156,10 @@ def _context(api: str) -> dict:
             fg = _by_tk.get(tk)
             if fg:
                 out["orderbooks"][tk] = _orderbook(api, fg)
+                out.setdefault("candles", {})[tk] = {
+                    "m5": _bars(api, fg, "5min", 10),
+                    "h1": _bars(api, fg, "hour", 6),
+                }
     except Exception:
         out["universe"] = []
     # Сделки
