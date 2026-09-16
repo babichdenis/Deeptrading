@@ -4339,12 +4339,17 @@ class PaperBotRuntime:
                 exit_policy = FixedSlTpPolicy(stop_pct=_slp,
                                               target_pct=_tpp if _tpp > 0 else 10.0)
                 plan = exit_policy.plan_entry(side, _fill, [])
+                if _tpp <= 0:
+                    # AI не задал TP — не ставим его вовсе (target_pct=10.0 у шорта
+                    # давал отрицательную цену TP, напр. -66.6 в UI)
+                    plan.take_profit = None
             elif (order.meta or {}).get("momentum"):
                 # Моментум-режим: стоп momentum_stop_pct (3%), TP не ставим (выход — EOD)
                 exit_policy = FixedSlTpPolicy(
                     stop_pct=float(getattr(cfg, "momentum_stop_pct", 0.03) or 0.03),
                     target_pct=10.0)
                 plan = exit_policy.plan_entry(side, _fill, [])
+                plan.take_profit = None
             elif cfg.sl_mode == "fixed":
                 exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
                 plan = exit_policy.plan_entry(side, _fill, [])
