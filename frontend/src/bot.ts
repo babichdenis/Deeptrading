@@ -2121,16 +2121,17 @@ export async function renderStats() {
       const mv = await fetch(`${API}/api/v1/screener/movers?top=4`)
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
       if (mv && mv.ok && mv.horizons) {
+        const fmt = (arr: any[]) => (arr || []).map((x: any) =>
+          `<span class="mv-tk">${x.ticker}</span> <span class="${x.chg >= 0 ? "mv-up" : "mv-dn"}">${x.chg > 0 ? "+" : ""}${x.chg}%</span>`).join("<br>");
         const rows = Object.entries(mv.horizons).map(([lbl, h]: [string, any]) => {
-          const up = (h.up || []).map((x: any) => `${x.ticker} ${x.chg > 0 ? "+" : ""}${x.chg}%`).join(", ");
-          const dn = (h.down || []).map((x: any) => `${x.ticker} ${x.chg}%`).join(", ");
           const c = h.counts || {};
-          const cnt = `≥5% ${c["5"]?.[0] ?? 0}/${c["5"]?.[1] ?? 0} · ≥10% ${c["10"]?.[0] ?? 0}/${c["10"]?.[1] ?? 0} · ≥20% ${c["20"]?.[0] ?? 0}/${c["20"]?.[1] ?? 0}`;
-          return `<div class="an-ag-prov"><b>${lbl}</b>: ` +
-            `<span style="color:var(--up)">▲ ${up || "—"}</span> · ` +
-            `<span style="color:var(--down)">▼ ${dn || "—"}</span> <span class="dim">(${cnt})</span></div>`;
+          const cnt = `≥5%: ${c["5"]?.[0] ?? 0}/${c["5"]?.[1] ?? 0}<br>≥10%: ${c["10"]?.[0] ?? 0}/${c["10"]?.[1] ?? 0}<br>≥20%: ${c["20"]?.[0] ?? 0}/${c["20"]?.[1] ?? 0}`;
+          return `<tr><td class="mv-h">${lbl}</td><td>${fmt(h.up) || "—"}</td>` +
+                 `<td>${fmt(h.down) || "—"}</td><td class="dim num">${cnt}</td></tr>`;
         }).join("");
-        mvEl.innerHTML = `<div class="an-ag-head">📊 Движения (${mv.horizons["1д"]?.n ?? 0} тикеров)</div>` + rows;
+        mvEl.innerHTML = `<div class="an-ag-head">📊 Движения · рост/падение по горизонтам (${mv.horizons["1д"]?.n ?? 0} тикеров)</div>` +
+          `<table class="an-table"><thead><tr><th>Горизонт</th><th>▲ Рост</th><th>▼ Падение</th>` +
+          `<th class="num">шт (рост/пад)</th></tr></thead><tbody>${rows}</tbody></table>`;
       }
     }
   } catch { /* ignore */ }
@@ -2176,14 +2177,24 @@ export async function renderStats() {
           : "";
         const dd = pf.dd || {};
         const ddTxt = dd.peak ? ` · просадка ${Math.round((dd.dd_pct || 0) * 1000) / 10}% от пика` : "";
+        const cell = (v: string, cls = "") => `<td class="${cls}">${v}</td>`;
+        const row2 = (a: string, b: string, c2 = "", d = "") =>
+          `<tr>${cell(a, "mv-h")}${cell(b)}${cell(c2)}${cell(d, "dim")}</tr>`;
         pfEl.innerHTML =
-          `<div class="an-ag-head">📦 Портфель: L ${Math.round((pf.long_exposure_pct || 0) * 100)}% · ` +
-          `S ${Math.round((pf.short_exposure_pct || 0) * 100)}% · net ${Math.round((pf.net_exposure_pct || 0) * 100)}%` +
-          ` · gross ×${pf.gross_leverage ?? "—"} · маржа ${Math.round((pf.margin_use_pct || 0) * 100)}%` +
-          ` · стресс ±5%: ${Math.round((st["imoex_+5%"] || 0) * 100)}% / ${Math.round((st["imoex_-5%"] || 0) * 100)}%` +
-          rgTxt + qTop + rkTxt + ddTxt + `</div>` +
-          (sec ? `<div class="an-ag-prov">Сектора: ${sec}</div>` : "") +
-          (skips ? `<div class="an-ag-prov">⛔ Пропуски входа: ${skips}</div>` : "");
+          `<div class="an-ag-head">📦 Портфель · equity ${Math.round(pf.equity || 0)}₽</div>` +
+          `<table class="an-table"><tbody>` +
+          row2("Экспозиция", `L ${Math.round((pf.long_exposure_pct || 0) * 100)}% · ` +
+            `S ${Math.round((pf.short_exposure_pct || 0) * 100)}% · net ${Math.round((pf.net_exposure_pct || 0) * 100)}%`,
+            `gross ×${pf.gross_leverage ?? "—"}`) +
+          row2("Маржа", `${Math.round((pf.margin_use_pct || 0) * 100)}% · свободно ${Math.round(pf.margin_free || 0)}₽`,
+            `стресс ±5%: ${Math.round((st["imoex_+5%"] || 0) * 100)}% / ${Math.round((st["imoex_-5%"] || 0) * 100)}%`) +
+          (rgTxt ? row2("Режим", rgTxt.replace(/^ · режим: /, "")) : "") +
+          (qTop ? row2("Очередь", qTop.replace(/^ · очередь: /, "")) : "") +
+          (rkTxt ? row2("Рейтинг", rkTxt.replace(/^ · рейтинг: /, "")) : "") +
+          (ddTxt ? row2("Просадка", ddTxt.replace(/^ · просадка /, "")) : "") +
+          (sec ? row2("Сектора", sec) : "") +
+          (skips ? row2("⛔ Пропуски входа", skips) : "") +
+          `</tbody></table>`;
       }
     }
   } catch { /* ignore */ }

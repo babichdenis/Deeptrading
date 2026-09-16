@@ -2078,3 +2078,15 @@ body.sb-resizing .sr-grip { background: rgba(41, 98, 255, 0.3); }
 .sr-cs-log-act { font-size: 10px; }
 .sr-cs-err { margin-top: 4px; color: #ff6b6b; font-weight: 600; }
 .sr-cs-la { margin-top: 4px; color: var(--text-faint); font-size: 10px; }
+
+
+/* Таблицы на странице «Анализ» */
+.an-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+.an-table th { text-align: left; color: var(--text-dim); font-weight: 600; font-size: 11px;
+  padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.08); white-space: nowrap; }
+.an-table td { padding: 4px 8px; vertical-align: top; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.an-table td.num, .an-table th.num { text-align: right; white-space: nowrap; }
+.an-table .mv-h { color: var(--text-dim); font-weight: 600; white-space: nowrap; }
+.an-table .mv-tk { font-weight: 600; }
+.an-table .mv-up { color: var(--up); }
+.an-table .mv-dn { color: var(--down); }

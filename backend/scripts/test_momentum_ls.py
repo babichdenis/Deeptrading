@@ -67,7 +67,9 @@ def lev_for(meta: dict, ticker: str, side: str, max_lev: float) -> float:
 
 
 def run(days_sorted, by_day, meta, *, n=21, k=5, side="ls", pos_pct=0.5,
-        max_lev=3.0, equity0=50000.0) -> dict:
+        max_lev=3.0, equity0=50000.0, stop_pct=0.0, hold="oc") -> dict:
+    """hold: "oc" = вход на открытии, выход на закрытии дня;
+             "cc" = вход на закрытии дня D, выход на закрытии D+1."""
     equity = equity0
     curve = [equity]
     trades = []
@@ -103,11 +105,30 @@ def run(days_sorted, by_day, meta, *, n=21, k=5, side="ls", pos_pct=0.5,
             if not bar:
                 continue
             lev = lev_for(meta, t, sd, max_lev)
+            if hold == "cc":
+                # вход на закрытии дня D, выход на закрытии D+1
+                if i + 1 >= len(days_sorted):
+                    continue
+                nxt = by_day[days_sorted[i + 1]].get(t)
+                if not nxt:
+                    continue
+                entry, exit_ = bar["c"], nxt["c"]
+                hi, lo = nxt["h"], nxt["l"]
+            else:
+                entry, exit_ = bar["o"], bar["c"]
+                hi, lo = bar["h"], bar["l"]
+            if entry <= 0:
+                continue
             notional = per * lev
-            qty = int(notional / bar["o"])
+            qty = int(notional / entry)
             if qty < 1:
                 continue
-            entry, exit_ = bar["o"], bar["c"]
+            # стоп внутри дня (по high/low): шорт — вверх, лонг — вниз
+            if stop_pct > 0:
+                if sd == "SHORT" and hi >= entry * (1 + stop_pct):
+                    exit_ = entry * (1 + stop_pct)
+                elif sd == "LONG" and lo <= entry * (1 - stop_pct):
+                    exit_ = entry * (1 - stop_pct)
             pnl = (exit_ - entry) * qty if sd == "LONG" else (entry - exit_) * qty
             cost = (entry + exit_) * qty * (COMMISSION + SLIP)
             net = pnl - cost
@@ -142,10 +163,25 @@ async def main() -> None:
     ap.add_argument("--max-lev", type=float, default=3.0)
     ap.add_argument("--days", type=int, default=300)
     ap.add_argument("--equity", type=float, default=50000.0)
+    ap.add_argument("--stop", type=float, default=0.0, help="внутридневной стоп, доля (0.03)")
+    ap.add_argument("--hold", default="oc", choices=("oc", "cc"))
+    ap.add_argument("--grid", action="store_true", help="сетка: шорт × плечо × стоп")
     args = ap.parse_args()
 
     days_sorted, by_day, meta = await load(args.days)
     print(f"дней: {len(days_sorted)} | тикеров: {len(meta)}\n")
+    if args.grid:
+        print(f"{'Вариант':<34}{'N':>6}{'Net':>10}{'Ret%':>8}{'WR%':>7}{'PF':>6}{'MaxDD%':>8}")
+        for lev in (1.0, 1.5, 2.0, 3.0):
+            for stop in (0.0, 0.03, 0.05):
+                for hold in ("oc", "cc"):
+                    r = run(days_sorted, by_day, meta, n=63, k=5, side="short",
+                            pos_pct=args.pos_pct, max_lev=lev, equity0=args.equity,
+                            stop_pct=stop, hold=hold)
+                    print(f"{f'short n63 k5 lev{lev:g} stop{stop:.0%} {hold}':<34}"
+                          f"{r['n']:>6}{r['net']:>10.1f}{r['ret_pct']:>8.1f}"
+                          f"{r['wr']:>7.1f}{r['pf']:>6.2f}{r['maxdd']:>8.1f}")
+        return
     print(f"{'Вариант':<34}{'N':>6}{'Net':>10}{'Ret%':>8}{'WR%':>7}{'PF':>6}{'MaxDD%':>8}")
     for n in (args.n, 63):
         for k in (3, 5, 10):
