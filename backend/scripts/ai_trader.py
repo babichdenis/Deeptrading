@@ -47,12 +47,20 @@ SYSTEM = """Ты — автономный трейдер на MOEX (sandbox-сч
 - стоп обязателен (sl_pct 0.01-0.05), тейк по желанию (tp_pct, 0 = без тейка);
 - закрывай позиции, если тезис сломан, и фиксируй прибыль при достижении цели.
 
-Отвечай СТРОГО JSON-массивом действий (без текста вокруг):
-[
-  {"action":"open","ticker":"SBER","side":"SELL","notional_pct":1.0,"sl_pct":0.03,"tp_pct":0.06,"reason":"..."},
-  {"action":"close","ticker":"GAZP","reason":"..."}
-]
-Если действий нет — верни []. notional_pct: 1.0 = стандартный слот (60% equity с плечом до ×2).
+Отвечай СТРОГО JSON-объектом (без текста вокруг):
+{
+  "analysis": "разбор рынка и портфеля: что вижу в данных (IMOEX, движения, стаканы, свечи),
+               как это связано с текущими позициями, общий план на цикл (5-10 предложений)",
+  "actions": [
+    {"action":"open","ticker":"SBER","side":"SELL","notional_pct":1.0,"sl_pct":0.03,"tp_pct":0.06,
+     "reason":"почему именно эта сделка: что в данных говорит за вход, почему эта сторона,
+               где стоп/тейк и что подтверждает/опровергает тезис (2-4 предложения)"},
+    {"action":"close","ticker":"GAZP",
+     "reason":"почему закрываю: что изменилось в данных/тезисе (2-4 предложения)"}
+  ]
+}
+Если действий нет — "actions": []. notional_pct: 1.0 = стандартный слот (60% equity с плечом до ×2).
+Пиши содержательно: по твоему analysis и reason мы будем понимать и править логику.
 """
 
 
@@ -63,7 +71,7 @@ def _http(method: str, url: str, payload: dict | None = None, timeout: float = 6
         return r.json()
 
 
-def _ask(system: str, user: dict, model: str, url: str) -> list:
+def _ask(system: str, user: dict, model: str, url: str) -> tuple:
     url = url.rstrip("/")
     with httpx.Client(timeout=180.0) as c:
         sid = c.post(f"{url}/session", json={"title": "ai-trader"}).json().get("id")
@@ -77,8 +85,16 @@ def _ask(system: str, user: dict, model: str, url: str) -> list:
             r.raise_for_status()
             txt = "".join(p.get("text", "") for p in (r.json().get("parts") or [])
                           if p.get("type") == "text")
-            m = re.search(r"\[.*\]", txt, re.S)
-            return json.loads(m.group(0)) if m else []
+            m = re.search(r"\{.*\}", txt, re.S)
+            if m:
+                try:
+                    obj = json.loads(m.group(0))
+                    if isinstance(obj, dict) and "actions" in obj:
+                        return [obj.get("analysis") or "", obj.get("actions") or []]
+                except Exception:
+                    pass
+            m2 = re.search(r"\[.*\]", txt, re.S)
+            return ["", json.loads(m2.group(0))] if m2 else ["", []]
         finally:
             try:
                 c.delete(f"{url}/session/{sid}")
@@ -192,7 +208,17 @@ def main() -> None:
             eq = (ctx.get("portfolio") or {}).get("equity")
             print(f"[ai-trader] контекст: позиций {n_pos}, equity {eq}, "
                   f"тикеров {len(ctx.get('universe') or [])}", flush=True)
-            acts = _ask(SYSTEM, ctx, args.model, args.opencode_url)
+            analysis, acts = _ask(SYSTEM, ctx, args.model, args.opencode_url)
+            if analysis:
+                print(f"[ai-trader] РАЗБОР: {analysis}", flush=True)
+                try:
+                    _http("POST", f"{args.api}/api/v1/bot/ai_notes", {
+                        "ticker": "ПОРТФЕЛЬ", "side": "", "action": "analysis",
+                        "note": str(analysis)[:900], "advice": "", "model": args.model,
+                        "provider": "opencode",
+                    }, timeout=20)
+                except Exception:
+                    pass
             print(f"[ai-trader] действий: {len(acts)}", flush=True)
             for a in acts[:6]:
                 try:
@@ -211,7 +237,25 @@ def main() -> None:
                         })
                     else:
                         continue
-                    print(f"[ai-trader] {act} {tk}: {json.dumps(r, ensure_ascii=False)[:120]}", flush=True)
+                    _why = str(a.get("reason") or "")[:600]
+                    print(f"[ai-trader] {act} {tk}: {json.dumps(r, ensure_ascii=False)[:100]}", flush=True)
+                    if _why:
+                        print(f"[ai-trader]   причина: {_why}", flush=True)
+                    try:
+                        _http("POST", f"{args.api}/api/v1/bot/ai_notes", {
+                            "ticker": tk, "side": str(a.get("side") or ""), "action": act,
+                            "note": _why, "advice": "", "model": args.model,
+                            "provider": "opencode",
+                        }, timeout=20)
+                    except Exception:
+                        pass
+                    try:
+                        with open("ai_trader_cycles.jsonl", "a", encoding="utf-8") as f:
+                            f.write(json.dumps({"ts": ctx.get("now_msk"), "analysis": analysis,
+                                                "action": a, "result": r},
+                                               ensure_ascii=False, default=str) + "\n")
+                    except Exception:
+                        pass
                 except Exception as e:
                     print(f"[ai-trader] ошибка действия {a}: {type(e).__name__}: {str(e)[:100]}", flush=True)
         except Exception as e:
