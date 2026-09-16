@@ -198,7 +198,9 @@ def _context(api: str) -> dict:
                                 for t in (tr.get("trades") or [])]
     except Exception:
         out["recent_trades"] = []
-    out["now_msk"] = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    out["now_msk"] = (datetime.now(timezone.utc)
+                      .astimezone(timezone(timedelta(hours=3)))
+                      .strftime("%Y-%m-%d %H:%M") + " МСК")
     return out
 
 
