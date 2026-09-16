@@ -123,8 +123,8 @@ async def main() -> None:
         try:
             r = _http("POST", f"{API}/api/v1/bot/mode",
                       {"mode": "test", "test_name": name,
-                       "replay_start": "2026-09-15T07:00:00+00:00",
-                       "replay_end": "2026-09-15T15:00:00+00:00",
+                       "replay_start": "2026-09-15T03:00:00+00:00",
+                       "replay_end": "2026-09-15T21:00:00+00:00",
                        "replay_pace": "fast"})
             log(f"  запуск: {r.get('mode')} {r.get('test_name')}")
         except Exception as e:
