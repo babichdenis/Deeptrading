@@ -947,7 +947,10 @@ class PaperBotRuntime:
         _msk = _ZI("Europe/Moscow")
         while self.running:
             try:
-                await asyncio.sleep(30.0)
+                # В реплее время идёт быстрее wall-clock — спим коротко, иначе окно входа
+                # (30 мин) проскакивается между итерациями.
+                _replay = str(getattr(self.config, "feed", "")) == "replay"
+                await asyncio.sleep(0.5 if _replay else 30.0)
                 cfg = self.config
                 if not bool(getattr(cfg, "momentum_short", False)):
                     continue
