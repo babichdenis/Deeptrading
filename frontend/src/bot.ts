@@ -1759,7 +1759,15 @@ async function renderAiGate() {
       notesEl.innerHTML = '<span class="ag-empty">нет заметок (позиции вне риска или вахтёр не запущен)</span>';
     } else {
       const actLabel: Record<string, string> = {
-        hold: "✋ держать", tighten: "🔧 подтянуть стоп", close: "✕ закрыть", watch: "… наблюдать",
+        hold: "✋ держать", tighten: "🔧 подтянуть", close: "✕ закрыть", watch: "… наблюдать",
+      };
+      const tightLabel = (n: any): string => {
+        const apd = ((n.applied_levels || {}).applied) || {};
+        const hasSl = apd.sl != null, hasTp = apd.tp != null;
+        if (hasSl && hasTp) return "🔧 SL+TP";
+        if (hasTp) return "🔧 TP";
+        if (hasSl) return "🔧 SL";
+        return "🔧 подтянуть";
       };
       notesEl.innerHTML = notes.slice().reverse().map((n) => {
         const act = String(n.action || "watch").toLowerCase();
@@ -1768,7 +1776,7 @@ async function renderAiGate() {
         const dtp = n.dist_tp_atr != null ? ` · ${Number(n.dist_tp_atr).toFixed(2)} ATR до TP` : "";
         const pnl = n.pnl != null ? ` · P&L ${Number(n.pnl) >= 0 ? "+" : ""}${Math.round(Number(n.pnl))}₽` : "";
         return `<div class="ag-note ${act}" title="${_agEsc(n.note)}">
-          <div class="ag-r1"><span class="ag-t">${_agEsc(t)}</span><span class="ag-tk">${_agEsc(n.ticker)} ${_agEsc(n.side)}</span><span class="ag-dec">${actLabel[act] || act}</span></div>
+          <div class="ag-r1"><span class="ag-t">${_agEsc(t)}</span><span class="ag-tk">${_agEsc(n.ticker)} ${_agEsc(n.side)}</span><span class="ag-dec">${act === "tighten" ? tightLabel(n) : (actLabel[act] || act)}</span></div>
           <div class="ag-r2">${_agEsc(n.note)}<span class="ag-meta">${_agEsc(n.model || "")}${dsl}${dtp}${pnl}</span></div>
           ${n.advice ? `<div class="ag-advice">💡 ${_agEsc(n.advice)}</div>` : ""}
         </div>`;
