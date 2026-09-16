@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models.instrument import Instrument
 
 router = APIRouter(prefix="/api/v1/screener", tags=["screener"])
@@ -194,6 +194,66 @@ async def _carousel_status(db: AsyncSession) -> dict:
         "insufficient": insufficient,
         "log": list(_carousel_log),
     }
+
+
+# --- Срезы движений (моментум-витрина): 1 / 5 / 21 / 63 торговых дня ---
+_MOVERS_TTL = 600  # сек
+_movers_cache: dict = {"ts": 0.0, "data": None}
+_HORIZONS = ((1, "1д"), (5, "1н"), (21, "1м"), (63, "3м"))
+
+
+async def _compute_movers(top: int = 5) -> dict:
+    from zoneinfo import ZoneInfo as _ZI
+    from datetime import datetime as _dt, timezone as _tz
+    _msk = _ZI("Europe/Moscow")
+    today = _dt.now(_tz.utc).astimezone(_msk).date()
+    async with SessionLocal() as db:
+        rows = (await db.execute(text(
+            "SELECT c.figi, i.ticker, c.ts, c.close FROM candles c "
+            "JOIN instruments i ON i.figi = c.figi "
+            "WHERE c.interval = 24 AND i.class_code = 'TQBR' ORDER BY c.figi, c.ts"
+        ))).all()
+    by: dict[str, list] = {}
+    names: dict[str, str] = {}
+    for f, t, ts, close in rows:
+        f = str(f)
+        names[f] = str(t)
+        by.setdefault(f, []).append((ts, float(close or 0.0)))
+    out: dict = {}
+    for days, label in _HORIZONS:
+        items = []
+        for f, bars in by.items():
+            bars = [b for b in bars if b[0].astimezone(_msk).date() != today]
+            if len(bars) < days + 1 or bars[-days - 1][1] <= 0:
+                continue
+            ch = (bars[-1][1] / bars[-days - 1][1] - 1) * 100
+            items.append({"ticker": names[f], "chg": round(ch, 1), "price": round(bars[-1][1], 2)})
+        items.sort(key=lambda x: -x["chg"])
+        out[label] = {
+            "n": len(items),
+            "up": items[:top],
+            "down": items[-top:][::-1],
+            "counts": {str(thr): [sum(1 for x in items if x["chg"] >= thr),
+                                  sum(1 for x in items if x["chg"] <= -thr)]
+                       for thr in (5, 10, 20, 40)},
+        }
+    return out
+
+
+@router.get("/movers")
+async def movers(top: int = 5) -> dict:
+    """Срезы движений по горизонтам (1д/1н/1м/3м) — витрина для UI и AI."""
+    import time as _time
+    now = _time.monotonic()
+    if _movers_cache["data"] is not None and now - _movers_cache["ts"] < _MOVERS_TTL:
+        return {"ok": True, "cached": True, "horizons": _movers_cache["data"]}
+    try:
+        data = await _compute_movers(top)
+        _movers_cache.update(ts=now, data=data)
+        return {"ok": True, "cached": False, "horizons": data}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}",
+                "horizons": _movers_cache.get("data") or {}}
 
 
 @router.get("")

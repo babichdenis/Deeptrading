@@ -2114,6 +2114,27 @@ export async function renderStats() {
         ` · L/S: ${ls.longs ?? "—"}/${ls.shorts ?? "—"}`;
     }
   } catch { /* ignore */ }
+  // Блок движений: срезы по горизонтам (1д/1н/1м/3м).
+  try {
+    const mvEl = $("an-movers");
+    if (mvEl) {
+      const mv = await fetch(`${API}/api/v1/screener/movers?top=4`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (mv && mv.ok && mv.horizons) {
+        const rows = Object.entries(mv.horizons).map(([lbl, h]: [string, any]) => {
+          const up = (h.up || []).map((x: any) => `${x.ticker} ${x.chg > 0 ? "+" : ""}${x.chg}%`).join(", ");
+          const dn = (h.down || []).map((x: any) => `${x.ticker} ${x.chg}%`).join(", ");
+          const c = h.counts || {};
+          const cnt = `≥5% ${c["5"]?.[0] ?? 0}/${c["5"]?.[1] ?? 0} · ≥10% ${c["10"]?.[0] ?? 0}/${c["10"]?.[1] ?? 0} · ≥20% ${c["20"]?.[0] ?? 0}/${c["20"]?.[1] ?? 0}`;
+          return `<div class="an-ag-prov"><b>${lbl}</b>: ` +
+            `<span style="color:var(--up)">▲ ${up || "—"}</span> · ` +
+            `<span style="color:var(--down)">▼ ${dn || "—"}</span> <span class="dim">(${cnt})</span></div>`;
+        }).join("");
+        mvEl.innerHTML = `<div class="an-ag-head">📊 Движения (${mv.horizons["1д"]?.n ?? 0} тикеров)</div>` + rows;
+      }
+    }
+  } catch { /* ignore */ }
+
   // Блок портфеля: экспозиции/сектора/маржа/стресс.
   try {
     const pfEl = $("an-portfolio");
