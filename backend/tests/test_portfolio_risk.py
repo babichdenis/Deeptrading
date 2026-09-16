@@ -286,3 +286,15 @@ def test_regime_limits_do_not_enable_disabled_net_limit():
     on = PortfolioLimits(max_net_exposure_pct=0.5, max_sector_pct=0.35)
     assert regime_limits(on, {"state": "bear"}).max_net_exposure_pct >= 1.0
     assert regime_limits(on, {"state": "reversal"}).max_net_exposure_pct == 0.35
+
+
+def test_should_force_close_uses_bot_now_not_stale_candle():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.engine.sessions import should_force_close
+    msk = ZoneInfo("Europe/Moscow")
+    S = ["morning", "day", "evening"]
+    evening = datetime(2026, 9, 16, 21, 58, tzinfo=msk)
+    night = datetime(2026, 9, 16, 2, 0, tzinfo=msk)
+    assert should_force_close(evening, S, False) is False   # вечером не закрываем
+    assert should_force_close(night, S, False) is True      # ночью закрываем

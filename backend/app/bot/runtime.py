@@ -3593,7 +3593,9 @@ class PaperBotRuntime:
         # overnight=True  = держать позиции через ночь (не закрывать)
         # overnight=False = закрывать на конец торгового дня, но клиринг day→evening
         #                   и активные сессии всегда выдерживаются
-        if not _closed and _should_force_close(c.ts, self.config.sessions, self.config.overnight):
+        # ВАЖНО: решаем по ТЕКУЩЕМУ времени (бот-нау), а не по ts свечи: при рестарте
+        # стрим отдаёт бэклог (ночные свечи) и позиции ложно закрывались как overnight.
+        if not _closed and _should_force_close(self._bot_now(), self.config.sessions, self.config.overnight):
             trade = await self.broker.close_position(figi, float(c.open), "overnight_force_close")
             self._held.discard(figi)
             self._opposite_count.pop(figi, None)
