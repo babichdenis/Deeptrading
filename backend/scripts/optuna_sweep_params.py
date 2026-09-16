@@ -25,7 +25,9 @@ from app.services.signals import _load_candles as _lc
 import optuna
 
 ALL_SIDS = ["rsi_reversal", "bollinger_reclaim", "pullback_ema", "vwap_reclaim",
-            "range_compression_breakout", "macd_cross", "donchian_breakout"]
+            "range_compression_breakout", "macd_cross", "donchian_breakout",
+            "trend_up", "trend_down", "range_reversion",
+            "long_ensemble", "short_ensemble", "range_ensemble", "hv_ensemble", "neutral_ensemble"]
 V2_PARAMS = {
     "rsi_reversal": {"period": 16, "oversold": 30, "overbought": 80},
     "bollinger_reclaim": {"period": 15, "k": 1.0},
@@ -34,6 +36,9 @@ V2_PARAMS = {
     "donchian_breakout": {"period": 45},
     "vwap_reclaim": {"k": 2.0},
     "macd_cross": {"fast": 12, "slow": 26, "signal_period": 9},
+    "trend_up": {}, "trend_down": {}, "range_reversion": {},
+    "long_ensemble": {}, "short_ensemble": {}, "range_ensemble": {},
+    "hv_ensemble": {}, "neutral_ensemble": {},
 }
 # Какие параметры у каждой стратегии варьировать + диапазоны вокруг V2
 STRAT_PARAM_RANGES = {
@@ -46,12 +51,12 @@ STRAT_PARAM_RANGES = {
     "donchian_breakout": [("period", 30, 60, 1)],
 }
 
-W1_FROM = datetime(2026, 8, 10, tzinfo=timezone.utc)
-W1_TO = datetime(2026, 8, 17, tzinfo=timezone.utc)
-W2_FROM = datetime(2026, 8, 17, tzinfo=timezone.utc)
-W2_TO = datetime(2026, 8, 24, tzinfo=timezone.utc)
-W3_FROM = datetime(2026, 8, 24, tzinfo=timezone.utc)
-W3_TO = datetime(2026, 8, 31, tzinfo=timezone.utc)
+W1_FROM = datetime(2026, 8, 29, tzinfo=timezone.utc)
+W1_TO = datetime(2026, 9, 5, tzinfo=timezone.utc)
+W2_FROM = datetime(2026, 9, 5, tzinfo=timezone.utc)
+W2_TO = datetime(2026, 9, 12, tzinfo=timezone.utc)
+W3_FROM = datetime(2026, 9, 12, tzinfo=timezone.utc)
+W3_TO = datetime(2026, 9, 13, tzinfo=timezone.utc)
 
 
 def suggest_strategy_params(trial, sid, active):

@@ -502,6 +502,7 @@ class PaperBotRuntime:
         self._signal_busy: set[str] = set()
         self._skip_logged: dict[str, object] = {}  # figi -> ts последней залогированной причины "нет входа"
         self._held: set[str] = set()
+        self._swing: set[str] = set()  # figis AI-сделок "swing" (не закрывать на EOD/ночь)
         self._held_since: dict[str, float] = {}  # figi -> время добавления в _held (для grace синка)
         self._live_logs: deque[str] = deque(maxlen=400)
         self._log_persist_queue: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (level, source, msg) — дренится в bot_logs флашером
@@ -1255,7 +1256,9 @@ class PaperBotRuntime:
                         if _eod(self._bot_now(), cfg.sessions,
                                 minutes_before=int(getattr(cfg, "eod_close_min_before", 10) or 10),
                                 overnight=False):
-                            r = await self.reduce_positions(1.0, "eod_overnight")
+                            _eod_figs = set(self._held) - self._swing
+                            r = await self.reduce_positions(1.0, "eod_overnight",
+                                                            figis=_eod_figs) if _eod_figs else {}
                             if r.get("closed"):
                                 self._log(f"🌙 EOD: закрыто {r['closed']} поз. "
                                           f"(overnight=False, {self._bot_now().astimezone(timezone(timedelta(hours=3))).strftime('%H:%M')} МСК)")
@@ -1266,7 +1269,8 @@ class PaperBotRuntime:
                 # --- Уборка ночных: overnight=False, а позиция вошла до сегодня → закрыть.
                 try:
                     if not bool(getattr(cfg, "overnight", False)) and self._held:
-                        _figs = await self._overnight_positions()
+                        _figs = [f for f in await self._overnight_positions()
+                                 if f not in self._swing]
                         if _figs:
                             r = await self.reduce_positions(1.0, "overnight_cleanup", figis=set(_figs))
                             if r.get("closed"):
@@ -1509,6 +1513,12 @@ class PaperBotRuntime:
         return stats
 
     async def _st_open(self, figi, ticker, side, qty, price, sl, tp, meta: dict | None = None, leverage: float = 1.0) -> None:
+        try:
+            if str((meta or {}).get("hold") or "").lower() == "swing":
+                self._swing.add(str(figi))
+                self._log(f"SWING {ticker}: долгая сделка — EOD/ночь не закрывает")
+        except Exception:
+            pass
         from app.models.sandbox_trade import SandboxTrade
         import json as _json
         _lot = 1
@@ -2129,10 +2139,28 @@ class PaperBotRuntime:
         self._daily_pnl_cache = (datetime.now(timezone.utc), total)
         return total
 
+    async def _restore_swing(self) -> None:
+        """Восстановить список swing-позиций из открытых сделок (meta.hold)."""
+        try:
+            import json as _json
+            from sqlalchemy import text as _text
+            async with SessionLocal() as db:
+                rows = (await db.execute(_text(
+                    "SELECT figi, meta FROM sandbox_trades WHERE exit_time IS NULL"))).all()
+            for f, m in rows:
+                try:
+                    if str((_json.loads(m or "{}") or {}).get("hold") or "").lower() == "swing":
+                        self._swing.add(str(f))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     async def start(self, cfg: BotConfig) -> dict:
         if self.running or self.starting:
             raise RuntimeError("bot already running")
         self.config = cfg
+        await self._restore_swing()
         # Восстанавливаем сохранённые настройки (переживают перезапуск/старт без фронта).
         try:
             _saved = await load_bot_settings()
@@ -3595,7 +3623,8 @@ class PaperBotRuntime:
         #                   и активные сессии всегда выдерживаются
         # ВАЖНО: решаем по ТЕКУЩЕМУ времени (бот-нау), а не по ts свечи: при рестарте
         # стрим отдаёт бэклог (ночные свечи) и позиции ложно закрывались как overnight.
-        if not _closed and _should_force_close(self._bot_now(), self.config.sessions, self.config.overnight):
+        if (not _closed and figi not in self._swing
+                and _should_force_close(self._bot_now(), self.config.sessions, self.config.overnight)):
             trade = await self.broker.close_position(figi, float(c.open), "overnight_force_close")
             self._held.discard(figi)
             self._opposite_count.pop(figi, None)
@@ -4436,6 +4465,7 @@ class PaperBotRuntime:
 
     def _clear_exit_state(self, figi: str) -> None:
         """Полная очистка локального учёта выхода позиции (все поля)."""
+        self._swing.discard(figi)
         self._exit_plans.pop(figi, None)
         self._exit_side.pop(figi, None)
         self._exit_entry_px.pop(figi, None)

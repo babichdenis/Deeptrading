@@ -895,6 +895,7 @@ class AiTradeRequest(BaseModel):
     notional_pct: float | None = None  # доля стандартного слота (1.0 = слот)
     sl_pct: float | None = None        # стоп, доля (0.03 = 3%)
     tp_pct: float | None = None        # тейк (0 = без TP)
+    hold: str = "intraday"             # intraday | swing (swing = держать через ночь)
     reason: str = ""
 
 
@@ -924,6 +925,7 @@ async def bot_ai_trade(req: AiTradeRequest) -> dict:
     await runtime._submit_order(figi, ticker, "open", _side, meta={
         "ai_trader": True, "priority": True, "ai_reason": str(req.reason)[:200],
         "notional_pct": req.notional_pct, "sl_pct": req.sl_pct, "tp_pct": req.tp_pct,
+        "hold": str(req.hold or "intraday"),
     })
     return {"ok": True, "ticker": ticker, "side": _side, "action": "open",
             "reason": str(req.reason)[:200]}

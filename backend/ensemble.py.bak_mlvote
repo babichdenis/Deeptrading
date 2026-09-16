@@ -735,68 +735,6 @@ def _stoch_map(bars, k_period: int, d_period: int) -> dict:
     return {bars[i].ts: (ks[i], ds[i]) for i in range(len(bars))}
 
 
-def _ml_vote_signals(candles_1m: list[EngineCandle], model, tcode: int,
-                     threshold: float) -> list[dict]:
-    """ML-голос на 5m-гриде: для каждого 5m бара (ts кратно 300) считаем p на 1m
-    свече с тем же ts (закрытие бара) по фичам LONG и mirror-фичам для SHORT.
-    Голосует та сторона, чей p выше, если p >= threshold. Возвращает [] если данных мало."""
-    import numpy as np
-    import pandas as pd
-    from app.services.ml_ensemble_filter import FEATS as _FEATS
-    from app.services.ml_ensemble_filter import _compute_features as _CF
-    min_bars = 80
-    n = len(candles_1m)
-    if n < min_bars:
-        return []
-    df = pd.DataFrame({"ts": [c.ts for c in candles_1m],
-                       "open": [float(c.open) for c in candles_1m],
-                       "high": [float(c.high) for c in candles_1m],
-                       "low": [float(c.low) for c in candles_1m],
-                       "close": [float(c.close) for c in candles_1m],
-                       "volume": [float(c.volume) for c in candles_1m]})
-    fl = _CF(candles_1m)
-    fl = {k: fl[k].to_numpy(dtype=np.float64) for k in _FEATS}
-    # mirror (SHORT): 1/p, high<->low
-    dm = df.copy()
-    for col in ("open", "high", "low", "close"):
-        p = df[col].to_numpy(np.float64)
-        dm[col] = np.where(p > 0, 1.0 / p, np.nan)
-    mh = dm["high"].copy()
-    dm["high"] = dm["low"]
-    dm["low"] = mh
-    cm = [EngineCandle(ts=row.ts, open=row.open, high=row.high, low=row.low,
-                       close=row.close, volume=row.volume)
-          for row in dm.itertuples(index=False)]
-    fs = _CF(cm)
-    fs = {k: fs[k].to_numpy(dtype=np.float64) for k in _FEATS}
-
-    ts_arr = df["ts"].values.astype("datetime64[ns]").astype("int64") // 10 ** 9
-    epoch5 = (ts_arr // 300) * 300
-    Xl = np.column_stack([fl[k] for k in _FEATS])[min_bars:]
-    Xl = np.nan_to_num(Xl, nan=0.0)
-    Xs = np.column_stack([fs[k] for k in _FEATS])[min_bars:]
-    Xs = np.nan_to_num(Xs, nan=0.0)
-    tcol = np.full(len(Xl), float(tcode))
-    Xl = np.column_stack([Xl, tcol])
-    Xs = np.column_stack([Xs, tcol])
-    pl = model.predict_proba(Xl)[:, 1]
-    ps = model.predict_proba(Xs)[:, 1]
-    out: list[dict] = []
-    seen: set = set()
-    for i in range(len(pl)):
-        ts5 = epoch5[i + min_bars]
-        if ts5 in seen:
-            continue
-        seen.add(ts5)
-        if ts5 != ts_arr[i + min_bars] or ts_arr[i + min_bars] % 300 != 0:
-            continue  # голосуем только на барах закрытия 5m
-        _p, _s = float(pl[i]), float(ps[i])
-        if max(_p, _s) >= threshold:
-            out.append({"ts": datetime.fromtimestamp(ts5, tz=timezone.utc),
-                        "side": "BUY" if _p >= _s else "SELL"})
-    return out
-
-
 def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   setups_cfg: list[dict], quorum_k: int, entry_window_min: int,
                   entry_lookback: int, exit_obj: ExitPolicy, qty_shares: float,
@@ -806,7 +744,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   capital: float, label: str,
                   oracle_swings_detail: list[dict] | None = None,
                   bias_tf_sec: int = 3600,
-                  ml_filter_obj=None, ml_vote_obj=None) -> dict:
+                  ml_filter_obj=None) -> dict:
     """Один прогон (static или adaptive) через единый конвейер."""
     setup_runs: list[tuple[str, list[dict]]] = []
     setup_out: dict[str, dict] = {}
@@ -824,14 +762,6 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         setup_out[sid] = {"tf": s.get("tf", "5min"), "signals": len(sigs),
                           "BUY": sum(1 for x in sigs if x["side"] == "BUY"),
                           "SELL": sum(1 for x in sigs if x["side"] == "SELL")}
-    if ml_vote_obj is not None:
-        ml_votes = _ml_vote_signals(candles, ml_vote_obj["model"],
-                                    ml_vote_obj["tcode"], ml_vote_obj["threshold"])
-        if ml_votes:
-            setup_runs.append(("ml_vote", ml_votes))
-            setup_out["ml_vote"] = {"tf": "5min", "signals": len(ml_votes),
-                                    "BUY": sum(1 for x in ml_votes if x["side"] == "BUY"),
-                                    "SELL": sum(1 for x in ml_votes if x["side"] == "SELL")}
 
     # IMOEX: при высокой волатильности индекса — veto по направлению и/или отдельный голос.
     _imoex = req.get("imoex")
@@ -879,53 +809,6 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         ]
     else:
         entries_raw = micro_breakout(entry_candles, entry_lookback)
-
-    # --- Тройное подтверждение входа на 1м свечах (monotonic closes) ---
-    # req["entry_confirm_closes"] = N: для сторон из entry_confirm_closes_sides требуем,
-    # чтобы последние N ЗАКРЫТИЙ 1м были строго по направлению входа:
-    # BUY — каждое выше предыдущего, SELL — каждое ниже. Сигнальный бар — последний из N.
-    _ecb = int(req.get("entry_confirm_closes", 0) or 0)
-    _ecb_rej = 0
-    if _ecb >= 2 and entries_raw:
-        _ecb_sides = {str(s).upper() for s in (req.get("entry_confirm_closes_sides") or ["BUY"])}
-        _idx_by_ts = {c.ts: i for i, c in enumerate(candles)}
-        _kept = []
-        for _e in entries_raw:
-            _side = str(_e.get("side") or "").upper()
-            if _side not in _ecb_sides:
-                _kept.append(_e)
-                continue
-            _ts = _e.get("ts")
-            if isinstance(_ts, str):
-                try:
-                    _ts = datetime.fromisoformat(_ts)
-                except Exception:
-                    _ts = None
-            _i = _idx_by_ts.get(_ts) if _ts is not None else None
-            if _i is None or _i < _ecb - 1:
-                _kept.append(_e)  # нет истории — не режем
-                continue
-            _cl = [float(candles[_i - k].close) for k in range(_ecb)]
-            if _side == "BUY":
-                _ok = all(_cl[k] > _cl[k + 1] for k in range(_ecb - 1))
-            else:
-                _ok = all(_cl[k] < _cl[k + 1] for k in range(_ecb - 1))
-            if _ok:
-                _kept.append(_e)
-            else:
-                _ecb_rej += 1
-        entries_raw = _kept
-
-    # --- Held-тикер: не рассматриваем входы В СТОРОНУ открытой позиции ---
-    # req["skip_entry_side"] = "BUY"|"SELL": отбрасываем только эти входы
-    # (противоположные остаются — они нужны для сигнальных выходов/флипов).
-    _skip_side = str(req.get("skip_entry_side") or "").upper()
-    _skip_rej = 0
-    if _skip_side in ("BUY", "SELL") and entries_raw:
-        _before = len(entries_raw)
-        entries_raw = [e for e in entries_raw if str(e.get("side") or "").upper() != _skip_side]
-        _skip_rej = _before - len(entries_raw)
-
     unique_raw_ts = len({s["ts"] for _, sigs in setup_runs for s in sigs})
 
     # Volume Exhaustion (VOLUME_EXHAUSTION_2026.md Шаг 1): серия фич по закрытым 5m-барам.
@@ -1510,8 +1393,6 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             "quorum_BUY": sum(1 for q in quorum_sigs if q["side"] == "BUY"),
             "quorum_SELL": sum(1 for q in quorum_sigs if q["side"] == "SELL"),
             "entries_raw": len(entries_raw),
-            "entry_confirm_rejected": _ecb_rej,
-            "skip_side_rejected": _skip_rej,
             "accepted_decisions": len(accepted),
             "unique_entry_episodes": len(entry_episodes),
             "entries_rejected": len(rejected),
@@ -1812,24 +1693,6 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
             adaptive_map[state] = entry_cfg_adapt
         adaptive_map["_exit_policies"] = adaptive_exits
 
-    # ML-голос: дополнительный участник кворума (7 стратегий + ml_tb)
-    ml_vote_obj = None
-    ml_vote_cfg = req.get("ml_vote")
-    if ml_vote_cfg:
-        _mp = ml_vote_cfg.get("model_path") or "reports/ml_tb_1m_v3.joblib"
-        import joblib as _joblib
-        _mloaded = _joblib.load(_mp)
-        _model = _mloaded.get("clf") if isinstance(_mloaded, dict) else _mloaded
-        _tcode = ml_vote_cfg.get("tcode")
-        if _tcode is None:
-            logger.warning("ml_vote: tcode not resolved, disabled")
-        elif _model is None:
-            logger.warning("ml_vote: clf not found in model, disabled")
-        else:
-            ml_vote_obj = {"model": _model,
-                           "tcode": int(_tcode),
-                           "threshold": float(ml_vote_cfg.get("threshold", 0.38))}
-
     if ml_filter_obj is not None:
         c5_all = resample_to_5m(candles)
         ml_filter_obj.precompute(c5_all)
@@ -1840,8 +1703,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
                            adaptive_map if req.get("regime_gate") else None,
                            oracle, o_points, lot, capital, "static",
                            o_swings_detail, bias_tf_sec=bias_tf_sec,
-                           ml_filter_obj=ml_filter_obj,
-                           ml_vote_obj=ml_vote_obj if not adaptive_map else None)
+                           ml_filter_obj=ml_filter_obj)
 
     if adaptive_map is not None:
         adaptive = _run_pipeline(candles, req, bias, setups_cfg, quorum_k, entry_window_min,

@@ -211,6 +211,8 @@ def main() -> None:
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--report-only", action="store_true",
                     help="только отчёт/предложения и закрытия, без открытия позиций")
+    ap.add_argument("--no-buy", action="store_true",
+                    help="запретить покупки (BUY), шорты разрешены")
     args = ap.parse_args()
 
     def post_prompt() -> None:
@@ -273,6 +275,10 @@ def main() -> None:
                         continue
                     if args.report_only and act == "open":
                         print(f"[ai-trader] open {tk} пропущен (--report-only)", flush=True)
+                        continue
+                    if (args.no_buy and act == "open"
+                            and str(a.get("side") or "SELL").upper() in ("BUY", "LONG")):
+                        print(f"[ai-trader] BUY {tk} пропущен (--no-buy)", flush=True)
                         continue
                     if act == "close":
                         r = _http("POST", f"{args.api}/api/v1/bot/ai_trade",

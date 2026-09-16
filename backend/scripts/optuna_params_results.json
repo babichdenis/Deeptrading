@@ -1,1636 +1,9 @@
 {
-  "AFLT": {
-    "figi": "BBG004S683W7",
-    "lot": 10,
+  "AFKS": {
+    "figi": "BBG004S68614",
+    "lot": 100,
     "trials": 60,
-    "elapsed_s": 108.8,
-    "best_params": {
-      "sl_mult": 3.5,
-      "rr": 5.0,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 20,
-      "rsi_reversal.oversold": 32,
-      "rsi_reversal.overbought": 83,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 13,
-      "bollinger_reclaim.k": 1.0,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": true,
-      "range_compression_breakout.lookback": 12.0,
-      "range_compression_breakout.atr_period": 16,
-      "range_compression_breakout.pct": 37.0,
-      "inc_macd_cross": true,
-      "macd_cross.fast": 9,
-      "macd_cross.slow": 27,
-      "macd_cross.signal_period": 8,
-      "inc_donchian_breakout": true,
-      "donchian_breakout.period": 43
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 20,
-        "oversold": 32,
-        "overbought": 83
-      },
-      "bollinger_reclaim": {
-        "period": 13,
-        "k": 1.0
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 12.0,
-        "atr_period": 16,
-        "pct": 37.0
-      },
-      "macd_cross": {
-        "fast": 9,
-        "slow": 27,
-        "signal_period": 8
-      },
-      "donchian_breakout": {
-        "period": 43
-      }
-    },
-    "baseline": {
-      "w1": [
-        3199.85,
-        150,
-        8.1
-      ],
-      "w2": [
-        19947.77,
-        135,
-        38.2
-      ],
-      "w3": [
-        3799.84,
-        191,
-        6.9
-      ]
-    },
-    "opt": {
-      "w1": [
-        5138.11,
-        141,
-        20.51
-      ],
-      "w2": [
-        23654.62,
-        195,
-        62.15
-      ],
-      "w3": [
-        3064.91,
-        154,
-        6.57
-      ]
-    }
-  },
-  "ASTR": {
-    "figi": "RU000A106T36",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 150.7,
-    "best_params": {
-      "sl_mult": 4.5,
-      "rr": 5.5,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 18,
-      "rsi_reversal.oversold": 26,
-      "rsi_reversal.overbought": 85,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 16,
-      "bollinger_reclaim.k": 0.8,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": true,
-      "macd_cross.fast": 16,
-      "macd_cross.slow": 22,
-      "macd_cross.signal_period": 11,
-      "inc_donchian_breakout": false
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 18,
-        "oversold": 26,
-        "overbought": 85
-      },
-      "bollinger_reclaim": {
-        "period": 16,
-        "k": 0.8
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 16,
-        "slow": 22,
-        "signal_period": 11
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        5678.18,
-        132,
-        10.09
-      ],
-      "w2": [
-        9398.22,
-        165,
-        12.11
-      ],
-      "w3": [
-        7572.75,
-        141,
-        14.86
-      ]
-    },
-    "opt": {
-      "w1": [
-        9408.21,
-        150,
-        15.83
-      ],
-      "w2": [
-        8502.27,
-        178,
-        7.72
-      ],
-      "w3": [
-        6063.87,
-        127,
-        10.38
-      ]
-    }
-  },
-  "CHMF": {
-    "figi": "BBG00475K6C3",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 115.9,
-    "best_params": {
-      "sl_mult": 5.0,
-      "rr": 6.0,
-      "quorum": 2,
-      "vol_thr": 0.2,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 14,
-      "rsi_reversal.oversold": 36,
-      "rsi_reversal.overbought": 69,
-      "inc_bollinger_reclaim": false,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": true,
-      "macd_cross.fast": 7,
-      "macd_cross.slow": 25,
-      "macd_cross.signal_period": 7,
-      "inc_donchian_breakout": false
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 14,
-        "oversold": 36,
-        "overbought": 69
-      },
-      "bollinger_reclaim": {
-        "period": 15,
-        "k": 1.0
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 7,
-        "slow": 25,
-        "signal_period": 7
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        2306.76,
-        139,
-        5.42
-      ],
-      "w2": [
-        4290.95,
-        139,
-        5.46
-      ],
-      "w3": [
-        3582.96,
-        163,
-        4.7
-      ]
-    },
-    "opt": {
-      "w1": [
-        4813.44,
-        146,
-        7.82
-      ],
-      "w2": [
-        5587.84,
-        173,
-        4.75
-      ],
-      "w3": [
-        4214.26,
-        170,
-        4.4
-      ]
-    }
-  },
-  "GAZP": {
-    "figi": "BBG004730RP0",
-    "lot": 10,
-    "trials": 60,
-    "elapsed_s": 138.7,
-    "best_params": {
-      "sl_mult": 6.0,
-      "rr": 6.0,
-      "quorum": 2,
-      "vol_thr": 0.6000000000000001,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 8,
-      "rsi_reversal.oversold": 26,
-      "rsi_reversal.overbought": 67,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 17,
-      "bollinger_reclaim.k": 1.9000000000000001,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": false,
-      "inc_donchian_breakout": true,
-      "donchian_breakout.period": 39
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 8,
-        "oversold": 26,
-        "overbought": 67
-      },
-      "bollinger_reclaim": {
-        "period": 17,
-        "k": 1.9000000000000001
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 12,
-        "slow": 26,
-        "signal_period": 9
-      },
-      "donchian_breakout": {
-        "period": 39
-      }
-    },
-    "baseline": {
-      "w1": [
-        482.51,
-        131,
-        3.26
-      ],
-      "w2": [
-        4104.81,
-        137,
-        8.71
-      ],
-      "w3": [
-        3843.53,
-        143,
-        9.57
-      ]
-    },
-    "opt": {
-      "w1": [
-        5070.7,
-        109,
-        23.31
-      ],
-      "w2": [
-        2507.38,
-        133,
-        4.92
-      ],
-      "w3": [
-        1573.66,
-        116,
-        3.14
-      ]
-    }
-  },
-  "GMKN": {
-    "figi": "BBG004731489",
-    "lot": 10,
-    "trials": 60,
-    "elapsed_s": 145.9,
-    "best_params": {
-      "sl_mult": 5.0,
-      "rr": 5.5,
-      "quorum": 3,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 18,
-      "rsi_reversal.oversold": 32,
-      "rsi_reversal.overbought": 65,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 13,
-      "bollinger_reclaim.k": 0.7,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": false,
-      "inc_donchian_breakout": false
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 18,
-        "oversold": 32,
-        "overbought": 65
-      },
-      "bollinger_reclaim": {
-        "period": 13,
-        "k": 0.7
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 12,
-        "slow": 26,
-        "signal_period": 9
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        12889.34,
-        154,
-        8.51
-      ],
-      "w2": [
-        18454.67,
-        147,
-        16.64
-      ],
-      "w3": [
-        -242.2,
-        130,
-        1.39
-      ]
-    },
-    "opt": {
-      "w1": [
-        16319.77,
-        155,
-        9.52
-      ],
-      "w2": [
-        9233.86,
-        80,
-        14.16
-      ],
-      "w3": [
-        2061.63,
-        145,
-        10.62
-      ]
-    }
-  },
-  "LENT": {
-    "figi": "BBG0063FKTD9",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 73.9,
-    "best_params": {
-      "sl_mult": 5.0,
-      "rr": 5.0,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": false,
-      "inc_bollinger_reclaim": false,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": true,
-      "vwap_reclaim.k": 1.4,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": true,
-      "macd_cross.fast": 16,
-      "macd_cross.slow": 26,
-      "macd_cross.signal_period": 11,
-      "inc_donchian_breakout": true,
-      "donchian_breakout.period": 45
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 16,
-        "oversold": 30,
-        "overbought": 80
-      },
-      "bollinger_reclaim": {
-        "period": 15,
-        "k": 1.0
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 1.4
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 16,
-        "slow": 26,
-        "signal_period": 11
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        2797.95,
-        109,
-        6.8
-      ],
-      "w2": [
-        3452.15,
-        135,
-        9.25
-      ],
-      "w3": [
-        3497.72,
-        96,
-        16.81
-      ]
-    },
-    "opt": {
-      "w1": [
-        4226.4,
-        122,
-        8.62
-      ],
-      "w2": [
-        3282.46,
-        140,
-        7.07
-      ],
-      "w3": [
-        6103.03,
-        150,
-        27.06
-      ]
-    }
-  },
-  "LKOH": {
-    "figi": "BBG004731032",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 120.8,
-    "best_params": {
-      "sl_mult": 6.0,
-      "rr": 6.0,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 20,
-      "rsi_reversal.oversold": 34,
-      "rsi_reversal.overbought": 81,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 19,
-      "bollinger_reclaim.k": 0.6,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": true,
-      "vwap_reclaim.k": 2.3,
-      "inc_range_compression_breakout": true,
-      "range_compression_breakout.lookback": 18.0,
-      "range_compression_breakout.atr_period": 20,
-      "range_compression_breakout.pct": 43.0,
-      "inc_macd_cross": true,
-      "macd_cross.fast": 9,
-      "macd_cross.slow": 23,
-      "macd_cross.signal_period": 11,
-      "inc_donchian_breakout": true,
-      "donchian_breakout.period": 46
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 20,
-        "oversold": 34,
-        "overbought": 81
-      },
-      "bollinger_reclaim": {
-        "period": 19,
-        "k": 0.6
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.3
-      },
-      "range_compression_breakout": {
-        "lookback": 18.0,
-        "atr_period": 20,
-        "pct": 43.0
-      },
-      "macd_cross": {
-        "fast": 9,
-        "slow": 23,
-        "signal_period": 11
-      },
-      "donchian_breakout": {
-        "period": 46
-      }
-    },
-    "baseline": {
-      "w1": [
-        1472.16,
-        129,
-        5.36
-      ],
-      "w2": [
-        1773.75,
-        122,
-        5.09
-      ],
-      "w3": [
-        1390.26,
-        131,
-        4.89
-      ]
-    },
-    "opt": {
-      "w1": [
-        3774.57,
-        167,
-        8.72
-      ],
-      "w2": [
-        1869.21,
-        230,
-        2.41
-      ],
-      "w3": [
-        3934.37,
-        150,
-        6.93
-      ]
-    }
-  },
-  "MAGN": {
-    "figi": "BBG004S68507",
-    "lot": 10,
-    "trials": 60,
-    "elapsed_s": 124.5,
-    "best_params": {
-      "sl_mult": 4.0,
-      "rr": 5.5,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 12,
-      "rsi_reversal.oversold": 34,
-      "rsi_reversal.overbought": 65,
-      "inc_bollinger_reclaim": false,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": true,
-      "macd_cross.fast": 9,
-      "macd_cross.slow": 26,
-      "macd_cross.signal_period": 8,
-      "inc_donchian_breakout": false
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 12,
-        "oversold": 34,
-        "overbought": 65
-      },
-      "bollinger_reclaim": {
-        "period": 15,
-        "k": 1.0
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 9,
-        "slow": 26,
-        "signal_period": 8
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        4206.75,
-        122,
-        14.47
-      ],
-      "w2": [
-        5978.98,
-        150,
-        11.1
-      ],
-      "w3": [
-        2721.04,
-        165,
-        3.93
-      ]
-    },
-    "opt": {
-      "w1": [
-        5715.27,
-        160,
-        13.05
-      ],
-      "w2": [
-        7154.82,
-        176,
-        11.33
-      ],
-      "w3": [
-        8647.37,
-        176,
-        12.36
-      ]
-    }
-  },
-  "MTSS": {
-    "figi": "BBG004S681W1",
-    "lot": 10,
-    "trials": 60,
-    "elapsed_s": 103.7,
-    "best_params": {
-      "sl_mult": 3.0,
-      "rr": 5.0,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": false,
-      "inc_bollinger_reclaim": false,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": true,
-      "macd_cross.fast": 9,
-      "macd_cross.slow": 24,
-      "macd_cross.signal_period": 6,
-      "inc_donchian_breakout": true,
-      "donchian_breakout.period": 52
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 16,
-        "oversold": 30,
-        "overbought": 80
-      },
-      "bollinger_reclaim": {
-        "period": 15,
-        "k": 1.0
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 9,
-        "slow": 24,
-        "signal_period": 6
-      },
-      "donchian_breakout": {
-        "period": 52
-      }
-    },
-    "baseline": {
-      "w1": [
-        1776.72,
-        121,
-        7.01
-      ],
-      "w2": [
-        585.35,
-        117,
-        2.79
-      ],
-      "w3": [
-        3287.63,
-        134,
-        7.66
-      ]
-    },
-    "opt": {
-      "w1": [
-        2447.61,
-        116,
-        12.01
-      ],
-      "w2": [
-        1813.59,
-        139,
-        5.21
-      ],
-      "w3": [
-        4232.42,
-        137,
-        10.05
-      ]
-    }
-  },
-  "MVID": {
-    "figi": "BBG004S68CP5",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 96.9,
-    "best_params": {
-      "sl_mult": 5.0,
-      "rr": 4.5,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": false,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 11,
-      "bollinger_reclaim.k": 1.6,
-      "inc_pullback_ema": true,
-      "pullback_ema.trend_ema": 23,
-      "pullback_ema.pull_ema": 12,
-      "inc_vwap_reclaim": true,
-      "vwap_reclaim.k": 1.3,
-      "inc_range_compression_breakout": true,
-      "range_compression_breakout.lookback": 19.0,
-      "range_compression_breakout.atr_period": 16,
-      "range_compression_breakout.pct": 35.0,
-      "inc_macd_cross": true,
-      "macd_cross.fast": 10,
-      "macd_cross.slow": 21,
-      "macd_cross.signal_period": 6,
-      "inc_donchian_breakout": true,
-      "donchian_breakout.period": 40
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 16,
-        "oversold": 30,
-        "overbought": 80
-      },
-      "bollinger_reclaim": {
-        "period": 11,
-        "k": 1.6
-      },
-      "pullback_ema": {
-        "trend_ema": 23,
-        "pull_ema": 12
-      },
-      "vwap_reclaim": {
-        "k": 1.3
-      },
-      "range_compression_breakout": {
-        "lookback": 19.0,
-        "atr_period": 16,
-        "pct": 35.0
-      },
-      "macd_cross": {
-        "fast": 10,
-        "slow": 21,
-        "signal_period": 6
-      },
-      "donchian_breakout": {
-        "period": 40
-      }
-    },
-    "baseline": {
-      "w1": [
-        1153.33,
-        82,
-        2.8
-      ],
-      "w2": [
-        5614.54,
-        74,
-        8.68
-      ],
-      "w3": [
-        4768.58,
-        83,
-        10.57
-      ]
-    },
-    "opt": {
-      "w1": [
-        3061.09,
-        84,
-        5.6
-      ],
-      "w2": [
-        7875.92,
-        109,
-        8.4
-      ],
-      "w3": [
-        3977.1,
-        88,
-        5.79
-      ]
-    }
-  },
-  "NLMK": {
-    "figi": "BBG004S681B4",
-    "lot": 10,
-    "trials": 60,
-    "elapsed_s": 110.9,
-    "best_params": {
-      "sl_mult": 5.0,
-      "rr": 5.5,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 24,
-      "rsi_reversal.oversold": 32,
-      "rsi_reversal.overbought": 85,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 12,
-      "bollinger_reclaim.k": 0.8,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": false,
-      "inc_donchian_breakout": false
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 24,
-        "oversold": 32,
-        "overbought": 85
-      },
-      "bollinger_reclaim": {
-        "period": 12,
-        "k": 0.8
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 12,
-        "slow": 26,
-        "signal_period": 9
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        1628.51,
-        116,
-        4.63
-      ],
-      "w2": [
-        2450.64,
-        132,
-        3.64
-      ],
-      "w3": [
-        1756.32,
-        163,
-        3.43
-      ]
-    },
-    "opt": {
-      "w1": [
-        4156.28,
-        171,
-        7.28
-      ],
-      "w2": [
-        2866.93,
-        180,
-        3.6
-      ],
-      "w3": [
-        3727.11,
-        214,
-        4.24
-      ]
-    }
-  },
-  "NVTK": {
-    "figi": "BBG00475KKY8",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 139.1,
-    "best_params": {
-      "sl_mult": 4.0,
-      "rr": 6.0,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 18,
-      "rsi_reversal.oversold": 30,
-      "rsi_reversal.overbought": 65,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 17,
-      "bollinger_reclaim.k": 1.1,
-      "inc_pullback_ema": true,
-      "pullback_ema.trend_ema": 22,
-      "pullback_ema.pull_ema": 13,
-      "inc_vwap_reclaim": true,
-      "vwap_reclaim.k": 1.4,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": false,
-      "inc_donchian_breakout": false
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 18,
-        "oversold": 30,
-        "overbought": 65
-      },
-      "bollinger_reclaim": {
-        "period": 17,
-        "k": 1.1
-      },
-      "pullback_ema": {
-        "trend_ema": 22,
-        "pull_ema": 13
-      },
-      "vwap_reclaim": {
-        "k": 1.4
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 12,
-        "slow": 26,
-        "signal_period": 9
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        2656.64,
-        178,
-        10.19
-      ],
-      "w2": [
-        4540.64,
-        117,
-        11.5
-      ],
-      "w3": [
-        3921.06,
-        108,
-        11.09
-      ]
-    },
-    "opt": {
-      "w1": [
-        3421.84,
-        180,
-        13.54
-      ],
-      "w2": [
-        4408.92,
-        173,
-        5.84
-      ],
-      "w3": [
-        8942.64,
-        173,
-        27.68
-      ]
-    }
-  },
-  "ROSN": {
-    "figi": "BBG004731354",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 145.7,
-    "best_params": {
-      "sl_mult": 3.0,
-      "rr": 5.5,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 8,
-      "rsi_reversal.oversold": 32,
-      "rsi_reversal.overbought": 65,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 17,
-      "bollinger_reclaim.k": 1.0,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": false,
-      "inc_donchian_breakout": true,
-      "donchian_breakout.period": 30
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 8,
-        "oversold": 32,
-        "overbought": 65
-      },
-      "bollinger_reclaim": {
-        "period": 17,
-        "k": 1.0
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 12,
-        "slow": 26,
-        "signal_period": 9
-      },
-      "donchian_breakout": {
-        "period": 30
-      }
-    },
-    "baseline": {
-      "w1": [
-        4337.34,
-        139,
-        12.76
-      ],
-      "w2": [
-        3562.63,
-        164,
-        9.11
-      ],
-      "w3": [
-        2593.39,
-        192,
-        4.61
-      ]
-    },
-    "opt": {
-      "w1": [
-        4777.35,
-        126,
-        31.08
-      ],
-      "w2": [
-        4573.91,
-        180,
-        10.33
-      ],
-      "w3": [
-        2762.2,
-        196,
-        5.43
-      ]
-    }
-  },
-  "RUAL": {
-    "figi": "BBG008F2T3T2",
-    "lot": 10,
-    "trials": 60,
-    "elapsed_s": 203.3,
-    "best_params": {
-      "sl_mult": 4.0,
-      "rr": 6.0,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 20,
-      "rsi_reversal.oversold": 34,
-      "rsi_reversal.overbought": 83,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 13,
-      "bollinger_reclaim.k": 0.9,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": true,
-      "macd_cross.fast": 10,
-      "macd_cross.slow": 27,
-      "macd_cross.signal_period": 7,
-      "inc_donchian_breakout": false
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 20,
-        "oversold": 34,
-        "overbought": 83
-      },
-      "bollinger_reclaim": {
-        "period": 13,
-        "k": 0.9
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 10,
-        "slow": 27,
-        "signal_period": 7
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        1714.44,
-        156,
-        4.01
-      ],
-      "w2": [
-        5950.34,
-        134,
-        6.55
-      ],
-      "w3": [
-        6400.86,
-        165,
-        9.88
-      ]
-    },
-    "opt": {
-      "w1": [
-        5957.57,
-        205,
-        9.35
-      ],
-      "w2": [
-        7676.81,
-        145,
-        8.56
-      ],
-      "w3": [
-        4311.53,
-        181,
-        5.24
-      ]
-    }
-  },
-  "SBER": {
-    "figi": "BBG004730N88",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 114.2,
-    "best_params": {
-      "sl_mult": 6.0,
-      "rr": 5.0,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": false,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 14,
-      "bollinger_reclaim.k": 0.8,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": false,
-      "inc_donchian_breakout": false
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 16,
-        "oversold": 30,
-        "overbought": 80
-      },
-      "bollinger_reclaim": {
-        "period": 14,
-        "k": 0.8
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 12,
-        "slow": 26,
-        "signal_period": 9
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        -78.11,
-        110,
-        4.22
-      ],
-      "w2": [
-        433.5,
-        168,
-        4.27
-      ],
-      "w3": [
-        0.0,
-        0,
-        0.0
-      ]
-    },
-    "opt": {
-      "w1": [
-        1386.82,
-        132,
-        6.09
-      ],
-      "w2": [
-        1223.03,
-        196,
-        5.56
-      ],
-      "w3": [
-        3412.7,
-        192,
-        8.55
-      ]
-    }
-  },
-  "SFIN": {
-    "figi": "BBG003LYCMB1",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 154.1,
-    "best_params": {
-      "sl_mult": 6.0,
-      "rr": 5.0,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": true,
-      "rsi_reversal.period": 24,
-      "rsi_reversal.oversold": 32,
-      "rsi_reversal.overbought": 85,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 14,
-      "bollinger_reclaim.k": 0.8,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": false,
-      "inc_donchian_breakout": true,
-      "donchian_breakout.period": 54
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 24,
-        "oversold": 32,
-        "overbought": 85
-      },
-      "bollinger_reclaim": {
-        "period": 14,
-        "k": 0.8
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 12,
-        "slow": 26,
-        "signal_period": 9
-      },
-      "donchian_breakout": {
-        "period": 54
-      }
-    },
-    "baseline": {
-      "w1": [
-        6005.42,
-        104,
-        17.59
-      ],
-      "w2": [
-        10572.87,
-        157,
-        36.25
-      ],
-      "w3": [
-        -677.35,
-        119,
-        1.23
-      ]
-    },
-    "opt": {
-      "w1": [
-        10095.35,
-        162,
-        18.97
-      ],
-      "w2": [
-        10910.58,
-        180,
-        22.61
-      ],
-      "w3": [
-        439.02,
-        162,
-        1.63
-      ]
-    }
-  },
-  "SMLT": {
-    "figi": "BBG00F6NKQX3",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 266.5,
-    "best_params": {
-      "sl_mult": 4.5,
-      "rr": 5.5,
-      "quorum": 2,
-      "vol_thr": 0.4,
-      "inc_rsi_reversal": false,
-      "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 14,
-      "bollinger_reclaim.k": 1.2000000000000002,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": true,
-      "vwap_reclaim.k": 2.4000000000000004,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": false,
-      "inc_donchian_breakout": false
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 16,
-        "oversold": 30,
-        "overbought": 80
-      },
-      "bollinger_reclaim": {
-        "period": 14,
-        "k": 1.2000000000000002
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.4000000000000004
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 12,
-        "slow": 26,
-        "signal_period": 9
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        2871.13,
-        103,
-        4.09
-      ],
-      "w2": [
-        7439.84,
-        135,
-        6.63
-      ],
-      "w3": [
-        8313.64,
-        121,
-        16.83
-      ]
-    },
-    "opt": {
-      "w1": [
-        11457.19,
-        131,
-        19.52
-      ],
-      "w2": [
-        9178.33,
-        145,
-        6.4
-      ],
-      "w3": [
-        7828.24,
-        142,
-        9.6
-      ]
-    }
-  },
-  "SNGSP": {
-    "figi": "BBG004S681M2",
-    "lot": 10,
-    "trials": 60,
-    "elapsed_s": 375.4,
-    "best_params": {
-      "sl_mult": 6.0,
-      "rr": 6.0,
-      "quorum": 2,
-      "vol_thr": 0.0,
-      "inc_rsi_reversal": false,
-      "inc_bollinger_reclaim": false,
-      "inc_pullback_ema": false,
-      "inc_vwap_reclaim": false,
-      "inc_range_compression_breakout": false,
-      "inc_macd_cross": false,
-      "inc_donchian_breakout": false
-    },
-    "best_strat_params": {
-      "rsi_reversal": {
-        "period": 16,
-        "oversold": 30,
-        "overbought": 80
-      },
-      "bollinger_reclaim": {
-        "period": 15,
-        "k": 1.0
-      },
-      "pullback_ema": {
-        "trend_ema": 20,
-        "pull_ema": 10
-      },
-      "vwap_reclaim": {
-        "k": 2.0
-      },
-      "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
-      },
-      "macd_cross": {
-        "fast": 12,
-        "slow": 26,
-        "signal_period": 9
-      },
-      "donchian_breakout": {
-        "period": 45
-      }
-    },
-    "baseline": {
-      "w1": [
-        4316.66,
-        181,
-        5.67
-      ],
-      "w2": [
-        1232.62,
-        126,
-        3.28
-      ],
-      "w3": [
-        6314.56,
-        196,
-        10.76
-      ]
-    },
-    "opt": {
-      "w1": [
-        9928.54,
-        198,
-        10.43
-      ],
-      "w2": [
-        2582.0,
-        202,
-        3.34
-      ],
-      "w3": [
-        5874.78,
-        228,
-        5.99
-      ]
-    }
-  },
-  "T": {
-    "figi": "BBG000BSJK37",
-    "lot": 1,
-    "trials": 60,
-    "elapsed_s": 4.5,
+    "elapsed_s": 8.4,
     "best_params": {
       "sl_mult": 4.0,
       "rr": 6.0,
@@ -1657,7 +30,15 @@
       "macd_cross.slow": 27,
       "macd_cross.signal_period": 6,
       "inc_donchian_breakout": true,
-      "donchian_breakout.period": 32
+      "donchian_breakout.period": 32,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
     },
     "best_strat_params": {
       "rsi_reversal": {
@@ -1688,7 +69,15 @@
       },
       "donchian_breakout": {
         "period": 32
-      }
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
     },
     "baseline": {
       "w1": [
@@ -1697,9 +86,9 @@
         0.0
       ],
       "w2": [
-        0.0,
-        0,
-        0.0
+        228.02,
+        22,
+        5.25
       ],
       "w3": [
         0.0,
@@ -1712,6 +101,2723 @@
         0.0,
         0,
         0.0
+      ],
+      "w2": [
+        84.95,
+        6,
+        4.67
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "AFLT": {
+    "figi": "BBG004S683W7",
+    "lot": 10,
+    "trials": 60,
+    "elapsed_s": 31.2,
+    "best_params": {
+      "sl_mult": 6.0,
+      "rr": 6.0,
+      "quorum": 3,
+      "vol_thr": 0.2,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 18,
+      "rsi_reversal.oversold": 30,
+      "rsi_reversal.overbought": 71,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 14,
+      "bollinger_reclaim.k": 1.3,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 20,
+      "pullback_ema.pull_ema": 13,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 1.1,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 19.0,
+      "range_compression_breakout.atr_period": 13,
+      "range_compression_breakout.pct": 49.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 6,
+      "macd_cross.slow": 28,
+      "macd_cross.signal_period": 10,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 59,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": true
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 18,
+        "oversold": 30,
+        "overbought": 71
+      },
+      "bollinger_reclaim": {
+        "period": 14,
+        "k": 1.3
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 13
+      },
+      "vwap_reclaim": {
+        "k": 1.1
+      },
+      "range_compression_breakout": {
+        "lookback": 19.0,
+        "atr_period": 13,
+        "pct": 49.0
+      },
+      "macd_cross": {
+        "fast": 6,
+        "slow": 28,
+        "signal_period": 10
+      },
+      "donchian_breakout": {
+        "period": 59
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        380.68,
+        51,
+        6.16
+      ],
+      "w2": [
+        19.37,
+        41,
+        2.32
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        608.09,
+        31,
+        9.65
+      ],
+      "w2": [
+        157.73,
+        28,
+        2.95
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "ALRS": {
+    "figi": "BBG004S68B31",
+    "lot": 10,
+    "trials": 60,
+    "elapsed_s": 26.1,
+    "best_params": {
+      "sl_mult": 5.0,
+      "rr": 5.0,
+      "quorum": 2,
+      "vol_thr": 0.2,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 20,
+      "bollinger_reclaim.k": 1.5,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 18.0,
+      "range_compression_breakout.atr_period": 13,
+      "range_compression_breakout.pct": 47.0,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": false,
+      "inc_trend_up": false,
+      "inc_trend_down": false,
+      "inc_range_reversion": true,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": false,
+      "inc_hv_ensemble": false,
+      "inc_neutral_ensemble": true
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 20,
+        "k": 1.5
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 18.0,
+        "atr_period": 13,
+        "pct": 47.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 45
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        544.04,
+        37,
+        5.63
+      ],
+      "w2": [
+        2043.6,
+        83,
+        12.67
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        886.73,
+        30,
+        13.61
+      ],
+      "w2": [
+        2058.83,
+        75,
+        12.88
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "ASTR": {
+    "figi": "RU000A106T36",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 17.5,
+    "best_params": {
+      "sl_mult": 3.5,
+      "rr": 2.0,
+      "quorum": 2,
+      "vol_thr": 0.0,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 22,
+      "rsi_reversal.oversold": 32,
+      "rsi_reversal.overbought": 83,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 14,
+      "bollinger_reclaim.k": 1.3,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 18,
+      "pullback_ema.pull_ema": 13,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 1.4,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 13.0,
+      "range_compression_breakout.atr_period": 18,
+      "range_compression_breakout.pct": 27.0,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": false,
+      "inc_trend_up": false,
+      "inc_trend_down": false,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": false,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 22,
+        "oversold": 32,
+        "overbought": 83
+      },
+      "bollinger_reclaim": {
+        "period": 14,
+        "k": 1.3
+      },
+      "pullback_ema": {
+        "trend_ema": 18,
+        "pull_ema": 13
+      },
+      "vwap_reclaim": {
+        "k": 1.4
+      },
+      "range_compression_breakout": {
+        "lookback": 13.0,
+        "atr_period": 18,
+        "pct": 27.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 45
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        120.7,
+        50,
+        2.76
+      ],
+      "w2": [
+        984.24,
+        51,
+        6.61
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        625.15,
+        42,
+        16.21
+      ],
+      "w2": [
+        969.2,
+        50,
+        7.25
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "CHMF": {
+    "figi": "BBG00475K6C3",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 29.9,
+    "best_params": {
+      "sl_mult": 5.5,
+      "rr": 5.0,
+      "quorum": 2,
+      "vol_thr": 0.8,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 16,
+      "bollinger_reclaim.k": 1.4,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 15.0,
+      "range_compression_breakout.atr_period": 16,
+      "range_compression_breakout.pct": 33.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 14,
+      "macd_cross.slow": 29,
+      "macd_cross.signal_period": 9,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 37,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": false,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 16,
+        "k": 1.4
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 15.0,
+        "atr_period": 16,
+        "pct": 33.0
+      },
+      "macd_cross": {
+        "fast": 14,
+        "slow": 29,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 37
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        1289.95,
+        72,
+        5.39
+      ],
+      "w2": [
+        1484.47,
+        58,
+        11.47
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        1935.63,
+        49,
+        9.3
+      ],
+      "w2": [
+        842.4,
+        44,
+        3.56
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "GAZP": {
+    "figi": "BBG004730RP0",
+    "lot": 10,
+    "trials": 60,
+    "elapsed_s": 34.3,
+    "best_params": {
+      "sl_mult": 4.5,
+      "rr": 6.0,
+      "quorum": 2,
+      "vol_thr": 1.0,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 14,
+      "rsi_reversal.oversold": 32,
+      "rsi_reversal.overbought": 79,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 16,
+      "bollinger_reclaim.k": 0.5,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 17.0,
+      "range_compression_breakout.atr_period": 13,
+      "range_compression_breakout.pct": 43.0,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 53,
+      "inc_trend_up": true,
+      "inc_trend_down": false,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": false,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": false,
+      "inc_neutral_ensemble": true
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 14,
+        "oversold": 32,
+        "overbought": 79
+      },
+      "bollinger_reclaim": {
+        "period": 16,
+        "k": 0.5
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 17.0,
+        "atr_period": 13,
+        "pct": 43.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 53
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        768.97,
+        87,
+        5.24
+      ],
+      "w2": [
+        712.74,
+        51,
+        5.04
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        985.23,
+        48,
+        8.02
+      ],
+      "w2": [
+        649.9,
+        30,
+        4.93
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "GMKN": {
+    "figi": "BBG004731489",
+    "lot": 10,
+    "trials": 60,
+    "elapsed_s": 23.6,
+    "best_params": {
+      "sl_mult": 5.0,
+      "rr": 5.0,
+      "quorum": 2,
+      "vol_thr": 1.0,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": false,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 11,
+      "macd_cross.slow": 22,
+      "macd_cross.signal_period": 9,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 41,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": false,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.0
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 15,
+        "atr_period": 16,
+        "pct": 40.0
+      },
+      "macd_cross": {
+        "fast": 11,
+        "slow": 22,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 41
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        736.72,
+        52,
+        13.14
+      ],
+      "w2": [
+        1043.56,
+        47,
+        11.63
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        1291.51,
+        19,
+        36.65
+      ],
+      "w2": [
+        1037.26,
+        34,
+        13.4
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "LENT": {
+    "figi": "BBG0063FKTD9",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 20.0,
+    "best_params": {
+      "sl_mult": 4.0,
+      "rr": 3.0,
+      "quorum": 2,
+      "vol_thr": 1.0,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 18,
+      "rsi_reversal.oversold": 30,
+      "rsi_reversal.overbought": 85,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": false,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 40,
+      "inc_trend_up": true,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": false,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": false,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 18,
+        "oversold": 30,
+        "overbought": 85
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.0
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 15,
+        "atr_period": 16,
+        "pct": 40.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 40
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        125.01,
+        50,
+        3.1
+      ],
+      "w2": [
+        42.96,
+        31,
+        3.23
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        549.16,
+        26,
+        7.96
+      ],
+      "w2": [
+        331.08,
+        14,
+        452900000000.01
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "MAGN": {
+    "figi": "BBG004S68507",
+    "lot": 10,
+    "trials": 60,
+    "elapsed_s": 29.3,
+    "best_params": {
+      "sl_mult": 6.0,
+      "rr": 6.0,
+      "quorum": 2,
+      "vol_thr": 0.2,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 10,
+      "rsi_reversal.oversold": 38,
+      "rsi_reversal.overbought": 81,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 16,
+      "pullback_ema.pull_ema": 10,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 1.8,
+      "inc_range_compression_breakout": false,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 60,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": false,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 10,
+        "oversold": 38,
+        "overbought": 81
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.0
+      },
+      "pullback_ema": {
+        "trend_ema": 16,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 1.8
+      },
+      "range_compression_breakout": {
+        "lookback": 15,
+        "atr_period": 16,
+        "pct": 40.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 60
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        1672.27,
+        57,
+        12.59
+      ],
+      "w2": [
+        1022.73,
+        49,
+        10.57
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        1811.3,
+        48,
+        12.26
+      ],
+      "w2": [
+        945.26,
+        47,
+        9.49
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "MTSS": {
+    "figi": "BBG004S681W1",
+    "lot": 10,
+    "trials": 60,
+    "elapsed_s": 26.5,
+    "best_params": {
+      "sl_mult": 3.5,
+      "rr": 3.5,
+      "quorum": 2,
+      "vol_thr": 0.4,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 20,
+      "rsi_reversal.oversold": 32,
+      "rsi_reversal.overbought": 85,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 11,
+      "bollinger_reclaim.k": 0.6,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": false,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 41,
+      "inc_trend_up": false,
+      "inc_trend_down": false,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": false,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": false,
+      "inc_neutral_ensemble": true
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 20,
+        "oversold": 32,
+        "overbought": 85
+      },
+      "bollinger_reclaim": {
+        "period": 11,
+        "k": 0.6
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 15,
+        "atr_period": 16,
+        "pct": 40.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 41
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        664.68,
+        56,
+        12.89
+      ],
+      "w2": [
+        469.47,
+        38,
+        7.51
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        793.07,
+        55,
+        14.64
+      ],
+      "w2": [
+        438.01,
+        34,
+        15.32
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "NLMK": {
+    "figi": "BBG004S681B4",
+    "lot": 10,
+    "trials": 60,
+    "elapsed_s": 23.2,
+    "best_params": {
+      "sl_mult": 5.5,
+      "rr": 5.5,
+      "quorum": 2,
+      "vol_thr": 0.0,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 12,
+      "bollinger_reclaim.k": 0.8,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 22,
+      "pullback_ema.pull_ema": 15,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": false,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": false,
+      "inc_trend_up": false,
+      "inc_trend_down": false,
+      "inc_range_reversion": true,
+      "inc_long_ensemble": false,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": true
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 12,
+        "k": 0.8
+      },
+      "pullback_ema": {
+        "trend_ema": 22,
+        "pull_ema": 15
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 15,
+        "atr_period": 16,
+        "pct": 40.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 45
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        1820.8,
+        53,
+        33.15
+      ],
+      "w2": [
+        414.25,
+        61,
+        3.52
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        2157.35,
+        67,
+        17.9
+      ],
+      "w2": [
+        486.83,
+        64,
+        3.64
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "NVTK": {
+    "figi": "BBG00475KKY8",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 31.0,
+    "best_params": {
+      "sl_mult": 5.5,
+      "rr": 6.0,
+      "quorum": 3,
+      "vol_thr": 1.2000000000000002,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 15,
+      "bollinger_reclaim.k": 1.3,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 2.2,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 16.0,
+      "range_compression_breakout.atr_period": 12,
+      "range_compression_breakout.pct": 49.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 6,
+      "macd_cross.slow": 20,
+      "macd_cross.signal_period": 12,
+      "inc_donchian_breakout": false,
+      "inc_trend_up": false,
+      "inc_trend_down": false,
+      "inc_range_reversion": true,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": false,
+      "inc_neutral_ensemble": true
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.3
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.2
+      },
+      "range_compression_breakout": {
+        "lookback": 16.0,
+        "atr_period": 12,
+        "pct": 49.0
+      },
+      "macd_cross": {
+        "fast": 6,
+        "slow": 20,
+        "signal_period": 12
+      },
+      "donchian_breakout": {
+        "period": 45
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        465.93,
+        59,
+        3.8
+      ],
+      "w2": [
+        884.87,
+        72,
+        8.84
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        1012.29,
+        23,
+        13.93
+      ],
+      "w2": [
+        816.59,
+        28,
+        6.01
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "PHOR": {
+    "figi": "BBG004S689R0",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 4.3,
+    "best_params": {
+      "sl_mult": 4.0,
+      "rr": 6.0,
+      "quorum": 3,
+      "vol_thr": 0.8,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 8,
+      "rsi_reversal.oversold": 38,
+      "rsi_reversal.overbought": 77,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 20,
+      "bollinger_reclaim.k": 1.8,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 17,
+      "pullback_ema.pull_ema": 10,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 1.6,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 13.0,
+      "range_compression_breakout.atr_period": 15,
+      "range_compression_breakout.pct": 35.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 12,
+      "macd_cross.slow": 27,
+      "macd_cross.signal_period": 6,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 32,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 8,
+        "oversold": 38,
+        "overbought": 77
+      },
+      "bollinger_reclaim": {
+        "period": 20,
+        "k": 1.8
+      },
+      "pullback_ema": {
+        "trend_ema": 17,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 1.6
+      },
+      "range_compression_breakout": {
+        "lookback": 13.0,
+        "atr_period": 15,
+        "pct": 35.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 27,
+        "signal_period": 6
+      },
+      "donchian_breakout": {
+        "period": 32
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        0.0,
+        0,
+        0.0
+      ],
+      "w2": [
+        117.85,
+        17,
+        11.8
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        0.0,
+        0,
+        0.0
+      ],
+      "w2": [
+        11.04,
+        4,
+        3.18
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "PLZL": {
+    "figi": "BBG000R607Y3",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 3.3,
+    "best_params": {
+      "sl_mult": 4.0,
+      "rr": 6.0,
+      "quorum": 3,
+      "vol_thr": 0.8,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 8,
+      "rsi_reversal.oversold": 38,
+      "rsi_reversal.overbought": 77,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 20,
+      "bollinger_reclaim.k": 1.8,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 17,
+      "pullback_ema.pull_ema": 10,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 1.6,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 13.0,
+      "range_compression_breakout.atr_period": 15,
+      "range_compression_breakout.pct": 35.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 12,
+      "macd_cross.slow": 27,
+      "macd_cross.signal_period": 6,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 32,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 8,
+        "oversold": 38,
+        "overbought": 77
+      },
+      "bollinger_reclaim": {
+        "period": 20,
+        "k": 1.8
+      },
+      "pullback_ema": {
+        "trend_ema": 17,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 1.6
+      },
+      "range_compression_breakout": {
+        "lookback": 13.0,
+        "atr_period": 15,
+        "pct": 35.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 27,
+        "signal_period": 6
+      },
+      "donchian_breakout": {
+        "period": 32
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        0.0,
+        0,
+        0.0
+      ],
+      "w2": [
+        449.77,
+        10,
+        40.29
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        0.0,
+        0,
+        0.0
+      ],
+      "w2": [
+        87.95,
+        3,
+        4.69
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "RNFT": {
+    "figi": "BBG00F9XX7H4",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 18.9,
+    "best_params": {
+      "sl_mult": 3.0,
+      "rr": 3.0,
+      "quorum": 3,
+      "vol_thr": 0.0,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 10,
+      "rsi_reversal.oversold": 34,
+      "rsi_reversal.overbought": 77,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 18,
+      "bollinger_reclaim.k": 0.9,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 18.0,
+      "range_compression_breakout.atr_period": 15,
+      "range_compression_breakout.pct": 49.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 15,
+      "macd_cross.slow": 29,
+      "macd_cross.signal_period": 6,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 55,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": true,
+      "inc_long_ensemble": false,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": false,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 10,
+        "oversold": 34,
+        "overbought": 77
+      },
+      "bollinger_reclaim": {
+        "period": 18,
+        "k": 0.9
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 18.0,
+        "atr_period": 15,
+        "pct": 49.0
+      },
+      "macd_cross": {
+        "fast": 15,
+        "slow": 29,
+        "signal_period": 6
+      },
+      "donchian_breakout": {
+        "period": 55
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        104.26,
+        53,
+        2.68
+      ],
+      "w2": [
+        464.5,
+        74,
+        3.79
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        456.18,
+        24,
+        7.51
+      ],
+      "w2": [
+        149.53,
+        35,
+        2.16
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "ROSN": {
+    "figi": "BBG004731354",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 38.9,
+    "best_params": {
+      "sl_mult": 6.0,
+      "rr": 3.0,
+      "quorum": 2,
+      "vol_thr": 0.0,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 13.0,
+      "range_compression_breakout.atr_period": 12,
+      "range_compression_breakout.pct": 49.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 6,
+      "macd_cross.slow": 20,
+      "macd_cross.signal_period": 8,
+      "inc_donchian_breakout": false,
+      "inc_trend_up": true,
+      "inc_trend_down": false,
+      "inc_range_reversion": true,
+      "inc_long_ensemble": false,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": false,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.0
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 13.0,
+        "atr_period": 12,
+        "pct": 49.0
+      },
+      "macd_cross": {
+        "fast": 6,
+        "slow": 20,
+        "signal_period": 8
+      },
+      "donchian_breakout": {
+        "period": 45
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        377.39,
+        41,
+        6.54
+      ],
+      "w2": [
+        312.21,
+        66,
+        3.11
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        659.86,
+        51,
+        7.82
+      ],
+      "w2": [
+        540.88,
+        66,
+        3.87
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "RUAL": {
+    "figi": "BBG008F2T3T2",
+    "lot": 10,
+    "trials": 60,
+    "elapsed_s": 22.5,
+    "best_params": {
+      "sl_mult": 5.5,
+      "rr": 6.0,
+      "quorum": 3,
+      "vol_thr": 0.2,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 16,
+      "rsi_reversal.oversold": 30,
+      "rsi_reversal.overbought": 83,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 18,
+      "pullback_ema.pull_ema": 14,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 19.0,
+      "range_compression_breakout.atr_period": 15,
+      "range_compression_breakout.pct": 25.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 17,
+      "macd_cross.slow": 29,
+      "macd_cross.signal_period": 6,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 46,
+      "inc_trend_up": true,
+      "inc_trend_down": false,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": false,
+      "inc_neutral_ensemble": true
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 83
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.0
+      },
+      "pullback_ema": {
+        "trend_ema": 18,
+        "pull_ema": 14
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 19.0,
+        "atr_period": 15,
+        "pct": 25.0
+      },
+      "macd_cross": {
+        "fast": 17,
+        "slow": 29,
+        "signal_period": 6
+      },
+      "donchian_breakout": {
+        "period": 46
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        197.35,
+        54,
+        2.49
+      ],
+      "w2": [
+        591.68,
+        55,
+        8.95
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        556.72,
+        42,
+        3.98
+      ],
+      "w2": [
+        300.51,
+        41,
+        5.09
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "SBER": {
+    "figi": "BBG004730N88",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 44.3,
+    "best_params": {
+      "sl_mult": 5.5,
+      "rr": 5.5,
+      "quorum": 3,
+      "vol_thr": 1.2000000000000002,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": false,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 46,
+      "inc_trend_up": true,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": false,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": false,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.0
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 15,
+        "atr_period": 16,
+        "pct": 40.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 46
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        370.34,
+        61,
+        7.18
+      ],
+      "w2": [
+        -77.72,
+        79,
+        4.02
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        663.69,
+        34,
+        9.9
+      ],
+      "w2": [
+        64.31,
+        40,
+        3.7
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "SFIN": {
+    "figi": "BBG003LYCMB1",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 18.6,
+    "best_params": {
+      "sl_mult": 4.0,
+      "rr": 4.0,
+      "quorum": 2,
+      "vol_thr": 0.4,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 20,
+      "pullback_ema.pull_ema": 14,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 10.0,
+      "range_compression_breakout.atr_period": 14,
+      "range_compression_breakout.pct": 43.0,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": false,
+      "inc_trend_up": false,
+      "inc_trend_down": false,
+      "inc_range_reversion": true,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": false,
+      "inc_neutral_ensemble": true
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.0
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 14
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 10.0,
+        "atr_period": 14,
+        "pct": 43.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 45
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        360.67,
+        35,
+        6.17
+      ],
+      "w2": [
+        657.65,
+        37,
+        6.81
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        469.9,
+        24,
+        6.85
+      ],
+      "w2": [
+        534.62,
+        36,
+        5.69
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "SIBN": {
+    "figi": "BBG004S684M6",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 5.3,
+    "best_params": {
+      "sl_mult": 4.0,
+      "rr": 6.0,
+      "quorum": 3,
+      "vol_thr": 0.8,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 8,
+      "rsi_reversal.oversold": 38,
+      "rsi_reversal.overbought": 77,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 20,
+      "bollinger_reclaim.k": 1.8,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 17,
+      "pullback_ema.pull_ema": 10,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 1.6,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 13.0,
+      "range_compression_breakout.atr_period": 15,
+      "range_compression_breakout.pct": 35.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 12,
+      "macd_cross.slow": 27,
+      "macd_cross.signal_period": 6,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 32,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 8,
+        "oversold": 38,
+        "overbought": 77
+      },
+      "bollinger_reclaim": {
+        "period": 20,
+        "k": 1.8
+      },
+      "pullback_ema": {
+        "trend_ema": 17,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 1.6
+      },
+      "range_compression_breakout": {
+        "lookback": 13.0,
+        "atr_period": 15,
+        "pct": 35.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 27,
+        "signal_period": 6
+      },
+      "donchian_breakout": {
+        "period": 32
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        0.0,
+        0,
+        0.0
+      ],
+      "w2": [
+        306.68,
+        22,
+        6.91
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        0.0,
+        0,
+        0.0
+      ],
+      "w2": [
+        178.61,
+        5,
+        227700000000.0
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "SMLT": {
+    "figi": "BBG00F6NKQX3",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 14.6,
+    "best_params": {
+      "sl_mult": 5.0,
+      "rr": 6.0,
+      "quorum": 2,
+      "vol_thr": 0.0,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 10,
+      "bollinger_reclaim.k": 0.6,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 2.1,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 10.0,
+      "range_compression_breakout.atr_period": 14,
+      "range_compression_breakout.pct": 25.0,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": false,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": true,
+      "inc_long_ensemble": false,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 10,
+        "k": 0.6
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.1
+      },
+      "range_compression_breakout": {
+        "lookback": 10.0,
+        "atr_period": 14,
+        "pct": 25.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 45
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        721.19,
+        25,
+        34.33
+      ],
+      "w2": [
+        1230.27,
+        46,
+        4.42
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        1469.8,
+        40,
+        45.24
+      ],
+      "w2": [
+        1492.22,
+        67,
+        4.61
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "SNGSP": {
+    "figi": "BBG004S681M2",
+    "lot": 10,
+    "trials": 60,
+    "elapsed_s": 26.1,
+    "best_params": {
+      "sl_mult": 4.0,
+      "rr": 3.5,
+      "quorum": 2,
+      "vol_thr": 0.6000000000000001,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 20,
+      "rsi_reversal.oversold": 34,
+      "rsi_reversal.overbought": 71,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": false,
+      "inc_range_compression_breakout": false,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 9,
+      "macd_cross.slow": 32,
+      "macd_cross.signal_period": 7,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 44,
+      "inc_trend_up": true,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": false,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": false,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 20,
+        "oversold": 34,
+        "overbought": 71
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.0
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 15,
+        "atr_period": 16,
+        "pct": 40.0
+      },
+      "macd_cross": {
+        "fast": 9,
+        "slow": 32,
+        "signal_period": 7
+      },
+      "donchian_breakout": {
+        "period": 44
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        711.23,
+        55,
+        9.71
+      ],
+      "w2": [
+        181.72,
+        45,
+        3.9
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        697.01,
+        41,
+        9.8
+      ],
+      "w2": [
+        60.1,
+        38,
+        2.63
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "T": {
+    "figi": "TCS80A107UL4",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 10.7,
+    "best_params": {
+      "sl_mult": 4.0,
+      "rr": 6.0,
+      "quorum": 3,
+      "vol_thr": 0.8,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 8,
+      "rsi_reversal.oversold": 38,
+      "rsi_reversal.overbought": 77,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 20,
+      "bollinger_reclaim.k": 1.8,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 17,
+      "pullback_ema.pull_ema": 10,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 1.6,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 13.0,
+      "range_compression_breakout.atr_period": 15,
+      "range_compression_breakout.pct": 35.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 12,
+      "macd_cross.slow": 27,
+      "macd_cross.signal_period": 6,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 32,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 8,
+        "oversold": 38,
+        "overbought": 77
+      },
+      "bollinger_reclaim": {
+        "period": 20,
+        "k": 1.8
+      },
+      "pullback_ema": {
+        "trend_ema": 17,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 1.6
+      },
+      "range_compression_breakout": {
+        "lookback": 13.0,
+        "atr_period": 15,
+        "pct": 35.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 27,
+        "signal_period": 6
+      },
+      "donchian_breakout": {
+        "period": 32
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        0.0,
+        0,
+        0.0
+      ],
+      "w2": [
+        -8.5,
+        47,
+        2.74
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        0.0,
+        0,
+        0.0
+      ],
+      "w2": [
+        15.88,
+        30,
+        2.61
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "TATN": {
+    "figi": "BBG004RVFFC0",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 4.5,
+    "best_params": {
+      "sl_mult": 4.0,
+      "rr": 6.0,
+      "quorum": 3,
+      "vol_thr": 0.8,
+      "inc_rsi_reversal": true,
+      "rsi_reversal.period": 8,
+      "rsi_reversal.oversold": 38,
+      "rsi_reversal.overbought": 77,
+      "inc_bollinger_reclaim": true,
+      "bollinger_reclaim.period": 20,
+      "bollinger_reclaim.k": 1.8,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 17,
+      "pullback_ema.pull_ema": 10,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 1.6,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 13.0,
+      "range_compression_breakout.atr_period": 15,
+      "range_compression_breakout.pct": 35.0,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 12,
+      "macd_cross.slow": 27,
+      "macd_cross.signal_period": 6,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 32,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 8,
+        "oversold": 38,
+        "overbought": 77
+      },
+      "bollinger_reclaim": {
+        "period": 20,
+        "k": 1.8
+      },
+      "pullback_ema": {
+        "trend_ema": 17,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 1.6
+      },
+      "range_compression_breakout": {
+        "lookback": 13.0,
+        "atr_period": 15,
+        "pct": 35.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 27,
+        "signal_period": 6
+      },
+      "donchian_breakout": {
+        "period": 32
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        0.0,
+        0,
+        0.0
+      ],
+      "w2": [
+        470.77,
+        10,
+        892.25
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        0.0,
+        0,
+        0.0
+      ],
+      "w2": [
+        314.81,
+        4,
+        26.79
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "TRNFP": {
+    "figi": "BBG00475KHX6",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 32.3,
+    "best_params": {
+      "sl_mult": 4.5,
+      "rr": 2.5,
+      "quorum": 3,
+      "vol_thr": 1.2000000000000002,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": true,
+      "pullback_ema.trend_ema": 16,
+      "pullback_ema.pull_ema": 8,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 2.0,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 14.0,
+      "range_compression_breakout.atr_period": 18,
+      "range_compression_breakout.pct": 29.0,
+      "inc_macd_cross": false,
+      "inc_donchian_breakout": false,
+      "inc_trend_up": true,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": false,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": false,
+      "inc_hv_ensemble": false,
+      "inc_neutral_ensemble": true
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.0
+      },
+      "pullback_ema": {
+        "trend_ema": 16,
+        "pull_ema": 8
+      },
+      "vwap_reclaim": {
+        "k": 2.0
+      },
+      "range_compression_breakout": {
+        "lookback": 14.0,
+        "atr_period": 18,
+        "pct": 29.0
+      },
+      "macd_cross": {
+        "fast": 12,
+        "slow": 26,
+        "signal_period": 9
+      },
+      "donchian_breakout": {
+        "period": 45
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        479.24,
+        47,
+        10.1
+      ],
+      "w2": [
+        426.56,
+        41,
+        8.01
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        550.02,
+        14,
+        18.6
+      ],
+      "w2": [
+        84.89,
+        20,
+        3.39
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    }
+  },
+  "VKCO": {
+    "figi": "TCS00A106YF0",
+    "lot": 1,
+    "trials": 60,
+    "elapsed_s": 8.2,
+    "best_params": {
+      "sl_mult": 5.5,
+      "rr": 4.0,
+      "quorum": 3,
+      "vol_thr": 0.2,
+      "inc_rsi_reversal": false,
+      "inc_bollinger_reclaim": false,
+      "inc_pullback_ema": false,
+      "inc_vwap_reclaim": true,
+      "vwap_reclaim.k": 2.5,
+      "inc_range_compression_breakout": false,
+      "inc_macd_cross": true,
+      "macd_cross.fast": 18,
+      "macd_cross.slow": 24,
+      "macd_cross.signal_period": 10,
+      "inc_donchian_breakout": false,
+      "inc_trend_up": false,
+      "inc_trend_down": false,
+      "inc_range_reversion": true,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": false,
+      "inc_range_ensemble": false,
+      "inc_hv_ensemble": false,
+      "inc_neutral_ensemble": true
+    },
+    "best_strat_params": {
+      "rsi_reversal": {
+        "period": 16,
+        "oversold": 30,
+        "overbought": 80
+      },
+      "bollinger_reclaim": {
+        "period": 15,
+        "k": 1.0
+      },
+      "pullback_ema": {
+        "trend_ema": 20,
+        "pull_ema": 10
+      },
+      "vwap_reclaim": {
+        "k": 2.5
+      },
+      "range_compression_breakout": {
+        "lookback": 15,
+        "atr_period": 16,
+        "pct": 40.0
+      },
+      "macd_cross": {
+        "fast": 18,
+        "slow": 24,
+        "signal_period": 10
+      },
+      "donchian_breakout": {
+        "period": 45
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
+    },
+    "baseline": {
+      "w1": [
+        313.32,
+        21,
+        3.91
+      ],
+      "w2": [
+        12.59,
+        4,
+        1.62
+      ],
+      "w3": [
+        0.0,
+        0,
+        0.0
+      ]
+    },
+    "opt": {
+      "w1": [
+        397.88,
+        19,
+        6.1
       ],
       "w2": [
         0.0,
@@ -1725,98 +2831,118 @@
       ]
     }
   },
-  "TRNFP": {
-    "figi": "BBG00475KHX6",
+  "VTBR": {
+    "figi": "BBG004730ZJ9",
     "lot": 1,
     "trials": 60,
-    "elapsed_s": 118.1,
+    "elapsed_s": 6.3,
     "best_params": {
-      "sl_mult": 6.0,
-      "rr": 4.5,
-      "quorum": 2,
-      "vol_thr": 0.0,
+      "sl_mult": 4.0,
+      "rr": 6.0,
+      "quorum": 3,
+      "vol_thr": 0.8,
       "inc_rsi_reversal": true,
-      "rsi_reversal.period": 20,
-      "rsi_reversal.oversold": 26,
-      "rsi_reversal.overbought": 75,
+      "rsi_reversal.period": 8,
+      "rsi_reversal.oversold": 38,
+      "rsi_reversal.overbought": 77,
       "inc_bollinger_reclaim": true,
-      "bollinger_reclaim.period": 14,
-      "bollinger_reclaim.k": 1.5,
+      "bollinger_reclaim.period": 20,
+      "bollinger_reclaim.k": 1.8,
       "inc_pullback_ema": true,
-      "pullback_ema.trend_ema": 24,
-      "pullback_ema.pull_ema": 14,
+      "pullback_ema.trend_ema": 17,
+      "pullback_ema.pull_ema": 10,
       "inc_vwap_reclaim": true,
-      "vwap_reclaim.k": 1.1,
-      "inc_range_compression_breakout": false,
+      "vwap_reclaim.k": 1.6,
+      "inc_range_compression_breakout": true,
+      "range_compression_breakout.lookback": 13.0,
+      "range_compression_breakout.atr_period": 15,
+      "range_compression_breakout.pct": 35.0,
       "inc_macd_cross": true,
-      "macd_cross.fast": 9,
-      "macd_cross.slow": 24,
-      "macd_cross.signal_period": 9,
-      "inc_donchian_breakout": false
+      "macd_cross.fast": 12,
+      "macd_cross.slow": 27,
+      "macd_cross.signal_period": 6,
+      "inc_donchian_breakout": true,
+      "donchian_breakout.period": 32,
+      "inc_trend_up": false,
+      "inc_trend_down": true,
+      "inc_range_reversion": false,
+      "inc_long_ensemble": true,
+      "inc_short_ensemble": true,
+      "inc_range_ensemble": true,
+      "inc_hv_ensemble": true,
+      "inc_neutral_ensemble": false
     },
     "best_strat_params": {
       "rsi_reversal": {
-        "period": 20,
-        "oversold": 26,
-        "overbought": 75
+        "period": 8,
+        "oversold": 38,
+        "overbought": 77
       },
       "bollinger_reclaim": {
-        "period": 14,
-        "k": 1.5
+        "period": 20,
+        "k": 1.8
       },
       "pullback_ema": {
-        "trend_ema": 24,
-        "pull_ema": 14
+        "trend_ema": 17,
+        "pull_ema": 10
       },
       "vwap_reclaim": {
-        "k": 1.1
+        "k": 1.6
       },
       "range_compression_breakout": {
-        "lookback": 15,
-        "atr_period": 16,
-        "pct": 40.0
+        "lookback": 13.0,
+        "atr_period": 15,
+        "pct": 35.0
       },
       "macd_cross": {
-        "fast": 9,
-        "slow": 24,
-        "signal_period": 9
+        "fast": 12,
+        "slow": 27,
+        "signal_period": 6
       },
       "donchian_breakout": {
-        "period": 45
-      }
+        "period": 32
+      },
+      "trend_up": {},
+      "trend_down": {},
+      "range_reversion": {},
+      "long_ensemble": {},
+      "short_ensemble": {},
+      "range_ensemble": {},
+      "hv_ensemble": {},
+      "neutral_ensemble": {}
     },
     "baseline": {
       "w1": [
-        1332.87,
-        96,
-        5.6
+        0.0,
+        0,
+        0.0
       ],
       "w2": [
-        1618.72,
-        117,
-        4.23
+        61.11,
+        13,
+        4.96
       ],
       "w3": [
-        6757.93,
-        184,
-        16.55
+        0.0,
+        0,
+        0.0
       ]
     },
     "opt": {
       "w1": [
-        4098.08,
-        136,
-        25.69
+        0.0,
+        0,
+        0.0
       ],
       "w2": [
-        3125.01,
-        156,
-        4.32
+        -8.49,
+        7,
+        2.68
       ],
       "w3": [
-        6721.22,
-        208,
-        9.64
+        0.0,
+        0,
+        0.0
       ]
     }
   }
