@@ -177,6 +177,20 @@ reconcile loop. НЕ реализовано: StreamingEnsemble (инкремен
 
 ---
 
+## 📕 ПЛЕЙБУК (16.09.2026) — читать перед изменениями бота
+
+**`docs/roadmap/PLAYBOOK.md`** — единый документ: живой контур (сигналы/AI-гейт/риск),
+кейс SMLT (гейт отклонил в 07:24 и одобрил в 11:47 — так и должно быть), стратегия
+«следуем за IMOEX» (проверена: 240д +13%, PF 1.49, K=10-11, entry 0.19%/exit +0.05),
+рабочий процесс тестирования (честное исполнение, лоты, train/valid, плато) и
+список грабель (orphan_cleanup, опаздывающие AI-вердикты, EOD по свече, мусорный
+пик equity, look-ahead в реплее, риск-ставка вместо GetMaxLots).
+
+**Скрипты тестов:** `scripts/test_moex_follow.py`, `scripts/optuna_moex_follow.py`,
+`scripts/test_mtf_filters.py`, `scripts/analyze_filters.py`.
+
+---
+
 ## 🤝 ДОГОВОРЁННОСТИ КОМАНДЫ
 
 - **Единая рабочая папка `/Volumes/Dev/Deeptrading`.** Не создавать копий. Временное — в `~/Documents/Default Project`.
