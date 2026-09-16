@@ -21,6 +21,24 @@ logger = logging.getLogger("analysis_1min")
 # а запускаем ensure_candles отдельным таском. Ответ фронту — из БД мгновенно.
 _bg_ensure: dict[str, asyncio.Task] = {}
 
+# Кэш ответов анализа: переключение графиков/авто-refresh не должны ждать
+# пересчёт индикаторов (на загруженной машине ~2.5с на запрос).
+_analysis_cache: dict[tuple, tuple[float, dict]] = {}
+_ANALYSIS_CACHE_TTL = 20.0
+
+
+def _cache_get(key: tuple) -> dict | None:
+    item = _analysis_cache.get(key)
+    if item is not None and (_time.monotonic() - item[0]) < _ANALYSIS_CACHE_TTL:
+        return item[1]
+    return None
+
+
+def _cache_put(key: tuple, value: dict) -> None:
+    if len(_analysis_cache) > 300:
+        _analysis_cache.clear()
+    _analysis_cache[key] = (_time.monotonic(), value)
+
 
 async def _spawn_ensure_1min(figi: str) -> None:
     """Фоновая докачка последних 2 часов 1min из T-Invest API (без блокировки запроса)."""
@@ -75,6 +93,11 @@ async def get_analysis(
     if interval is None:
         raise HTTPException(400, f"Unknown interval. Available: {', '.join(INTERVAL_NAMES)}")
 
+    cache_key = (figi, interval_name, int(limit))
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     from sqlalchemy import text as _text
     instrument = await db.scalar(select(Instrument).where(Instrument.figi == figi))
     fallback_ticker = None
@@ -111,7 +134,7 @@ async def get_analysis(
         except Exception:
             pass
     if not candles:
-        return {
+        empty = {
             "figi": figi,
             "ticker": ticker_name,
             "name": name,
@@ -124,6 +147,8 @@ async def get_analysis(
             "bb_lower": [],
             "macd": {"macd": [], "signal": [], "hist": []},
         }
+        _cache_put(cache_key, empty)
+        return empty
 
     closes = [float(c.close) for c in candles]
     sma20 = sma(closes, 20)
@@ -147,7 +172,7 @@ async def get_analysis(
         pass
     m_line, s_line, hist = macd(closes, fast=m_fast, slow=m_slow, signal_period=m_sig)
 
-    return {
+    payload = {
         "figi": figi,
         "ticker": ticker_name,
         "name": name,
@@ -171,3 +196,5 @@ async def get_analysis(
         "macd": {"macd": m_line, "signal": s_line, "hist": hist},
         "macd_params": {"fast": m_fast, "slow": m_slow, "signal_period": m_sig},
     }
+    _cache_put(cache_key, payload)
+    return payload
