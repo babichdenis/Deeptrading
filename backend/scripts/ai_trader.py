@@ -27,9 +27,15 @@ except Exception:
 SYSTEM = """Ты — автономный трейдер на MOEX (sandbox-счёт). Ты САМ решаешь, что делать:
 открывать/закрывать позиции, какие ставить стоп/тейк. Никаких «рекомендаций» — только действия.
 
-Вход: {portfolio: equity/cash/позиции/маржа, positions: открытые позиции с P&L и уровнями,
-movers: движения по горизонтам (1д/1н/1м/3м, топ рост/падение), imoex: направление индекса,
-universe: список доступных тикеров, recent_trades: последние сделки, now_msk}.
+Вход:
+- portfolio: equity/cash/маржа; long_short: баланс L/S;
+- positions[]: открытые позиции (entry/last/pnl/sl/tp/dist_*_atr/regime) + orderbook каждой;
+- orderbooks{ticker}: ЖИВОЙ СТАКАН — last, best_bid/best_ask, spread_bps, bid_qty/ask_qty,
+  imbalance (-1..+1, >0 = перевес покупок), depth_rub (глубина в рублях);
+- movers: движения по горизонтам 1д/1н/1м/3м (up/down + streak = дней в группе);
+- universe[]: доступные тикеры (price/turnover/rng_pct);
+- imoex: направление индекса (dir/pct_20m/pct_60m/pct_day, breadth_up_pct);
+- risk: дневной P&L/лимит; recent_trades: последние сделки; now_msk.
 
 Правила:
 - маржа: бот не даст превысить 80% equity; стресс ±5% IMOEX ≤ 10% equity;
@@ -78,36 +84,67 @@ def _ask(system: str, user: dict, model: str, url: str) -> list:
                 pass
 
 
+def _orderbook(api: str, figi: str) -> dict:
+    """Живой стакан: последняя цена, спред, перевес бидов, глубина в ₽."""
+    try:
+        ob = _http("GET", f"{api}/api/v1/bot/orderbook/{figi}?depth=5", timeout=20)
+        return {k: ob.get(k) for k in ("last", "best_bid", "best_ask", "spread_bps",
+                                       "bid_qty", "ask_qty", "imbalance", "depth_rub")}
+    except Exception:
+        return {}
+
+
 def _context(api: str) -> dict:
     out: dict = {}
+    st: dict = {}
     try:
         st = _http("GET", f"{api}/api/v1/bot/status")
         out["portfolio"] = st.get("portfolio")
         out["long_short"] = st.get("long_short")
+        out["imoex"] = st.get("imoex_guard")
+        out["risk"] = st.get("risk")
     except Exception:
         pass
+    # Позиции с деталями + их стаканы
     try:
-        pos = _http("GET", f"{api}/api/v1/sandbox/positions")
-        out["positions"] = [{k: p.get(k) for k in
-                             ("ticker", "side", "qty", "entry_price", "current_price",
-                              "net_pnl_est", "stop_loss", "take_profit", "dist_sl_atr")}
-                            for p in (pos.get("positions") or [])]
+        pos = _http("GET", f"{api}/api/v1/bot/state")
+        items = pos.get("positions") or []
+        out["positions"] = []
+        for p in items[:8]:
+            d = {k: p.get(k) for k in
+                 ("ticker", "side", "qty", "entry", "last", "pnl", "sl", "tp",
+                  "dist_sl_atr", "dist_tp_atr", "atr", "regime", "trail_active")}
+            d["orderbook"] = _orderbook(api, p.get("figi"))
+            out["positions"].append(d)
     except Exception:
         out["positions"] = []
+    # Движения по горизонтам (+ стаж в группе)
     try:
-        mv = _http("GET", f"{api}/api/v1/screener/movers?top=5")
+        mv = _http("GET", f"{api}/api/v1/screener/movers?top=6")
         out["movers"] = mv.get("horizons")
     except Exception:
         out["movers"] = {}
-    try:
-        out["imoex"] = (_http("GET", f"{api}/api/v1/bot/status").get("imoex_guard"))
-    except Exception:
-        pass
+    # Вселенная: цена/оборот/волатильность + стаканы кандидатов (топ рост/падение 1м)
     try:
         scr = _http("GET", f"{api}/api/v1/screener")
-        out["universe"] = [r["ticker"] for r in (scr.get("items") or [])[:60] if r.get("in_universe")]
+        rows = [r for r in (scr.get("items") or []) if r.get("in_universe")]
+        out["universe"] = [{"ticker": r["ticker"], "price": r.get("price"),
+                            "turnover": r.get("turnover"), "rng_pct": r.get("rng_pct")}
+                           for r in rows[:40]]
+        _cand: list[tuple[str, str]] = []
+        for lbl in ("1м",):
+            h = (out.get("movers") or {}).get(lbl) or {}
+            for x in (h.get("up") or [])[:3] + (h.get("down") or [])[:3]:
+                _cand.append((x.get("ticker"), x.get("ticker")))
+        _by_tk = {r["ticker"]: r["figi"] for r in rows}
+        out["orderbooks"] = {}
+        for tk, _ in _cand[:6]:
+            fg = _by_tk.get(tk)
+            if fg:
+                out["orderbooks"][tk] = _orderbook(api, fg)
     except Exception:
         out["universe"] = []
+    # Сделки
     try:
         tr = _http("GET", f"{api}/api/v1/sandbox/trades?limit=15")
         out["recent_trades"] = [{k: t.get(k) for k in
