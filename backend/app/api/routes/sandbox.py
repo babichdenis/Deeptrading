@@ -280,7 +280,7 @@ def _reconcile_logger():
 
 
 _CASH_FLOWS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))), "data", "cash_flows.json")
+    os.path.dirname(os.path.abspath(__file__))))), "data", "cash_flows.json")
 _CASH_FLOWS: dict = {"total": 0.0, "events": []}
 
 
@@ -405,7 +405,9 @@ async def _portfolio_digest() -> dict:
         _save_cash_flows()
         lg.info("RECONCILE: ВВОД/ВЫВОД средств %.2f₽ принят (вне сделок), baseline скорректирован",
                 _unexplained)
-        delta_cash = round(delta_cash - float(_CASH_FLOWS["total"]), 2)
+    # Вычитаем учтённые потоки ВСЕГДА (не только в момент детекта) — иначе после
+    # первого принятия каждый следующий опрос снова показывал бы MISMATCH.
+    delta_cash = round(delta_cash - float(_CASH_FLOWS.get("total") or 0.0), 2)
 
     tinkoff_pnl = float(base["pnl"])
     delta_pnl = round(accounting_pnl - tinkoff_pnl, 2)
