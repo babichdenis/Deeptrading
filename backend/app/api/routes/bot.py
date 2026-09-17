@@ -908,6 +908,8 @@ class AiTradeRequest(BaseModel):
     sl_pct: float | None = None        # стоп, доля (0.03 = 3%)
     tp_pct: float | None = None        # тейк (0 = без TP)
     hold: str = "intraday"             # intraday | swing (swing = держать через ночь)
+    sl: float | None = None            # для update_sl/update_tp: новая цена стопа
+    tp: float | None = None            # для update_sl/update_tp: новая цена тейка
     reason: str = ""
 
 
@@ -935,8 +937,20 @@ async def bot_ai_trade(req: AiTradeRequest) -> dict:
     if _spec and not _spec.get("trader"):
         raise HTTPException(403, "режим AI не разрешает AI-трейдеру торговать "
                                  "(переключи на «Бот+++» или «AI-трейдер»)")
-    if str(req.action).lower() == "close":
+    _act = str(req.action).lower()
+    if _act == "close":
         return await bot_close_position(figi)
+    if _act in ("update_sl", "update_tp", "update_levels"):
+        _lvl = {}
+        if req.sl is not None:
+            _lvl["sl"] = float(req.sl)
+        if req.tp is not None:
+            _lvl["tp"] = float(req.tp)
+        if not _lvl:
+            raise HTTPException(400, "update_sl/update_tp: нужен sl и/или tp")
+        res = await runtime.set_position_levels(figi, **_lvl)
+        return {"ok": bool(res.get("ok", True)), "ticker": ticker, "action": _act,
+                "levels": _lvl, "result": res, "reason": str(req.reason)[:200]}
     _side = "BUY" if str(req.side).upper() in ("BUY", "LONG") else "SELL"
     await runtime._submit_order(figi, ticker, "open", _side, meta={
         "ai_trader": True, "priority": True, "ai_reason": str(req.reason)[:200],

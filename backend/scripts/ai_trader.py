@@ -322,6 +322,21 @@ def main() -> None:
                             and str(a.get("side") or "SELL").upper() in ("BUY", "LONG")):
                         print(f"[ai-trader] BUY {tk} пропущен (--no-buy)", flush=True)
                         continue
+                    if act in ("update_sl", "update_tp", "update_levels"):
+                        r = _http("POST", f"{args.api}/api/v1/bot/ai_trade", {
+                            "ticker": tk, "action": act, "sl": a.get("sl"), "tp": a.get("tp"),
+                            "reason": a.get("reason", ""),
+                        })
+                        print(f"[ai-trader] {act} {tk}: {json.dumps(r, ensure_ascii=False)[:100]}", flush=True)
+                        try:
+                            _http("POST", f"{args.api}/api/v1/bot/ai_notes", {
+                                "ticker": tk, "side": "", "action": "tighten",
+                                "note": str(a.get("reason") or "")[:600], "advice": "", "model": args.model,
+                                "provider": "opencode",
+                            }, timeout=20)
+                        except Exception:
+                            pass
+                        continue
                     if act == "close":
                         r = _http("POST", f"{args.api}/api/v1/bot/ai_trade",
                                   {"ticker": tk, "action": "close", "reason": a.get("reason", "")})

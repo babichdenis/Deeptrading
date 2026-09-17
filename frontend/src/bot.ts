@@ -1852,6 +1852,10 @@ async function saveAiPrompt(kind: string, value: string) {
       body: JSON.stringify({ prompts: { [kind]: value } }),
     });
     if (st) st.textContent = r.ok ? "✓ сохранено" : "ошибка сохранения";
+    if (r.ok && _aiControlCache) {
+      _aiControlCache.prompts = _aiControlCache.prompts || {};
+      _aiControlCache.prompts[kind] = value;
+    }
   } catch {
     if (st) st.textContent = "ошибка сети";
   }
