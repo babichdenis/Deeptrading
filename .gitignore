@@ -232,3 +232,4 @@ backend/mcp_server/audit.jsonl
 
 # MCP venv
 backend/.venv-mcp/
+backend/.ai_env
