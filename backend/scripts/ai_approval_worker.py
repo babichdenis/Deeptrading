@@ -405,13 +405,37 @@ def _ask_deepseek(order: dict, ctx: dict, model: str, base: str, key: str,
         "max_tokens": 300,
         "response_format": {"type": "json_object"},
     }
-    with httpx.Client(timeout=60.0) as c:
-        r = c.post(f"{base.rstrip('/')}/chat/completions",
-                   headers={"Authorization": f"Bearer {key}"}, json=payload)
-        r.raise_for_status()
-        data = r.json()
-    txt = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "{}"
-    return (parser or _parse_decision)(txt)
+    _prs = parser or _parse_decision
+
+    def _call(msgs: list) -> str:
+        payload["messages"] = msgs
+        with httpx.Client(timeout=90.0) as c:
+            r = c.post(f"{base.rstrip('/')}/chat/completions",
+                       headers={"Authorization": f"Bearer {key}"}, json=payload)
+            r.raise_for_status()
+            data = r.json()
+        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "{}"
+
+    msgs = list(payload["messages"])
+    txt = _call(msgs)
+    out = _prs(txt)
+    # Веб-модель (V4.1) любит отвечать прозой — один жёсткий ретрай на JSON
+    if isinstance(out, dict) and str(out.get("reason", "")).startswith("parse_error"):
+        msgs2 = msgs + [
+            {"role": "assistant", "content": str(txt)[:500]},
+            {"role": "user", "content": "ТВОЙ ОТВЕТ — НЕ JSON. Это ошибка. Ответь ТОЛЬКО валидным "
+                                        "JSON-объектом, без единого слова вокруг. Первый символ {, "
+                                        "последний }. Формат: {\"decision\": \"approve\"|\"reject\"|\"skip\", "
+                                        "\"reason\": \"...\", \"advice\": \"...\", \"confidence\": 0.0}"},
+        ]
+        try:
+            txt2 = _call(msgs2)
+            out2 = _prs(txt2)
+            if not str(out2.get("reason", "")).startswith("parse_error"):
+                return out2
+        except Exception:
+            pass
+    return out
 
 
 def _extract_json(txt: str) -> str:

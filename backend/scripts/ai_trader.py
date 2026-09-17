@@ -113,18 +113,38 @@ def _ask_deepseek(system: str, user: dict, model: str = "deepseek-chat") -> tupl
             pass
     if not key:
         raise RuntimeError("нет DEEPSEEK_API_KEY")
-    with httpx.Client(timeout=180.0) as c:
-        r = c.post(f"{base}/chat/completions",
-                   headers={"Authorization": f"Bearer {key}"},
-                   json={"model": model, "temperature": 0.3, "max_tokens": 4000,
-                         "messages": [
-                             {"role": "system", "content": system},
-                             {"role": "user",
-                              "content": json.dumps(user, ensure_ascii=False, default=str)[:16000]},
-                         ]})
-        r.raise_for_status()
-        txt = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
-    return _parse_reply(txt)
+    body = {"model": model, "temperature": 0.3, "max_tokens": 4000, "messages": [
+        {"role": "system", "content": system},
+        {"role": "user",
+         "content": json.dumps(user, ensure_ascii=False, default=str)[:16000]},
+    ]}
+
+    def _call(msgs: list) -> str:
+        body["messages"] = msgs
+        with httpx.Client(timeout=180.0) as c:
+            r = c.post(f"{base}/chat/completions",
+                       headers={"Authorization": f"Bearer {key}"}, json=body)
+            r.raise_for_status()
+            return (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+
+    msgs = list(body["messages"])
+    txt = _call(msgs)
+    out = _parse_reply(txt)
+    if not out[1]:  # нет actions — возможно, проза вместо JSON: жёсткий ретрай
+        msgs2 = msgs + [
+            {"role": "assistant", "content": str(txt)[:500]},
+            {"role": "user", "content": "ТВОЙ ОТВЕТ — НЕ JSON. Ответь ТОЛЬКО валидным JSON-объектом "
+                                        "{\"analysis\": \"...\", \"actions\": [...], \"suggestions\": [...]} "
+                                        "без единого слова вокруг."},
+        ]
+        try:
+            txt2 = _call(msgs2)
+            out2 = _parse_reply(txt2)
+            if out2[1] or out2[0]:
+                return out2
+        except Exception:
+            pass
+    return out
 
 
 def _ask(system: str, user: dict, model: str, url: str) -> tuple:
