@@ -159,6 +159,23 @@ def _context(api: str) -> dict:
         out["long_short"] = st.get("long_short")
         out["imoex"] = st.get("imoex_guard")
         out["risk"] = st.get("risk")
+        try:
+            _sum = _http("GET", f"{api}/api/v1/bot/portfolio_summary", timeout=20)
+            _pf = out.get("portfolio") or {}
+            if isinstance(_pf, dict) and isinstance(_sum, dict):
+                _pf.setdefault("margin_pct", _sum.get("margin_use_pct"))
+                _pf.setdefault("margin_used", _sum.get("margin_used"))
+                _pf.setdefault("long_share", _sum.get("long_exposure_pct"))
+                _pf.setdefault("short_share", _sum.get("short_exposure_pct"))
+                _pf.setdefault("net_exposure", _sum.get("net_exposure_pct"))
+                _st = _sum.get("stress_pct") or {}
+                _pf.setdefault("stress_5pct_up", _st.get("imoex_+5%"))
+                _pf.setdefault("stress_5pct_down", _st.get("imoex_-5%"))
+                _sw = _sum.get("stress_worst")
+                _pf.setdefault("stress_worst",
+                               _sw[1] if isinstance(_sw, list) and len(_sw) > 1 else _sw)
+        except Exception:
+            pass
         _cfg = st.get("config") or {}
         out["bot"] = {"session_now": st.get("session"), "sessions": _cfg.get("sessions"),
                       "entries_paused": _cfg.get("entries_paused"),
@@ -178,6 +195,25 @@ def _context(api: str) -> dict:
             d["orderbook"] = _orderbook(api, p.get("figi"))
             d["m5"] = _bars(api, p.get("figi"), "5min", 10)
             d["h1"] = _bars(api, p.get("figi"), "hour", 6)
+            # Поля, которые ждёт промпт трейдера: pnl_pct/notional_pct/dist_high_atr/dist_low_atr
+            try:
+                _q = abs(float(p.get("qty") or 0))
+                _ep = float(p.get("entry") or 0)
+                _lp = float(p.get("last") or 0)
+                _notional = abs(float(p.get("notional") or (_q * _lp)))
+                _eqp = float((out.get("portfolio") or {}).get("equity") or 0)
+                d["pnl_pct"] = (round(float(p.get("pnl") or 0) / (_q * _ep), 4)
+                                if (_q and _ep) else None)
+                d["notional_pct"] = round(_notional / _eqp, 3) if _eqp else None
+                _atr = float(p.get("atr") or 0)
+                _cs = d.get("m5") or []
+                if _cs and _atr > 0 and _lp > 0:
+                    _hi = max(float(x.get("h") or 0) for x in _cs)
+                    _lo = min(float(x.get("l") or 1e18) for x in _cs)
+                    d["dist_high_atr"] = round((_hi - _lp) / _atr, 2)
+                    d["dist_low_atr"] = round((_lp - _lo) / _atr, 2)
+            except Exception:
+                pass
             out["positions"].append(d)
     except Exception:
         out["positions"] = []
@@ -305,14 +341,14 @@ def main() -> None:
                 try:
                     _http("POST", f"{args.api}/api/v1/bot/ai_notes", {
                         "ticker": "ПОРТФЕЛЬ", "side": "", "action": "analysis",
-                        "note": str(analysis)[:900], "advice": "", "model": args.model,
+                        "note": str(analysis)[:3000], "advice": "", "model": args.model,
                         "provider": "opencode",
                     }, timeout=20)
                 except Exception:
                     pass
                 try:
                     _http("POST", f"{args.api}/api/v1/bot/ai_report", {
-                        "model": args.model, "analysis": str(analysis)[:6000],
+                        "model": args.model, "analysis": str(analysis)[:8000],
                         "suggestions": sugg[:8], "actions": acts[:10],
                         "now_msk": ctx.get("now_msk"),
                     }, timeout=20)
@@ -341,7 +377,7 @@ def main() -> None:
                         try:
                             _http("POST", f"{args.api}/api/v1/bot/ai_notes", {
                                 "ticker": tk, "side": "", "action": "tighten",
-                                "note": str(a.get("reason") or "")[:600], "advice": "", "model": args.model,
+                                "note": str(a.get("reason") or "")[:1500], "advice": "", "model": args.model,
                                 "provider": "opencode",
                             }, timeout=20)
                         except Exception:
@@ -359,7 +395,7 @@ def main() -> None:
                         })
                     else:
                         continue
-                    _why = str(a.get("reason") or "")[:600]
+                    _why = str(a.get("reason") or "")[:1500]
                     print(f"[ai-trader] {act} {tk}: {json.dumps(r, ensure_ascii=False)[:100]}", flush=True)
                     if _why:
                         print(f"[ai-trader]   причина: {_why}", flush=True)

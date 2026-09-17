@@ -796,9 +796,12 @@ body {
   padding: 7px 9px; border-radius: 7px; background: rgba(120,154,194,.08);
   border-left: 3px solid rgba(120,154,194,.4);
 }
+#sr-pane-aigate .ag-note .ag-r1 { color: #ffffff; }
+#sr-pane-aigate .ag-note .ag-t { color: rgba(255,255,255,.75); }
+#sr-pane-aigate .ag-note .ag-tk { color: #ffffff; }
 #sr-pane-aigate .ag-note .ag-r2 { color: #ffffff; font-size: 11px; line-height: 1.45; }
-#sr-pane-aigate .ag-note .ag-advice { color: #ffe08a; }
-#sr-pane-aigate .ag-note .ag-meta { color: rgba(255,255,255,.55); }
+#sr-pane-aigate .ag-note .ag-advice { color: #ffe08a; }  /* жёлтые выводы — не трогаем */
+#sr-pane-aigate .ag-note .ag-meta { color: rgba(255,255,255,.75); }
 #sr-pane-aigate .ag-note.tighten { border-left-color: rgba(244,185,66,.7); }
 #sr-pane-aigate .ag-note.close { border-left-color: rgba(var(--down-rgb),.7); }
 #sr-pane-aigate .ag-note.hold { border-left-color: rgba(var(--up-rgb),.7); }

@@ -460,8 +460,8 @@ def _parse_watch(txt: str) -> dict:
     for _junk in ("коротко по-русски,", "коротко по-русски", "коротко,"):
         if _r.lower().startswith(_junk):
             _r = _r[len(_junk):].strip()
-    d["reason"] = _r[:300]
-    d["advice"] = str(d.get("advice") or "")[:300]
+    d["reason"] = _r[:1200]
+    d["advice"] = str(d.get("advice") or "")[:1200]
     return d
 
 
@@ -473,7 +473,7 @@ def _parse_decision(txt: str) -> dict:
     d["decision"] = str(d.get("decision", "skip")).lower()
     if d["decision"] not in ("approve", "reject", "skip"):
         d = {"decision": "skip", "reason": f"bad_decision: {d.get('decision')}", "confidence": 0.0}
-    d["advice"] = str(d.get("advice") or "")[:300]
+    d["advice"] = str(d.get("advice") or "")[:1200]
     return d
 
 
@@ -594,7 +594,7 @@ def _parse_watch_many(txt: str) -> dict:
                 _r = _r[len(_junk):].strip()
         out.append({"ticker": str(it.get("ticker") or "").upper(), "action": a,
                     "sl": it.get("sl"), "tp": it.get("tp"),
-                    "reason": _r[:300], "advice": str(it.get("advice") or "")[:300],
+                    "reason": _r[:1200], "advice": str(it.get("advice") or "")[:1200],
                     "confidence": it.get("confidence")})
     return {"decisions": out, "_by_ticker": {x["ticker"]: x for x in out if x["ticker"]}}
 

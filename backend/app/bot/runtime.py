@@ -1671,6 +1671,49 @@ class PaperBotRuntime:
                 await self._ensure_exit_state(figi, _c, pos)
         if figi not in self._exit_plans and figi not in self._trail_stop:
             return {"ok": False, "error": "no_exit_state"}
+        # --- Защита от «прижимания» уровней (AI любит подтягивать слишком рано) ---
+        _px = 0.0
+        _atr = 0.0
+        try:
+            _b = list(self.buffers.get(figi) or [])
+            _px = float(_b[-1].close) if _b else 0.0
+            _atr = float(self.atr_now(figi) or 0.0)
+        except Exception:
+            pass
+        _is_long = str(getattr(pos, "side", "")).upper() in ("BUY", "LONG")
+        if _px > 0 and _atr > 0:
+            _min_sl = 0.3 * _atr
+            _min_tp = 0.2 * _atr
+            _max_step = 3.0 * _atr
+            if sl is not None:
+                _sl = float(sl)
+                if _is_long and _sl >= _px:
+                    return {"ok": False, "error": f"SL {_sl:.4g} выше цены {_px:.4g} — мгновенный стоп (лонг)"}
+                if (not _is_long) and _sl <= _px:
+                    return {"ok": False, "error": f"SL {_sl:.4g} ниже цены {_px:.4g} — мгновенный стоп (шорт)"}
+                if abs(_px - _sl) < _min_sl:
+                    return {"ok": False, "error": f"SL слишком близко к цене (<0.3 ATR = {_min_sl:.4g})"}
+                _cur = self._trail_stop.get(figi)
+                if _cur and abs(_sl - float(_cur)) > _max_step:
+                    return {"ok": False, "error": f"шаг SL {abs(_sl - float(_cur)):.4g} > 3 ATR ({_max_step:.4g})"}
+                sl = _sl
+            if tp is not None:
+                _tp = float(tp)
+                if _is_long and _tp <= _px:
+                    return {"ok": False, "error": f"TP {_tp:.4g} ниже цены {_px:.4g} (лонг)"}
+                if (not _is_long) and _tp >= _px:
+                    return {"ok": False, "error": f"TP {_tp:.4g} выше цены {_px:.4g} (шорт)"}
+                if abs(_tp - _px) < _min_tp:
+                    return {"ok": False, "error": f"TP слишком близко к цене (<0.2 ATR = {_min_tp:.4g})"}
+                _curtp = self._exit_target.get(figi)
+                if _curtp:
+                    if _is_long and _tp > float(_curtp) + 1e-9:
+                        return {"ok": False, "error": "TP отодвигается дальше от цены — не разрешено"}
+                    if (not _is_long) and _tp < float(_curtp) - 1e-9:
+                        return {"ok": False, "error": "TP отодвигается дальше от цены — не разрешено"}
+                    if abs(_tp - float(_curtp)) > _max_step:
+                        return {"ok": False, "error": f"шаг TP {abs(_tp - float(_curtp)):.4g} > 3 ATR"}
+                tp = _tp
         if sl is not None:
             self._trail_stop[figi] = float(sl)
         if tp is not None:
@@ -1746,6 +1789,8 @@ class PaperBotRuntime:
                 "dist_sl_pct": d_sl, "dist_tp_pct": d_tp,
                 "atr": _atr, "dist_sl_atr": _dsa, "dist_tp_atr": _dta,
                 "regime": reg_name, "trail_active": bool(self._trail_active.get(bb)),
+                "hold": "swing" if bb in self._swing else "intraday",
+                "notional": (abs(qty) * last) if last else None,
             })
         for pos in out["positions"]:
             for key, lbl in (("dist_sl_pct", "SL"), ("dist_tp_pct", "TP")):
@@ -2749,8 +2794,8 @@ class PaperBotRuntime:
             "ticker": str(payload.get("ticker") or ""),
             "side": str(payload.get("side") or ""),
             "action": str(payload.get("action") or ""),      # hold | tighten | close | watch
-            "note": str(payload.get("note") or payload.get("reason") or "")[:400],
-            "advice": str(payload.get("advice") or "")[:300],
+            "note": str(payload.get("note") or payload.get("reason") or "")[:4000],
+            "advice": str(payload.get("advice") or "")[:1200],
             "model": str(payload.get("model") or ""),
             "provider": str(payload.get("provider") or ""),
             "latency_ms": payload.get("latency_ms"),
