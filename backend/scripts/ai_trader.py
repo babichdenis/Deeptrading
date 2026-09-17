@@ -231,6 +231,7 @@ def main() -> None:
         try:
             _http("POST", f"{args.api}/api/v1/bot/ai_prompt", {
                 "provider": "opencode", "model": args.model, "shadow": False,
+                "kind": "trader",
                 "system": SYSTEM,
                 "context_schema": {
                     "portfolio": "equity/cash/маржа, long_short",
