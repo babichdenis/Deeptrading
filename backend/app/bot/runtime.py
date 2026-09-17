@@ -590,6 +590,7 @@ class PaperBotRuntime:
         self._global_last_loss_ts: datetime | None = None
         # --- AI-гейт: пауза после отклонения (per-ticker) ---
         self._ai_reject_until: dict[str, datetime] = {}
+        self._ai_reject_logged: set[str] = set()  # дедуп логов «на паузе» (без спама)
         # --- Экспозиция: плечо по каждой позиции (для капа «свои ≤ equity») ---
         self._pos_leverage: dict[str, float] = {}
         # --- Портфель: кэш меты (sector/beta) и снапшота ---
@@ -2898,6 +2899,7 @@ class PaperBotRuntime:
                 _cd = float(getattr(self.config, "ai_reject_cooldown_min", 15.0) or 0.0)
                 if _cd > 0:
                     self._ai_reject_until[figi] = self._bot_now() + timedelta(minutes=_cd)
+                    self._ai_reject_logged.discard(figi)
                 self._log(f"AI-ГЕЙТ: вход {o.ticker} {o.side} ОТКЛОНЁН — {reason or 'без причины'}"
                           + (f" (пауза входов {_cd:.0f} мин)" if _cd > 0 else ""))
                 self.events.log("AI_APPROVAL_REJECTED", figi=figi, ticker=o.ticker,
@@ -4386,7 +4388,11 @@ class PaperBotRuntime:
             _until = self._ai_reject_until.get(figi)
             if _cd > 0 and _until is not None and self._bot_now() < _until:
                 _left = (_until - self._bot_now()).total_seconds() / 60.0
-                self._log(f"AI-ГЕЙТ: {ticker} недавно отклонён ИИ — входы на паузе ещё {_left:.0f} мин")
+                # В лог — только первый пропуск по этому тикеру (дальше счётчик, без спама)
+                if figi not in self._ai_reject_logged:
+                    self._ai_reject_logged.add(figi)
+                    self._log(f"AI-ГЕЙТ: {ticker} недавно отклонён ИИ — входы на паузе ещё {_left:.0f} мин "
+                              f"(повторы не пишу)")
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="AI_REJECT_COOLDOWN")
                 self._log_no_trade(figi, "ai_reject_cooldown")
                 return
@@ -4424,6 +4430,14 @@ class PaperBotRuntime:
                 if _dflt == "reject":
                     order.status = "CANCELLED"
                     self._approvals_since.pop(order.id, None)
+                    # Таймаут-отклонение тоже ставит паузу по тикеру (иначе один и тот же
+                    # сигнал переспрашивает AI каждый бар).
+                    try:
+                        _cdt = float(getattr(cfg, "ai_reject_cooldown_min", 15.0) or 0.0)
+                        if _cdt > 0:
+                            self._ai_reject_until[figi] = self._bot_now() + timedelta(minutes=_cdt)
+                    except Exception:
+                        pass
                     self._log(f"AI-ГЕЙТ: таймаут {_tmo:.0f}с — вход {order.ticker} отклонён (default=reject)")
                     self.events.log("AI_APPROVAL_TIMEOUT", figi=figi, ticker=order.ticker,
                                     order_id=order.id, decision="reject")
