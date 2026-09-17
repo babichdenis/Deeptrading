@@ -143,6 +143,11 @@ def _context(api: str) -> dict:
         out["long_short"] = st.get("long_short")
         out["imoex"] = st.get("imoex_guard")
         out["risk"] = st.get("risk")
+        _cfg = st.get("config") or {}
+        out["bot"] = {"session_now": st.get("session"), "sessions": _cfg.get("sessions"),
+                      "entries_paused": _cfg.get("entries_paused"),
+                      "overnight": _cfg.get("overnight"),
+                      "max_positions": _cfg.get("max_positions")}
     except Exception:
         pass
     # Позиции с деталями + их стаканы
