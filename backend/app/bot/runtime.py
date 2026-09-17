@@ -51,6 +51,15 @@ POS_PCT = 0.40  # доля портфеля на одну позицию (мод
 _BOT_CONFIG_FILE = str(Path(__file__).resolve().parents[2] / "data" / "bot_config.json")
 _AI_CONTROL_FILE = str(Path(__file__).resolve().parents[2] / "data" / "ai_control.json")
 
+# Режимы AI (селектор в шапке UI): какие нейронки активны + торгует ли двигатель.
+AI_MODES: dict[str, dict] = {
+    "bot":    {"gate": False, "watch": False, "trader": False, "engine": True,  "label": "🧱 Бот (без AI)"},
+    "bot+":   {"gate": False, "watch": True,  "trader": False, "engine": True,  "label": "👁 Бот+ (вахтёр)"},
+    "bot++":  {"gate": True,  "watch": True,  "trader": False, "engine": True,  "label": "🚦 Бот++ (воркер-гейт)"},
+    "bot+++": {"gate": True,  "watch": True,  "trader": True,  "engine": True,  "label": "🤖 Бот+++ (AI-трейдер)"},
+    "ai":     {"gate": False, "watch": True,  "trader": True,  "engine": False, "label": "🧠 AI-трейдер (только AI)"},
+}
+
 
 @dataclass
 class BotConfig:
@@ -2173,6 +2182,10 @@ class PaperBotRuntime:
             raise RuntimeError("bot already running")
         self.config = cfg
         await self._restore_swing()
+        try:
+            self.apply_ai_mode()
+        except Exception:
+            pass
         # Восстанавливаем сохранённые настройки (переживают перезапуск/старт без фронта).
         try:
             _saved = await load_bot_settings()
@@ -2778,12 +2791,44 @@ class PaperBotRuntime:
         return self._ai_prompt or {}
 
     def get_ai_control(self) -> dict:
-        """Текущие переопределения промптов + срочное сообщение (для UI и воркеров)."""
+        """Текущие переопределения промптов + срочное сообщение + режим (для UI и воркеров)."""
         out = dict(self._ai_control or {})
         out.setdefault("prompts", {})
         out.setdefault("note", "")
+        _m = str(self._ai_control.get("mode") or "")
+        out["mode"] = _m
+        out["spec"] = dict(AI_MODES.get(_m) or {})
+        out["modes"] = {k: v.get("label") for k, v in AI_MODES.items()}
         out["defaults"] = self._ai_defaults or {}
         return out
+
+    def ai_mode_spec(self) -> dict:
+        """Спека текущего режима AI (пусто = режим не задан, работаем по конфигу)."""
+        return dict(AI_MODES.get(str(self._ai_control.get("mode") or "")) or {})
+
+    def apply_ai_mode(self) -> None:
+        """Применить режим AI к конфигу (гейт = ai_approval; 'ai' = двигатель выкл)."""
+        spec = self.ai_mode_spec()
+        if not spec:
+            return
+        try:
+            self.config.ai_approval = bool(spec.get("gate"))
+            self.config.momentum_only = not bool(spec.get("engine"))
+        except Exception:
+            pass
+        try:
+            import asyncio as _aio
+            _aio.get_running_loop().create_task(save_bot_settings(self.config))
+        except Exception:
+            pass
+        try:
+            _m = str(self._ai_control.get("mode") or "")
+            self._log(f"РЕЖИМ AI → {_m}: гейт={'вкл' if spec.get('gate') else 'выкл'}, "
+                      f"вахтёр={'вкл' if spec.get('watch') else 'выкл'}, "
+                      f"трейдер={'вкл' if spec.get('trader') else 'выкл'}, "
+                      f"двигатель={'вкл' if spec.get('engine') else 'выкл'}")
+        except Exception:
+            pass
 
     def set_ai_control(self, payload: dict) -> dict:
         """Сохранить промпт(ы) и/или срочное сообщение из UI (файл data/ai_control.json)."""
@@ -2796,6 +2841,9 @@ class PaperBotRuntime:
             self._ai_control["prompts"] = cur
         if "note" in payload:
             self._ai_control["note"] = str(payload.get("note") or "")
+        _mode = str(payload.get("mode") or "").lower()
+        if _mode in AI_MODES:
+            self._ai_control["mode"] = _mode
         self._ai_control["updated_ts"] = datetime.now(timezone.utc).isoformat()
         try:
             _p = Path(_AI_CONTROL_FILE)
@@ -2804,6 +2852,10 @@ class PaperBotRuntime:
             _tmp.write_text(json.dumps(self._ai_control, ensure_ascii=False, indent=2),
                             encoding="utf-8")
             _tmp.replace(_p)
+        except Exception:
+            pass
+        try:
+            self.apply_ai_mode()
         except Exception:
             pass
         return {"ok": True, "updated_ts": self._ai_control["updated_ts"]}

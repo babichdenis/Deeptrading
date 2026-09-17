@@ -984,6 +984,7 @@ async function doReset() {
 
 
 export async function pollOnce(onStateChange?: (running: boolean) => void) {
+  void loadAiMode();
   const pillTop = $("bot-pill-top");
   if (pillTop) {
     pillTop.classList.remove("on", "off");
@@ -1783,6 +1784,28 @@ async function renderAiGate() {
       }).join("");
     }
   }
+}
+
+let _aiModeLoaded = false;
+
+async function loadAiMode() {
+  const sel = $("ai-mode-select") as HTMLSelectElement | null;
+  if (!sel) return;
+  try {
+    const d = await fetch(`${API}/api/v1/bot/ai_control`)
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const m = String((d && (d as any).mode) || "");
+    if (document.activeElement !== sel) sel.value = m;
+    if (!_aiModeLoaded) {
+      _aiModeLoaded = true;
+      sel.addEventListener("change", () => {
+        void fetch(`${API}/api/v1/bot/ai_control`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode: sel.value }),
+        }).then(() => loadAiMode());
+      });
+    }
+  } catch { /* ignore */ }
 }
 
 let _aiPromptKind: "gate" | "watch" | "trader" = "gate";

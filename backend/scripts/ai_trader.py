@@ -134,6 +134,22 @@ def _bars(api: str, figi: str, tf: str = "5min", limit: int = 10) -> list:
         return []
 
 
+_AI_CTL_CACHE: dict = {"ts": 0.0, "data": {}}
+
+
+def _ai_control(api: str, ttl: float = 30.0) -> dict:
+    """Промпты/режим из UI (кэш ttl сек)."""
+    if _AI_CTL_CACHE["data"] and (time.monotonic() - float(_AI_CTL_CACHE["ts"])) < ttl:
+        return _AI_CTL_CACHE["data"]
+    try:
+        d = _http("GET", f"{api}/api/v1/bot/ai_control", timeout=10)
+        _AI_CTL_CACHE["data"] = d if isinstance(d, dict) else {}
+        _AI_CTL_CACHE["ts"] = time.monotonic()
+    except Exception:
+        pass
+    return _AI_CTL_CACHE["data"] or {}
+
+
 def _context(api: str) -> dict:
     out: dict = {}
     st: dict = {}
@@ -260,6 +276,13 @@ def main() -> None:
             post_prompt()
         t0 = time.monotonic()
         try:
+            _spec = (_ai_control(args.api).get("spec") or {})
+            if _spec and not _spec.get("trader"):
+                print("[ai-trader] режим AI не разрешает трейдера — пропуск цикла", flush=True)
+                if args.once:
+                    return
+                time.sleep(max(15.0, float(args.interval)))
+                continue
             ctx = _context(args.api)
             n_pos = len(ctx.get("positions") or [])
             eq = (ctx.get("portfolio") or {}).get("equity")

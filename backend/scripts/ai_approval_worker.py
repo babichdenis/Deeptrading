@@ -742,6 +742,10 @@ def run_watch(args, provs: list[str], models: dict) -> None:
             if not watch:
                 time.sleep(max(15.0, float(args.watch_interval)))
                 continue
+            _spec = (_ai_control(args.api).get("spec") or {})
+            if _spec and not _spec.get("watch"):
+                time.sleep(max(15.0, float(args.watch_interval)))
+                continue
             watch.sort(key=lambda x: (x.get("dist_sl_atr") if x.get("dist_sl_atr") is not None else 99))
             watch = watch[: max(1, int(args.watch_max))]
             items = []

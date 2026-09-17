@@ -931,6 +931,10 @@ async def bot_ai_trade(req: AiTradeRequest) -> dict:
             figi = None
     if not figi:
         raise HTTPException(404, f"ticker {ticker} не найден")
+    _spec = runtime.ai_mode_spec()
+    if _spec and not _spec.get("trader"):
+        raise HTTPException(403, "режим AI не разрешает AI-трейдеру торговать "
+                                 "(переключи на «Бот+++» или «AI-трейдер»)")
     if str(req.action).lower() == "close":
         return await bot_close_position(figi)
     _side = "BUY" if str(req.side).upper() in ("BUY", "LONG") else "SELL"

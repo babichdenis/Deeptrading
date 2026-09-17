@@ -701,6 +701,11 @@ body {
   color: var(--text-faint); font-weight: 700;
 }
 .hdr-live-badge span { font-size: 11px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.hdr-ai-mode select {
+  background: rgba(0,0,0,.25); color: var(--text); border: 1px solid rgba(120,154,194,.25);
+  border-radius: 6px; font-size: 11px; padding: 1px 4px; cursor: pointer;
+}
+.hdr-ai-mode .ai-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 6px rgba(244,185,66,.6); flex-shrink: 0; }
 .hdr-live-badge .live-dot,
 .hdr-live-badge .mex-dot,
 .hdr-live-badge .imoex-dot { width: 7px; height: 7px; border-radius: 50%; background: #4b5563; flex-shrink: 0; transition: background .25s ease, box-shadow .25s ease; }
