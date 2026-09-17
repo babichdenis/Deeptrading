@@ -1,6 +1,8 @@
 """Sandbox API — T-Invest sandbox (thread-safe, DB tickers, ATR TP/SL, precise prices)."""
 import asyncio
+import json
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter
 from app.config import get_settings
@@ -277,6 +279,37 @@ def _reconcile_logger():
     return _RECONCILE_LOGGER
 
 
+_CASH_FLOWS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "data", "cash_flows.json")
+_CASH_FLOWS: dict = {"total": 0.0, "events": []}
+
+
+def _load_cash_flows() -> None:
+    global _CASH_FLOWS
+    try:
+        with open(_CASH_FLOWS_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+            if isinstance(d, dict):
+                _CASH_FLOWS = {"total": float(d.get("total") or 0.0),
+                               "events": list(d.get("events") or [])[-30:]}
+    except Exception:
+        pass
+
+
+def _save_cash_flows() -> None:
+    try:
+        os.makedirs(os.path.dirname(_CASH_FLOWS_FILE), exist_ok=True)
+        tmp = _CASH_FLOWS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_CASH_FLOWS, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, _CASH_FLOWS_FILE)
+    except Exception:
+        pass
+
+
+_load_cash_flows()
+
+
 async def _portfolio_digest() -> dict:
     """Единый проверенный блок портфеля: источник истины — T-Invest.
 
@@ -357,6 +390,23 @@ async def _portfolio_digest() -> dict:
     if _active_mode() == "live":
         base = {**base, "pnl": accounting_pnl,
                 "initial_cash": round(float(base["equity"]) - accounting_pnl, 2)}
+    # Ввод/вывод средств владельцем (вне сделок бота): крупное необъяснимое расхождение
+    # кэша принимаем и запоминаем — иначе каждый опрос пишет MISMATCH.
+    _flow_thr = max(100.0, 0.05 * abs(float(base.get("equity") or 0.0)))
+    _unexplained = delta_cash - float(_CASH_FLOWS.get("total") or 0.0)
+    if abs(_unexplained) > _flow_thr:
+        _CASH_FLOWS["total"] = round(float(_CASH_FLOWS.get("total") or 0.0) + _unexplained, 2)
+        _CASH_FLOWS.setdefault("events", []).append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "delta": round(_unexplained, 2),
+            "note": "ввод/вывод средств владельцем (вне сделок бота)",
+        })
+        _CASH_FLOWS["events"] = _CASH_FLOWS["events"][-30:]
+        _save_cash_flows()
+        lg.info("RECONCILE: ВВОД/ВЫВОД средств %.2f₽ принят (вне сделок), baseline скорректирован",
+                _unexplained)
+        delta_cash = round(delta_cash - float(_CASH_FLOWS["total"]), 2)
+
     tinkoff_pnl = float(base["pnl"])
     delta_pnl = round(accounting_pnl - tinkoff_pnl, 2)
     ok = abs(delta_cash) <= 0.5 and abs(delta_pnl) <= 1.0
