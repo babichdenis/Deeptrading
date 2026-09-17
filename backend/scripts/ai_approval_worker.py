@@ -148,6 +148,12 @@ def _sanitize_prompt(p: str) -> str:
     return t.strip()
 
 
+_JSON_ONLY = """
+
+— ФОРМАТ ОТВЕТА (критично) —
+Отвечай ТОЛЬКО валидным JSON-объектом. НИКАКОГО текста до или после JSON:
+ни рассуждений, ни пояснений, ни markdown. Первый символ ответа — {, последний — }.
+"""
 _LEVEL_DISCIPLINE = """
 
 — ДИСЦИПЛИНА УРОВНЕЙ (обязательно, приоритет выше твоих правил) —
@@ -170,7 +176,7 @@ def _eff_system(api: str, kind: str, default: str) -> str:
     except Exception:
         base = default
     if kind in ("watch", "gate"):
-        return base + _LEVEL_DISCIPLINE
+        return base + _LEVEL_DISCIPLINE + _JSON_ONLY
     return base
 
 
@@ -536,7 +542,8 @@ def _ask_opencode(order: dict, ctx: dict, model: str, url: str,
         sid = c.post(f"{url}/session", json={"title": "ai-gate"}).json().get("id")
         try:
             body = {
-                "model": {"providerID": "opencode", "modelID": model},
+                "model": (lambda m: {"providerID": m.split("/", 1)[0], "modelID": m.split("/", 1)[1]}
+                              if "/" in m else {"providerID": "opencode", "modelID": m})(str(model)),
                 "system": system,
                 "parts": [{"type": "text", "text": json.dumps(
                     {"order": order, "context": ctx}, ensure_ascii=False, default=str)[:12000]}],

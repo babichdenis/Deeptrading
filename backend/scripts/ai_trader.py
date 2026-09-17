@@ -133,7 +133,8 @@ def _ask(system: str, user: dict, model: str, url: str) -> tuple:
         sid = c.post(f"{url}/session", json={"title": "ai-trader"}).json().get("id")
         try:
             body = {
-                "model": {"providerID": "opencode", "modelID": model},
+                "model": (lambda m: {"providerID": m.split("/", 1)[0], "modelID": m.split("/", 1)[1]}
+                              if "/" in m else {"providerID": "opencode", "modelID": m})(str(model)),
                 "system": system,
                 "parts": [{"type": "text", "text": json.dumps(user, ensure_ascii=False, default=str)[:16000]}],
             }
@@ -384,7 +385,12 @@ def main() -> None:
                 _j = _ov.find(_cut)
                 if _j > 0:
                     _ov = _ov[:_j]
-            _sys = (_ov.strip() or SYSTEM) + _LEVEL_DISCIPLINE
+            _sys = (_ov.strip() or SYSTEM) + _LEVEL_DISCIPLINE + """
+
+— ФОРМАТ ОТВЕТА (критично) —
+Отвечай ТОЛЬКО валидным JSON-объектом. НИКАКОГО текста до или после JSON:
+ни рассуждений, ни пояснений, ни markdown. Первый символ ответа — {, последний — }.
+"""
             if str(args.provider) == "deepseek":
                 analysis, acts, sugg = _ask_deepseek(_sys, ctx, args.model or "deepseek-chat")
             else:
