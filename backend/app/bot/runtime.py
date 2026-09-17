@@ -3372,37 +3372,50 @@ class PaperBotRuntime:
                     # fallback — последняя известная цена.
                     _exit_px = None
                     _net = None
+                    _entry_px_broker = None
                     try:
                         import asyncio as _aio
                         from app.api.routes.sandbox import _get_operations
                         _ops = await _aio.to_thread(_get_operations, 3)
-                        _pay = 0.0
-                        _pxs: list[float] = []
+                        _lng0 = str(r.side).upper() in ("BUY", "LONG")
+                        _close_kind = "Покупка" if not _lng0 else "Продажа"   # закрывающая сторона
+                        _open_kind = "Продажа" if not _lng0 else "Покупка"    # сторона входа
+                        _et = r.entry_time
+                        if _et is not None and getattr(_et, "tzinfo", None) is None:
+                            _et = _et.replace(tzinfo=timezone.utc)
+                        _best_close = None   # (t, price) — ближайшая закрывающая после входа
+                        _best_open = None
                         for _op in (getattr(_ops, "operations", None) or []):
                             try:
                                 if str(getattr(_op, "figi", "")) != figi:
                                     continue
                                 _t = getattr(_op, "date", None)
-                                if (_t is not None and r.entry_time is not None
-                                        and _t < r.entry_time):
+                                if _t is not None and getattr(_t, "tzinfo", None) is None:
+                                    _t = _t.replace(tzinfo=timezone.utc)
+                                if _et is not None and _t is not None and _t < _et - timedelta(minutes=3):
                                     continue
-                                _mv = getattr(_op, "payment", None)
-                                if _mv is not None:
-                                    _pay += float(getattr(_mv, "units", 0) or 0) + \
-                                            float(getattr(_mv, "nano", 0) or 0) / 1e9
+                                _otype = str(getattr(_op, "type", "") or "")
+                                if "комисси" in _otype.lower():
+                                    continue
                                 _pm = getattr(_op, "price", None)
+                                _p = 0.0
                                 if _pm is not None:
                                     _p = float(getattr(_pm, "units", 0) or 0) + \
                                          float(getattr(_pm, "nano", 0) or 0) / 1e9
-                                    if _p > 0:
-                                        _pxs.append(_p)
+                                if _p <= 0:
+                                    continue
+                                if _close_kind in _otype:
+                                    if _best_close is None or (_t is not None and _t < _best_close[0]):
+                                        _best_close = (_t or _et or _t, _p)
+                                elif _open_kind in _otype:
+                                    if _best_open is None or (_t is not None and _t > _best_open[0]):
+                                        _best_open = (_t or _et or _t, _p)
                             except Exception:
                                 continue
-                        # ВАЖНО: _pay суммирует все операции по figi (могут быть чужие
-                        # сделки/маржа) — для net используем цены входа/выхода ниже,
-                        # операции берём только как источник цены выхода.
-                        if _pxs:
-                            _exit_px = round(sum(_pxs) / len(_pxs), 6)
+                        if _best_close is not None:
+                            _exit_px = round(_best_close[1], 6)
+                        if _best_open is not None:
+                            _entry_px_broker = round(_best_open[1], 6)
                     except Exception:
                         pass
                     # P&L считаем по ценам: (выход − вход) × qty × направление − комиссии.
@@ -3416,9 +3429,11 @@ class PaperBotRuntime:
                     if _px_out > 0:
                         _q = abs(float(r.qty or 0))
                         _lng = str(r.side).upper() in ("BUY", "LONG")
-                        _pnl = (_px_out - float(r.entry_price or 0.0)) * _q * (1 if _lng else -1)
+                        # Цена входа: если брокер дал операцию входа — берём её (точнее стрима)
+                        _epx = float(_entry_px_broker or r.entry_price or 0.0)
+                        _pnl = (_px_out - _epx) * _q * (1 if _lng else -1)
                         _cr = float(getattr(self.config, "commission_rate", 0.0005) or 0.0005)
-                        _net = round(_pnl - _cr * (float(r.entry_price or 0.0) + _px_out) * _q, 4)
+                        _net = round(_pnl - _cr * (_epx + _px_out) * _q, 4)
                         _exit_px = _px_out
                     r.exit_time = now
                     r.exit_price = float(_exit_px or r.entry_price or 0.0)
