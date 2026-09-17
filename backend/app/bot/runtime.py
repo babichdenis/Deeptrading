@@ -1681,9 +1681,10 @@ class PaperBotRuntime:
         except Exception:
             pass
         _is_long = str(getattr(pos, "side", "")).upper() in ("BUY", "LONG")
+        _entry = float(getattr(pos, "entry_price", 0) or 0)
         if _px > 0 and _atr > 0:
-            _min_sl = 0.3 * _atr
-            _min_tp = 0.2 * _atr
+            _min_sl = 1.0 * _atr   # ближе 1 ATR к цене — запрещено (шум выбивает)
+            _min_tp = 0.5 * _atr
             _max_step = 3.0 * _atr
             if sl is not None:
                 _sl = float(sl)
@@ -1692,7 +1693,15 @@ class PaperBotRuntime:
                 if (not _is_long) and _sl <= _px:
                     return {"ok": False, "error": f"SL {_sl:.4g} ниже цены {_px:.4g} — мгновенный стоп (шорт)"}
                 if abs(_px - _sl) < _min_sl:
-                    return {"ok": False, "error": f"SL слишком близко к цене (<0.3 ATR = {_min_sl:.4g})"}
+                    return {"ok": False, "error": f"SL слишком близко к цене (<1 ATR = {_min_sl:.4g}) — шум выбьет"}
+                # SL в зону прибыли — только когда прибыль реально есть (>= 1 ATR)
+                if _entry > 0:
+                    _in_profit = (_sl > _entry) if _is_long else (_sl < _entry)
+                    _best = (_px - _entry) if _is_long else (_entry - _px)
+                    if _in_profit and _best < 1.0 * _atr:
+                        return {"ok": False,
+                                "error": f"SL в плюс только при прибыли ≥1 ATR "
+                                         f"(сейчас {_best / _atr:.2f} ATR) — дай позиции дышать"}
                 _cur = self._trail_stop.get(figi)
                 if _cur and abs(_sl - float(_cur)) > _max_step:
                     return {"ok": False, "error": f"шаг SL {abs(_sl - float(_cur)):.4g} > 3 ATR ({_max_step:.4g})"}
