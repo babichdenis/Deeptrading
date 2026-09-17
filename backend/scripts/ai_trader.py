@@ -82,6 +82,51 @@ def _http(method: str, url: str, payload: dict | None = None, timeout: float = 6
         return r.json()
 
 
+def _parse_reply(txt: str) -> tuple:
+    m = re.search(r"\{.*\}", txt, re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict) and "actions" in obj:
+                return [obj.get("analysis") or "", obj.get("actions") or [],
+                        obj.get("suggestions") or []]
+        except Exception:
+            pass
+    m2 = re.search(r"\[.*\]", txt, re.S)
+    return ["", json.loads(m2.group(0)), []] if m2 else ["", [], []]
+
+
+def _ask_deepseek(system: str, user: dict, model: str = "deepseek-chat") -> tuple:
+    """DeepSeek через API (ключ из env/.env). Замена opencode, когда Zen недоступен."""
+    import os
+    key = os.environ.get("DEEPSEEK_API_KEY", "")
+    base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    if not key:
+        try:
+            for line in open(".env", encoding="utf-8"):
+                line = line.strip()
+                if line.startswith("DEEPSEEK_API_KEY="):
+                    key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if line.startswith("DEEPSEEK_BASE_URL="):
+                    base = line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    if not key:
+        raise RuntimeError("нет DEEPSEEK_API_KEY")
+    with httpx.Client(timeout=180.0) as c:
+        r = c.post(f"{base}/chat/completions",
+                   headers={"Authorization": f"Bearer {key}"},
+                   json={"model": model, "temperature": 0.3, "max_tokens": 4000,
+                         "messages": [
+                             {"role": "system", "content": system},
+                             {"role": "user",
+                              "content": json.dumps(user, ensure_ascii=False, default=str)[:16000]},
+                         ]})
+        r.raise_for_status()
+        txt = (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+    return _parse_reply(txt)
+
+
 def _ask(system: str, user: dict, model: str, url: str) -> tuple:
     url = url.rstrip("/")
     with httpx.Client(timeout=180.0) as c:
@@ -96,17 +141,7 @@ def _ask(system: str, user: dict, model: str, url: str) -> tuple:
             r.raise_for_status()
             txt = "".join(p.get("text", "") for p in (r.json().get("parts") or [])
                           if p.get("type") == "text")
-            m = re.search(r"\{.*\}", txt, re.S)
-            if m:
-                try:
-                    obj = json.loads(m.group(0))
-                    if isinstance(obj, dict) and "actions" in obj:
-                        return [obj.get("analysis") or "", obj.get("actions") or [],
-                                obj.get("suggestions") or []]
-                except Exception:
-                    pass
-            m2 = re.search(r"\[.*\]", txt, re.S)
-            return ["", json.loads(m2.group(0)), []] if m2 else ["", [], []]
+            return _parse_reply(txt)
         finally:
             try:
                 c.delete(f"{url}/session/{sid}")
@@ -288,11 +323,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--api", default="http://127.0.0.1:8000")
     ap.add_argument("--opencode-url", default="http://192.168.1.3:4096")
-    ap.add_argument("--model", default="big-pickle")
+    ap.add_argument("--model", default="")
     ap.add_argument("--interval", type=float, default=300.0)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--report-only", action="store_true",
                     help="только отчёт/предложения и закрытия, без открытия позиций")
+    ap.add_argument("--provider", default="opencode", choices=("opencode", "deepseek"),
+                    help="opencode (Zen/big-pickle) или deepseek (API)")
     ap.add_argument("--no-buy", action="store_true",
                     help="запретить покупки (BUY), шорты разрешены")
     args = ap.parse_args()
@@ -348,7 +385,10 @@ def main() -> None:
                 if _j > 0:
                     _ov = _ov[:_j]
             _sys = (_ov.strip() or SYSTEM) + _LEVEL_DISCIPLINE
-            analysis, acts, sugg = _ask(_sys, ctx, args.model, args.opencode_url)
+            if str(args.provider) == "deepseek":
+                analysis, acts, sugg = _ask_deepseek(_sys, ctx, args.model or "deepseek-chat")
+            else:
+                analysis, acts, sugg = _ask(_sys, ctx, args.model, args.opencode_url)
             if analysis:
                 print(f"[ai-trader] РАЗБОР: {analysis}", flush=True)
                 try:
