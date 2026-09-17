@@ -133,10 +133,25 @@ def _ai_control(api: str, ttl: float = 30.0) -> dict:
     return _AI_CTL_CACHE["data"] or {}
 
 
+def _sanitize_prompt(p: str) -> str:
+    """Снять обёртки старого UI: «— SYSTEM —», «— Контекст заявки (JSON) —» и JSON после."""
+    t = str(p or "")
+    for marker in ("— SYSTEM —", "- SYSTEM -", "— SYSTEM—"):
+        i = t.find(marker)
+        if i >= 0:
+            t = t[i + len(marker):]
+            break
+    for cut in ("— Контекст заявки (JSON) —", "— Контекст заявки", "Контекст заявки (JSON)"):
+        j = t.find(cut)
+        if j > 0:
+            t = t[:j]
+    return t.strip()
+
+
 def _eff_system(api: str, kind: str, default: str) -> str:
     """Промпт: переопределение из UI (если задано), иначе дефолт воркера."""
     try:
-        p = str((_ai_control(api).get("prompts") or {}).get(kind) or "")
+        p = _sanitize_prompt(str((_ai_control(api).get("prompts") or {}).get(kind) or ""))
         return p if p.strip() else default
     except Exception:
         return default
@@ -220,6 +235,56 @@ def _ctx_compact(api: str, order: dict) -> dict:
         if int(_ls.get("total") or 0) < 3:
             out["long_short_note"] = "позиций < 3: баланс L/S не учитывать как ограничение"
         out["loss_streak"] = r.get("loss_streak")
+        # --- Поля под промпт пользователя (daily/hourly/m5 bias, MTF, режим, сессия) ---
+        try:
+            _mtf = (r.get("mtf") or {}).get(tk) or {}
+            _db = (r.get("daily_bias") or {}).get(tk) if isinstance(r.get("daily_bias"), dict) else None
+            out["daily_bias"] = _db
+            out["hourly_bias"] = _mtf.get("h1")
+            out["m5_bias"] = _mtf.get("m5")
+            out["mtf_alignment"] = {"h1": _mtf.get("h1"), "m5": _mtf.get("m5"),
+                                    "m5_trend": _mtf.get("m5_trend"),
+                                    "score": (1.0 if _mtf.get("h1") == side and _mtf.get("m5") == side
+                                              else 0.5 if _mtf.get("h1") == side else 0.0)}
+            out["regime"] = (r.get("portfolio") or {}).get("regime") if isinstance(r.get("portfolio"), dict) else None
+            _sess = r.get("session")
+            _sn = (_sess.get("state") if isinstance(_sess, dict) else _sess)
+            _last_hour = False
+            try:
+                _now = datetime.now(timezone(timedelta(hours=3)))
+                _last_hour = _now.hour == 22 or (_now.hour == 18 and _now.minute >= 45)
+            except Exception:
+                pass
+            out["session"] = {"name": _sn, "is_last_hour": _last_hour}
+            _pf2 = out.get("portfolio") or {}
+            out["margin_use_pct"] = _pf2.get("margin_use_pct")
+            out["net_exposure_pct"] = _pf2.get("net_exposure_pct")
+        except Exception:
+            pass
+        # --- Стакан: спред + перевес (для правил 11/20) ---
+        try:
+            _ob = _http("GET", f"{api}/api/v1/bot/orderbook/{order.get('figi')}?depth=5", timeout=15)
+            out["spread_bps"] = _ob.get("spread_bps")
+            out["imbalance"] = _ob.get("imbalance")
+            out["orderbook"] = {k: _ob.get(k) for k in ("last", "best_bid", "best_ask", "bid_qty",
+                                                        "ask_qty", "imbalance", "depth_rub")}
+        except Exception:
+            pass
+        # --- Живая статистика по тикеру (правило 13/21): сделки + win rate ---
+        try:
+            _t2 = _http("GET", f"{api}/api/v1/bot/trades?limit=200", timeout=20)
+            _rows = [x for x in (_t2.get("trades") or [])
+                     if str(x.get("ticker", "")).upper() == tk]
+            _pnls = [float(x.get("net_pnl") or 0) for x in _rows[:20]]
+            _wins = sum(1 for v in _pnls if v > 0)
+            out["live_stats"] = {"trades": len(_pnls),
+                                 "win_rate": (round(_wins / len(_pnls), 2) if _pnls else None),
+                                 "last5": [round(v) for v in _pnls[:5]]}
+            out["ticker_recent_trades"] = [
+                {k: x.get(k) for k in ("entry_time", "side", "net_pnl", "exit_reason")}
+                for x in _rows[:5]]
+        except Exception:
+            pass
         try:
             out["portfolio"] = _http("GET", f"{api}/api/v1/bot/portfolio_summary", timeout=20)
         except Exception:

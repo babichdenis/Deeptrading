@@ -288,7 +288,17 @@ def main() -> None:
             eq = (ctx.get("portfolio") or {}).get("equity")
             print(f"[ai-trader] контекст: позиций {n_pos}, equity {eq}, "
                   f"тикеров {len(ctx.get('universe') or [])}", flush=True)
-            _sys = str(ctx.pop("prompt_override", "") or "") or SYSTEM
+            _ov = str(ctx.pop("prompt_override", "") or "")
+            for _mk in ("— SYSTEM —", "- SYSTEM -"):
+                _i = _ov.find(_mk)
+                if _i >= 0:
+                    _ov = _ov[_i + len(_mk):]
+                    break
+            for _cut in ("— Контекст заявки (JSON) —", "— Контекст заявки"):
+                _j = _ov.find(_cut)
+                if _j > 0:
+                    _ov = _ov[:_j]
+            _sys = _ov.strip() or SYSTEM
             analysis, acts, sugg = _ask(_sys, ctx, args.model, args.opencode_url)
             if analysis:
                 print(f"[ai-trader] РАЗБОР: {analysis}", flush=True)
