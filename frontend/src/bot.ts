@@ -153,6 +153,38 @@ async function doClosePosition(ticker: string, side: string, qty: number) {
 (window as any).__closePosition = doClosePosition;
 
 
+function initAgResizer() {
+  const list = document.getElementById("ag-list");
+  const resizer = document.getElementById("ag-resizer");
+  if (!list || !resizer) return;
+  const pane = document.getElementById("sr-pane-aigate");
+  const clamp = (h: number) => {
+    const maxH = (pane ? pane.clientHeight : window.innerHeight) - 220;
+    return Math.max(60, Math.min(h, Math.max(80, maxH)));
+  };
+  const saved = Number(localStorage.getItem("agListHeight"));
+  if (saved > 0) list.style.height = `${clamp(saved)}px`;
+  let startY = 0;
+  let startH = 0;
+  const onMove = (e: PointerEvent) => {
+    list.style.height = `${clamp(startH + (e.clientY - startY))}px`;
+  };
+  const onUp = () => {
+    resizer.classList.remove("dragging");
+    localStorage.setItem("agListHeight", String(list.clientHeight));
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  };
+  resizer.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    startY = e.clientY;
+    startH = list.clientHeight;
+    resizer.classList.add("dragging");
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
+}
+
 function initBotResizer() {
   const wrap = document.getElementById("bot-chart-wrap");
   const resizer = document.getElementById("bot-resizer");
@@ -1967,6 +1999,7 @@ function initScreener() {
   $("ag-full")?.addEventListener("click", () => {
     $("sr-pane-aigate")?.classList.toggle("sr-fullscreen");
   });
+  initAgResizer();
   $("stats-apply")?.addEventListener("click", () => { void renderStats(); });
   ($("stats-mode") as HTMLSelectElement | null)?.addEventListener("change", () => { void renderStats(); });
   $("stats-cmp-toggle")?.addEventListener("click", () => {
