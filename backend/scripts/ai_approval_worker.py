@@ -117,6 +117,38 @@ def _http(method: str, url: str, payload: dict | None = None, timeout: float = 2
         return r.json() if r.content else {}
 
 
+_AI_CTL_CACHE: dict = {"ts": 0.0, "data": {}}
+
+
+def _ai_control(api: str, ttl: float = 30.0) -> dict:
+    """Промпты (переопределения из UI) + срочное сообщение. Кэш ttl сек."""
+    if _AI_CTL_CACHE["data"] and (time.monotonic() - float(_AI_CTL_CACHE["ts"])) < ttl:
+        return _AI_CTL_CACHE["data"]
+    try:
+        d = _http("GET", f"{api}/api/v1/bot/ai_control", timeout=10)
+        _AI_CTL_CACHE["data"] = d if isinstance(d, dict) else {}
+        _AI_CTL_CACHE["ts"] = time.monotonic()
+    except Exception:
+        pass
+    return _AI_CTL_CACHE["data"] or {}
+
+
+def _eff_system(api: str, kind: str, default: str) -> str:
+    """Промпт: переопределение из UI (если задано), иначе дефолт воркера."""
+    try:
+        p = str((_ai_control(api).get("prompts") or {}).get(kind) or "")
+        return p if p.strip() else default
+    except Exception:
+        return default
+
+
+def _human_note(api: str) -> str:
+    try:
+        return str(_ai_control(api).get("note") or "")
+    except Exception:
+        return ""
+
+
 def _ctx(api: str) -> dict:
     out: dict = {}
     try:
@@ -138,6 +170,9 @@ def _ctx(api: str) -> dict:
         ]
     except Exception:
         out["recent_trades"] = []
+    _note = _human_note(api)
+    if _note:
+        out["human_note"] = _note
     return out
 
 
@@ -173,6 +208,13 @@ def _ctx_compact(api: str, order: dict) -> dict:
     try:
         r = _http("GET", f"{api}/api/v1/bot/status")
         out["risk"] = r.get("risk")
+        _cfg = r.get("config") or {}
+        out["bot"] = {"session_now": r.get("session"), "sessions": _cfg.get("sessions"),
+                      "entries_paused": _cfg.get("entries_paused"),
+                      "overnight": _cfg.get("overnight")}
+        _note = _human_note(api)
+        if _note:
+            out["human_note"] = _note
         out["long_short"] = r.get("long_short")
         _ls = out.get("long_short") or {}
         if int(_ls.get("total") or 0) < 3:
@@ -720,21 +762,25 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                    "long_short": (stt or {}).get("long_short") if isinstance(stt, dict) else None,
                    "portfolio": _pf,
                    "positions": items}
+            _note = _human_note(args.api)
+            if _note:
+                ctx["human_note"] = _note
+            _wsys = _eff_system(args.api, "watch", SYSTEM_WATCH_MANY)
 
             def _one(prov: str):
                 _t = time.monotonic()
                 try:
                     if prov == "opencode":
                         d = _ask_opencode({"positions": len(items)}, ctx, models.get("opencode", "big-pickle"),
-                                          args.opencode_url, system=SYSTEM_WATCH_MANY, parser=_parse_watch_many)
+                                          args.opencode_url, system=_wsys, parser=_parse_watch_many)
                     elif prov == "ollama":
                         d = _ask_ollama({"positions": len(items)}, ctx, models.get("ollama", "llama3.2:3b"),
-                                        args.ollama_url, system=SYSTEM_WATCH_MANY, parser=_parse_watch_many)
+                                        args.ollama_url, system=_wsys, parser=_parse_watch_many)
                     else:
                         d = _ask_deepseek({"positions": len(items)}, ctx, models.get("deepseek", "deepseek-chat"),
                                           os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
                                           os.environ.get("DEEPSEEK_API_KEY", ""),
-                                          system=SYSTEM_WATCH_MANY, parser=_parse_watch_many)
+                                          system=_wsys, parser=_parse_watch_many)
                 except Exception as e:
                     d = {"decisions": [], "error": f"{type(e).__name__}: {str(e)[:80]}"}
                 return d, int((time.monotonic() - _t) * 1000)
@@ -849,20 +895,23 @@ def main() -> None:
           flush=True)
 
     def decide(provider: str, order: dict, ctx: dict) -> dict:
+        _sys = _eff_system(args.api, "gate", SYSTEM)
         if provider == "opencode":
-            return _ask_opencode(order, ctx, _models["opencode"], args.opencode_url)
+            return _ask_opencode(order, ctx, _models["opencode"], args.opencode_url, system=_sys)
         if provider == "ollama":
-            return _ask_ollama(order, ctx, _models["ollama"], args.ollama_url)
+            return _ask_ollama(order, ctx, _models["ollama"], args.ollama_url, system=_sys)
         return _ask_deepseek(order, ctx, _models["deepseek"],
                              os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-                             os.environ.get("DEEPSEEK_API_KEY", ""))
+                             os.environ.get("DEEPSEEK_API_KEY", ""), system=_sys)
 
     # Отдаём текущий промпт/конфиг в бота — виден в UI (вкладка AI-гейт).
     def post_prompt() -> bool:
         try:
             _http("POST", f"{args.api}/api/v1/bot/ai_prompt", {
                 "provider": ",".join(_provs), "model": ",".join(_models.get(p, "") for p in _provs),
-                "shadow": args.dry_run, "system": SYSTEM,
+                "shadow": args.dry_run,
+                "kind": "watch" if args.watch_positions else "gate",
+                "system": SYSTEM_WATCH_MANY if args.watch_positions else SYSTEM,
                 "context_schema": {
                     "order": "ticker, side, qty, price, reason",
                     "context": "now_msk, positions, equity, guard, risk, session, "

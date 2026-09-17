@@ -1785,24 +1785,68 @@ async function renderAiGate() {
   }
 }
 
+let _aiPromptKind: "gate" | "watch" | "trader" = "gate";
+let _aiControlCache: any = null;
+
 async function loadAiPrompt() {
-  const pre = $("ag-prompt");
-  if (!pre) return;
+  if (!$("ag-prompt")) return;
   try {
-    const r = await fetch(`${API}/api/v1/bot/ai_prompt`);
-    const d = r.ok ? await r.json() : null;
-    if (!d || !d.system) {
-      pre.textContent = "промпт ещё не получен (воркер не запущен)";
-      return;
-    }
-    const schema = d.context_schema ? JSON.stringify(d.context_schema, null, 2) : "—";
-    pre.textContent =
-      `Провайдер: ${d.provider || "—"} · модель: ${d.model || "—"} · ` +
-      `${d.shadow ? "shadow (не применяет)" : "боевой"} · обновлён: ${d.updated_ts || "—"}\n\n` +
-      `— SYSTEM —\n${d.system}\n\n— Контекст заявки (JSON) —\n${schema}`;
+    const d = await fetch(`${API}/api/v1/bot/ai_control`)
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    _aiControlCache = d || {};
   } catch {
-    pre.textContent = "ошибка загрузки промпта";
+    _aiControlCache = {};
   }
+  renderAiPromptEditor();
+}
+
+function renderAiPromptEditor() {
+  const d = _aiControlCache || {};
+  const ed = $("ag-prompt-edit") as HTMLTextAreaElement | null;
+  if (!ed) return;
+  const ov = String((d.prompts || {})[_aiPromptKind] || "");
+  const def = String((((d.defaults || {})[_aiPromptKind]) || {}).system || "");
+  ed.value = ov.trim() ? ov : def;
+  const info = $("ag-prompt-info");
+  if (info) {
+    const who = { gate: "🚦 гейт", watch: "👁 вахтёр", trader: "🤖 трейдер" }[_aiPromptKind];
+    info.textContent = `${who} · ${ov.trim() ? "переопределён (UI)" : "дефолт воркера"}` +
+      ` · ${ed.value.length} симв`;
+  }
+  const inp = $("ag-send-input") as HTMLTextAreaElement | null;
+  if (inp && document.activeElement !== inp) inp.value = String(d.note || "");
+  document.querySelectorAll("#ag-prompt .ag-ptab").forEach((b) => {
+    (b as HTMLElement).classList.toggle("active",
+      (b as HTMLElement).dataset.kind === _aiPromptKind);
+  });
+}
+
+async function saveAiPrompt(kind: string, value: string) {
+  const st = $("ag-prompt-status");
+  try {
+    const r = await fetch(`${API}/api/v1/bot/ai_control`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompts: { [kind]: value } }),
+    });
+    if (st) st.textContent = r.ok ? "✓ сохранено" : "ошибка сохранения";
+  } catch {
+    if (st) st.textContent = "ошибка сети";
+  }
+  setTimeout(() => { if (st) st.textContent = ""; }, 2500);
+}
+
+async function saveAiNote(value: string) {
+  const st = $("ag-send-status");
+  try {
+    const r = await fetch(`${API}/api/v1/bot/ai_control`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: value }),
+    });
+    if (st) st.textContent = r.ok ? "✓ отправлено (AI увидит в следующем цикле)" : "ошибка";
+  } catch {
+    if (st) st.textContent = "ошибка сети";
+  }
+  setTimeout(() => { if (st) st.textContent = ""; }, 4000);
 }
 
 function initScreener() {
@@ -1874,6 +1918,24 @@ function initScreener() {
     if (!p) return;
     p.classList.toggle("hidden");
     if (!p.classList.contains("hidden")) void loadAiPrompt();
+  });
+  document.querySelectorAll("#ag-prompt .ag-ptab").forEach((b) => {
+    b.addEventListener("click", () => {
+      _aiPromptKind = ((b as HTMLElement).dataset.kind as any) || "gate";
+      renderAiPromptEditor();
+    });
+  });
+  $("ag-prompt-save")?.addEventListener("click", () => {
+    const ed = $("ag-prompt-edit") as HTMLTextAreaElement | null;
+    if (ed) void saveAiPrompt(_aiPromptKind, ed.value);
+  });
+  $("ag-prompt-reset")?.addEventListener("click", () => {
+    const ed = $("ag-prompt-edit") as HTMLTextAreaElement | null;
+    if (ed) { ed.value = ""; void saveAiPrompt(_aiPromptKind, ""); }
+  });
+  $("ag-send-btn")?.addEventListener("click", () => {
+    const inp = $("ag-send-input") as HTMLTextAreaElement | null;
+    if (inp) void saveAiNote(inp.value);
   });
   $("ag-full")?.addEventListener("click", () => {
     $("sr-pane-aigate")?.classList.toggle("sr-fullscreen");

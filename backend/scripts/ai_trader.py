@@ -198,6 +198,16 @@ def _context(api: str) -> dict:
                                 for t in (tr.get("trades") or [])]
     except Exception:
         out["recent_trades"] = []
+    try:
+        ctl = _http("GET", f"{api}/api/v1/bot/ai_control", timeout=10)
+        _p = str((ctl.get("prompts") or {}).get("trader") or "")
+        if _p.strip():
+            out["prompt_override"] = _p
+        _n = str(ctl.get("note") or "")
+        if _n.strip():
+            out["human_note"] = _n
+    except Exception:
+        pass
     out["now_msk"] = (datetime.now(timezone.utc)
                       .astimezone(timezone(timedelta(hours=3)))
                       .strftime("%Y-%m-%d %H:%M") + " МСК")
@@ -249,7 +259,8 @@ def main() -> None:
             eq = (ctx.get("portfolio") or {}).get("equity")
             print(f"[ai-trader] контекст: позиций {n_pos}, equity {eq}, "
                   f"тикеров {len(ctx.get('universe') or [])}", flush=True)
-            analysis, acts, sugg = _ask(SYSTEM, ctx, args.model, args.opencode_url)
+            _sys = str(ctx.pop("prompt_override", "") or "") or SYSTEM
+            analysis, acts, sugg = _ask(_sys, ctx, args.model, args.opencode_url)
             if analysis:
                 print(f"[ai-trader] РАЗБОР: {analysis}", flush=True)
                 try:

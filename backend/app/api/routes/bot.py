@@ -864,6 +864,18 @@ async def bot_ai_prompt_get() -> dict:
     return runtime.get_ai_prompt()
 
 
+@router.get("/ai_control")
+async def bot_ai_control_get() -> dict:
+    """Промпты AI (переопределения + дефолты воркеров) + срочное сообщение — для UI."""
+    return runtime.get_ai_control()
+
+
+@router.put("/ai_control")
+async def bot_ai_control_put(payload: dict) -> dict:
+    """Сохранить промпт(ы)/срочное сообщение из UI; воркеры читают каждый цикл."""
+    return runtime.set_ai_control(payload or {})
+
+
 @router.post("/ai_report")
 async def bot_ai_report_set(payload: dict) -> dict:
     """Отчёт AI о рынке + предложения по механизму бота (ai_trader шлёт каждый цикл)."""

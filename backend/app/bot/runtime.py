@@ -49,6 +49,7 @@ POS_PCT = 0.40  # доля портфеля на одну позицию (мод
 
 # Файл, где хранятся настройки бота (единственный источник правды; БД — только резерв).
 _BOT_CONFIG_FILE = str(Path(__file__).resolve().parents[2] / "data" / "bot_config.json")
+_AI_CONTROL_FILE = str(Path(__file__).resolve().parents[2] / "data" / "ai_control.json")
 
 
 @dataclass
@@ -606,6 +607,17 @@ class PaperBotRuntime:
         self._ai_decisions: deque = deque(maxlen=50)
         self._ai_notes: deque = deque(maxlen=50)  # заметки вахтёра позиций (llama)
         self._ai_prompt: dict = {}  # текущий промпт/модель AI-гейта (для UI)
+        # Управление AI из UI: переопределения промптов (gate/watch/trader) + срочная заметка.
+        self._ai_control: dict = {"prompts": {}, "note": "", "updated_ts": ""}
+        self._ai_defaults: dict = {}  # дефолтные промпты воркеров (gate/watch/trader)
+        try:
+            _acp = Path(_AI_CONTROL_FILE)
+            if _acp.exists():
+                _acd = json.loads(_acp.read_text(encoding="utf-8"))
+                if isinstance(_acd, dict):
+                    self._ai_control.update(_acd)
+        except Exception:
+            pass
         self._ai_report: dict = {}  # отчёт AI о рынке + предложения по боту (для UI)
 
     async def sector_meta(self) -> dict:
@@ -2742,6 +2754,16 @@ class PaperBotRuntime:
 
     def set_ai_prompt(self, payload: dict) -> dict:
         """Сохранить текущий промпт/конфиг AI-гейта (воркер присылает при старте)."""
+        _kind = str((payload or {}).get("kind") or "gate")
+        try:
+            self._ai_defaults[_kind] = {
+                "system": str((payload or {}).get("system") or ""),
+                "model": str((payload or {}).get("model") or ""),
+                "provider": str((payload or {}).get("provider") or ""),
+                "updated_ts": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception:
+            pass
         self._ai_prompt = {
             "updated_ts": datetime.now(timezone.utc).isoformat(),
             "provider": str(payload.get("provider") or ""),
@@ -2754,6 +2776,37 @@ class PaperBotRuntime:
 
     def get_ai_prompt(self) -> dict:
         return self._ai_prompt or {}
+
+    def get_ai_control(self) -> dict:
+        """Текущие переопределения промптов + срочное сообщение (для UI и воркеров)."""
+        out = dict(self._ai_control or {})
+        out.setdefault("prompts", {})
+        out.setdefault("note", "")
+        out["defaults"] = self._ai_defaults or {}
+        return out
+
+    def set_ai_control(self, payload: dict) -> dict:
+        """Сохранить промпт(ы) и/или срочное сообщение из UI (файл data/ai_control.json)."""
+        prompts = payload.get("prompts")
+        if isinstance(prompts, dict):
+            cur = dict(self._ai_control.get("prompts") or {})
+            for k in ("gate", "watch", "trader"):
+                if k in prompts:
+                    cur[k] = str(prompts.get(k) or "")
+            self._ai_control["prompts"] = cur
+        if "note" in payload:
+            self._ai_control["note"] = str(payload.get("note") or "")
+        self._ai_control["updated_ts"] = datetime.now(timezone.utc).isoformat()
+        try:
+            _p = Path(_AI_CONTROL_FILE)
+            _p.parent.mkdir(parents=True, exist_ok=True)
+            _tmp = _p.with_suffix(".json.tmp")
+            _tmp.write_text(json.dumps(self._ai_control, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+            _tmp.replace(_p)
+        except Exception:
+            pass
+        return {"ok": True, "updated_ts": self._ai_control["updated_ts"]}
 
     def set_ai_report(self, payload: dict) -> dict:
         """Сохранить отчёт AI о рынке (ai_trader присылает каждый цикл)."""

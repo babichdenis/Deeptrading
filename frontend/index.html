@@ -640,12 +640,35 @@
             <button class="sr-refresh btn-secondary btn-xs" id="ag-prompt-btn" title="Показать промпт нейросети">📄</button>
             <button class="sr-refresh btn-secondary btn-xs" id="ag-full" title="На весь экран">⛶</button>
           </div>
-          <pre class="ag-prompt hidden" id="ag-prompt">загрузка…</pre>
+          <div class="ag-prompt hidden" id="ag-prompt">
+            <div class="ag-prompt-tabs">
+              <button class="ag-ptab active" data-kind="gate">🚦 Гейт входов</button>
+              <button class="ag-ptab" data-kind="watch">👁 Вахтёр</button>
+              <button class="ag-ptab" data-kind="trader">🤖 AI-трейдер</button>
+              <span class="ag-prompt-info" id="ag-prompt-info">—</span>
+            </div>
+            <textarea class="ag-prompt-edit" id="ag-prompt-edit" spellcheck="false"
+              placeholder="SYSTEM-промпт. Пусто = дефолт воркера. Сохраняется на сервере — воркеры читают каждый цикл."></textarea>
+            <div class="ag-prompt-actions">
+              <button class="btn-secondary btn-xs" id="ag-prompt-reset" title="Вернуть дефолт воркера (очистить переопределение)">↺ Дефолт</button>
+              <button class="btn-primary btn-xs" id="ag-prompt-save">💾 Сохранить промпт</button>
+              <span class="ag-prompt-status" id="ag-prompt-status"></span>
+            </div>
+          </div>
           <div class="ag-summary" id="ag-summary">—</div>
           <div class="ag-list" id="ag-list"><span class="ag-empty">нет решений</span></div>
           <div class="ag-watch">
             <div class="ag-watch-head">👁 Вахтёр позиций <span id="ag-watch-sub">—</span></div>
             <div class="ag-notes" id="ag-notes"><span class="ag-empty">нет заметок</span></div>
+          </div>
+          <div class="ag-send">
+            <div class="ag-send-head">✍ Срочное сообщение AI <span class="dim">(увидят гейт, вахтёр и трейдер)</span></div>
+            <textarea class="ag-send-input" id="ag-send-input" rows="3"
+              placeholder="Например: вечернюю торговлю выключил — входы не предлагай"></textarea>
+            <div class="ag-send-actions">
+              <span class="ag-send-status" id="ag-send-status"></span>
+              <button class="btn-primary btn-xs" id="ag-send-btn">Отправить</button>
+            </div>
           </div>
         </div>
       </aside>
