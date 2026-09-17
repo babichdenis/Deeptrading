@@ -204,6 +204,15 @@ def _ctx_compact(api: str, order: dict) -> dict:
             "reason": meta.get("reason") or meta.get("entry_reason") or meta.get("signal_note"),
         },
     }
+    _msig = {k: v for k, v in (meta or {}).items()
+             if k in ("votes", "quorum", "total", "functions", "confidence", "score",
+                      "signal_features", "ensemble")}
+    if _msig:
+        out["signal_features"] = _msig
+        if "votes" in _msig:
+            out["ensemble"] = {"votes": _msig.get("votes"), "total": _msig.get("total"),
+                               "quorum": _msig.get("quorum"),
+                               "functions": _msig.get("functions")}
     try:
         st = _http("GET", f"{api}/api/v1/bot/state")
         pos = st.get("positions") or []
@@ -447,6 +456,8 @@ def _parse_watch(txt: str) -> dict:
     except Exception:
         d = {"action": "watch", "reason": f"parse_error: {txt[:80]}", "confidence": 0.0}
     a = str(d.get("action", "watch")).lower()
+    if a in ("update_tp", "update_sl", "update_levels"):
+        a = "tighten"   # промпт может просить update_tp/update_sl — это tighten с уровнями
     if a not in ("hold", "tighten", "close", "watch"):
         a = "watch"
     d["action"] = a
