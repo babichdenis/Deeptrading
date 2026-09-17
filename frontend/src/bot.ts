@@ -256,8 +256,12 @@ function sendBotConfigPatch(extra?: Record<string, unknown>) {
   const trade_regimes = Object.keys(rgMap)
     .filter((x) => ($(x) as HTMLInputElement | null)?.checked)
     .map((x) => rgMap[x]);
+  const _szPos = $("sz-pos") as HTMLInputElement | null;
+  const _szMax = $("sz-max") as HTMLInputElement | null;
   const body: Record<string, unknown> = {
     sessions: sessions.length ? sessions : ["day"],
+    ...(_szPos ? { pos_pct: Math.max(0.1, Math.min(1.0, Number(_szPos.value) / 100)) } : {}),
+    ...(_szMax ? { max_positions: Math.max(1, Math.min(10, Number(_szMax.value))) } : {}),
     long_allowed: longOn,
     short_allowed: shortOn,
     margin_sessions,
@@ -342,6 +346,20 @@ function initSessChips() {
           }
         }
       } else { sendBotConfigPatch(); }
+      const _sp = $("sz-pos") as HTMLInputElement | null;
+      const _spl = $("sz-pos-label");
+      const _spv = Math.round(Number((cfg as { pos_pct?: number }).pos_pct || 0.3) * 100);
+      if (_sp && document.activeElement !== _sp) {
+        _sp.value = String(Math.max(10, Math.min(100, _spv)));
+        if (_spl) _spl.textContent = `${_sp.value}%`;
+      }
+      const _sm = $("sz-max") as HTMLInputElement | null;
+      const _sml = $("sz-max-label");
+      const _smv = Number((cfg as { max_positions?: number }).max_positions || 6);
+      if (_sm && document.activeElement !== _sm) {
+        _sm.value = String(Math.max(1, Math.min(10, _smv)));
+        if (_sml) _sml.textContent = _sm.value;
+      }
       const mlv = (cfg as { margin_leverage?: number }).margin_leverage;
       const levEl = $("mg-lev") as HTMLInputElement | null;
       if (typeof mlv === "number" && levEl) {
@@ -1972,6 +1990,18 @@ function initScreener() {
   });
   $("stats-refresh")?.addEventListener("click", () => { void renderStats(); });
   $("ag-refresh")?.addEventListener("click", () => { void renderAiGate(); });
+  ($("sz-pos") as HTMLInputElement | null)?.addEventListener("input", () => {
+    const v = ($("sz-pos") as HTMLInputElement).value;
+    const l = $("sz-pos-label");
+    if (l) l.textContent = `${v}%`;
+  });
+  ($("sz-pos") as HTMLInputElement | null)?.addEventListener("change", () => { sendBotConfigPatch(); });
+  ($("sz-max") as HTMLInputElement | null)?.addEventListener("input", () => {
+    const v = ($("sz-max") as HTMLInputElement).value;
+    const l = $("sz-max-label");
+    if (l) l.textContent = v;
+  });
+  ($("sz-max") as HTMLInputElement | null)?.addEventListener("change", () => { sendBotConfigPatch(); });
   $("ag-prompt-btn")?.addEventListener("click", () => {
     const p = $("ag-prompt");
     if (!p) return;

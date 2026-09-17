@@ -169,6 +169,21 @@
               <label class="pill" title="Высокая волатильность"><input type="checkbox" id="rg-highvol" checked><i data-lucide="waves"></i><span>Волат</span></label>
               <label class="pill" title="Флэт/боковик"><input type="checkbox" id="rg-range" checked><i data-lucide="bar-chart-3"></i><span>Флэт</span></label>
             </div>
+
+            <div class="separator"></div>
+
+            <div class="filter-group" title="Размер позиции и число слотов (применяется сразу)">
+              <div class="range-wrap" title="Размер одной позиции (доля equity на сделку)">
+                <span class="range-caption">Слот</span>
+                <input type="range" id="sz-pos" min="10" max="100" step="10" value="30">
+                <span id="sz-pos-label">30%</span>
+              </div>
+              <div class="range-wrap" title="Максимум одновременных позиций">
+                <span class="range-caption">Слоты</span>
+                <input type="range" id="sz-max" min="1" max="10" step="1" value="6">
+                <span id="sz-max-label">6</span>
+              </div>
+            </div>
           </section>
         </header>
 
