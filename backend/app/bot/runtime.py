@@ -2783,14 +2783,19 @@ class PaperBotRuntime:
         return list(self._ai_decisions)[-max(1, min(int(limit), 50)):]
 
     def atr_now(self, figi: str) -> float | None:
-        """Текущий ATR (1м, период из конфига) по буферу — для подсветки SL/TP и вахтёра."""
+        """Текущий ATR на ТФ ВХОДА (5м, период из конфига) — паритет с бэктестом.
+
+        ВАЖНО: раньше считался по 1м → стопы выходили в ~2.2 раза уже бэктеста
+        (там ATR на 5м баров) → позиции выбивало шумом и комиссиями.
+        """
         try:
             from app.engine.indicators import atr as _atr
             buf = self.buffers.get(figi)
             if not buf:
                 return None
             _p = int(getattr(self.config, "atr_period", 14) or 14)
-            vals = _atr(list(buf), _p)
+            _bars = self._get_5m_bars(figi, list(buf)) or list(buf)
+            vals = _atr(list(_bars), _p)
             v = vals[-1] if vals else None
             return float(v) if v else None
         except Exception:
@@ -4582,7 +4587,10 @@ class PaperBotRuntime:
                                             trail_min_factor=cfg.trail_min_factor,
                                             trail_min_atr=cfg.trail_min_atr,
                                             trail_vol_boost=cfg.trail_vol_boost)
-                buf_raw = list(self.buffers.get(figi, []))
+                # ATR для SL/TP — на ТФ входа (5м), как в бэктесте (паритет).
+                # Раньше брали 1м буфер → SL/TP были ~2.2× уже и выбивались шумом.
+                _b1 = list(self.buffers.get(figi, []))
+                buf_raw = self._get_5m_bars(figi, _b1) or _b1
                 plan = exit_policy.plan_entry(side, _fill, buf_raw)
         else:
             exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
