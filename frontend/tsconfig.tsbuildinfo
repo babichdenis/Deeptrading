@@ -1,1 +1,0 @@
-{"root":["./src/api.ts","./src/bot.ts","./src/enslab.ts","./src/lab.ts","./src/labchart.ts","./src/main.ts","./src/test.ts","./src/ws.ts","./vite.config.ts"],"errors":true,"version":"5.8.3"}

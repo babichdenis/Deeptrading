@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     bot_test_pace: str = "fast"  # fast | wall (wall = поминутно, реальное время)
     log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR
     log_debug_engine: bool = False  # подробные debug-логи движка (hot path)
+    api_token: str = ""  # Bearer-токен для write-эндпойнтов API (пусто = auth отключена)
+    # CORS-домены через запятую. ПУСТО = legacy-поведение (разрешено всё + warning).
+    # Для публичного/строгого режима задать явно, напр. http://localhost:5173.
+    cors_origins: str = ""
+    run_migrations_on_start: bool = False  # alembic upgrade head при старте приложения
 
     @field_validator("log_debug_engine", mode="before")
     @classmethod
@@ -73,6 +78,10 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 @lru_cache

@@ -1,15 +1,19 @@
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import models  # noqa: F401
 from app.api.routes import analysis, bot as bot_routes, catalog, candles, instruments, lab, ml as ml_routes, orchestrator_route, quorum, research, sandbox, screener, signals, test as test_routes, warehouse, ws
 from app.config import get_settings
 from app.database import Base, engine
 from app.logging_setup import setup_logging
+
+_log = logging.getLogger("uvicorn")
 
 setup_logging()
 
@@ -18,7 +22,8 @@ setup_logging()
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Миграция: признак контура сделки (sandbox|live) в реестре сделок.
+        # Догоняющие ALTER'ы (idempotent). Основная схема-эволюция — в alembic/
+        # (включить: RUN_MIGRATIONS_ON_START=1), см. alembic/versions/0001_*.
         from sqlalchemy import text as _text
         try:
             await conn.execute(_text(
@@ -32,6 +37,16 @@ async def lifespan(app: FastAPI):
                 "CREATE INDEX IF NOT EXISTS ix_sandbox_trades_test_name ON sandbox_trades (test_name)"))
         except Exception:
             pass
+    try:
+        if get_settings().run_migrations_on_start:
+            from alembic import command as _alc
+            from alembic.config import Config as _AlcCfg
+            from pathlib import Path as _Path
+            _cfg = _AlcCfg(str(_Path(__file__).resolve().parents[1] / "alembic.ini"))
+            _alc.upgrade(_cfg, "head")
+            _log.info("alembic upgrade head: ok")
+    except Exception as e:  # noqa: BLE001
+        _log.warning("alembic upgrade head failed: %s", e)
     from app.services.test_queue import queue_dispatcher
     from app.services.ensemble_queue import queue_dispatcher as ens_dispatcher
 
@@ -184,12 +199,31 @@ def create_app() -> FastAPI:
         description="Анализ рынка акций и торговый робот (Т-Инвестиции)",
         lifespan=lifespan,
     )
+    _cors_origins = settings.cors_origin_list
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
+        allow_origins=_cors_origins or ["*"],
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
         allow_headers=["*"],
     )
+    if not _cors_origins:
+        logging.getLogger("uvicorn").warning(
+            "CORS_ORIGINS пуст — CORS открыт на все домены (*). "
+            "Для строгого режима задайте CORS_ORIGINS=http://localhost:5173 в .env."
+        )
+
+    # Bearer-токен на мутирующие методы (POST/PATCH/PUT/DELETE) под /api.
+    # Пока API_TOKEN пуст — отключено (обратная совместимость).
+    _write_token = settings.api_token
+
+    @app.middleware("http")
+    async def _write_auth(request: Request, call_next):
+        if (_write_token and request.method in ("POST", "PATCH", "PUT", "DELETE")
+                and request.url.path.startswith("/api")):
+            if request.headers.get("authorization") != f"Bearer {_write_token}":
+                return JSONResponse(status_code=401,
+                                    content={"detail": "unauthorized"})
+        return await call_next(request)
     app.include_router(instruments.router)
     app.include_router(candles.router)
     app.include_router(analysis.router)
