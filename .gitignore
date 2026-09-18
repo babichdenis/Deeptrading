@@ -218,6 +218,7 @@ backend/scripts/sb_test_buy.py
 backend/scripts/sb_test_full.py
 backend/scripts/sb_v7_test.py
 backend/scripts/sync_gap.py
+backend/scripts/sandbox_test2.py
 backend/scripts/test_candle_stream.py
 backend/scripts/test_candle_stream2.py
 backend/scripts/test_order_stream.py
@@ -233,3 +234,15 @@ backend/mcp_server/audit.jsonl
 # MCP venv
 backend/.venv-mcp/
 backend/.ai_env
+
+# --- Audit 2026-09-18: runtime/big artifacts не храним в git ---
+backend/models/
+*.joblib
+*.jsonl
+*.tsbuildinfo
+*.bak_mlvote
+backend/s5_*.json
+/new-session-*.json
+backend/scripts/logs/
+frontend/node_modules.broken/
+backend/tg-orchestrator/
