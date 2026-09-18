@@ -24,77 +24,12 @@ from app.engine.exits import ExitPolicy, intrabar_exit
 def _validate_candles(candles: list) -> tuple:
     """Validate candles for anomalies and broken data.
 
-    Уровень 1 — битые ДНИ (мерцание цены): если в пределах торгового дня (МСК)
-    цена между соседними барами прыгает >50% не менее FLICKER_JUMPS раз, весь
-    день считается битым (сбой источника, напр. 2026-08-22: AFLT 32->85,
-    MVID 46->4222, NLMK 70->317 мерцают весь день). Такие бары отбрасываются.
-
-    Уровень 2 — битые бары: zero/negative, high<low, high<open/close,
-    low>open/close, volume<0, и единичный ценовой прыжок >40% от prev close.
-
-    Returns:
-        (valid_candles, skipped_count)
+    Делегирует общей реализации app.services.candle_guard (AUDIT P2-13),
+    чтобы бэктест и live-стрим использовали одну логику.
     """
     from zoneinfo import ZoneInfo as _ZI
-    _msk = _ZI("Europe/Moscow")
-
-    FLICKER_JUMPS = 3
-    FLICKER_THR = 0.50
-    JUMP_THR = 0.40
-
-    # --- Уровень 1: определить битые дни (мерцание) ---
-    bad_days: set[str] = set()
-    day_jumps: dict[str, int] = {}
-    day_prev: dict[str, float] = {}
-    for c in candles:
-        d = c.ts.astimezone(_msk).date().isoformat()
-        pv = day_prev.get(d)
-        if pv is not None and pv > 0:
-            j = abs(c.close - pv) / pv
-            if j > FLICKER_THR:
-                day_jumps[d] = day_jumps.get(d, 0) + 1
-        day_prev[d] = c.close
-    for d, n in day_jumps.items():
-        if n >= FLICKER_JUMPS:
-            bad_days.add(d)
-
-    # --- Уровень 2: фильтрация баров ---
-    valid = []
-    skipped = 0
-    prev_valid_close: float | None = None
-    for c in candles:
-        d = c.ts.astimezone(_msk).date().isoformat()
-        if d in bad_days:
-            skipped += 1
-            continue
-        # Check for zero/negative prices
-        if c.open <= 0 or c.close <= 0 or c.high <= 0 or c.low <= 0:
-            skipped += 1
-            continue
-        # Check high >= low
-        if c.high < c.low:
-            skipped += 1
-            continue
-        # Check high >= open and high >= close
-        if c.high < c.open or c.high < c.close:
-            skipped += 1
-            continue
-        # Check low <= open and low <= close
-        if c.low > c.open or c.low > c.close:
-            skipped += 1
-            continue
-        # Check volume >= 0
-        if c.volume < 0:
-            skipped += 1
-            continue
-        # Unit price jump vs previous valid close (gap between sessions allowed up to 40%)
-        if prev_valid_close is not None and prev_valid_close > 0:
-            if abs(c.close - prev_valid_close) / prev_valid_close > JUMP_THR:
-                skipped += 1
-                continue
-        prev_valid_close = c.close
-        valid.append(c)
-    return valid, skipped
+    from app.services.candle_guard import validate_candles as _vc
+    return _vc(list(candles), _ZI("Europe/Moscow"))
 
 from app.engine.models import Candle as EngineCandle, PositionState, Side
 from app.engine.policies import SignalPolicyConfig

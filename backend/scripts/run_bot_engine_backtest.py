@@ -20,11 +20,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.database import SessionLocal
 
 FIGIS = {
-    "BBG008F2T3T2": "SBER",
-    "BBG004S681M2": "GAZP",
-    "BBG004S683W7": "LKOH",
-    "BBG004S68CP5": "ROSN",
-    "BBG004S681B4": "RUAL",
+    # Правильные FIGIs (AGENTS.md): BBG004730N88=SBER, BBG004730RP0=GAZP,
+    # BBG004731032=LKOH, BBG004731354=ROSN, BBG008F2T3T2=RUAL.
+    "BBG004730N88": "SBER",
+    "BBG004730RP0": "GAZP",
+    "BBG004731032": "LKOH",
+    "BBG004731354": "ROSN",
+    "BBG008F2T3T2": "RUAL",
 }
 
 DATE_FROM = datetime(2026, 8, 1, tzinfo=timezone.utc)

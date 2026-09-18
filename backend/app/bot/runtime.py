@@ -1381,7 +1381,7 @@ class PaperBotRuntime:
             return True
 
     def _candle_ok(self, c) -> bool:
-        """Инкрементальная валидация свечи из стрима (зеркало _validate_candles).
+        """Инкрементальная валидация свечи из стрима (общая логика ballot_guard).
 
         Отбрасывает БИТЫЕ бары: некорректные OHLC/volume и единичный прыжок
         цены >40% от последнего ВАЛИДНОГО close. prev_close обновляется только
@@ -1390,6 +1390,7 @@ class PaperBotRuntime:
         валидным ценам. Счётчик прыжков по дню логируется (для статистики),
         но день целиком НЕ отбрасывается в live (нужно управлять позицией).
         """
+        from app.services.candle_guard import bar_ok, jump_ratio
         try:
             o, h, l, cl = float(c.open), float(c.high), float(c.low), float(c.close)
         except Exception:
@@ -1397,15 +1398,8 @@ class PaperBotRuntime:
         cfigi = getattr(c, "figi", "")
         tcs_map = getattr(self, "tcs_to_bbg", {}) or {}
         figi = tcs_map.get(cfigi, cfigi)
-        if o <= 0 or cl <= 0 or h <= 0 or l <= 0:
+        if not bar_ok(o, h, l, cl, volume=getattr(c, "volume", None)):
             return False
-        if h < l or h < o or h < cl or l > o or l > cl:
-            return False
-        try:
-            if float(c.volume) < 0:
-                return False
-        except Exception:
-            pass
         # MSK date tracking (для статистики)
         try:
             _d = c.ts.astimezone(ZoneInfo("Europe/Moscow")).date().isoformat()
@@ -1414,13 +1408,13 @@ class PaperBotRuntime:
         dj = self._day_jumps.setdefault(figi, {})
         pv = self._prev_close.get(figi)
         if pv is not None and pv > 0:
-            jump = abs(cl - pv) / pv
-            if jump > 0.50:
+            jump = jump_ratio(pv, cl)
+            if jump is not None and jump > 0.50:
                 dj[_d] = dj.get(_d, 0) + 1
                 if dj[_d] in (3, 10, 30):
                     self.events.log("DATA_BAD_DAY", figi=figi,
                                     reason=f"flicker {_d} jumps={dj[_d]} prev={pv} close={cl}")
-            if jump > 0.40:
+            if jump is not None and jump > 0.40:
                 # единичный прыжок — битый бар, отбрасываем; prev_close НЕ обновляем
                 self._candles_rejected += 1
                 return False
@@ -1759,6 +1753,7 @@ class PaperBotRuntime:
         out: dict = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "mode": self.mode, "running": bool(self.running),
+            "broker_mode": self.broker_mode, "contour": self.active_contour,
             "equity": None, "positions": [], "alerts": [],
             "imoex_guard": self._imoex_guard_snapshot(),
             "pending_approvals": self.list_approvals(),
@@ -2088,6 +2083,8 @@ class PaperBotRuntime:
             "running": self.running,
             "starting": self.starting,
             "mode": self.mode,
+            "broker_mode": self.broker_mode,
+            "contour": self.active_contour,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "error": self.error,
             "config": {
@@ -2207,22 +2204,34 @@ class PaperBotRuntime:
     async def refresh_daily_pnl(self) -> float:
         msk_now = self._bot_now().astimezone(timezone(timedelta(hours=3)))
         day_start = msk_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        _mode = str(getattr(self, "broker_mode", "") or "")
         async with SessionLocal() as db:
-            res = await db.execute(
-                select(PaperTrade.net_pnl).where(PaperTrade.exit_time >= day_start)
-            )
-            total = sum(float(v) for v in res.scalars())
+            if _mode in ("sandbox", "live"):
+                # Дневной P&L — только по активному контуру, иначе после переключения
+                # sandbox↔live в лимит дня попадали бы сделки чужого счёта.
+                from app.models.sandbox_trade import SandboxTrade as _ST
+                res = await db.execute(
+                    select(_ST.net_pnl).where(_ST.exit_time >= day_start, _ST.mode == _mode)
+                )
+            else:
+                res = await db.execute(
+                    select(PaperTrade.net_pnl).where(PaperTrade.exit_time >= day_start)
+                )
+            total = sum(float(v) for v in res.scalars() if v is not None)
         self._daily_pnl_cache = (datetime.now(timezone.utc), total)
         return total
 
     async def _restore_swing(self) -> None:
-        """Восстановить список swing-позиций из открытых сделок (meta.hold)."""
+        """Восстановить список swing-позиций из открытых сделок (meta.hold) активного контура."""
         try:
             import json as _json
+            _cfg_mode = str(getattr(self.config, "mode", "") or "")
+            _mode = _cfg_mode if _cfg_mode in ("sandbox", "live") else "paper"
             from sqlalchemy import text as _text
             async with SessionLocal() as db:
                 rows = (await db.execute(_text(
-                    "SELECT figi, meta FROM sandbox_trades WHERE exit_time IS NULL"))).all()
+                    "SELECT figi, meta FROM sandbox_trades WHERE exit_time IS NULL AND mode = :m"),
+                    {"m": _mode})).all()
             for f, m in rows:
                 try:
                     if str((_json.loads(m or "{}") or {}).get("hold") or "").lower() == "swing":
@@ -2236,11 +2245,8 @@ class PaperBotRuntime:
         if self.running or self.starting:
             raise RuntimeError("bot already running")
         self.config = cfg
+        self._pf_cache = None  # контур мог смениться — не отдаём портфель прошлого счёта
         await self._restore_swing()
-        try:
-            self.apply_ai_mode()
-        except Exception:
-            pass
         # Восстанавливаем сохранённые настройки (переживают перезапуск/старт без фронта).
         try:
             _saved = await load_bot_settings()
@@ -2251,6 +2257,13 @@ class PaperBotRuntime:
                             setattr(cfg, _f, _saved[_f])
                         except Exception:
                             pass
+        except Exception:
+            pass
+        # Режим AI применяем ПОСЛЕ сохранёнок: селектор (Бот+++/AI) — источник правды
+        # для ai_approval/momentum_only, иначе сохранённый флаг гейта глушил воркеров
+        # после переключения контура (sandbox↔live) и AI «только рассуждал».
+        try:
+            self.apply_ai_mode()
         except Exception:
             pass
         # Восстанавливаем персистентные runtime-флаги (entries_paused переживает рестарт).
@@ -2860,7 +2873,26 @@ class PaperBotRuntime:
         out["spec"] = dict(AI_MODES.get(_m) or {})
         out["modes"] = {k: v.get("label") for k, v in AI_MODES.items()}
         out["defaults"] = self._ai_defaults or {}
+        # Активный контур (sandbox|live|paper|test) — воркеры обязаны работать по нему.
+        out["contour"] = self.active_contour
+        out["broker_mode"] = self.broker_mode
+        out["running"] = bool(self.running)
         return out
+
+    @property
+    def active_contour(self) -> str:
+        """Активный контур бота: sandbox|live|paper|test.
+
+        Воркеры (гейт/вахтёр/трейдер) используют его, чтобы брать данные и
+        ставить заявки именно того счёта, который выбран в UI.
+        """
+        _bm = str(getattr(self, "broker_mode", "") or "")
+        if _bm in ("sandbox", "live"):
+            return _bm
+        _cfg = str(getattr(self.config, "mode", "") or "")
+        if _cfg in ("sandbox", "live", "test", "paper"):
+            return _cfg
+        return _bm or "paper"
 
     def ai_mode_spec(self) -> dict:
         """Спека текущего режима AI (пусто = режим не задан, работаем по конфигу)."""
