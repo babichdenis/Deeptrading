@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["app", "scripts"]
+
+[tool.ruff.lint]
+# Прагматичный набор: ошибки/неотсортированный импорт/важные правила.
+# Полный F/E по legacy-кодpу — постепенно, не блокировать CI списком legacy.
+select = ["F", "E4", "E7", "E9", "I", "UP", "B", "SIM"]
+ignore = [
+  "SIM108",  # тернарники не обязательны
+  "UP035",   # импорты typing
+]

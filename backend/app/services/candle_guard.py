@@ -15,13 +15,13 @@ def bar_ok(open_, high, low, close, volume=None) -> bool:
     try:
         o = float(open_)
         h = float(high)
-        l = float(low)
+        lo = float(low)
         c = float(close)
     except (TypeError, ValueError):
         return False
-    if o <= 0 or c <= 0 or h <= 0 or l <= 0:
+    if o <= 0 or c <= 0 or h <= 0 or lo <= 0:
         return False
-    if h < l or h < o or h < c or l > o or l > c:
+    if h < lo or h < o or h < c or lo > o or lo > c:
         return False
     if volume is not None:
         try:
