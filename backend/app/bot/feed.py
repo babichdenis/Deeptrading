@@ -6,8 +6,9 @@ import time as _time
 import traceback as _tb
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import AsyncIterator
+from zoneinfo import ZoneInfo
 
 from t_tech.invest import (
     CandleInstrument,
@@ -92,12 +93,31 @@ class CandleFeed:
         try:
             async with SessionLocal() as db:
                 await upsert_candles(db, buf)
-            self._emit(
-                f"persist_ok n={len(buf)} first={buf[0]['figi'][-6:]} ts={buf[0]['ts']}"
-            )
+            _info = self._persist_human(buf)
+            self._emit(f"записано в БД свечей: {_info}")
         except Exception as e:
             self._emit(f"persist_fail {type(e).__name__}: {str(e)[:120]}")
             self._persist_buf.extend(buf)
+
+    def _persist_human(self, buf: list[dict]) -> str:
+        """Человекочитаемая сводка записи: сколько свечей, за какое время и не позно ли."""
+        try:
+            _d = buf[0]["ts"]
+            if not hasattr(_d, "astimezone"):
+                _d = datetime.fromisoformat(str(_d).replace("Z", "+00:00"))
+            if _d.tzinfo is None:
+                _d = _d.replace(tzinfo=timezone.utc)
+            _dm = _d.astimezone(ZoneInfo("Europe/Moscow"))
+            _lag = (datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Moscow")) - _dm).total_seconds()
+            if _lag < 30:
+                _lag_txt = "свежая"
+            elif _lag < 90:
+                _lag_txt = f"опоздание ~{int(_lag)} сек"
+            else:
+                _lag_txt = f"опоздание ~{int(_lag // 60)} мин"
+            return f"{len(buf)} шт, первая {buf[0]['figi'][-6:]} за {_dm:%H:%M:%S} МСК · {_lag_txt}"
+        except Exception:
+            return f"{len(buf)} шт"
 
     def request_stop(self) -> None:
         self._stop_requested = True

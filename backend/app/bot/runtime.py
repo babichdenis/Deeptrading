@@ -21,6 +21,30 @@ from app.bot.risk import RiskSnapshot
 from app.bot.stream_manager import StreamManager
 
 
+def _msk_fmt(dt, fmt: str = "%H:%M:%S") -> str:
+    """Время бара/события сразу в МСК — чтобы не думать, где UTC, а где локальное."""
+    try:
+        return dt.astimezone(ZoneInfo("Europe/Moscow")).strftime(fmt)
+    except Exception:
+        return str(dt)[:19]
+
+
+def _skip_human(s: str) -> str:
+    """Перевод причины «нет входа» с внутреннего жаргона на человеческий."""
+    _s = str(s)
+    if "session_blocked" in _s:
+        return "торговая сессия сейчас не активна"
+    if "no_fresh" in _s:
+        return "нет свежих свечей (стрим отстаёт от биржи)"
+    if "no_entries" in _s:
+        return "все кандидаты отклонены фильтрами"
+    if "quorum" in _s.lower():
+        return "не набран кворум голосов стратегий"
+    if "no_capital" in _s.lower() or "cash" in _s.lower() or "money" in _s.lower():
+        return "недостаточно свободных средств"
+    return _s[:110]
+
+
 def price_from_trade(trade) -> float | None:
     """Extract executed price from PaperTrade."""
     if trade is None:
@@ -2301,10 +2325,10 @@ class PaperBotRuntime:
             if self._replay_from is not None:
                 self._log(f"REPLAY START: окно с {self._replay_from.isoformat()} pacing={cfg.replay_pace}")
         self._log(
-            f"НАСТРОЙКИ: торги={'/'.join(cfg.sessions) or '—'} · "
-            f"маржа={'/'.join(cfg.margin_sessions) or '—'} "
+            f"Параметры бота: сессии: {'/'.join(cfg.sessions) or '—'} · "
+            f"маржа: {'/'.join(cfg.margin_sessions) or '—'} "
             f"(плечо {'Max' if float(cfg.margin_leverage or 0) <= 0 else '×'+format(float(cfg.margin_leverage),'g')}) · "
-            f"long={'да' if cfg.long_allowed else 'нет'} short={'да' if cfg.short_allowed else 'нет'}"
+            f"направления: {'Long, Short' if cfg.long_allowed and cfg.short_allowed else ('Long' if cfg.long_allowed else ('Short' if cfg.short_allowed else '—'))}"
         )
         try:
             from sqlalchemy import text as _text
@@ -2453,7 +2477,7 @@ class PaperBotRuntime:
             try:
                 _atrs = [u.get("atr_pct", 0) for u in self.universe if u.get("atr_pct")]
                 if _atrs:
-                    self._log(f"UNIVERSE: {len(self.universe)} тикеров · ATR% {min(_atrs):.3f}–{max(_atrs):.3f} · "
+                    self._log(f"Вселенная: {len(self.universe)} бумаг · волатильность ATR% {min(_atrs):.3f}–{max(_atrs):.3f} · "
                               f"{', '.join(u.get('ticker', '?') for u in self.universe)}")
             except Exception:
                 pass
@@ -2528,7 +2552,10 @@ class PaperBotRuntime:
                 self._imoex_last_tick = ""
                 self._imoex_guard_tick()
                 if _n_buf:
-                    self._log(f"IMOEX GUARD: ряд {_n_buf} свечей загружен ({self._imoex_guard_snapshot()})")
+                    _gs = self._imoex_guard_snapshot()
+                    self._log(f"IMOEX-щит: загружен ряд из {_n_buf} свечей · состояние: {_gs.get('dir', '—')} · "
+                              f"активен {_gs.get('active', '—')}, блокировок {_gs.get('blocks', 0)}, "
+                              f"срабатываний {_gs.get('activations', 0)}")
             except Exception as e:
                 self._log(f"⚠ IMOEX guard init: {str(e)[:100]}")
             # Beta бумаг к IMOEX (instruments.imoex_beta) — для per-ticker режима guard'а.
@@ -2952,10 +2979,9 @@ class PaperBotRuntime:
             pass
         try:
             _m = str(self._ai_control.get("mode") or "")
-            self._log(f"РЕЖИМ AI → {_m}: гейт={'вкл' if spec.get('gate') else 'выкл'}, "
-                      f"вахтёр={'вкл' if spec.get('watch') else 'выкл'}, "
-                      f"трейдер={'вкл' if spec.get('trader') else 'выкл'}, "
-                      f"двигатель={'вкл' if spec.get('engine') else 'выкл'}")
+            self._log(f"Режим бота: {_m or '—'} · торговля двигателем={'вкл' if spec.get('engine') else 'выкл'} · "
+                      f"гейт={'вкл' if spec.get('gate') else 'выкл'} · вахтёр={'вкл' if spec.get('watch') else 'выкл'} · "
+                      f"трейдер={'вкл' if spec.get('trader') else 'выкл'}")
         except Exception:
             pass
 
@@ -3312,7 +3338,7 @@ class PaperBotRuntime:
                 m["last_alert"] = None
                 m["alerts"] = alerts[-5:]
                 if alerts:
-                    self._log("⚠ MЕТРИКИ: " + " · ".join(alerts))
+                    self._log("⚠ Мониторинг: " + " · ".join(alerts))
                     for a in alerts[-3:]:
                         self.events.log("METRICS_ALERT", reason=a)
                 else:
@@ -3320,7 +3346,8 @@ class PaperBotRuntime:
                         f"TECHINFO метрики cps={cps:.2f} bar={bar_avg:.0f}ms "
                         f"ens={ens_avg:.0f}ms persist={ps_avg:.0f}ms "
                         f"q={len(self._persist_queue)}/{len(self._persist_queue_5m)} "
-                        f"сигналов={self.signals_seen}"
+                        f"сигналов={self.signals_seen}",
+                        level="debug",
                     )
             except Exception as e:
                 self._log(f"METRICS_LOOP_ERR {type(e).__name__}: {str(e)[:120]}")
@@ -3535,9 +3562,9 @@ class PaperBotRuntime:
             # Лог состояния сверки КАЖДЫЙ цикл (не только при изменениях).
             if not force:
                 if created or closed:
-                    self._log(f"RECONCILE CHECK: MISMATCH → +{created} создано, {closed} закрыто | брокер {len(broker_pos)} поз, локально {len(local_by_figi)} строк")
+                    self._log(f"Сверка с брокером: были расхождения → создано {created}, закрыто {closed} (брокер: {len(broker_pos)} поз., локально: {len(local_by_figi)})")
                 else:
-                    self._log(f"RECONCILE CHECK: OK | брокер {len(broker_pos)} поз, локально {len(local_by_figi)} строк, расхождений нет")
+                    self._log(f"Сверка с брокером: ✓ сходится (позиций: брокер {len(broker_pos)}, локально {len(local_by_figi)})")
 
     def _interval_value(self) -> int:
         if self.config.use_ensemble:
@@ -3594,12 +3621,14 @@ class PaperBotRuntime:
                     self._log(
                         f"TECHINFO FLUSH_ITEM f={_s[0][-6:]} ts={_s[1]} "
                         f"iv={1 if batch else 5} flushes={self._persist_flushes} "
-                        f"q={len(batch)} q5={len(batch5)}"
+                        f"q={len(batch)} q5={len(batch5)}",
+                        level="debug",
                     )
                 if self._persist_flushes % 10 == 0:
                     self._log(
                         f"TECHINFO persist ok q={len(batch)} q5={len(batch5)} "
-                        f"flushes={self._persist_flushes}"
+                        f"flushes={self._persist_flushes}",
+                        level="debug",
                     )
             except Exception as e:
                 self._log(f"PERSIST_ERR {type(e).__name__}: {str(e)[:80]}")
@@ -3661,7 +3690,7 @@ class PaperBotRuntime:
             _feed_target = None
             feed = CandleFeed(_feed_token, self.config.interval_name,
                               self.stream_universe, target=_feed_target)
-        feed.on_log = lambda msg: self._log("TECHINFO [feed] " + msg)
+        feed.on_log = lambda msg: self._log(msg, level="debug")
         self.feed = feed
         exited = "stream_exhausted"
         self._persist_task = asyncio.create_task(self._flush_persist())
@@ -3783,7 +3812,8 @@ class PaperBotRuntime:
                 self._log(
                     f"TECHINFO stat received={self._candles_received} seen={self.candles_seen} "
                     f"rejected={self._candles_rejected} persist_q={len(self._persist_queue)} "
-                    f"persist_q5={len(self._persist_queue_5m)} mode={self.mode}"
+                    f"persist_q5={len(self._persist_queue_5m)} mode={self.mode}",
+                    level="debug",
                 )
         except Exception:
             pass
@@ -3833,10 +3863,13 @@ class PaperBotRuntime:
         except Exception:
             pass
         if self.log_candles:
-            _now = datetime.now(timezone.utc).timestamp()
-            if _now - self._last_candle_log_ts >= 3.0:
-                self._last_candle_log_ts = _now
-                self._log(f"СВЕЧА {figi[-6:]} ts={c.ts.strftime('%H:%M:%S')} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} v={c.volume}")
+            _tk = self.tickers.get(figi, figi[-6:])
+            _ch = ((c.close - c.open) / c.open * 100) if c.open else 0.0
+            _dir = "▲" if _ch > 0 else ("▼" if _ch < 0 else "·")
+            self._log(
+                f"Свеча {_tk} {_msk_fmt(c.ts, 'HH:%M')} МСК: {c.open:.2f} → {c.close:.2f} "
+                f"({_dir} {_ch:+.2f}%), объём {c.volume:g}"
+            )
 
         _lookup = self.tcs_to_bbg.get(figi, figi)
         # Позиция брокера/стрима нужна только как ФАКТ открытой позиции (side/qty).
@@ -3937,8 +3970,7 @@ class PaperBotRuntime:
             _skip = getattr(strategy, "_last_skip", None)
             if _skip and self._skip_logged.get(figi) != c.ts:
                 self._skip_logged[figi] = c.ts
-                self._log(f"⏭ НЕТ ВХОДА {self.tickers.get(figi, figi[-6:])} "
-                          f"ts={c.ts.strftime('%m-%d %H:%M')}: {_skip}")
+                self._log(f"Пропуск входа {self.tickers.get(figi, figi[-6:])} ({_msk_fmt(c.ts, '%d.%m %H:%M')} МСК): {_skip_human(_skip)}")
         _reg_state = getattr(strategy, "_last_regime", None)
         _reg_vol = getattr(strategy, "_last_vol", None)
         # Fallback: если стратегия не вернула regime timeline (новые/hot-add тикеры),

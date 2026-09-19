@@ -605,13 +605,14 @@ function lgRowEl(it: LogItem): HTMLElement {
   const row = document.createElement("div");
   row.className = `lg-row lg-k-${logCategory(it.msg)} lg-lv-${lv}`;
   row.dataset.id = String(it.id);
-  // Шапка: время · уровень · источник · счётчик ×N · копия
+  // Шапка: время · уровень · источник · счётчик ×N · копия (разделители-пробелы,
+  // чтобы при выделении/копировании элементы не склеивались в одно слово).
   const hd = document.createElement("div"); hd.className = "lg-hd";
-  const t = document.createElement("span"); t.className = "lg-t"; t.textContent = it.ts.slice(11);
+  const t = document.createElement("span"); t.className = "lg-t"; t.textContent = it.ts.slice(11) + "  ";
   t.title = it.ts;
-  const badge = document.createElement("span"); badge.className = "lg-lv"; badge.textContent = lv.toUpperCase().slice(0, 5);
+  const badge = document.createElement("span"); badge.className = "lg-lv"; badge.textContent = lv.toUpperCase().slice(0, 5) + " ";
   badge.title = `уровень: ${lv}`;
-  const src = document.createElement("span"); src.className = "lg-src"; src.textContent = lgSrcLabel(it.source);
+  const src = document.createElement("span"); src.className = "lg-src"; src.textContent = lgSrcLabel(it.source) + " ";
   src.title = it.source;
   const rep = document.createElement("span"); rep.className = "lg-rep"; rep.textContent = it.rep && it.rep > 1 ? "×" + it.rep : "";
   rep.title = "одинаковых записей подряд";
