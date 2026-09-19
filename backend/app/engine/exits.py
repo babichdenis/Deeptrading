@@ -115,7 +115,16 @@ class AtrStopPolicy(ExitPolicy):
         trs = c.get("trs")
         cn = c.get("n", 0)
         first_ts = bars[0].ts if n else None
-        if trs is None or n < cn or c.get("first_ts") != first_ts:
+        # Валидность кэша: совпадают первый бар И последний закэшированный бар
+        # (ts + close). Раньше проверялись только первый ts и длина — другая серия
+        # с тем же ts-паттерном молча получала ЧУЖОЙ ATR (audit 2026-09-18).
+        cache_ok = (
+            trs is not None and 0 < cn <= n
+            and c.get("first_ts") == first_ts
+            and bars[cn - 1].ts == c.get("last_ts")
+            and bars[cn - 1].close == c.get("last_close")
+        )
+        if not cache_ok:
             # Полный пересчёт true range (только массив TR, без ATR-рекурсии).
             logger.debug("atr_cache rebuild: n=%d prev=%d period=%d", n, cn, self.period)
             c["first_ts"] = first_ts
@@ -140,6 +149,8 @@ class AtrStopPolicy(ExitPolicy):
                     trs[i] = tr
             c["trs"] = trs
             c["n"] = n
+            c["last_ts"] = bars[n - 1].ts if n else None
+            c["last_close"] = bars[n - 1].close if n else None
             c["value"] = None
             c["value_n"] = 0
         elif n > cn:
@@ -164,6 +175,8 @@ class AtrStopPolicy(ExitPolicy):
                         tr = b
                     trs.append(tr)
             c["n"] = n
+            c["last_ts"] = bars[n - 1].ts if n else None
+            c["last_close"] = bars[n - 1].close if n else None
         p = self.period
         v = c.get("value")
         vn = c.get("value_n", 0)

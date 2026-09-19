@@ -98,7 +98,9 @@ def compute_smoke_candles(n: int = 300) -> list[Candle]:
 
 
 def test_ensemble_static_contains_oracle_coverage():
-    res = compute_ensemble(compute_smoke_candles(), {"days": 30})
+    # oracle_coverage считается только по запросу (analytics-гейт в compute_ensemble):
+    # без флага дорогие oracle-расчёты не запускаются и поле остаётся None.
+    res = compute_ensemble(compute_smoke_candles(), {"days": 30, "analytics": True})
     assert "error" not in res, res.get("error")
     oc = res["static"]["oracle_coverage"]
     assert oc is not None
