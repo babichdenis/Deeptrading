@@ -17,6 +17,12 @@ class SignalPolicyConfig:
     entry_confirm_bars: int = 0  # N подряд подтверждающих свечей (close>open для LONG, close<open для SHORT) перед входом; 0 = без подтверждения
     opposite_hold: bool = False
     confirm_flip: bool = False
+    # Лимитный вход: вместо market по open ставим лимит на k*ATR лучше цены сигнала.
+    # 0 = выключено (market-вход, как раньше). Не исполнен за entry_limit_bars — отмена.
+    entry_limit_atr: float = 0.0
+    entry_limit_bars: int = 3
+    entry_limit_chase: bool = False  # переносить лимит к цене каждый бар (chase)
+    entry_limit_atr_period: int = 14
 
 
 class SignalPolicy:

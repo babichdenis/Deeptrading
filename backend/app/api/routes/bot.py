@@ -67,6 +67,7 @@ def _config_payload(cfg: BotConfig) -> dict:
         "ensemble_quorum": cfg.ensemble_quorum,
         "pos_pct": float(getattr(cfg, "pos_pct", 0.4) or 0.4),
         "max_positions": int(getattr(cfg, "max_positions", 0) or 0),
+        "reconcile_enabled": bool(getattr(cfg, "reconcile_enabled", True)),
         "max_exposure_pct": float(getattr(cfg, "max_exposure_pct", 1.0) or 0.0),
         "max_short_share": float(getattr(cfg, "max_short_share", 0.7) or 0.0),
         "max_net_exposure_pct": float(getattr(cfg, "max_net_exposure_pct", 0.5) or 0.0),
@@ -92,6 +93,13 @@ def _config_payload(cfg: BotConfig) -> dict:
         "momentum_side": str(getattr(cfg, "momentum_side", "short") or "short"),
         "mtf_align": bool(getattr(cfg, "mtf_align", False)),
         "mtf_trigger": bool(getattr(cfg, "mtf_trigger", False)),
+        "entry_h1_align": bool(getattr(cfg, "entry_h1_align", True)),
+        "entry_tf_conflict": bool(getattr(cfg, "entry_tf_conflict", True)),
+        "entry_last_hour_block": bool(getattr(cfg, "entry_last_hour_block", True)),
+        "entry_ob_imbalance_max": float(getattr(cfg, "entry_ob_imbalance_max", 0.3) or 0.0),
+        "entry_ob_spread_max": float(getattr(cfg, "entry_ob_spread_max", 25.0) or 0.0),
+        "entry_min_turnover": float(getattr(cfg, "entry_min_turnover", 0.0) or 0.0),
+        "entry_volatility_max_mult": float(getattr(cfg, "entry_volatility_max_mult", 3.0) or 0.0),
         "daily_bias": bool(getattr(cfg, "daily_bias", True)),
         "daily_bias_mode": str(getattr(cfg, "daily_bias_mode", "veto")),
         "top_sizing": str(getattr(cfg, "top_sizing", "multiply")),
@@ -264,6 +272,7 @@ class BotConfigPatch(BaseModel):
     ensemble_quorum: int | None = None
     pos_pct: float | None = None  # доля equity на позицию (0.4 = 40%)
     max_positions: int | None = None  # максимум одновременных позиций (0 = без лимита)
+    reconcile_enabled: bool | None = None  # сверка с брокером (только в торговое время)
     max_exposure_pct: float | None = None  # свои деньги в позициях <= X от equity (1.0 = 100%)
     max_short_share: float | None = None  # макс. доля SHORT среди позиций (0.7 = 70%)
     max_net_exposure_pct: float | None = None  # |net| <= X equity
@@ -291,6 +300,13 @@ class BotConfigPatch(BaseModel):
     momentum_only: bool | None = None           # только моментум (сигналы ансамбля игнор.)
     momentum_side: str | None = None            # short | long | both
     mtf_trigger: bool | None = None            # M5 MACD триггер разворота
+    entry_h1_align: bool | None = None         # H1 MACD подтверждает сторону входа (правило 7)
+    entry_tf_conflict: bool | None = None      # daily bias и H1 не противоречат (правило 6)
+    entry_last_hour_block: bool | None = None  # не входить в последний час сессии (правило 16)
+    entry_ob_imbalance_max: float | None = None    # стакан: блок против потока (0=выкл)
+    entry_ob_spread_max: float | None = None       # стакан: блок при широком спреде (0=выкл)
+    entry_min_turnover: float | None = None        # мин. дневной оборот, ₽ (0=выкл)
+    entry_volatility_max_mult: float | None = None  # ATR% > X× медианы → блок (0=выкл)
     daily_bias_mode: str | None = None         # veto | info
     top_sizing: str | None = None              # режим размера топ-1 (divide|multiply)
     top_relax_caps: bool | None = None         # топ-1: сектор off, net до 100%
@@ -415,6 +431,11 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         if _mp != int(getattr(cfg, "max_positions", 0) or 0):
             changes.append(f"макс. позиций: {getattr(cfg, 'max_positions', 0)} → {_mp}")
         cfg.max_positions = _mp
+    if req.reconcile_enabled is not None:
+        _rec = bool(req.reconcile_enabled)
+        if _rec != bool(getattr(cfg, "reconcile_enabled", True)):
+            changes.append(f"сверка с брокером: {'вкл' if getattr(cfg, 'reconcile_enabled', True) else 'выкл'} → {'вкл' if _rec else 'выкл'}")
+        cfg.reconcile_enabled = _rec
     if req.max_exposure_pct is not None:
         _me = max(0.0, min(5.0, float(req.max_exposure_pct)))
         if abs(_me - float(getattr(cfg, "max_exposure_pct", 1.0) or 0.0)) > 1e-9:
@@ -485,6 +506,27 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.mtf_trigger is not None:
         cfg.mtf_trigger = bool(req.mtf_trigger)
         changes.append(f"MTF M5-триггер: {'вкл' if cfg.mtf_trigger else 'выкл'}")
+    if req.entry_h1_align is not None:
+        cfg.entry_h1_align = bool(req.entry_h1_align)
+        changes.append(f"H1-подтверждение входа: {'вкл' if cfg.entry_h1_align else 'выкл'}")
+    if req.entry_tf_conflict is not None:
+        cfg.entry_tf_conflict = bool(req.entry_tf_conflict)
+        changes.append(f"TF-конфликт daily/H1: {'вкл' if cfg.entry_tf_conflict else 'выкл'}")
+    if req.entry_last_hour_block is not None:
+        cfg.entry_last_hour_block = bool(req.entry_last_hour_block)
+        changes.append(f"Блок последнего часа: {'вкл' if cfg.entry_last_hour_block else 'выкл'}")
+    if req.entry_ob_imbalance_max is not None:
+        cfg.entry_ob_imbalance_max = max(0.0, float(req.entry_ob_imbalance_max))
+        changes.append(f"Стакан imbalance max: {cfg.entry_ob_imbalance_max:g}")
+    if req.entry_ob_spread_max is not None:
+        cfg.entry_ob_spread_max = max(0.0, float(req.entry_ob_spread_max))
+        changes.append(f"Стакан спред max: {cfg.entry_ob_spread_max:g} б.п.")
+    if req.entry_min_turnover is not None:
+        cfg.entry_min_turnover = max(0.0, float(req.entry_min_turnover))
+        changes.append(f"Мин. оборот: {cfg.entry_min_turnover:,.0f}₽")
+    if req.entry_volatility_max_mult is not None:
+        cfg.entry_volatility_max_mult = max(0.0, float(req.entry_volatility_max_mult))
+        changes.append(f"Волатильность max: {cfg.entry_volatility_max_mult:g}× медианы")
     if req.daily_bias is not None:
         cfg.daily_bias = bool(req.daily_bias)
         changes.append(f"дневной bias: {'вкл' if cfg.daily_bias else 'выкл'}")
@@ -621,6 +663,12 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if changes:
         runtime._log("⚙ КОНФИГ: " + " | ".join(changes))
     await save_bot_settings(cfg)
+    # Пороговые поля гейтов пишем ещё и в data/gates_config.json (единый конфиг гейтов).
+    try:
+        from app.bot.gates import save_gates_config as _sgc
+        _sgc(cfg)
+    except Exception:
+        pass
     return _config_payload(cfg)
 
 
@@ -633,6 +681,20 @@ async def bot_config_get() -> dict:
         _payload = _config_payload(await _cfg_from_saved())
     _payload.pop("ok", None)
     return _payload
+
+
+@router.get("/gates")
+async def bot_gates() -> dict:
+    """Единый реестр ВСЕХ гейтов входа: слой, флаг, текущее состояние, статистика отказов.
+
+    key = reason-код из логов и skip_counts. Источник правды — app/bot/gates.py.
+    """
+    from app.bot.gates import gates_report
+    try:
+        sk = runtime.get_no_trade_stats()
+    except Exception:
+        sk = {}
+    return gates_report(runtime.config, sk)
 
 
 @router.get("/ensemble")
@@ -957,8 +1019,9 @@ async def bot_ai_trade(req: AiTradeRequest) -> dict:
 
     Плюс жёсткие гейты (настраиваются в BotConfig):
       ai_chase_pct — запрет входа после сильного дневного хода без отката;
-      ai_ob_imbalance_max / ai_ob_spread_max — стакан против входа / широкий спред;
       ai_sl_max_pct / ai_tp_max_pct — потолки SL/TP.
+    Стакан (spread/imbalance) — общий гейт движка (STAGE S) для всех входов:
+      entry_ob_imbalance_max / entry_ob_spread_max.
     """
     import asyncio as _aio
     ticker = str(req.ticker or "").strip().upper()
@@ -996,41 +1059,9 @@ async def bot_ai_trade(req: AiTradeRequest) -> dict:
         return {"ok": bool(res.get("ok", True)), "ticker": ticker, "action": _act,
                 "levels": _lvl, "result": res, "reason": str(req.reason)[:200]}
     _side = "BUY" if str(req.side).upper() in ("BUY", "LONG") else "SELL"
-    # --- Жёсткие гейты AI-ордера: чейзинг, стакан, потолки SL/TP ---
+    # --- Потолки SL/TP (дёшево). Чейзинг/стакан проверяет движок (_submit_order,
+    # STAGE C2) — ПОСЛЕ time/trend/portfolio-гейтов и ДО запроса маржи.
     _cfg = runtime.config
-    _skip: list[str] = []
-    _ch = float(getattr(_cfg, "ai_chase_pct", 3.0) or 0.0)
-    _chg = _day_change_pct(figi)
-    if _ch and _chg is not None:
-        if _side == "BUY" and _chg > _ch:
-            _skip.append(f"чейзинг: +{_chg:.1f}% за день без отката")
-        if _side == "SELL" and _chg < -_ch:
-            _skip.append(f"чейзинг: {_chg:.1f}% за день без отскока")
-    _ob = {}
-    try:
-        _ob = await bot_orderbook(figi, depth=10)
-    except Exception:
-        _ob = {}
-    _lim = float(getattr(_cfg, "ai_ob_imbalance_max", 0.3) or 0.0)
-    _imb = _ob.get("imbalance")
-    if _lim > 0 and _imb is not None:
-        if _side == "BUY" and float(_imb) < -_lim:
-            _skip.append(f"стакан: imbalance {_imb} против BUY")
-        if _side == "SELL" and float(_imb) > _lim:
-            _skip.append(f"стакан: imbalance {_imb} против SELL")
-    _spr_max = float(getattr(_cfg, "ai_ob_spread_max", 25.0) or 0.0)
-    _spr = _ob.get("spread_bps")
-    if _spr_max > 0 and _spr is not None and float(_spr) > _spr_max:
-        _skip.append(f"стакан: спред {_spr} > {_spr_max} б.п.")
-    if _skip:
-        try:
-            runtime.events.log("AI_ORDER_SKIPPED", figi=figi, ticker=ticker,
-                               reason="; ".join(_skip)[:200])
-            runtime._log(f"AI-ГЕЙТ ОРДЕРА: {ticker} {_side} отклонён — {'; '.join(_skip)}")
-        except Exception:
-            pass
-        return {"ok": False, "ticker": ticker, "side": _side, "action": "open",
-                "skipped": "; ".join(_skip)}
     _sl, _tp = req.sl_pct, req.tp_pct
     _sl_cap = float(getattr(_cfg, "ai_sl_max_pct", 0.03) or 0.0)
     if _sl and _sl_cap > 0:
@@ -1566,79 +1597,19 @@ async def bot_reset(initial_cash: float = 10_000.0) -> dict:
     return {"reset": True}
 
 
-_orderbook_client = None
-_orderbook_client_key = None
-_orderbook_lock = __import__("threading").Lock()
-_orderbook_cache: dict[tuple[str, int], tuple[float, dict]] = {}
-_ORDERBOOK_TTL = 5.0
-
-
 @router.get("/orderbook/{figi}")
 async def bot_orderbook(figi: str, depth: int = 10) -> dict:
     """Стакан (order book) на момент запроса: топ-N уровней + метрики для AI-гейта.
 
     spread_bps — ширина спреда (б.п.); imbalance — перевес бидов (-1..+1);
-    depth_rub — ликвидность в топе (₽). В реплее/вне торгов может быть недоступен.
-
-    Клиент T-Invest — переиспользуемый (создание Client на каждый запрос ~14с!),
-    плюс короткий кэш 5с: гейт и трейдер дёргают стакан десятками за цикл.
+    depth_rub — ликвидность в топе (₽). Реализация — app/services/orderbook.py
+    (переиспользуемый клиент + кэш 5с: гейт и трейдер дёргают стакан десятками за цикл).
     """
-    import asyncio as _aio
-    import time as _time
-    from t_tech.invest import Client
-    from app.config import get_settings
-    _s = get_settings()
-    _depth = max(1, min(int(depth), 20))
-    _key = (figi, _depth)
-    _hit = _orderbook_cache.get(_key)
-    if _hit is not None and (_time.monotonic() - _hit[0]) < _ORDERBOOK_TTL:
-        return _hit[1]
-
-    def _fetch():
-        global _orderbook_client, _orderbook_client_key
-        with _orderbook_lock:
-            if _orderbook_client is None or _orderbook_client_key != _s.feed_token:
-                _orderbook_client = Client(_s.feed_token).__enter__()
-                _orderbook_client_key = _s.feed_token
-        ob = _orderbook_client.market_data.get_order_book(figi=figi, depth=_depth)
-
-        def _q(v):
-            return float(v.units) + float(v.nano) / 1e9 if v is not None else 0.0
-
-        bids = [{"p": _q(b.price), "q": int(b.quantity)} for b in (ob.bids or [])]
-        asks = [{"p": _q(a.price), "q": int(a.quantity)} for a in (ob.asks or [])]
-        return bids, asks, _q(ob.last_price), getattr(ob, "order_book_ts", None)
-
+    from app.services.orderbook import fetch_orderbook
     try:
-        bids, asks, last, ts = await _aio.to_thread(_fetch)
+        return await fetch_orderbook(figi, depth)
     except Exception as e:
         raise HTTPException(502, f"orderbook: {type(e).__name__}: {str(e)[:120]}")
-
-    bb = bids[0]["p"] if bids else None
-    ba = asks[0]["p"] if asks else None
-    mid = ((bb + ba) / 2) if (bb and ba) else (last or 0.0)
-    spread_bps = ((ba - bb) / mid * 10000) if (bb and ba and mid > 0) else None
-    bq = sum(b["q"] for b in bids)
-    aq = sum(a["q"] for a in asks)
-    imb = (bq - aq) / (bq + aq) if (bq + aq) > 0 else None
-    depth_rub = sum(b["p"] * b["q"] for b in bids) + sum(a["p"] * a["q"] for a in asks)
-    _out = {
-        "figi": figi, "ts": str(ts) if ts else None, "last": last,
-        "best_bid": bb, "best_ask": ba,
-        "spread_bps": round(spread_bps, 1) if spread_bps is not None else None,
-        "bid_qty": bq, "ask_qty": aq,
-        "imbalance": round(imb, 3) if imb is not None else None,
-        "depth_rub": round(depth_rub, 0),
-        "top_bids": bids[:5], "top_asks": asks[:5],
-    }
-    try:
-        _orderbook_cache[_key] = (_time.monotonic(), _out)
-        if len(_orderbook_cache) > 64:
-            _oldest = min(_orderbook_cache, key=lambda k: _orderbook_cache[k][0])
-            _orderbook_cache.pop(_oldest, None)
-    except Exception:
-        pass
-    return _out
 
 
 @router.get("/trading_status")

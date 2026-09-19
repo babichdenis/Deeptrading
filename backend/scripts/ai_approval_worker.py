@@ -198,6 +198,7 @@ def _ctx(api: str) -> dict:
         out["risk"] = st.get("risk")
         out["portfolio"] = st.get("portfolio")
         out["guard"] = st.get("imoex_guard")
+        out["contour"] = st.get("broker_mode") or st.get("contour") or ((st.get("config") or {}).get("mode"))
     except Exception as e:
         out["risk"] = {"error": str(e)[:120]}
     try:
@@ -250,15 +251,19 @@ def _ctx_compact(api: str, order: dict) -> dict:
         }
         out["equity"] = st.get("equity")
         out["guard"] = st.get("imoex_guard")
+        out["contour"] = st.get("broker_mode") or st.get("contour")
     except Exception as e:
         out["state_error"] = f"{type(e).__name__}: {str(e)[:80]}"
     try:
         r = _http("GET", f"{api}/api/v1/bot/status")
         out["risk"] = r.get("risk")
         _cfg = r.get("config") or {}
+        _contour = r.get("broker_mode") or r.get("contour") or _cfg.get("mode")
+        out["contour"] = _contour
         out["bot"] = {"session_now": r.get("session"), "sessions": _cfg.get("sessions"),
                       "entries_paused": _cfg.get("entries_paused"),
-                      "overnight": _cfg.get("overnight")}
+                      "overnight": _cfg.get("overnight"),
+                      "contour": _contour}
         _note = _human_note(api)
         if _note:
             out["human_note"] = _note
@@ -283,8 +288,16 @@ def _ctx_compact(api: str, order: dict) -> dict:
             _sn = (_sess.get("state") if isinstance(_sess, dict) else _sess)
             _last_hour = False
             try:
+                # Последний час ПОСЛЕДНЕЙ сессии бота (как overnight-логика):
+                # вечер включён → 22:50–23:50; иначе день → 18:00–19:00; иначе утро.
                 _now = datetime.now(timezone(timedelta(hours=3)))
-                _last_hour = _now.hour == 22 or (_now.hour == 18 and _now.minute >= 45)
+                _ss = set(_cfg.get("sessions") or [])
+                if "evening" in _ss:
+                    _last_hour = _now.hour == 22 and _now.minute >= 50
+                elif "day" in _ss:
+                    _last_hour = _now.hour == 18
+                elif "morning" in _ss:
+                    _last_hour = _now.hour == 8 and _now.minute >= 50
             except Exception:
                 pass
             out["session"] = {"name": _sn, "is_last_hour": _last_hour}
@@ -396,6 +409,7 @@ def _ask_deepseek(order: dict, ctx: dict, model: str, base: str, key: str,
                   system: str = SYSTEM, parser=None) -> dict:
     payload = {
         "model": model,
+        "stream": False,  # мосты (DeepRouter/self-glm) без stream стримят SSE → r.json() падал
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps({"order": order, "context": ctx},
@@ -870,6 +884,9 @@ def run_watch(args, provs: list[str], models: dict) -> None:
             if _spec and not _spec.get("watch"):
                 time.sleep(max(15.0, float(args.watch_interval)))
                 continue
+            # В Бот+++/AI-режиме вахтёр не только советует, но и действует:
+            # закрывает по сломанному тезису и подтягивает уровни (в пределах лимитов).
+            _can_act = bool(_spec.get("trader")) and not bool(getattr(args, "watch_notes_only", False))
             watch.sort(key=lambda x: (x.get("dist_sl_atr") if x.get("dist_sl_atr") is not None else 99))
             watch = watch[: max(1, int(args.watch_max))]
             items = []
@@ -887,6 +904,9 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                 _pf = None
             ctx = {"now_msk": datetime.now(timezone.utc).astimezone(MSK).strftime("%Y-%m-%d %H:%M"),
                    "guard": guard, "risk": risk,
+                   "contour": ((st or {}).get("broker_mode") or (st or {}).get("contour")
+                               or ((stt or {}).get("broker_mode") if isinstance(stt, dict) else None)
+                               or (((stt or {}).get("config") or {}).get("mode") if isinstance(stt, dict) else None)),
                    "long_short": (stt or {}).get("long_short") if isinstance(stt, dict) else None,
                    "portfolio": _pf,
                    "positions": items}
@@ -942,7 +962,17 @@ def run_watch(args, provs: list[str], models: dict) -> None:
                            "model": models.get(prov, ""), "provider": prov, "latency_ms": lat,
                            "dist_sl_atr": p.get("dist_sl_atr"), "dist_tp_atr": p.get("dist_tp_atr"),
                            "pnl": p.get("pnl")}
-                    if args.ai_sl_manage and _is_apply and act == "tighten" and _want:
+                    if _is_apply and _can_act and act == "close":
+                        try:
+                            _cr = _http("POST", f"{args.api}/api/v1/bot/ai_trade",
+                                        {"ticker": tk, "action": "close",
+                                         "reason": str(d.get("reason") or "")[:200]})
+                            rec["applied_action"] = _cr
+                            rec["advice"] = f"{rec['advice']} → закрыто вахтёром"
+                        except Exception as _ce:
+                            rec["note"] = (f"{rec['note']} | close не применён: "
+                                           f"{type(_ce).__name__}: {str(_ce)[:80]}")
+                    elif (_can_act or args.ai_sl_manage) and _is_apply and act == "tighten" and _want:
                         _sl_new = None if getattr(args, "ai_tp_only", False) else d.get("sl")
                         _ap = _apply_ai_levels(args, args.api, p, _sl_new, d.get("tp"))
                         rec["applied_levels"] = _ap
@@ -998,6 +1028,8 @@ def main() -> None:
                     help="AI управляет только TP; SL не трогает (для вахтёра)")
     ap.add_argument("--ai-sl-manage", action="store_true",
                     help="разрешить llama ПОДТЯГИВАТЬ SL (только в сторону прибыли, с лимитами)")
+    ap.add_argument("--watch-notes-only", action="store_true",
+                    help="вахтёр только советует (не закрывает и не двигает уровни даже в Бот+++)")
     ap.add_argument("--ai-sl-max-step-atr", type=float, default=5.0)
     ap.add_argument("--ai-sl-buffer-atr", type=float, default=0.3)
     ap.add_argument("--watch-max", type=int, default=8, help="макс. позиций в одном батч-запросе вахтёра")
@@ -1018,9 +1050,20 @@ def main() -> None:
     if "deepseek" in _provs and not os.environ.get("DEEPSEEK_API_KEY"):
         print("НЕТ DEEPSEEK_API_KEY (env или backend/.env) — выход", file=sys.stderr)
         raise SystemExit(2)
+    _contour = ""
+    try:
+        _st = _http("GET", f"{args.api}/api/v1/bot/status", timeout=10)
+        _contour = str(_st.get("broker_mode") or _st.get("contour")
+                       or ((_st.get("config") or {}).get("mode")) or "")
+    except Exception:
+        pass
     print(f"[ai-gate] providers={','.join(_provs)} apply={_apply} "
-          f"models={ {p: _models.get(p) for p in _provs} } api={args.api} dry_run={args.dry_run}",
+          f"models={ {p: _models.get(p) for p in _provs} } api={args.api} "
+          f"contour={_contour or '?'} dry_run={args.dry_run}",
           flush=True)
+    if args.dry_run and not args.watch_positions:
+        print("[ai-gate] ⚠ SHADOW (--dry-run): решения НЕ применяются, заявки решает таймаут/default. "
+              "Для Бот+++ запусти воркер без --dry-run.", flush=True)
 
     def decide(provider: str, order: dict, ctx: dict) -> dict:
         _sys = _eff_system(args.api, "gate", SYSTEM)

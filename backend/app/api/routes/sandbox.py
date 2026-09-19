@@ -3,8 +3,12 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from pathlib import Path
+
 from app.config import get_settings
 
 router = APIRouter(prefix="/api/v1/sandbox", tags=["sandbox"])
@@ -33,7 +37,7 @@ def _active_mode() -> str:
 CASH_FIGI = {"RUB000UTSTOM", "RUB000UT"}
 
 _tcs_to_bbg_cache: dict[str, str] | None = None
-_portfolio_cache: tuple[float, object] | None = None
+_portfolio_cache: tuple[float, str, object] | None = None  # (ts, mode, portfolio)
 _portfolio_cache_ttl: float = 8.0
 _margin_map: dict[str, float] = {}
 
@@ -41,10 +45,12 @@ def _get_portfolio_cached():
     import time
     global _portfolio_cache
     now = time.monotonic()
-    if _portfolio_cache is not None and now - _portfolio_cache[0] < _portfolio_cache_ttl:
-        return _portfolio_cache[1]
+    _mode = _active_mode()
+    if (_portfolio_cache is not None and _portfolio_cache[1] == _mode
+            and now - _portfolio_cache[0] < _portfolio_cache_ttl):
+        return _portfolio_cache[2]
     p = _get_portfolio()
-    _portfolio_cache = (now, p)
+    _portfolio_cache = (now, _mode, p)
     return p
 
 
@@ -126,23 +132,25 @@ def _get_portfolio():
     c = _get_client()
     return c.operations.get_portfolio(account_id=_active_creds()[2])
 
-_ops_cache: tuple[float, object, int] | None = None  # (ts, ops, from_days)
+_ops_cache: tuple[float, str, object, int] | None = None  # (ts, mode, ops, from_days)
 
 def _get_operations(from_days=3):
-    """Операции за N дней (кэш 60с). Окно маленькое — для entry_time/сделок хватает;
+    """Операции за N дней (кэш 60с, ключ = контур+окно). Окно маленькое — для entry_time/сделок хватает;
     раньше тянули 60 дней на каждый запрос → таймауты."""
     global _ops_cache
     import time as _time
     now = _time.monotonic()
-    if _ops_cache is not None and _ops_cache[2] == from_days and now - _ops_cache[0] < 60.0:
-        return _ops_cache[1]
+    _mode = _active_mode()
+    if (_ops_cache is not None and _ops_cache[3] == from_days and _ops_cache[1] == _mode
+            and now - _ops_cache[0] < 60.0):
+        return _ops_cache[2]
     c = _get_client()
     ops = c.operations.get_operations(
         account_id=_active_creds()[2],
         from_=datetime.now(timezone.utc) - timedelta(days=from_days),
         to=datetime.now(timezone.utc),
     )
-    _ops_cache = (now, ops, from_days)
+    _ops_cache = (now, _mode, ops, from_days)
     return ops
 
 
@@ -310,6 +318,41 @@ def _save_cash_flows() -> None:
 _load_cash_flows()
 
 
+# Сверка кэша/позиций (digest) в /status не должна молотить каждые 8с поллинга.
+_RECONCILE_MIN_INTERVAL = 120.0  # период полной сверки (сек)
+_RECONCILE_LAST_TS: float = 0.0
+_RECONCILE_CACHE: dict = {}      # последние цифры сверки для UI между интервалами
+
+
+def _reconcile_due() -> bool:
+    """Полная сверка нужна, только когда включена, бот в live/sandbox, идёт торговое
+    время (МСК, будни, сессии конфига) и прошло достаточно времени с предыдущей."""
+    global _RECONCILE_LAST_TS
+    try:
+        from app.bot.runtime import runtime
+        if not getattr(runtime, "running", False):
+            return False
+        cfg = getattr(runtime, "config", None)
+        if not getattr(cfg, "reconcile_enabled", True):
+            return False
+        if getattr(runtime, "broker_mode", "") not in ("sandbox", "live"):
+            return False
+        sess = list(getattr(cfg, "sessions", []) or ["day"])
+        try:
+            from app.engine.sessions import is_session_active
+            if not is_session_active(datetime.now(timezone.utc), sess):
+                return False
+        except Exception:
+            pass
+    except Exception:
+        pass
+    _now = time.monotonic()
+    if _now - _RECONCILE_LAST_TS < _RECONCILE_MIN_INTERVAL:
+        return False
+    _RECONCILE_LAST_TS = _now
+    return True
+
+
 async def _portfolio_digest() -> dict:
     """Единый проверенный блок портфеля: источник истины — T-Invest.
 
@@ -392,19 +435,21 @@ async def _portfolio_digest() -> dict:
                 "initial_cash": round(float(base["equity"]) - accounting_pnl, 2)}
     # Ввод/вывод средств владельцем (вне сделок бота): крупное необъяснимое расхождение
     # кэша принимаем и запоминаем — иначе каждый опрос пишет MISMATCH.
-    _flow_thr = max(100.0, 0.05 * abs(float(base.get("equity") or 0.0)))
-    _unexplained = delta_cash - float(_CASH_FLOWS.get("total") or 0.0)
-    if abs(_unexplained) > _flow_thr:
-        _CASH_FLOWS["total"] = round(float(_CASH_FLOWS.get("total") or 0.0) + _unexplained, 2)
-        _CASH_FLOWS.setdefault("events", []).append({
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "delta": round(_unexplained, 2),
-            "note": "ввод/вывод средств владельцем (вне сделок бота)",
-        })
-        _CASH_FLOWS["events"] = _CASH_FLOWS["events"][-30:]
-        _save_cash_flows()
-        lg.info("RECONCILE: ВВОД/ВЫВОД средств %.2f₽ принят (вне сделок), baseline скорректирован",
-                _unexplained)
+    due = _reconcile_due()
+    if due:
+        _flow_thr = max(100.0, 0.05 * abs(float(base.get("equity") or 0.0)))
+        _unexplained = delta_cash - float(_CASH_FLOWS.get("total") or 0.0)
+        if abs(_unexplained) > _flow_thr:
+            _CASH_FLOWS["total"] = round(float(_CASH_FLOWS.get("total") or 0.0) + _unexplained, 2)
+            _CASH_FLOWS.setdefault("events", []).append({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "delta": round(_unexplained, 2),
+                "note": "ввод/вывод средств владельцем (вне сделок бота)",
+            })
+            _CASH_FLOWS["events"] = _CASH_FLOWS["events"][-30:]
+            _save_cash_flows()
+            lg.info("RECONCILE: ВВОД/ВЫВОД средств %.2f₽ принят (вне сделок), baseline скорректирован",
+                    _unexplained)
     # Вычитаем учтённые потоки ВСЕГДА (не только в момент детекта) — иначе после
     # первого принятия каждый следующий опрос снова показывал бы MISMATCH.
     delta_cash = round(delta_cash - float(_CASH_FLOWS.get("total") or 0.0), 2)
@@ -412,28 +457,42 @@ async def _portfolio_digest() -> dict:
     tinkoff_pnl = float(base["pnl"])
     delta_pnl = round(accounting_pnl - tinkoff_pnl, 2)
     ok = abs(delta_cash) <= 0.5 and abs(delta_pnl) <= 1.0
-    if ok:
-        lg.info("RECONCILE OK delta_cash=%.2f delta_pnl=%.2f equity=%.2f", delta_cash, delta_pnl, float(base["equity"]))
+    if due:
+        if ok:
+            lg.info("RECONCILE OK delta_cash=%.2f delta_pnl=%.2f equity=%.2f", delta_cash, delta_pnl, float(base["equity"]))
+        else:
+            lg.warning(
+                "RECONCILE MISMATCH delta_cash=%.2f delta_pnl=%.2f | tcur=%.2f cash_calc=%.2f | "
+                "closed_net=%.2f unrealized=%.2f vs tinkoff_pnl=%.2f",
+                delta_cash, delta_pnl, tcur, cash_calc, closed_net, unrealized, tinkoff_pnl,
+            )
     else:
-        lg.warning(
-            "RECONCILE MISMATCH delta_cash=%.2f delta_pnl=%.2f | tcur=%.2f cash_calc=%.2f | "
-            "closed_net=%.2f unrealized=%.2f vs tinkoff_pnl=%.2f",
-            delta_cash, delta_pnl, tcur, cash_calc, closed_net, unrealized, tinkoff_pnl,
-        )
+        # _CASH_FLOWS меняется только в период сверки; подсветить факт «не сверялось»
+        # нельзя — просто храним «в порядке».
+        ok = _RECONCILE_CACHE.get("_ok", ok)
 
     # Маржинальные показатели (реальные свободные средства = ликвидный портфель − начальная маржа).
     _liquid = float(base["equity"])
     _start_margin = 0.0
     _min_margin = 0.0
     _suff = 0.0
-    try:
-        _ma = _get_client().users.get_margin_attributes(account_id=_active_creds()[2])
-        _liquid = _q(_ma.liquid_portfolio)
-        _start_margin = _q(_ma.starting_margin)
-        _min_margin = _q(_ma.minimal_margin)
-        _suff = float(_ma.funds_sufficiency_level.units + _ma.funds_sufficiency_level.nano / 1e9)
-    except Exception:
-        pass
+    if due:
+        try:
+            _ma = _get_client().users.get_margin_attributes(account_id=_active_creds()[2])
+            _liquid = _q(_ma.liquid_portfolio)
+            _start_margin = _q(_ma.starting_margin)
+            _min_margin = _q(_ma.minimal_margin)
+            _suff = float(_ma.funds_sufficiency_level.units + _ma.funds_sufficiency_level.nano / 1e9)
+        except Exception:
+            pass
+        _RECONCILE_CACHE.update(_liquid=_liquid, _start_margin=_start_margin,
+                                _min_margin=_min_margin, _suff=_suff, _ok=ok)
+    else:
+        _cc = _RECONCILE_CACHE
+        _liquid = _cc.get("_liquid", float(base["equity"]))
+        _start_margin = _cc.get("_start_margin", 0.0)
+        _min_margin = _cc.get("_min_margin", 0.0)
+        _suff = _cc.get("_suff", 0.0)
 
     return {
         **base,
@@ -1093,3 +1152,274 @@ async def sandbox_orders(limit: int = 30):
         return {"count": len(items), "orders": items[-limit:]}
     except Exception as e:
         return {"count": 0, "orders": [], "error": f"{type(e).__name__}: {e}"}
+
+
+# ---------------------------------------------------------------------------
+# Полный сброс sandbox одной командой: закрыть счёт, завести новый, пополнить,
+# стереть сделки/историю этой сессии, перезапустить бота на новом счёте.
+# ---------------------------------------------------------------------------
+
+class SandboxResetRequest(BaseModel):
+    cash: float = 10_000.0
+    name: str = "V4_Bot_10k"
+    keep_history: bool = False
+
+
+_RESET_TABLES = ("sandbox_trades", "paper_trades", "paper_positions",
+                 "paper_accounts", "ai_decisions")
+_RESET_LOG_FILES = ("reports/ai_approval_log.jsonl", "ai_trader_cycles.jsonl")
+
+
+async def _wipe_reset_data() -> dict:
+    """Удалить сделки/позиции/историю текущей сессии (не трогает настройки/свечи)."""
+    from app.database import SessionLocal as _SL
+    from sqlalchemy import text as _text
+    out: dict = {}
+    async with _SL() as db:
+        for _t in _RESET_TABLES:
+            try:
+                r = await db.execute(_text(f"DELETE FROM {_t}"))
+                out[_t] = int(r.rowcount or 0)
+            except Exception as e:
+                out[_t] = f"skip: {type(e).__name__}"
+        try:
+            await db.execute(_text("DELETE FROM bot_logs"))
+            out["bot_logs"] = "cleared"
+        except Exception as e:
+            out["bot_logs"] = f"skip: {type(e).__name__}"
+        await db.commit()
+    return out
+
+
+def _archive_reset_logs(backend_dir: Path) -> None:
+    for rel in _RESET_LOG_FILES:
+        p = backend_dir / rel
+        try:
+            if p.exists() and p.stat().st_size > 0:
+                dst = p.with_suffix(p.suffix + ".old")
+                if dst.exists():
+                    dst.unlink()
+                p.replace(dst)
+        except Exception as _sw_e:
+            _log.warning("SB-RESET: журнал %s: %s", rel, type(_sw_e).__name__)
+
+
+def _close_named_accounts(token: str, name: str, keep_id: str | None = None) -> list[str]:
+    """Закрыть ВСЕ sandbox-счёта с именем name, кроме keep_id. Чистит «сирот» от
+    оборванных сбросов и старые сессии с тем же именем (сделки удаляются со счётом)."""
+    from t_tech.invest import Client
+    closed: list[str] = []
+    try:
+        with Client(token, target="sandbox-invest-public-api.tbank.ru") as _svc:
+            accs = _svc.sandbox.get_sandbox_accounts().accounts
+            for a in accs:
+                if str(a.name) != name:
+                    continue
+                if keep_id and str(a.id) == keep_id:
+                    continue
+                try:
+                    _svc.sandbox.close_sandbox_account(account_id=a.id)
+                    closed.append(str(a.id))
+                except Exception as _e2:
+                    _log.warning("SB-RESET: close dup %s fail: %s", a.id, _e2)
+    except Exception as e:
+        _log.warning("SB-RESET: list sandbox accounts fail (пропускаем чистку дублей): %s", e)
+    return closed
+
+
+def _fund_account(token: str, acc: str, target_cash: float, attempts: int = 4,
+                  settle_wait: float = 5.0) -> float:
+    """Пополнить счёт до target_cash, сверяясь с ФАКТИЧЕСКИМ балансом.
+
+    Платим ТОЛЬКО когда баланс реально читается: если чтение падает (upstream
+    в аварии), НЕ платим вслепую и ждём следующий тик. Если платёж «упал с
+    таймаутом», но реально дошёл — следующий тик это увидит и доплатим только
+    разницу, поэтому никогда не переплатим (лишних 4×10k не будет)."""
+    from t_tech.invest import Client
+    from t_tech.invest.schemas import MoneyValue
+
+    def _cash():
+        try:
+            with Client(token, target="sandbox-invest-public-api.tbank.ru") as _svc:
+                pf = _svc.sandbox.get_sandbox_portfolio(account_id=acc)
+                return _q(getattr(pf, "total_amount_currencies", None) or 0.0)
+        except Exception as _e3:
+            _log.warning("SB-RESET: fund check fail: %s", _e3)
+            return None
+
+    have = _cash()
+    for attempt in range(attempts):
+        if have is None:
+            time.sleep(3.0)
+            have = _cash()
+            continue
+        if have >= target_cash - 0.01:
+            return have
+        if have < 0:
+            time.sleep(2.0)
+            have = _cash()
+            continue
+        try:
+            with Client(token, target="sandbox-invest-public-api.tbank.ru") as _svc2:
+                _svc2.sandbox.sandbox_pay_in(
+                    account_id=acc,
+                    amount=MoneyValue(currency="rub",
+                                      units=int(target_cash - have), nano=0))
+        except Exception as _e4:
+            _log.warning("SB-RESET: pay_in attempt %d fail: %s (проверяем баланс)",
+                         attempt + 1, type(_e4).__name__)
+        time.sleep(settle_wait)
+        have = _cash()
+    return have if have is not None else 0.0
+
+
+@router.post("/reset")
+async def sandbox_reset(req: SandboxResetRequest) -> dict:
+    """Полный сброс sandbox: закрываются ВСЕ счёта с именем --name (включая старые
+    сессии и «сирот» от оборванных сбросов), заводится новый счёт, пополняется на
+    --cash (с ретраями и сверкой по фактическому балансу), сделки и история текущей
+    сессии стираются из БД, бот перезапускается на новом счёте."""
+    import re as _re
+    from app.config import get_settings as _get_settings
+    from app.bot.runtime import runtime as _rt
+
+    _log.warning("SB-RESET: start cash=%.0f name=%s keep_history=%s",
+                 req.cash, req.name, req.keep_history)
+    s = _get_settings()
+    old = s.get_account("sandbox") or ""
+    token = s.get_token("sandbox")
+    if not token:
+        raise HTTPException(400, "нет sandbox-токена в .env")
+
+    was_running = bool(getattr(_rt, "running", False))
+    if was_running:
+        try:
+            await _rt.stop()
+            _log.warning("SB-RESET: бот остановлен")
+        except Exception as e:
+            _log.warning("SB-RESET: stop bot fail: %s", e)
+
+    # 1) закрыть всё, что носит наше имя (дубли/сироты/прошлые сессии).
+    closed_all = await asyncio.to_thread(_close_named_accounts, token, req.name)
+    if closed_all:
+        _log.warning("SB-RESET: закрыты дубли/сироты с именем %s: %s", req.name, closed_all)
+
+    closed_old = None
+    if old:
+        try:
+            def _close_old():
+                from t_tech.invest import Client
+                with Client(token, target="sandbox-invest-public-api.tbank.ru") as _svc:
+                    _svc.sandbox.close_sandbox_account(account_id=old)
+            await asyncio.to_thread(_close_old)
+            closed_old = old
+            _log.warning("SB-RESET: старый счёт закрыт %s", old)
+        except Exception as e:
+            if "NOT_FOUND" in str(e) or "not found" in str(e).lower():
+                _log.warning("SB-RESET: старый счёт %s уже отсутствует — это ок", old)
+            else:
+                _log.warning("SB-RESET: close old %s fail: %s", old, e)
+
+    # 2) открыть новый счёт и 3) пополнить его ДО фактического баланса.
+    try:
+        def _open_fund():
+            from t_tech.invest import Client
+            with Client(token, target="sandbox-invest-public-api.tbank.ru") as _svc3:
+                r = _svc3.sandbox.open_sandbox_account(name=req.name)
+                return str(r.account_id)
+        new_acc = await asyncio.to_thread(_open_fund)
+    except Exception as e:
+        raise HTTPException(500, f"не удалось завести новый счёт: {e}")
+    funded = await asyncio.to_thread(_fund_account, token, new_acc, req.cash)
+    if funded < req.cash - 0.01:
+        try:
+            def _rollback():
+                from t_tech.invest import Client
+                with Client(token, target="sandbox-invest-public-api.tbank.ru") as _svc:
+                    _svc.sandbox.close_sandbox_account(account_id=new_acc)
+            await asyncio.to_thread(_rollback)
+            _log.warning("SB-RESET: откат — недополненный счёт %s закрыт", new_acc)
+        except Exception as _e5:
+            _log.warning("SB-RESET: rollback close %s fail: %s", new_acc, _e5)
+        raise HTTPException(502, f"счёт {new_acc} создан, но не удалось пополнить "
+                                 f"(upstream T-Invest недоступен): cash={funded:.2f}")
+    _log.warning("SB-RESET: новый счёт %s (+%.0f₽)", new_acc, funded)
+
+    backend_dir = Path(__file__).resolve().parents[3]
+    env_path = backend_dir / ".env"
+    try:
+        txt = env_path.read_text(encoding="utf-8")
+        if _re.search(r"(?m)^SANDBOX_ACCOUNT=.*$", txt):
+            txt2 = _re.sub(r"(?m)^SANDBOX_ACCOUNT=.*$",
+                           f"SANDBOX_ACCOUNT={new_acc}", txt, count=1)
+        else:
+            txt2 = txt.rstrip() + f"\nSANDBOX_ACCOUNT={new_acc}\n"
+        env_path.write_text(txt2, encoding="utf-8")
+        _log.warning("SB-RESET: SANDBOX_ACCOUNT=%s записан в backend/.env", new_acc)
+    except Exception as e:
+        _log.warning("SB-RESET: .env write fail: %s", e)
+
+    # Сбросить кэш настроек — следующий start поднимет брокера с новым аккаунтом.
+    _get_settings.cache_clear()
+
+    wiped: dict = {}
+    if not req.keep_history:
+        wiped = await _wipe_reset_data()
+        _archive_reset_logs(backend_dir)
+        _log.warning("SB-RESET: история очищена: %s",
+                     {k: v for k, v in wiped.items() if v})
+    else:
+        wiped = {"skipped": "keep_history"}
+
+    # Кэши портфеля/операций/маржа — чтобы UI сразу показал новый счёт.
+    global _portfolio_cache, _ops_cache, _init_cash_cache, _tcs_to_bbg_cache, _margin_map
+    _portfolio_cache = None
+    _ops_cache = None
+    _init_cash_cache = None
+    _tcs_to_bbg_cache = None
+    _margin_map = {}
+    from app.services.loghub import hub
+    hub.clear()
+
+    restarted = False
+    restart_error: str | None = None
+    if not (_rt.running or _rt.starting):
+        try:
+            from app.api.routes.bot import _cfg_from_saved
+            cfg = getattr(_rt, "config", None)
+            if cfg is None:
+                cfg = await _cfg_from_saved("sandbox")
+            if cfg is not None:
+                await _rt.start(cfg)
+                restarted = True
+        except Exception as e:
+            restarted = False
+            restart_error = f"{type(e).__name__}: {e}"
+            _log.error("SB-RESET: start bot fail: %s", e)
+
+    # Синхронизировать наш учёт капитала с фактическим пополнением счёта.
+    try:
+        from app.database import SessionLocal as _SL
+        from sqlalchemy import text as _text
+        async with _SL() as db:
+            await db.execute(_text(
+                "UPDATE paper_accounts SET initial_cash = :c, cash = :c WHERE name = 'default'"),
+                {"c": req.cash})
+            await db.commit()
+        _init_cash_cache = req.cash
+    except Exception as _sw_e:
+        _log.warning("SB-RESET: paper_accounts sync: %s", type(_sw_e).__name__)
+
+    _log.warning("SB-RESET: готово, новый счёт %s", new_acc)
+    return {
+        "ok": True,
+        "account_id": new_acc,
+        "account_name": req.name,
+        "cash": req.cash,
+        "funded": round(funded, 2),
+        "closed_old": closed_old,
+        "closed_dups": closed_all,
+        "restarted": restarted,
+        "restart_error": restart_error,
+        "wiped": wiped,
+    }

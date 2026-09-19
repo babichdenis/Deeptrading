@@ -184,8 +184,20 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Гасим бота и его фоновые циклы ДО dispose — иначе uvicorn висит на
+        # shutdown (pending tasks), и процесс приходится убивать kill -9.
+        try:
+            from app.bot.runtime import runtime as _rt
+            await _rt.stop()
+        except Exception:
+            pass
         _imoex_task.cancel()
         _daily_task.cancel()
+        for _t in (_imoex_task, _daily_task):
+            try:
+                await _t
+            except (asyncio.CancelledError, Exception):
+                pass
         queue_dispatcher.stop()
         ens_dispatcher.stop()
         await engine.dispose()

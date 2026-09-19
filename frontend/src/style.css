@@ -2131,6 +2131,17 @@ body.sb-resizing .sr-grip { background: rgba(41, 98, 255, 0.3); }
   border: 1px solid var(--border); border-radius: 6px;
   background: rgba(0,0,0,0.3); color: var(--text); font-variant-numeric: tabular-nums;
 }
+.sr-tools { display: flex; align-items: center; gap: 10px; padding: 6px 10px 2px; }
+.sr-tools .sr-legend { padding: 0; }
+.sr-tools .sr-refresh { margin-left: 0; }
+.sr-univ-only { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); cursor: pointer; white-space: nowrap; user-select: none; }
+.sr-univ-only:hover { color: var(--text); }
+.sr-univ-only input { accent-color: var(--accent); }
+.sv-chip { display: inline-block; padding: 1px 8px; border-radius: 6px; font-weight: 700; font-size: 11px; font-variant-numeric: tabular-nums; }
+.sv-1 { color: #6aa9ff; background: rgba(106,169,255,0.15); }
+.sv-2 { color: var(--gold); background: rgba(244,185,66,0.15); }
+.sv-3 { color: var(--up); background: rgba(var(--up-rgb),0.15); }
+.sr-reg { font-size: 10px; font-weight: 700; }
 .sr-row.sr-universe { background: rgba(90, 140, 255, 0.10); }
 .sr-row.sr-universe .ticker-cell { color: #9dbdff; }
 

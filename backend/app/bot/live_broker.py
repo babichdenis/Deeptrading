@@ -62,6 +62,7 @@ class LiveBroker:
         self._target = _s.get_target(self.mode)
         self._account = _s.get_account(self.mode)
         self._services = None
+        self._client = None
         self._portfolio_snapshot = None
         self._portfolio_ts = 0.0
         self._portfolio_ttl = 15.0
@@ -74,7 +75,22 @@ class LiveBroker:
 
             client = Client(self._token, target=self._target)
             self._services = client.__enter__()
+            self._client = client
         return self._services
+
+    def close(self) -> None:
+        """Закрыть gRPC-канал T-Invest.
+
+        Синхронный Client держит non-daemon потоки — без явного close процесс
+        uvicorn после shutdown остаётся висеть (и его приходится убивать kill -9).
+        """
+        try:
+            if self._client is not None:
+                self._client.__exit__(None, None, None)
+        except Exception:
+            pass
+        self._client = None
+        self._services = None
 
     # --- API-ветвление sandbox/live (одни и те же схемы, разные сервисы) ---
     def _api_post_order(self, **kwargs):

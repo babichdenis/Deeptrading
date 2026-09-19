@@ -46,20 +46,47 @@ cd frontend && npm install && npm run dev    # :5173
 BACKEND_URL=http://<ip>:8000 npm run dev     # если бэк не локальный
 ```
 
-## Сброс sandbox-счёта (1 команда)
+## Деплой/рестарт на .2 (Windows runner, где крутится живой бот)
 
 ```bash
-cd backend
-.venv/bin/python3 scripts/reset_sandbox_account.py              # 10 000 ₽, имя V4_Bot_10k
-.venv/bin/python3 scripts/reset_sandbox_account.py --cash 20000
-.venv/bin/python3 scripts/reset_sandbox_account.py --name NewBot
+# Деплой файлов (sshpass локально установлен):
+sshpass -p 0987 scp -o StrictHostKeyChecking=no <file> nadts@192.168.1.2:C:/Users/nadts/Dev/Deeptrading/<path>
+# Рестарт backend — НЕ скрипт, а таск планировщика:
+#   таск `uvicorn_test` → C:\Users\nadts\run_uvicorn.bat → uvicorn app.main:app :8000
+sshpass -p 0987 ssh -o StrictHostKeyChecking=no nadts@192.168.1.2 \
+  "powershell -NoProfile -Command \"Get-CimInstance Win32_Process -Filter \\\"Name='python.exe' AND CommandLine LIKE '%uvicorn%'\\\" | ForEach-Object { Stop-Process -Id \\\$_.ProcessId -Force -ErrorAction SilentlyContinue }; cmd /c schtasks /run /tn uvicorn_test\""
+# После рестарта wait ~20с и проверка: curl http://192.168.1.2:8000/api/v1/bot/status (running=true)
+# Vite на .2: таск `vitebot` (Не убивать kill — респавнится).
+# Логи: /bot/logs держит ~300 записей (кольцо); история большего срока — из БД.
 ```
 
-Удаляет старый счёт (с позициями) → открывает новый → пополняет → переписывает
-ACC в `app/api/routes/sandbox.py:11` и `app/bot/live_broker.py:22` → перезапускает
-uvicorn → ждёт автостарт бота. Актуальный sandbox-аккаунт: `5e4d9c6f-b777-410f-abb3-95794fde0d99`.
-Позиции НЕ переносятся; sandbox вне торговых часов отклоняет ордера (ошибка 30079),
-закрывать позиции вручную ночью нельзя — просто удаляйте счёт целиком.
+## Сброс sandbox-счёта (1 команда) — НОВЫЙ механизм (2026-09-18)
+
+Сброс делает САМ бэкенд через `POST /api/v1/sandbox/reset`; скрипт — только клиент.
+Это единственный правильный способ (ручной сброс на одной машине оставляет другой
+хост на «мёртвом» аккаунте).
+
+```bash
+# локальный бэкенд:
+/usr/local/bin/python3 ~/Dev/Deeptrading/backend/scripts/reset_sandbox_account.py
+# или бэкенд на .2 (Windows):
+/usr/local/bin/python3 ~/Dev/Deeptrading/backend/scripts/reset_sandbox_account.py --host http://192.168.1.2:8000
+# опции: --cash 20000 --name NewBot --keep-history (не стирать сделки/историю)
+```
+
+Эндпойнт: останавливает бота → закрывает ВСЕ счёта с именем `--name` (дубли/«сироты») +
+аккаунт из `.env` → открывает новый → пополняет с ретраями (сверка по фактическому
+балансу; при неудаче — откат: счёт закрывается) → переписывает `SANDBOX_ACCOUNT` в
+`backend/.env` → чистит `get_settings`-кэш → стирает сделки/историю/lоги текущей сессии
+(`sandbox_trades, paper_trades, paper_positions, paper_accounts, ai_decisions, bot_logs`)
+→ автостарт бота → sync `paper_accounts`.
+
+⚠️ Если эндпойнт возвращает 502 «не удалось пополнить» — это АВАРИЯ upstream T-Invest
+(`SandboxPayIn UNAVAILABLE`, бывает ночами/вне сессии). Механизм сам сделает откат,
+повторить команду в сессию (пн 06:50 MSK).
+
+⚠️ Sandbox отклоняет ордера вне торговых часов (ошибка 30079) — закрывать позиции
+ночью вручную нельзя, просто удаляйте счёт целиком (как делает reset).
 
 ## Структура
 

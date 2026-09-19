@@ -153,6 +153,7 @@
               <label class="pill" title="Дневная сессия"><input type="checkbox" id="sg-day" checked><i data-lucide="sun-medium"></i><span>День</span></label>
               <label class="pill" title="Вечерняя сессия"><input type="checkbox" id="sg-evening"><i data-lucide="moon"></i><span>Вечер</span></label>
               <label class="pill" title="Держать позиции через ночь (вне торговых сессий)"><input type="checkbox" id="sg-overnight"><i data-lucide="moon-star"></i><span>Overnight</span></label>
+              <label class="pill" title="Сверка позиций/кэша с брокером (каждые 60с, только в торговое время)"><input type="checkbox" id="rec-on" checked><i data-lucide="git-compare-arrows"></i><span>Сверка</span></label>
             </div>
 
             <div class="separator"></div>
@@ -626,13 +627,12 @@
       <aside class="sidebar sidebar-right" id="sidebar-right">
         <div class="sidebar-grip sr-grip" title="Изменить ширину"></div>
         <div class="sr-tabs">
-          <button class="sr-tab active" data-srtab="market">📊 Рынок</button>
-          <button class="sr-tab" data-srtab="votes">🗳 Голоса</button>
+          <button class="sr-tab active" data-srtab="market">📊 Рынок · Голоса</button>
           <button class="sr-tab" data-srtab="aigate">🤖 AI-гейт</button>
         </div>
         <div class="sr-tabpane" id="sr-pane-market">
         <div class="sr-head">
-          <span class="sr-title">📊 Рынок TQBR</span>
+          <span class="sr-title">📊 Рынок · Голоса</span>
           <span class="sr-sub" id="sr-count">—</span>
           <span class="sr-live" id="sr-ts"></span>
         </div>
@@ -640,6 +640,17 @@
           <input type="search" id="sr-query" class="sr-query" placeholder="Поиск…" />
           <label class="sr-min-t">Оборот ≥ <input type="number" id="sr-min-t" value="0" min="0" step="1"> М₽</label>
         </div>
+        <div class="sr-tools">
+          <label class="sr-univ-only" title="Показывать только бумаги вселенной бота"><input type="checkbox" id="sr-univ-only" /> только вселенная</label>
+          <span class="sr-legend">
+            <span class="sr-leg sr-leg-1">1</span>
+            <span class="sr-leg sr-leg-2">2</span>
+            <span class="sr-leg sr-leg-3">3+</span>
+          </span>
+          <button class="sr-refresh btn-secondary btn-xs" id="votes-config-btn" title="Состав кворума (управление движком)">⚙</button>
+          <button class="sr-refresh btn-secondary btn-xs" id="sr-refresh" title="Обновить с биржи">⟳</button>
+        </div>
+        <div class="votes-editor hidden" id="votes-editor"></div>
         <div class="sr-carousel-panel" id="sr-carousel-panel"></div>
         <div class="sr-table-wrap">
           <table class="sr-table" id="sr-table">
@@ -648,33 +659,16 @@
                 <th data-sort="ticker">Название <span class="sr-arrow"></span></th>
                 <th class="sr-num" data-sort="price">Цена <span class="sr-arrow"></span></th>
                 <th class="sr-num" data-sort="turnover">Оборот <span class="sr-arrow"></span></th>
-                <th class="sr-num" data-sort="rng_pct">Волат. <span class="sr-arrow"></span></th>
+                <th class="sr-num" data-sort="rng_pct" title="Волатильность дня из API: (HIGH−LOW)/WAPRICE · MOEX ISS">Волат API <span class="sr-arrow"></span></th>
+                <th class="sr-num" data-sort="atr_pct" title="Волатильность бота: ATR(14) на 5m / цена — только для вселенной">ATR% <span class="sr-arrow"></span></th>
+                <th class="sr-num" data-sort="votes" title="Голоса ансамбля на последнем 5m баре (1 синий · 2 жёлтый · 3+ зелёный)">Голоса <span class="sr-arrow"></span></th>
+                <th class="sr-num" data-sort="regime" title="Режим рынка (VS — волатильность, UP/DOWN тренд)">Режим <span class="sr-arrow"></span></th>
                 <th class="sr-num sr-col-action" title="Добавить в карусель">✦</th>
               </tr>
             </thead>
             <tbody id="sr-tbody"></tbody>
           </table>
         </div>
-        <button class="sr-refresh btn-secondary btn-xs" id="sr-refresh" title="Обновить с биржи">⟳</button>
-        </div>
-        <div class="sr-tabpane hidden" id="sr-pane-votes">
-          <div class="sr-head">
-            <span class="sr-title">🗳 Голоса ансамбля (5m)</span>
-            <span class="sr-sub" id="votes-count">—</span>
-            <button class="sr-refresh btn-secondary btn-xs" id="votes-config-btn" title="Состав кворума (управление движком)">⚙</button>
-          </div>
-          <div class="votes-editor hidden" id="votes-editor"></div>
-          <div class="sr-votes-sort">
-            <button class="votes-sort" data-vsort="ticker">Название <span class="vs-arrow"></span></button>
-            <button class="votes-sort" data-vsort="atr">Волат. <span class="vs-arrow"></span></button>
-            <button class="votes-sort" data-vsort="votes">Голоса <span class="vs-arrow"></span></button>
-          </div>
-          <div class="sr-legend">
-            <span class="sr-leg sr-leg-1">1</span>
-            <span class="sr-leg sr-leg-2">2</span>
-            <span class="sr-leg sr-leg-3">3+</span>
-          </div>
-          <div class="votes-grid" id="votes-grid"></div>
         </div>
         <div class="sr-tabpane hidden" id="sr-pane-aigate">
           <div class="sr-head">

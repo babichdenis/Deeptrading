@@ -392,6 +392,10 @@ function initSessChips() {
       const ov = (cfg as { overnight?: boolean }).overnight;
       const ovEl = $("sg-overnight") as HTMLInputElement | null;
       if (typeof ov === "boolean" && ovEl) applyChip(ovEl, ov);
+      // Сверка с брокером.
+      const rec = (cfg as { reconcile_enabled?: boolean }).reconcile_enabled;
+      const recEl = $("rec-on") as HTMLInputElement | null;
+      if (typeof rec === "boolean" && recEl) applyChip(recEl, rec);
     } catch { /* бэкенд недоступен — остаёмся на localStorage */ }
   })();
 
@@ -405,6 +409,19 @@ function initSessChips() {
     ovEl.addEventListener("change", () => {
       ovEl.closest("label")?.classList.toggle("on", ovEl.checked);
       localStorage.setItem("bot_overnight", ovEl.checked ? "1" : "0");
+      sendBotConfigPatch();
+    });
+  }
+  // Сверка с брокером (позиции/кэш) — только в торговое время.
+  const recEl = $("rec-on") as HTMLInputElement | null;
+  if (recEl) {
+    let recSaved = true;
+    try { recSaved = localStorage.getItem("bot_reconcile") !== "0"; } catch { recSaved = true; }
+    recEl.checked = recSaved;
+    recEl.closest("label")?.classList.toggle("on", recSaved);
+    recEl.addEventListener("change", () => {
+      recEl.closest("label")?.classList.toggle("on", recEl.checked);
+      localStorage.setItem("bot_reconcile", recEl.checked ? "1" : "0");
       sendBotConfigPatch();
     });
   }
@@ -566,6 +583,7 @@ const LOG_CAP_DOM = 1500;           // предел DOM-строк (trim све�
 const LG_SRC_LABEL: Record<string, string> = {
   "t_tech.invest.lo": "tinkoff",
   "app.bot.stream_m": "streams",
+  "portfolio_reconcile": "reconcile",
   "portfolio_reconc": "reconcile",
   "candle_feed": "candles",
   "lab.queue": "queue",
@@ -579,16 +597,26 @@ function lgSrcLabel(src: string): string {
   return s.length > 12 ? s.slice(0, 12) + "…" : s;
 }
 
-function logCategory(msg: string): string {
-  if (msg.includes("TECHINFO") || msg.includes("FLUSH")) return "tech";
-  if (msg.includes("СВЕЧА")) return "candles";
-  if (msg.includes("СИГНАЛ")) return "signals";
-  if (msg.includes("СДЕЛКА") || msg.includes("ВЫХОД") || msg.includes("ЗАКРЫТИЕ")) return "trades";
+const _LOG_KW: Record<string, RegExp> = {
+  candles: /новые свеч|свеч|candle/i,
+  signals: /сигнал|свитч|флип/i,
+  trades: /сделк|вход|выход|закрыт|открыт|игнор выхода|трейлинг/i,
+};
+function logCategory(it: LogItem | string): string {
+  const src = typeof it === "string" ? "" : (it.source || "");
+  const msg = typeof it === "string" ? it : it.msg;
+  if (src.startsWith("candle_feed")) return "candles";
+  if (src.startsWith("portfolio_reconc")) return "trades";
+  const m = msg.toLocaleLowerCase();
+  if (m.includes("techinfo") || m.includes("flush")) return "tech";
+  if (_LOG_KW.candles.test(msg)) return "candles";
+  if (_LOG_KW.signals.test(msg)) return "signals";
+  if (_LOG_KW.trades.test(msg)) return "trades";
   return "events";
 }
 
 function _itemVisible(it: LogItem): boolean {
-  if (!LGF[logCategory(it.msg) as keyof typeof LGF]) return false;
+  if (!LGF[logCategory(it) as keyof typeof LGF]) return false;
   const lv = (it.level || "info").toLowerCase();
   if (_logLevelSel && lv !== _logLevelSel) return false;
   if (_logQ && !it.msg.toLowerCase().includes(_logQ.toLowerCase())) return false;
@@ -603,7 +631,7 @@ function _itemVisible(it: LogItem): boolean {
 function lgRowEl(it: LogItem): HTMLElement {
   const lv = (it.level || "info").toLowerCase();
   const row = document.createElement("div");
-  row.className = `lg-row lg-k-${logCategory(it.msg)} lg-lv-${lv}`;
+  row.className = `lg-row lg-k-${logCategory(it)} lg-lv-${lv}`;
   row.dataset.id = String(it.id);
   // Шапка: время · уровень · источник · счётчик ×N · копия (разделители-пробелы,
   // чтобы при выделении/копировании элементы не склеивались в одно слово).
@@ -1128,7 +1156,8 @@ function initBotSettings() {
       atr_risk_reward: atrRr,
       commission_rate: commission,
       reentry_cooldown_bars: reentry,
-      overnight: ($("sg-overnight") as HTMLInputElement | null)?.checked ?? false,
+overnight: ($("sg-overnight") as HTMLInputElement | null)?.checked ?? false,
+    reconcile_enabled: ($("rec-on") as HTMLInputElement | null)?.checked ?? true,
       confirm_flip: confirmFlip,
       ensemble_quorum: ensembleQuorum,
     });
@@ -1485,10 +1514,10 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
       }
     }
   }
-  // Вкладка «Голоса»: тикеры юниверса + число голосов на последнем 5m баре.
+  // Объединённая вкладка «Рынок · Голоса»: тикеры рынка + голоса/волатильность вселенной.
   _lastVotes = ((bst as { votes?: Array<{ figi: string; ticker: string; buy: number; sell: number; votes: number; side: string; regime?: string | null; vol?: number | null; vol_abs?: number | null }> } | null)?.votes) || [];
   _lastUniverse = ((bst as { universe?: Array<{ figi: string; ticker: string; atr_pct?: number }> } | null)?.universe) || [];
-  renderVotes(_lastVotes, _lastUniverse);
+  _renderScreenerTable();
 
   if (lastRunning !== engineRunning) {
     lastRunning = engineRunning;
@@ -1840,11 +1869,9 @@ function tradeDetailsHtml(t: BotTradeRow): string {
 
 // ===== правый сайдбар: рынок TQBR (скринер) =====
 let _srRows: ScreenerRow[] = [];
-let _srSortKey: keyof ScreenerRow = (localStorage.getItem("deeptrading_sr_sort") as keyof ScreenerRow) || "turnover";
+let _srSortKey: string = (localStorage.getItem("deeptrading_sr_sort") as string) || "turnover";
 let _srSortAsc = localStorage.getItem("deeptrading_sr_sort_asc") === "1";
-// Сортировка вкладки «Голоса» (с памятью).
-let _votesSortKey: "ticker" | "atr" | "votes" = (localStorage.getItem("deeptrading_votes_sort") as "ticker" | "atr" | "votes") || "ticker";
-let _votesSortAsc = localStorage.getItem("deeptrading_votes_sort_asc") === "1";
+let _univOnly = localStorage.getItem("deeptrading_sr_univ") === "1";
 let _srLoading = false;
 let _srQuery = localStorage.getItem("deeptrading_sr_q") ?? "";
 let _srMinTurnoverM = Number(localStorage.getItem("deeptrading_sr_min_t") ?? 0) || 0;
@@ -1854,7 +1881,18 @@ function _srCmpNum(v: number | null | undefined): number {
   return v == null ? -Infinity : v;
 }
 
-function _srCompare(a: ScreenerRow, b: ScreenerRow): number {
+type _SrRow = ScreenerRow & {
+  atr?: number;
+  votes: number;
+  side: string;
+  regime?: string | null;
+  buy: number;
+  sell: number;
+  vol_abs?: number | null;
+};
+const _REG_RANK: Record<string, number> = { HIGH_VOLATILITY: 4, TREND_UP: 3, TREND_DOWN: 2, RANGE: 1, NEUTRAL: 0 };
+
+function _srCompare(a: _SrRow, b: _SrRow): number {
   const k = _srSortKey;
   if (k === "ticker") return _srSortAsc
     ? a.ticker.localeCompare(b.ticker, "ru")
@@ -1862,22 +1900,50 @@ function _srCompare(a: ScreenerRow, b: ScreenerRow): number {
   if (k === "name") return _srSortAsc
     ? a.name.localeCompare(b.name, "ru")
     : b.name.localeCompare(a.name, "ru");
-  const x = _srCmpNum(a[k] as number | null);
-  const y = _srCmpNum(b[k] as number | null);
+  if (k === "atr_pct") { const x = _srCmpNum(a.atr), y = _srCmpNum(b.atr); return _srSortAsc ? x - y : y - x; }
+  if (k === "votes") { const x = _srCmpNum(a.votes), y = _srCmpNum(b.votes); return _srSortAsc ? x - y : y - x; }
+  if (k === "regime") {
+    const x = a.regime ? (_REG_RANK[a.regime] ?? -1) : -Infinity;
+    const y = b.regime ? (_REG_RANK[b.regime] ?? -1) : -Infinity;
+    return _srSortAsc ? x - y : y - x;
+  }
+  const x = _srCmpNum(a[k as keyof ScreenerRow] as number | null);
+  const y = _srCmpNum(b[k as keyof ScreenerRow] as number | null);
   return _srSortAsc ? x - y : y - x;
 }
 
 function _renderScreenerTable() {
   const tbody = $("sr-tbody");
   if (!tbody) return;
+  const uniBy = new Map<string, { atr_pct?: number }>();
+  for (const u of _lastUniverse) uniBy.set(u.figi, u);
+  const voteBy = new Map<string, { votes: number; side: string; regime?: string | null; buy: number; sell: number; vol_abs?: number | null }>();
+  for (const v of _lastVotes) voteBy.set(v.figi, v);
+  const enriched: _SrRow[] = _srRows.map((r) => {
+    const u = uniBy.get(r.figi);
+    const v = voteBy.get(r.figi);
+    return {
+      ...r,
+      atr: u?.atr_pct,
+      votes: v?.votes ?? 0,
+      side: v?.side ?? "",
+      regime: v?.regime ?? null,
+      buy: v?.buy ?? 0,
+      sell: v?.sell ?? 0,
+      vol_abs: v?.vol_abs ?? null,
+    };
+  });
   const q = _srQuery.trim().toLowerCase();
   const minT = _srMinTurnoverM * 1e6;
-  const filtered = _srRows.filter((r) => {
+  const filtered = enriched.filter((r) => {
+    if (_univOnly && !uniBy.has(r.figi)) return false;
     if (minT > 0 && (r.turnover ?? 0) < minT) return false;
     if (q && !r.ticker.toLowerCase().includes(q) && !r.name.toLowerCase().includes(q)) return false;
     return true;
   });
   const sorted = filtered.sort(_srCompare);
+  const regShort: Record<string, string> = { HIGH_VOLATILITY: "Волат", TREND_UP: "Тренд↑", TREND_DOWN: "Тренд↓", RANGE: "Флэт", NEUTRAL: "Нейтр" };
+  const fmtVol = (x: number | null | undefined) => (x == null ? "—" : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : `${Math.round(x)}`);
   tbody.innerHTML = sorted
     .map((r) => {
       const prev = _srPrevPrice.get(r.ticker);
@@ -1887,26 +1953,44 @@ function _renderScreenerTable() {
       const arrows = prev != null && r.price != null && prev > 0
         ? (r.price > prev ? " ▲" : r.price < prev ? " ▼" : "")
         : "";
-      const uni = r.in_universe ? " sr-universe" : "";
+      const uni = uniBy.has(r.figi);
+      const rowCls = uni ? " sr-universe" : "";
       const priceTxt = r.price != null ? price(r.price) + " ₽" : "—";
       const turnTxt = r.turnover != null ? "₽" + money(r.turnover) : "—";
       const volTxt = r.rng_pct != null ? r.rng_pct.toFixed(2) + "%" : "—";
-      return `<tr class="sr-row${uni}" title="${r.name}">` +
+      const atrTxt = r.atr != null ? r.atr.toFixed(2) + "%" : "—";
+      const votesCell = r.votes > 0
+        ? `<span class="sv-chip sv-${Math.min(r.votes, 3)}" title="Голоса: BUY ${r.buy} / SELL ${r.sell} · Режим ${r.regime || "—"} · Объём ${fmtVol(r.vol_abs)}">${r.side === "BUY" ? "▲" : "▼"} ${r.votes}</span>`
+        : uni ? `<span class="sr-dim">·</span>`
+        : `<span class="sr-dim">—</span>`;
+      const reg = r.regime ? (regShort[r.regime] || r.regime) : null;
+      const regTxt = reg ?? "—";
+      const regCol = r.regime === "HIGH_VOLATILITY" ? "var(--gold)"
+        : r.regime === "TREND_UP" ? "var(--up)"
+        : r.regime === "TREND_DOWN" ? "var(--down)"
+        : "var(--text-dim)";
+      const rowTitle = uni
+        ? `${r.name} · Рынок бота${r.regime ? ` · режим ${r.regime}` : ""} — клик откроет график`
+        : `${r.name} — клик откроет график`;
+      return `<tr class="sr-row${rowCls}"${uni ? ` data-figi="${r.figi}" data-ticker="${r.ticker}"` : ""} title="${rowTitle}">` +
         `<td class="ticker-cell">${tickerLogo(r.ticker, r.name)}<span class="ticker-txt">${r.ticker}</span></td>` +
         `<td class="sr-num${flash}">${r.price != null ? priceTxt + arrows : `<span class="sr-dim">—</span>`}</td>` +
         `<td class="sr-num">${r.turnover != null ? turnTxt : `<span class="sr-dim">—</span>`}</td>` +
         `<td class="sr-num">${r.rng_pct != null ? `<span style="color:${r.rng_pct >= 3 ? "var(--gold)" : "var(--text)"}">${volTxt}</span>` : `<span class="sr-dim">—</span>`}</td>` +
+        `<td class="sr-num">${r.atr != null ? `<span style="color:${r.atr >= 0.3 ? "var(--gold)" : "var(--text)"}">${atrTxt}</span>` : `<span class="sr-dim">—</span>`}</td>` +
+        `<td class="sr-num">${votesCell}</td>` +
+        `<td class="sr-num">${reg ? `<span class="sr-reg" style="color:${regCol}">${regTxt}</span>` : `<span class="sr-dim">${regTxt}</span>`}</td>` +
         `<td class="sr-num sr-col-action"><button class="${r.in_universe ? "sr-toggle sr-toggle-active" : "sr-toggle"}" data-ticker="${r.ticker}" title="${r.in_universe ? "Убрать из карусели" : "Добавить в карусель"}">${r.in_universe ? "●" : "○"}</button></td>` +
         `</tr>`;
     })
-    .join("") || `<tr><td colspan=5 class="sr-empty">ничего не найдено</td></tr>`;
+    .join("") || `<tr><td colspan=8 class="sr-empty">ничего не найдено</td></tr>`;
   const countEl = $("sr-count");
   if (countEl) countEl.textContent = `${sorted.length} / ${_srRows.length}`;
   const tsEl = $("sr-ts");
   if (tsEl) tsEl.textContent = `обнов. ${fmtTimeOnly(new Date().toISOString())}`;
   document.querySelectorAll("#sr-table thead th").forEach((th) => {
     const el = th as HTMLElement;
-    const key = el.dataset.sort as keyof ScreenerRow | undefined;
+    const key = el.dataset.sort;
     const sortedNow = key === _srSortKey;
     el.classList.toggle("sorted", sortedNow === true);
     const arrow = el.querySelector(".sr-arrow");
@@ -1927,7 +2011,7 @@ async function _loadScreener(silent = false) {
   } catch {
     if (!silent && _srRows.length === 0) {
       const tbody = $("sr-tbody");
-      if (tbody) tbody.innerHTML = `<tr><td colspan=5 class="sr-empty">ошибка загрузки рынка</td></tr>`;
+      if (tbody) tbody.innerHTML = `<tr><td colspan=8 class="sr-empty">ошибка загрузки рынка</td></tr>`;
     }
     const tsEl = $("sr-ts");
     if (tsEl) tsEl.textContent = `обнов. ${fmtTimeOnly(new Date().toISOString())} (устарело)`;
@@ -2217,23 +2301,38 @@ function initScreener() {
   if (tbodyEl) {
     tbodyEl.addEventListener("click", (e) => {
       const b = (e.target as HTMLElement).closest(".sr-toggle") as HTMLButtonElement | null;
-      if (!b) return;
-      const tk = b.dataset.ticker;
-      if (!tk) return;
-      const r = _srRows.find((x) => x.ticker === tk);
-      if (!r) return;
-      b.disabled = true;
-      void _toggleEligible(tk, r).finally(() => { b.disabled = false; });
+      if (b) {
+        const tk = b.dataset.ticker;
+        if (!tk) return;
+        const r = _srRows.find((x) => x.ticker === tk);
+        if (!r) return;
+        b.disabled = true;
+        void _toggleEligible(tk, r).finally(() => { b.disabled = false; });
+        return;
+      }
+      const tr = (e.target as HTMLElement).closest(".sr-row") as HTMLElement | null;
+      if (!tr) return;
+      const figi = tr.dataset.figi;
+      const ticker = tr.dataset.ticker;
+      if (figi && ticker) { _focusPos = null; sendEmbedFocus(figi, ticker, null); }
+    });
+  }
+  const univChk = $("sr-univ-only") as HTMLInputElement | null;
+  if (univChk) {
+    univChk.checked = _univOnly;
+    univChk.addEventListener("change", () => {
+      _univOnly = univChk.checked;
+      try { localStorage.setItem("deeptrading_sr_univ", _univOnly ? "1" : "0"); } catch { /* noop */ }
+      _renderScreenerTable();
     });
   }
   initSidebarRightResize();
-  // Вкладки правого сайдбара: Рынок / Голоса
+  // Вкладки правого сайдбара: Рынок·Голоса / AI-гейт
   document.querySelectorAll(".sr-tab").forEach((b) => {
     b.addEventListener("click", () => {
       const tab = (b as HTMLElement).dataset.srtab;
       document.querySelectorAll(".sr-tab").forEach((x) => x.classList.toggle("active", x === b));
       $("sr-pane-market")?.classList.toggle("hidden", tab !== "market");
-      $("sr-pane-votes")?.classList.toggle("hidden", tab !== "votes");
       $("sr-pane-aigate")?.classList.toggle("hidden", tab !== "aigate");
       if (tab === "aigate") void renderAiGate();
     });
@@ -2289,82 +2388,10 @@ function initScreener() {
     if (!p.classList.contains("hidden")) void loadCompareList();
   });
   $("stats-cmp-run")?.addEventListener("click", () => { void runCompare(); });
-  // Клик по плашке тикера → открыть график в существующем chart
+  // Клик по ⚙ → редактор состава кворума
   $("votes-config-btn")?.addEventListener("click", toggleEnsembleEditor);
-  $("votes-grid")?.addEventListener("click", (e) => {
-    const el = (e.target as HTMLElement).closest(".vote-chip") as HTMLElement | null;
-    if (!el) return;
-    const figi = el.dataset.figi || "";
-    const ticker = el.dataset.ticker || "";
-    if (figi) { _focusPos = null; sendEmbedFocus(figi, ticker, null); }
-  });
-  // Сортировка вкладки «Голоса» (с памятью)
-  const updVotesArrows = () => {
-    document.querySelectorAll(".votes-sort").forEach((b) => {
-      const el = b as HTMLElement;
-      const arrow = el.querySelector(".vs-arrow");
-      if (arrow) arrow.textContent = el.dataset.vsort === _votesSortKey ? (_votesSortAsc ? "▲" : "▼") : "";
-      el.classList.toggle("active", el.dataset.vsort === _votesSortKey);
-    });
-  };
-  document.querySelectorAll(".votes-sort").forEach((b) => {
-    b.addEventListener("click", () => {
-      const k = (b as HTMLElement).dataset.vsort as "ticker" | "atr" | "votes";
-      if (_votesSortKey === k) _votesSortAsc = !_votesSortAsc;
-      else { _votesSortKey = k; _votesSortAsc = k === "ticker"; }
-      try {
-        localStorage.setItem("deeptrading_votes_sort", _votesSortKey);
-        localStorage.setItem("deeptrading_votes_sort_asc", _votesSortAsc ? "1" : "0");
-      } catch { /* noop */ }
-      updVotesArrows();
-      renderVotes(_lastVotes, _lastUniverse);
-    });
-  });
-  updVotesArrows();
   void _loadScreener(true);
   setInterval(() => void _loadScreener(false), 45000);
-}
-
-// Вкладка «Голоса»: список тикеров юниверса, подсветка по числу голосов
-// (1 — синий, 2 — жёлтый, 3+ — зелёный). Клик открывает график.
-function renderVotes(votes: Array<{ figi: string; ticker: string; buy: number; sell: number; votes: number; side: string; regime?: string | null; vol?: number | null; vol_abs?: number | null }>, universe: Array<{ figi: string; ticker: string; atr_pct?: number }>) {
-  const grid = $("votes-grid");
-  if (!grid) return;
-  const byFigi: Record<string, { buy: number; sell: number; votes: number; side: string; regime?: string | null; vol?: number | null; vol_abs?: number | null }> = {};
-  for (const v of votes || []) byFigi[v.figi] = v;
-  const items = (universe || []).map((u) => {
-    const v = byFigi[u.figi] || { buy: 0, sell: 0, votes: 0, side: "" };
-    return { figi: u.figi, ticker: u.ticker, atr_pct: u.atr_pct, ...v };
-  }).sort((a, b) => {
-    const d = _votesSortKey === "atr"
-      ? (a.atr_pct ?? 0) - (b.atr_pct ?? 0)
-      : _votesSortKey === "votes"
-        ? (a.votes - b.votes) || a.ticker.localeCompare(b.ticker)
-        : a.ticker.localeCompare(b.ticker);
-    return _votesSortAsc ? d : -d;
-  });
-  const cnt = $("votes-count");
-  if (cnt) cnt.textContent = `${items.filter((x) => x.votes > 0).length} / ${items.length} с голосами`;
-  const regShort: Record<string, string> = { HIGH_VOLATILITY: "HV", TREND_UP: "↑", TREND_DOWN: "↓", RANGE: "FLAT", NEUTRAL: "NEU" };
-  const fmtVol = (x: number | null | undefined) => (x == null ? "—" : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : `${Math.round(x)}`);
-  grid.innerHTML = items.map((it) => {
-    const lvl = it.votes >= 3 ? 3 : it.votes === 2 ? 2 : it.votes === 1 ? 1 : 0;
-    // Направление: из голосов, иначе из режима.
-    let dir = "";
-    if (it.votes > 0) dir = it.side === "BUY" ? "▲" : "▼";
-    else if (it.regime === "TREND_UP") dir = "▲";
-    else if (it.regime === "TREND_DOWN") dir = "▼";
-    const dirCol = dir === "▲" ? "var(--up)" : dir === "▼" ? "var(--down)" : "var(--text-dim)";
-    const atr = it.atr_pct != null ? `${it.atr_pct.toFixed(2)}%` : "—";
-    const reg = it.regime ? (regShort[it.regime] || it.regime) : "—";
-    return `<div class="vote-chip vote-${lvl}" data-figi="${it.figi}" data-ticker="${it.ticker}" title="Голоса: BUY ${it.buy} / SELL ${it.sell} · Режим ${it.regime || "—"} · Объём ${fmtVol(it.vol_abs)} · Волат ${atr}">` +
-      `<span class="vc-tk">${it.ticker}</span>` +
-      `<span class="vc-dir" style="color:${dirCol}">${dir || "•"}</span>` +
-      `<span class="vc-reg">${reg}</span>` +
-      `<span class="vc-info">V ${fmtVol(it.vol_abs)}</span>` +
-      `<span class="vc-info">${atr}</span>` +
-      `<span class="vc-v">${it.votes > 0 ? it.votes : ""}</span></div>`;
-  }).join("") || `<div class="mini-hint" style="color:#666">нет данных</div>`;
 }
 
 let _ensembleCfg: EnsembleConfig | null = null;

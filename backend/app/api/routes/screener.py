@@ -197,7 +197,7 @@ async def _carousel_status(db: AsyncSession) -> dict:
 
 
 # --- Срезы движений (моментум-витрина): 1 / 5 / 21 / 63 торговых дня ---
-_MOVERS_TTL = 600  # сек
+_MOVERS_TTL = 180  # сек (живые цены обновляются чаще — 1д должен быть актуальным)
 _movers_cache: dict = {"ts": 0.0, "data": None}
 _HORIZONS = ((1, "1д"), (5, "1н"), (21, "1м"), (63, "3м"))
 
@@ -219,14 +219,31 @@ async def _compute_movers(top: int = 5) -> dict:
         f = str(f)
         names[f] = str(t)
         by.setdefault(f, []).append((ts, float(close or 0.0)))
+    # Живая цена (TQBR quotes, кэш 60с) как «сегодняшнее» закрытие: иначе 1д-движение
+    # показывает вчерашний день и расходится с live (замечание AI/UI).
+    try:
+        _quotes = fetch_tqbr_market()
+    except Exception:
+        _quotes = {}
+    live: dict[str, float] = {}
+    for f, tk in names.items():
+        try:
+            _px = float((_quotes.get(tk) or {}).get("price") or 0.0)
+        except Exception:
+            _px = 0.0
+        if _px > 0:
+            live[f] = _px
     out: dict = {}
     for days, label in _HORIZONS:
-        # дневные закрытия по всем тикерам (для истории групп/стажа)
+        # дневные закрытия по всем тикерам (для истории групп/стажа) + live за сегодня
         series: dict[str, list[float]] = {}
         for f, bars in by.items():
             bb = [b for b in bars if b[0].astimezone(_msk).date() != today]
             if len(bb) >= days + 1:
-                series[names[f]] = [x[1] for x in bb]
+                cl = [x[1] for x in bb]
+                if f in live:
+                    cl = cl + [live[f]]
+                series[names[f]] = cl
         items = []
         for tk, cl in series.items():
             if cl[-days - 1] <= 0:
@@ -264,6 +281,10 @@ async def _compute_movers(top: int = 5) -> dict:
             "n": len(items),
             "up": items[:top],
             "down": items[-top:][::-1],
+            # Полный список (все тикеры) — для AI: видеть движение по всему рынку,
+            # а не только топ/дно. Компактно: ticker/chg/price.
+            "all": [{"ticker": x["ticker"], "chg": x["chg"], "price": x["price"]}
+                    for x in items],
             "counts": {str(thr): [sum(1 for x in items if x["chg"] >= thr),
                                   sum(1 for x in items if x["chg"] <= -thr)]
                        for thr in (5, 10, 20, 40)},

@@ -45,13 +45,34 @@ def _skip_human(s: str) -> str:
     return _s[:110]
 
 
+
+# --- audit 2026-09-18: тихие except не должны теряться молча ---------------------
+_AUDIT_SWALLOW_SEEN = set()
+
+
+def _audit_swallow(where, exc=None):
+    """Логирует проглоченное исключение; 1 раз на место (анти-флуд для бота)."""
+    if where in _AUDIT_SWALLOW_SEEN:
+        return
+    _AUDIT_SWALLOW_SEEN.add(where)
+    try:
+        import logging
+        logging.getLogger(__name__).warning('SILENT-EXCEPT %s: %s: %s',
+            where,
+            type(exc).__name__ if exc is not None else "-",
+            str(exc)[:120] if exc is not None else "")
+    except Exception:
+        pass
+
+
 def price_from_trade(trade) -> float | None:
     """Extract executed price from PaperTrade."""
     if trade is None:
         return None
     try:
         return float(getattr(trade, "exit_price", None) or getattr(trade, "entry_price", None) or 0)
-    except Exception:
+    except Exception as _sw_e:
+        _audit_swallow('price_from_trade@L30', _sw_e)  # audit silent-except
         return None
 from app.bot.session import session_state
 from app.config import get_settings
@@ -117,6 +138,7 @@ class BotConfig:
     ensemble_capital: float = 2000.0
     pos_pct: float = 0.40  # доля equity на одну позицию (слот), 0.4 = 40%
     max_positions: int = 5  # максимум одновременных позиций (0 = без лимита)
+    reconcile_enabled: bool = True  # сверка позиций/кэша с брокером (только в торговое время)
     max_exposure_pct: float = 1.0  # свои деньги в позициях <= X от equity (1.0 = 100%, 0 = без лимита)
     max_short_share: float = 0.7  # макс. доля SHORT среди позиций (0 = без лимита)
     # --- Портфельные лимиты (в деньгах) ---
@@ -183,6 +205,10 @@ class BotConfig:
     momentum_only: bool = False      # только моментум: сигналы ансамбля игнорируются
     momentum_side: str = "short"     # направление моментума: short | long | both
     mtf_trigger: bool = False        # M5 MACD гистограмма должна разворачиваться в сторону входа
+    # --- Детерминированные TF-гейты входа (правила AI-гейта, зашиты в движок) ---
+    entry_h1_align: bool = True         # 7) H1 MACD должен подтверждать сторону входа
+    entry_tf_conflict: bool = True      # 6) daily bias и H1 не должны противоречить
+    entry_last_hour_block: bool = True  # 16) не входить в последний час сессии
     # --- Margin ---
     use_margin: bool = True  # использовать маржинальное кредитование
     margin_sessions: list = field(default_factory=lambda: ["day"])  # сессии с маржой: morning/day/evening
@@ -214,10 +240,13 @@ class BotConfig:
     ai_approval_timeout_sec: float = 45.0  # сколько ждать решение, сек
     ai_approval_default: str = "approve"   # approve | reject — что делать по таймауту
     ai_reject_cooldown_min: float = 15.0   # пауза входов по тикеру после отклонения ИИ, мин (0=выкл)
-    # --- AI-ордера (AI-трейдер): жёсткие гейты на входе ---
+    # --- Стакан/ликвидность: гейт для ВСЕХ входов (движок + AI), первый после ансамбля ---
+    entry_ob_imbalance_max: float = 0.3  # блок входа против потока стакана сильнее X (0=выкл)
+    entry_ob_spread_max: float = 25.0    # блок входа при спреде > X б.п. (0=выкл)
+    entry_min_turnover: float = 0.0      # мин. дневной оборот тикера, ₽ (0=выкл)
+    entry_volatility_max_mult: float = 3.0  # блок если ATR% > X × медианы (0=выкл)
+    # --- AI-ордера (AI-трейдер): чейзинг и потолки SL/TP ---
     ai_chase_pct: float = 3.0         # блок входа после хода >X% за день без отката (0=выкл)
-    ai_ob_imbalance_max: float = 0.3  # блок входа против потока стакана сильнее X (0=выкл)
-    ai_ob_spread_max: float = 25.0    # блок входа при спреде > X б.п. (0=выкл)
     ai_sl_max_pct: float = 0.03       # потолок SL для AI-ордера, доля (0=без потолка)
     ai_tp_max_pct: float = 0.08       # потолок TP для AI-ордера, доля (0=без потолка)
 
@@ -232,10 +261,11 @@ BOT_PERSIST_FIELDS = (
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
     "overnight", "eod_close_min_before", "daily_bias", "daily_bias_mode",
     "mtf_align", "mtf_trigger", "ensemble_require_member",
+    "entry_h1_align", "entry_tf_conflict", "entry_last_hour_block",
     "momentum_short", "momentum_n", "momentum_k", "momentum_stop_pct",
     "momentum_entry_time", "momentum_max_lev", "momentum_only", "momentum_side",
     "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
-    "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
+    "pos_pct", "max_positions", "reconcile_enabled", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
     "max_sector_positions",
     "queue_enabled", "queue_ttl_min", "queue_interval_sec", "top_boost",
@@ -249,8 +279,9 @@ BOT_PERSIST_FIELDS = (
     "imoex_release_frac", "imoex_min_block_min", "imoex_guard_min_beta", "imoex_chase_block_pct",
     "ai_approval", "ai_approval_timeout_sec", "ai_approval_default",
     "ai_reject_cooldown_min",
-    "ai_chase_pct", "ai_ob_imbalance_max", "ai_ob_spread_max",
-    "ai_sl_max_pct", "ai_tp_max_pct",
+    "ai_chase_pct", "ai_sl_max_pct", "ai_tp_max_pct",
+    "entry_ob_imbalance_max", "entry_ob_spread_max", "entry_min_turnover",
+    "entry_volatility_max_mult",
 )
 
 
@@ -264,13 +295,15 @@ async def load_bot_settings() -> dict:
             _data = json.loads(_p.read_text(encoding="utf-8"))
             if isinstance(_data, dict) and _data:
                 return _data
-    except Exception:
+    except Exception as _sw_e:
+        _audit_swallow('load_bot_settings@L243', _sw_e)  # audit silent-except
         pass
     try:
         async with SessionLocal() as db:
             row = await db.get(BotSetting, "runtime_config")
             return dict(row.value) if (row is not None and row.value) else {}
-    except Exception:
+    except Exception as _sw_e:
+        _audit_swallow('load_bot_settings@L249', _sw_e)  # audit silent-except
         return {}
 
 
@@ -289,7 +322,8 @@ async def save_bot_settings(cfg) -> None:
         _tmp = _p.with_suffix(".json.tmp")
         _tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         _tmp.replace(_p)
-    except Exception:
+    except Exception as _sw_e:
+        _audit_swallow('save_bot_settings@L268', _sw_e)  # audit silent-except
         pass
     try:
         async with SessionLocal() as db:
@@ -299,7 +333,8 @@ async def save_bot_settings(cfg) -> None:
             else:
                 row.value = data
             await db.commit()
-    except Exception:
+    except Exception as _sw_e:
+        _audit_swallow('save_bot_settings@L278', _sw_e)  # audit silent-except
         pass
 
 
@@ -392,7 +427,8 @@ def apply_test_overrides(cfg) -> list[str]:
         try:
             setattr(cfg, _k, _v)
             applied.append(f"{_k}={_v}")
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('apply_test_overrides@L371', _sw_e)  # audit silent-except
             pass
     return applied
 
@@ -414,7 +450,8 @@ async def load_ensemble_config(mode: str = "") -> dict:
                 _d = json.loads(_p.read_text(encoding="utf-8"))
                 if isinstance(_d, dict) and _d.get("setups"):
                     return _d
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('load_ensemble_config@L393', _sw_e)  # audit silent-except
             continue
     return default_ensemble_config()
 
@@ -426,7 +463,8 @@ async def save_ensemble_config(cfg: dict) -> None:
         _tmp = _p.with_suffix(".json.tmp")
         _tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
         _tmp.replace(_p)
-    except Exception:
+    except Exception as _sw_e:
+        _audit_swallow('save_ensemble_config@L405', _sw_e)  # audit silent-except
         pass
 
 
@@ -437,7 +475,8 @@ async def load_bot_flags() -> dict:
         async with SessionLocal() as db:
             row = await db.get(BotSetting, _BOT_FLAGS_KEY)
             return dict(row.value) if (row is not None and row.value) else {}
-    except Exception:
+    except Exception as _sw_e:
+        _audit_swallow('load_bot_flags@L416', _sw_e)  # audit silent-except
         return {}
 
 
@@ -454,7 +493,8 @@ async def save_bot_flags(flags: dict) -> None:
             else:
                 row.value = cur
             await db.commit()
-    except Exception:
+    except Exception as _sw_e:
+        _audit_swallow('save_bot_flags@L433', _sw_e)  # audit silent-except
         pass
 
 
@@ -658,7 +698,8 @@ class PaperBotRuntime:
                 _acd = json.loads(_acp.read_text(encoding="utf-8"))
                 if isinstance(_acd, dict):
                     self._ai_control.update(_acd)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('__init__@L637', _sw_e)  # audit silent-except
             pass
         self._ai_report: dict = {}  # отчёт AI о рынке + предложения по боту (для UI)
 
@@ -684,7 +725,8 @@ class PaperBotRuntime:
                     _m[str(r[1])] = _v
             self._sector_meta = _m
             self._sector_meta_ts = _t.monotonic()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('sector_meta@L663', _sw_e)  # audit silent-except
             pass
         return self._sector_meta
 
@@ -699,7 +741,8 @@ class PaperBotRuntime:
         margin: dict = {}
         try:
             equity = float(await self.broker.equity() or 0.0)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('portfolio_snapshot@L678', _sw_e)  # audit silent-except
             pass
         try:
             for p in (await self.broker.positions()):
@@ -714,20 +757,23 @@ class PaperBotRuntime:
                     "entry": float(getattr(p, "entry_price", 0) or 0),
                     "last": last,
                 })
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('portfolio_snapshot@L693', _sw_e)  # audit silent-except
             pass
         _ma_fn = getattr(self.broker, "margin_attributes", None)
         if _ma_fn is not None:
             try:
                 margin = await _ma_fn() or {}
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('portfolio_snapshot@L699', _sw_e)  # audit silent-except
                 margin = {}
         meta = await self.sector_meta()
         snap = _snap(equity, positions, meta, margin)
         snap["skip_counts"] = self.get_no_trade_stats()
         try:
             await self.trade_history()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('portfolio_snapshot@L706', _sw_e)  # audit silent-except
             pass
         try:
             _mtfm = await self.mtf_macd_map()
@@ -735,16 +781,19 @@ class PaperBotRuntime:
                                "m5": (v.get("m5") or {}).get("side"),
                                "m5_trend": (v.get("m5") or {}).get("trend")}
                            for k, v in list(_mtfm.items())[:40]}
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('portfolio_snapshot@L714', _sw_e)  # audit silent-except
             snap["mtf"] = {}
         try:
             _dbm = await self.daily_bias_map()
             snap["daily_bias"] = {k: v.get("bias") for k, v in list(_dbm.items())[:40]}
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('portfolio_snapshot@L719', _sw_e)  # audit silent-except
             snap["daily_bias"] = {}
         try:
             snap["regime"] = await self.market_regime()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('portfolio_snapshot@L723', _sw_e)  # audit silent-except
             snap["regime"] = {}
         snap["queue"] = sorted(
             [{"ticker": c.get("ticker"), "side": c.get("side"), "score": c.get("score"),
@@ -761,7 +810,8 @@ class PaperBotRuntime:
                 "explore": int(getattr(self.config, "rank_explore", 10) or 0),
                 "top": [k for k, _ in _ranked[:int(getattr(self.config, "rank_top_n", 10) or 0)]],
             }
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('portfolio_snapshot@L740', _sw_e)  # audit silent-except
             snap["rank"] = {}
         snap["dd"] = {"peak": round(self._equity_peak, 2),
                       "dd_pct": round(max(0.0, (self._equity_peak - equity) / self._equity_peak), 4)
@@ -794,13 +844,15 @@ class PaperBotRuntime:
             _dv = [v for t, v in self._imoex_buf if t.astimezone(_msk).date() == _day]
             if _dv and last_v:
                 pday = (last_v - _dv[0]) / _dv[0] * 100
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_pct@L773', _sw_e)  # audit silent-except
             pass
         br_up = None
         try:
             from app.api.routes.screener import market_breadth
             br_up = (market_breadth() or {}).get("up_pct")
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_pct@L779', _sw_e)  # audit silent-except
             br_up = None
         st = "neutral"
         if p20 is not None and p60 is not None:
@@ -862,10 +914,12 @@ class PaperBotRuntime:
                     val = float(row.get("turnover") or 0.0)
                     if val > 0:
                         self._turnover_cache[str(tk).upper()] = val
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('trade_history@L841', _sw_e)  # audit silent-except
                 pass
             self._hist_ts = _t.monotonic()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('trade_history@L844', _sw_e)  # audit silent-except
             pass
         return self._hist_cache
 
@@ -915,7 +969,8 @@ class PaperBotRuntime:
                 out[tk] = _bfc(closes)
             self._daily_bias_cache = out
             self._daily_bias_ts = _t.monotonic()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('daily_bias_map@L894', _sw_e)  # audit silent-except
             pass
         return self._daily_bias_cache
 
@@ -961,7 +1016,8 @@ class PaperBotRuntime:
                 out[tk] = {"m5": m5, "h1": _ms(h1)}
             self._mtf_cache = out
             self._mtf_ts = _t.monotonic()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('mtf_macd_map@L940', _sw_e)  # audit silent-except
             pass
         return self._mtf_cache
 
@@ -996,7 +1052,8 @@ class PaperBotRuntime:
                     out[tk] = round((c1 / c0 - 1.0) * 100.0, 1)
             self._momentum_cache = out
             self._momentum_ts = _t.monotonic()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('momentum_map@L975', _sw_e)  # audit silent-except
             pass
         return self._momentum_cache
 
@@ -1023,7 +1080,8 @@ class PaperBotRuntime:
                 _et = str(getattr(cfg, "momentum_entry_time", "10:30") or "10:30")
                 try:
                     _eh, _em = (int(x) for x in _et.split(":"))
-                except Exception:
+                except Exception as _sw_e:
+                    _audit_swallow('_momentum_loop@L1002', _sw_e)  # audit silent-except
                     _eh, _em = 10, 30
                 _mins = msk.hour * 60 + msk.minute
                 _from = _eh * 60 + _em
@@ -1035,7 +1093,8 @@ class PaperBotRuntime:
                 await self._momentum_enter()
             except asyncio.CancelledError:
                 return
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_momentum_loop@L1014', _sw_e)  # audit silent-except
                 pass
 
     async def _momentum_enter(self) -> None:
@@ -1094,7 +1153,8 @@ class PaperBotRuntime:
             eq = float((snap or {}).get("equity") or 0.0)
             boost = float(getattr(cfg, "top_boost", 2.0) or 2.0)
             slot = eq * self._pos_pct() * boost if eq > 0 else 0.0
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_min_turnover@L1073', _sw_e)  # audit silent-except
             slot = 0.0
         return _mt(slot, mult, floor)
 
@@ -1120,7 +1180,8 @@ class PaperBotRuntime:
             worst = abs(min(0.0, min(st.values()))) if st else 0.0
             st_room = _room(worst, float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.1))
             return round(min(net_room, sec_room, mar_room, st_room), 3)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_room@L1099', _sw_e)  # audit silent-except
             return 0.5
 
     def _strength_for(self, bb: str, ticker: str, side: str, meta: dict | None = None,
@@ -1155,7 +1216,8 @@ class PaperBotRuntime:
                        fit=self._fit_score(snap, tk),
                        min_turnover=self._min_turnover(snap),
                        history_veto=bool(getattr(self.config, "queue_history_veto", True)))
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_strength_for@L1134', _sw_e)  # audit silent-except
             return {"score": 50.0, "factors": {}, "veto": []}
 
     async def _enqueue_candidate(self, figi: str, ticker: str, side: str, why: str,
@@ -1188,7 +1250,8 @@ class PaperBotRuntime:
                       f"liq {_f.get('liq')} fit {_f.get('fit')})"
                       + (f" ⛔{','.join(s.get('veto') or [])}" if s.get("veto") else "")
                       + f" — {why}")
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_enqueue_candidate@L1167', _sw_e)  # audit silent-except
             pass
 
     async def _priority_entry_loop(self) -> None:
@@ -1221,7 +1284,8 @@ class PaperBotRuntime:
                                          meta={"priority": True, "queue_score": c.get("score")})
             except asyncio.CancelledError:
                 return
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_priority_entry_loop@L1200', _sw_e)  # audit silent-except
                 pass
 
     async def reduce_positions(self, close_pct: float, reason: str, side: str = "",
@@ -1286,9 +1350,11 @@ class PaperBotRuntime:
                 try:
                     if et is not None and et.astimezone(_msk).date() < today:
                         out.append(str(f))
-                except Exception:
+                except Exception as _sw_e:
+                    _audit_swallow('_overnight_positions@L1265', _sw_e)  # audit silent-except
                     pass
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_overnight_positions@L1267', _sw_e)  # audit silent-except
             pass
         self._overnight_cache = out
         self._overnight_ts = _t.monotonic()
@@ -1319,6 +1385,7 @@ class PaperBotRuntime:
                                 self.events.log("EOD_CLOSE", closed=r["closed"],
                                                 reason="overnight_false")
                 except Exception as _e_eod:
+                    _audit_swallow('_portfolio_guard_loop@L1297', _e_eod)  # audit silent-except
                     pass
                 # --- Уборка ночных: overnight=False, а позиция вошла до сегодня → закрыть.
                 try:
@@ -1332,14 +1399,16 @@ class PaperBotRuntime:
                                 self._log(f"🌙 НОЧНЫЕ ЗАКРЫТЫ: {r['closed']} поз. "
                                           f"(вошли до сегодня, overnight=False)")
                                 self.events.log("OVERNIGHT_CLEANUP", closed=r["closed"])
-                except Exception:
+                except Exception as _sw_e:
+                    _audit_swallow('_portfolio_guard_loop@L1311', _sw_e)  # audit silent-except
                     pass
                 # Equity для DD-защиты: ликвидный портфель брокера (правда), fallback — equity().
                 eq = 0.0
                 try:
                     _ma = await self.broker.margin_attributes() or {}
                     eq = float(_ma.get("liquid") or 0.0)
-                except Exception:
+                except Exception as _sw_e:
+                    _audit_swallow('_portfolio_guard_loop@L1318', _sw_e)  # audit silent-except
                     eq = 0.0
                 if eq <= 0:
                     eq = float(await self.broker.equity() or 0.0)
@@ -1367,7 +1436,8 @@ class PaperBotRuntime:
                                     closed=r["closed"], peak=round(self._equity_peak, 2))
             except asyncio.CancelledError:
                 return
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_portfolio_guard_loop@L1346', _sw_e)  # audit silent-except
                 pass
 
     def _pos_pct(self) -> float:
@@ -1375,7 +1445,8 @@ class PaperBotRuntime:
         try:
             v = float(getattr(self.config, "pos_pct", POS_PCT) or POS_PCT)
             return min(max(v, 0.05), 1.0)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_pos_pct@L1354', _sw_e)  # audit silent-except
             return POS_PCT
 
     def _log(self, msg: str, level: str = "info", source: str = "bot") -> None:
@@ -1410,7 +1481,8 @@ class PaperBotRuntime:
         try:
             now = datetime.now(timezone.utc)
             return now >= c.ts
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_is_closed@L1389', _sw_e)  # audit silent-except
             return True
 
     def _candle_ok(self, c) -> bool:
@@ -1426,7 +1498,8 @@ class PaperBotRuntime:
         from app.services.candle_guard import bar_ok, jump_ratio
         try:
             o, h, l, cl = float(c.open), float(c.high), float(c.low), float(c.close)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_candle_ok@L1405', _sw_e)  # audit silent-except
             return False
         cfigi = getattr(c, "figi", "")
         tcs_map = getattr(self, "tcs_to_bbg", {}) or {}
@@ -1436,7 +1509,8 @@ class PaperBotRuntime:
         # MSK date tracking (для статистики)
         try:
             _d = c.ts.astimezone(ZoneInfo("Europe/Moscow")).date().isoformat()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_candle_ok@L1415', _sw_e)  # audit silent-except
             _d = str(getattr(c, "ts", ""))[:10]
         dj = self._day_jumps.setdefault(figi, {})
         pv = self._prev_close.get(figi)
@@ -1511,7 +1585,8 @@ class PaperBotRuntime:
                             u.get("lot_size", 10), cfg.ensemble_capital, cfg.sessions)
                         self.strategies[figi] = EnsembleV4Strategy(params)
                         n += 1
-                    except Exception:
+                    except Exception as _sw_e:
+                        _audit_swallow('reload_ensemble@L1490', _sw_e)  # audit silent-except
                         continue
             self._log(f"⚙ КОНФИГ КВОРУМА применён: пересобрано стратегий {n}")
         except Exception as e:
@@ -1527,6 +1602,13 @@ class PaperBotRuntime:
     def get_no_trade_stats(self) -> dict[str, int]:
         """Return aggregated NO_TRADE reasons for diagnostics."""
         return dict(self._no_trade_stats)
+
+    def _reject_entry(self, stage: str, key: str, detail: str, figi: str, ticker: str) -> None:
+        """Единое логирование отказа гейта: лог + событие + skip_counts (не молча)."""
+        self._log(f"ПРОПУСК ВХОДА {ticker}: [{stage}] {key} — {detail}")
+        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                        reason=str(key).upper(), detail=str(detail)[:160])
+        self._log_no_trade(figi, key)
 
     def log_no_trade_summary(self) -> None:
         """Print NO_TRADE stats summary to logs."""
@@ -1553,11 +1635,13 @@ class PaperBotRuntime:
                         meta = _json.loads(row[1]) if row[1] else {}
                         bh = meta.get("bars_held", 0)
                         stats["bars_held_sum"] += bh
-                    except Exception:
+                    except Exception as _sw_e:
+                        _audit_swallow('get_exit_stats@L1532', _sw_e)  # audit silent-except
                         pass
                 if stats["total"] > 0:
                     stats["avg_bars_held"] = round(stats["bars_held_sum"] / stats["total"], 1)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('get_exit_stats@L1536', _sw_e)  # audit silent-except
             pass
         return stats
 
@@ -1566,7 +1650,8 @@ class PaperBotRuntime:
             if str((meta or {}).get("hold") or "").lower() == "swing":
                 self._swing.add(str(figi))
                 self._log(f"SWING {ticker}: долгая сделка — EOD/ночь не закрывает")
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_st_open@L1545', _sw_e)  # audit silent-except
             pass
         from app.models.sandbox_trade import SandboxTrade
         import json as _json
@@ -1575,7 +1660,8 @@ class PaperBotRuntime:
             from app.models.instrument import Instrument
             async with SessionLocal() as db2:
                 _lot = int((await db2.execute(select(Instrument.lot).where(Instrument.figi == figi))).scalar_one_or_none() or 1)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_st_open@L1554', _sw_e)  # audit silent-except
             pass
         qty_shares = int(qty) * _lot
         try:
@@ -1609,7 +1695,8 @@ class PaperBotRuntime:
                     test_name=getattr(self.config, "test_name", "") or None,
                 ))
                 await db.commit()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_st_open@L1588', _sw_e)  # audit silent-except
             pass
 
     async def _st_close(self, figi, exit_price, reason="", net=None, meta: dict | None = None) -> None:
@@ -1649,9 +1736,11 @@ class PaperBotRuntime:
                         _net = float(net) if net is not None else (
                             float(row.net_pnl) if row.net_pnl is not None else None)
                         self._update_loss_streak(figi, _net)
-                    except Exception:
+                    except Exception as _sw_e:
+                        _audit_swallow('_st_close@L1628', _sw_e)  # audit silent-except
                         pass
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_st_close@L1630', _sw_e)  # audit silent-except
             pass
 
     async def _st_update_sl(self, figi: str, sl: float, trail_active: bool | None = None) -> None:
@@ -1674,7 +1763,8 @@ class PaperBotRuntime:
                         if trail_active:
                             row.take_profit = None  # TP выключается при активации трейлинга
                     await db.commit()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_st_update_sl@L1653', _sw_e)  # audit silent-except
             pass
 
     async def set_position_levels(self, figi: str, sl: float | None = None, tp: float | None = None) -> dict:
@@ -1687,7 +1777,8 @@ class PaperBotRuntime:
         from sqlalchemy import select as _sel
         try:
             pos = await self.broker.get_position(figi)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('set_position_levels@L1666', _sw_e)  # audit silent-except
             pos = None
         if pos is None:
             return {"ok": False, "error": "no_position"}
@@ -1705,7 +1796,8 @@ class PaperBotRuntime:
             _b = list(self.buffers.get(figi) or [])
             _px = float(_b[-1].close) if _b else 0.0
             _atr = float(self.atr_now(figi) or 0.0)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('set_position_levels@L1684', _sw_e)  # audit silent-except
             pass
         _is_long = str(getattr(pos, "side", "")).upper() in ("BUY", "LONG")
         _entry = float(getattr(pos, "entry_price", 0) or 0)
@@ -1793,11 +1885,13 @@ class PaperBotRuntime:
         }
         try:
             out["equity"] = float(await self.broker.equity())
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('state_snapshot@L1772', _sw_e)  # audit silent-except
             pass
         try:
             pos_list = await self.broker.positions()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('state_snapshot@L1776', _sw_e)  # audit silent-except
             pos_list = []
         for p in pos_list:
             figi = str(getattr(p, "figi", "") or "")
@@ -1924,7 +2018,8 @@ class PaperBotRuntime:
                         _upto = datetime.fromisoformat(_re.replace("Z", "+00:00"))
                         if _upto.tzinfo is None:
                             _upto = _upto.replace(tzinfo=timezone.utc)
-                    except Exception:
+                    except Exception as _sw_e:
+                        _audit_swallow('_load_imoex_buf@L1903', _sw_e)  # audit silent-except
                         _upto = now
                 if _upto < now:
                     _upto = now
@@ -2014,13 +2109,15 @@ class PaperBotRuntime:
         now = self._bot_now()
         try:
             age_sec = (now - last_ts).total_seconds() if last_ts else None
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_imoex_guard_snapshot@L1993', _sw_e)  # audit silent-except
             age_sec = None
         _trading = False
         try:
             from app.bot.imoex_guard import imoex_session as _isess
             _trading = _isess(now)  # IMOEX живёт только 09:50–19:00 МСК
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_imoex_guard_snapshot@L1999', _sw_e)  # audit silent-except
             pass
         _stale_sec = float(getattr(cfg, "imoex_stale_sec", 300.0) or 300.0)
         _stale = bool(_trading and (age_sec is None or age_sec > _stale_sec))
@@ -2269,9 +2366,11 @@ class PaperBotRuntime:
                 try:
                     if str((_json.loads(m or "{}") or {}).get("hold") or "").lower() == "swing":
                         self._swing.add(str(f))
-                except Exception:
+                except Exception as _sw_e:
+                    _audit_swallow('_restore_swing@L2248', _sw_e)  # audit silent-except
                     pass
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_restore_swing@L2250', _sw_e)  # audit silent-except
             pass
 
     async def start(self, cfg: BotConfig) -> dict:
@@ -2288,8 +2387,19 @@ class PaperBotRuntime:
                     if _f in _saved:
                         try:
                             setattr(cfg, _f, _saved[_f])
-                        except Exception:
+                        except Exception as _sw_e:
+                            _audit_swallow('start@L2267', _sw_e)  # audit silent-except
                             pass
+        except Exception as _sw_e:
+            _audit_swallow('start@L2269', _sw_e)  # audit silent-except
+            pass
+        # Конфиг гейтов (data/gates_config.json) — источник правды по порогам гейтов
+        # (entry_min_turnover, entry_ob_*, entry_volatility_max_mult, ai_* и т.д.).
+        try:
+            from app.bot.gates import apply_gates_config as _agc
+            _gapplied = _agc(cfg)
+            if _gapplied:
+                self._log(f"ГЕЙТЫ: конфиг применён ({len(_gapplied)} полей из gates_config.json)")
         except Exception:
             pass
         # Режим AI применяем ПОСЛЕ сохранёнок: селектор (Бот+++/AI) — источник правды
@@ -2297,7 +2407,8 @@ class PaperBotRuntime:
         # после переключения контура (sandbox↔live) и AI «только рассуждал».
         try:
             self.apply_ai_mode()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('start@L2276', _sw_e)  # audit silent-except
             pass
         # Восстанавливаем персистентные runtime-флаги (entries_paused переживает рестарт).
         try:
@@ -2305,7 +2416,8 @@ class PaperBotRuntime:
             self.entries_paused = bool(_flags.get("entries_paused", False))
             if self.entries_paused:
                 self._log("ВОССТАНОВЛЕНО: пауза новых входов (entries_paused=true) сохранена между рестартами")
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('start@L2284', _sw_e)  # audit silent-except
             pass
         if cfg.use_ensemble:
             cfg.interval_name = "1min"
@@ -2358,9 +2470,11 @@ class PaperBotRuntime:
                 if _rows:
                     hub.set_seq(int(_rows[-1][0]))
                 self._log(f"ВОССТАНОВЛЕНО {len(_rows)} строк логов из истории")
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('start@L2337', _sw_e)  # audit silent-except
                 pass
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('start@L2339', _sw_e)  # audit silent-except
             pass
         self.error = None
         self.candles_seen = 0
@@ -2479,7 +2593,8 @@ class PaperBotRuntime:
                 if _atrs:
                     self._log(f"Вселенная: {len(self.universe)} бумаг · волатильность ATR% {min(_atrs):.3f}–{max(_atrs):.3f} · "
                               f"{', '.join(u.get('ticker', '?') for u in self.universe)}")
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_startup@L2458', _sw_e)  # audit silent-except
                 pass
             # Loaded all eligible for streaming
             async with SessionLocal() as db2:
@@ -2657,7 +2772,8 @@ class PaperBotRuntime:
                             self._log(f"ВЫХОД ВОССТАНОВЛЕН {_f[-6:]} {_p.side} entry={_entry_px:.2f} sl={self._trail_stop[_f]:.2f} trail={_trail_was}")
                         except Exception as _restore_e:
                             self._log(f"restore trailing {_f[-6:]} error: {_restore_e}")
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_load_bounded@L2633', _sw_e)  # audit silent-except
                 self._held = set()
             self.running = True
             self._log("БОТ ЗАПУЩЕН")
@@ -2668,6 +2784,7 @@ class PaperBotRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            _audit_swallow('_load_bounded@L2643', e)  # audit silent-except
             self.error = str(e)[:300]
             self.events.log("ERROR", reason=self.error)
         finally:
@@ -2682,7 +2799,8 @@ class PaperBotRuntime:
         if self.stream_manager is not None:
             try:
                 await self.stream_manager.stop()
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('stop@L2658', _sw_e)  # audit silent-except
                 pass
             self.stream_manager = None
         # Закрыть gRPC-канал брокера: non-daemon потоки Client держат процесс
@@ -2691,7 +2809,8 @@ class PaperBotRuntime:
             _cl = getattr(self.broker, "close", None)
             if callable(_cl):
                 _cl()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('stop@L2667', _sw_e)  # audit silent-except
             pass
         for t in (self.startup_task, self.task):
             if t and not t.done():
@@ -2875,7 +2994,8 @@ class PaperBotRuntime:
             vals = _atr(list(_bars), _p)
             v = vals[-1] if vals else None
             return float(v) if v else None
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('atr_now@L2851', _sw_e)  # audit silent-except
             return None
 
     def add_ai_note(self, payload: dict) -> dict:
@@ -2912,7 +3032,8 @@ class PaperBotRuntime:
                 "provider": str((payload or {}).get("provider") or ""),
                 "updated_ts": datetime.now(timezone.utc).isoformat(),
             }
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('set_ai_prompt@L2888', _sw_e)  # audit silent-except
             pass
         self._ai_prompt = {
             "updated_ts": datetime.now(timezone.utc).isoformat(),
@@ -2970,19 +3091,22 @@ class PaperBotRuntime:
         try:
             self.config.ai_approval = bool(spec.get("gate"))
             self.config.momentum_only = not bool(spec.get("engine"))
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('apply_ai_mode@L2946', _sw_e)  # audit silent-except
             pass
         try:
             import asyncio as _aio
             _aio.get_running_loop().create_task(save_bot_settings(self.config))
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('apply_ai_mode@L2951', _sw_e)  # audit silent-except
             pass
         try:
             _m = str(self._ai_control.get("mode") or "")
             self._log(f"Режим бота: {_m or '—'} · торговля двигателем={'вкл' if spec.get('engine') else 'выкл'} · "
                       f"гейт={'вкл' if spec.get('gate') else 'выкл'} · вахтёр={'вкл' if spec.get('watch') else 'выкл'} · "
                       f"трейдер={'вкл' if spec.get('trader') else 'выкл'}")
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('apply_ai_mode@L2959', _sw_e)  # audit silent-except
             pass
 
     def set_ai_control(self, payload: dict) -> dict:
@@ -3007,11 +3131,13 @@ class PaperBotRuntime:
             _tmp.write_text(json.dumps(self._ai_control, ensure_ascii=False, indent=2),
                             encoding="utf-8")
             _tmp.replace(_p)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('set_ai_control@L2984', _sw_e)  # audit silent-except
             pass
         try:
             self.apply_ai_mode()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('set_ai_control@L2988', _sw_e)  # audit silent-except
             pass
         return {"ok": True, "updated_ts": self._ai_control["updated_ts"]}
 
@@ -3077,7 +3203,8 @@ class PaperBotRuntime:
                                      float(trade.price) if (trade and getattr(trade, "price", None)) else price,
                                      reason="kill_switch_close_all",
                                      net=float(trade.net_pnl) if trade else None)
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('close_all@L3054', _sw_e)  # audit silent-except
                 pass
             closed.append({"figi": p.figi, "ticker": p.ticker,
                            "price": round(price, 6),
@@ -3110,7 +3237,8 @@ class PaperBotRuntime:
                     self._held.discard(f)
                     self._held_since.pop(f, None)
                     self._log(f"♻ ОЧИСТКА _held: {f[-6:]} (нет в портфеле)")
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_sync_held@L3087', _sw_e)  # audit silent-except
                 pass
 
     async def _hot_add_universe(self) -> None:
@@ -3121,6 +3249,11 @@ class PaperBotRuntime:
 
         while self.running:
             try:
+                # Вне торговых сессий (ночь/выходной) хоровод универса не крутим:
+                # свечи стрима пишутся, а hot-add/стратегии подождём до сессии.
+                if not _sessions_allowed(self._bot_now(), self.config.sessions):
+                    await asyncio.sleep(60.0)
+                    continue
                 async with SessionLocal() as db:
                     # Ищем eligible тикеры которые ещё НЕ в universe
                     current_figi = {u["figi"] for u in self.universe}
@@ -3200,7 +3333,8 @@ class PaperBotRuntime:
                             _la = next((v for v in reversed(_vals) if v is not None), None)
                             if _la and _ec5 and _ec5[-1].close:
                                 _atr_pct = round(_la / _ec5[-1].close * 100, 3)
-                        except Exception:
+                        except Exception as _sw_e:
+                            _audit_swallow('_hot_add_universe@L3177', _sw_e)  # audit silent-except
                             pass
                         self.universe.append({
                             "figi": figi, "ticker": ticker,
@@ -3262,7 +3396,8 @@ class PaperBotRuntime:
                     )
                     self.events.log("SESSION_STATE", reason=_ss,
                                     trading=trade_ok, margin=margin_ok)
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_session_monitor@L3239', _sw_e)  # audit silent-except
                 pass
             await asyncio.sleep(20.0)
 
@@ -3317,7 +3452,8 @@ class PaperBotRuntime:
                     _tss = trading_session()
                     _ss = session_state()
                     _trade_ok = _ss in ("trading", "pre_open") and _tss in (self.config.sessions or [])
-                except Exception:
+                except Exception as _sw_e:
+                    _audit_swallow('_metrics_loop@L3294', _sw_e)  # audit silent-except
                     _trade_ok = True
                 if self.last_candle_ts is None:
                     alerts.append("НЕТ свечей с момента старта")
@@ -3369,6 +3505,12 @@ class PaperBotRuntime:
             try:
                 if not isinstance(self.broker, LiveBroker):
                     continue
+                # Сверка только по явному включению и в торговое время (МСК, будни,
+                # сессии конфига) — вне сессии позиции и так заморожены, опрос только шумит.
+                if not getattr(self.config, "reconcile_enabled", True):
+                    continue
+                if not _sessions_allowed(self._bot_now(), self.config.sessions):
+                    continue
                 await self._reconcile_positions(force=False)
             except asyncio.CancelledError:
                 raise
@@ -3383,7 +3525,8 @@ class PaperBotRuntime:
         # после только что отправленного ордера (иначе свежая строка съедается как orphan).
         try:
             await self.broker.flush_portfolio()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_reconcile_positions@L3359', _sw_e)  # audit silent-except
             pass
         broker_pos = {p.figi: p for p in await self.broker.positions()}
         async with SessionLocal() as db:
@@ -3458,7 +3601,8 @@ class PaperBotRuntime:
                     # сбой API) — если позиция у брокера есть, НЕ помечаем orphan'ом.
                     try:
                         _real = await self.broker.get_position(figi)
-                    except Exception:
+                    except Exception as _sw_e:
+                        _audit_swallow('_reconcile_positions@L3434', _sw_e)  # audit silent-except
                         _real = None
                     if _real is not None:
                         self._log(f"RECONCILE: orphan {figi[-6:]} — у брокера позиция есть, не трогаю")
@@ -3506,13 +3650,15 @@ class PaperBotRuntime:
                                 elif _open_kind in _otype:
                                     if _best_open is None or (_t is not None and _t > _best_open[0]):
                                         _best_open = (_t or _et or _t, _p)
-                            except Exception:
+                            except Exception as _sw_e:
+                                _audit_swallow('_reconcile_positions@L3482', _sw_e)  # audit silent-except
                                 continue
                         if _best_close is not None:
                             _exit_px = round(_best_close[1], 6)
                         if _best_open is not None:
                             _entry_px_broker = round(_best_open[1], 6)
-                    except Exception:
+                    except Exception as _sw_e:
+                        _audit_swallow('_reconcile_positions@L3488', _sw_e)  # audit silent-except
                         pass
                     # P&L считаем по ценам: (выход − вход) × qty × направление − комиссии.
                     _px_out = float(_exit_px or 0.0)
@@ -3520,7 +3666,8 @@ class PaperBotRuntime:
                         try:
                             _buf = self.buffers.get(figi)
                             _px_out = float(_buf[-1].close) if _buf else 0.0
-                        except Exception:
+                        except Exception as _sw_e:
+                            _audit_swallow('_reconcile_positions@L3496', _sw_e)  # audit silent-except
                             _px_out = 0.0
                     if _px_out > 0:
                         _q = abs(float(r.qty or 0))
@@ -3667,7 +3814,8 @@ class PaperBotRuntime:
                     self._replay_from = datetime.fromisoformat(
                         self.config.replay_start.replace("Z", "+00:00")
                     )
-                except Exception:
+                except Exception as _sw_e:
+                    _audit_swallow('_run@L3641', _sw_e)  # audit silent-except
                     self._replay_from = None
                 if self._replay_from is not None and self._replay_from.tzinfo is None:
                     self._replay_from = self._replay_from.replace(tzinfo=timezone.utc)
@@ -3677,7 +3825,8 @@ class PaperBotRuntime:
                     _r_end = datetime.fromisoformat(self.config.replay_end.replace("Z", "+00:00"))
                     if _r_end.tzinfo is None:
                         _r_end = _r_end.replace(tzinfo=timezone.utc)
-                except Exception:
+                except Exception as _sw_e:
+                    _audit_swallow('_run@L3651', _sw_e)  # audit silent-except
                     _r_end = None
             feed: CandleFeed = ReplayFeed(
                 self.config.interval_name, self.stream_universe,
@@ -3727,6 +3876,7 @@ class PaperBotRuntime:
             exited = "cancelled"
             raise
         except Exception as e:
+            _audit_swallow('_run@L3700', e)  # audit silent-except
             self.error = str(e)[:300]
             exited = f"exception: {self.error[:80]}"
             self.events.log("ERROR", reason=self.error)
@@ -3772,7 +3922,8 @@ class PaperBotRuntime:
             if _mm != self._imoex_last_tick:
                 self._imoex_last_tick = _mm
                 self._imoex_guard_tick()
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_process_candle@L3746', _sw_e)  # audit silent-except
             pass
 
         # Битая свеча (прыжок цены / битые OHLC): пропускаем полностью —
@@ -3801,7 +3952,8 @@ class PaperBotRuntime:
                 self._persist_queue.append(
                     (figi, c.ts, float(c.open), float(c.high), float(c.low), float(c.close), int(c.volume or 0))
                 )
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_process_candle@L3775', _sw_e)  # audit silent-except
             pass
 
         # TECHINFO: периодический отчёт (раз в 60с) о поступлении/персисте свечей
@@ -3815,7 +3967,8 @@ class PaperBotRuntime:
                     f"persist_q5={len(self._persist_queue_5m)} mode={self.mode}",
                     level="debug",
                 )
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_process_candle@L3788', _sw_e)  # audit silent-except
             pass
 
         # ГЕЙТ СВЕЖЕСТИ (wall-clock): в торговлю допускаем ТОЛЬКО последний
@@ -3830,7 +3983,8 @@ class PaperBotRuntime:
                 self.events.log("DATA_STALE_CANDLE", figi=figi,
                                 reason=f"stale age={int(_age)}s ts={c.ts}")
                 return
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_process_candle@L3803', _sw_e)  # audit silent-except
             pass
 
         # Стратегию и позиции обрабатываем только для тикеров из universe
@@ -3860,14 +4014,15 @@ class PaperBotRuntime:
                     if not any(abs((x[1] - _ts5).total_seconds()) < 1 and x[0] == figi
                                for x in self._persist_queue_5m):
                         self._persist_queue_5m.append((figi, _ts5, _o, _h, _l, _c, _v))
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_process_candle@L3833', _sw_e)  # audit silent-except
             pass
         if self.log_candles:
             _tk = self.tickers.get(figi, figi[-6:])
             _ch = ((c.close - c.open) / c.open * 100) if c.open else 0.0
             _dir = "▲" if _ch > 0 else ("▼" if _ch < 0 else "·")
             self._log(
-                f"Свеча {_tk} {_msk_fmt(c.ts, 'HH:%M')} МСК: {c.open:.2f} → {c.close:.2f} "
+                f"Свеча {_tk} {_msk_fmt(c.ts, '%H:%M')} МСК: {c.open:.2f} → {c.close:.2f} "
                 f"({_dir} {_ch:+.2f}%), объём {c.volume:g}"
             )
 
@@ -3929,6 +4084,12 @@ class PaperBotRuntime:
                 self._log_no_trade(figi, "cooldown", f"bars_since={bars_since} < {cooldown}")
                 return
 
+        # Вне разрешённых сессий (ночь/выходной): свечи уже собраны и записаны,
+        # позиции обслужены — ансамбль/режим/сигналы НЕ гоняем (экономия CPU;
+        # входов всё равно не будет: их отсекает session_filter).
+        if not _sessions_allowed(self._bot_now(), self.config.sessions):
+            return
+
         if figi in self._signal_busy:
             return
         self._signal_busy.add(figi)
@@ -3943,7 +4104,8 @@ class PaperBotRuntime:
                     _pos_side = "BUY" if _s == "LONG" else ("SELL" if _s == "SHORT" else "")
                 if hasattr(strategy, "p") and hasattr(strategy.p, "skip_entry_side"):
                     strategy.p.skip_entry_side = _pos_side
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_process_candle@L3913', _sw_e)  # audit silent-except
                 pass
             _t2 = _time.perf_counter()
             sig = await asyncio.to_thread(strategy.on_bar, list(buffer))
@@ -3961,6 +4123,7 @@ class PaperBotRuntime:
             if _et > self.metrics["ensemble_ms_max"]:
                 self.metrics["ensemble_ms_max"] = _et
         except Exception as e:
+            _audit_swallow('_process_candle@L3930', e)  # audit silent-except
             self.events.log("SIGNAL_ERROR", figi=figi, reason=str(e)[:200])
             sig = None
         finally:
@@ -3988,7 +4151,8 @@ class PaperBotRuntime:
                                   "features": _r.get("features")}
                     _feats = _r.get("features") or {}
                     _reg_vol = _feats.get("volume_ratio")
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_process_candle@L3959', _sw_e)  # audit silent-except
                 pass
         if _reg_state is not None:
             self._regimes[figi] = {
@@ -4068,13 +4232,13 @@ class PaperBotRuntime:
                 self._log_no_trade(figi, "entries_paused")
                 return
             if sig.side.value == "BUY" and not self.config.long_allowed:
-                self._log(f"ПРОПУСК ВХОДА {ticker}: Long запрещён (Направление)")
+                self._log(f"ПРОПУСК ВХОДА {ticker}: [time] direction_disabled — Long запрещён (Направление)")
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                 reason="LONG_DISABLED")
                 self._log_no_trade(figi, "long_disabled")
                 return
             if sig.side.value == "SELL" and not self.config.short_allowed:
-                self._log(f"ПРОПУСК ВХОДА {ticker}: Short запрещён (Направление)")
+                self._log(f"ПРОПУСК ВХОДА {ticker}: [time] direction_disabled — Short запрещён (Направление)")
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                 reason="SHORT_DISABLED")
                 self._log_no_trade(figi, "short_disabled")
@@ -4103,7 +4267,7 @@ class PaperBotRuntime:
             # HOLD после серии убытков: пауза входов (per-ticker или global).
             _hold, _hold_why = self._loss_streak_block(figi)
             if _hold:
-                self._log(f"ПРОПУСК ВХОДА {ticker}: HOLD после убытков — {_hold_why}")
+                self._log(f"ПРОПУСК ВХОДА {ticker}: [time] loss_streak_hold — HOLD после убытков — {_hold_why}")
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="LOSS_STREAK_HOLD")
                 self._log_no_trade(figi, "loss_streak_hold")
                 return
@@ -4112,7 +4276,7 @@ class PaperBotRuntime:
             if _imoex_why:
                 if self._imoex_state is not None:
                     self._imoex_state.blocks += 1
-                self._log(f"ПРОПУСК ВХОДА {ticker}: против IMOEX — {_imoex_why}")
+                self._log(f"ПРОПУСК ВХОДА {ticker}: [time] imoex_guard — против IMOEX — {_imoex_why}")
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="IMOEX_GUARD")
                 self._log_no_trade(figi, "imoex_guard")
                 return
@@ -4183,6 +4347,289 @@ class PaperBotRuntime:
         # (7000×5.95≈42k) и ордер режется портфельным лимитом экспозиции.
         if _is_priority and not _is_ai:
             _sizing = str(getattr(cfg, "top_sizing", "multiply") or "multiply").lower()
+        # ================= STAGE A: время/контекст (дёшево, без брокера) =================
+        # Цепочка вынесена в app/bot/gates.py (TIME_GATES): пауза → сессия → последний
+        # час → направление → риск дня → loss-streak → already-held. Short-circuit:
+        # если гейт выше рангом отклонил — дальше не идём (и маржу не спрашиваем).
+        if action == "open":
+            from app.bot.gates import TimeContext, TIME_GATES, run_gate_chain
+            from app.bot.session import session_last_hour as _slh
+            _hold_a, _hold_why_a = self._loss_streak_block(figi)
+            _risk_a = self.risk_snapshot()
+            _tc = TimeContext(
+                cfg=cfg, side=side,
+                entries_paused=bool(self.entries_paused),
+                sessions_allowed=bool(_sessions_allowed(self._bot_now(), cfg.sessions)),
+                is_last_hour=bool(_slh(self._bot_now(), list(cfg.sessions or []))),
+                risk_allowed=bool(_risk_a.entries_allowed()),
+                risk_state=str(_risk_a.state), daily_pnl=float(_risk_a.daily_pnl),
+                loss_hold=bool(_hold_a), loss_why=str(_hold_why_a),
+                already_held=bool(figi in self._held),
+            )
+            _res_a = run_gate_chain(TIME_GATES, _tc)
+            if not _res_a.passed:
+                self._reject_entry("time", _res_a.key, _res_a.detail, figi, ticker)
+                return
+        # ================= STAGE S: стакан/ликвидность (первый после ансамбля) ==========
+        # MARKET_GATES из app/bot/gates.py: ликвидность → волатильность → стакан.
+        # Ансамбль может кричать SHORT, но если стакан против (перевес бидов) или спред
+        # широкий — сейчас не время входить, будет минус. Для ВСЕХ входов (движок + AI),
+        # до тренда/портфеля/маржи. Данные — app/services/orderbook.py (кэш 5с).
+        if action == "open":
+            from app.bot.gates import MarketContext, MARKET_GATES, run_gate_chain
+            _to_s = 0.0
+            _atr_s = None
+            for _u in self.universe:
+                if _u.get("figi") == figi:
+                    _to_s = float(_u.get("avg_turnover") or 0.0)
+                    _ap = _u.get("atr_pct")
+                    _atr_s = float(_ap) if _ap else None
+                    break
+            _atrs = [float(u.get("atr_pct") or 0.0)
+                     for u in (self.universe or []) if u.get("atr_pct")]
+            _med_s = None
+            if _atrs:
+                _srt = sorted(_atrs)
+                _med_s = _srt[len(_srt) // 2]
+            _imb_lim_s = float(getattr(cfg, "entry_ob_imbalance_max", 0.3) or 0.0)
+            _spr_lim_s = float(getattr(cfg, "entry_ob_spread_max", 25.0) or 0.0)
+            _ob_s = None
+            if _imb_lim_s > 0 or _spr_lim_s > 0:
+                try:
+                    from app.services.orderbook import fetch_orderbook
+                    _ob_s = await fetch_orderbook(figi, 10)
+                except Exception:
+                    _ob_s = None  # gate_orderbook вернёт orderbook_error
+            _mc = MarketContext(cfg=cfg, side=side, turnover=_to_s, atr_pct=_atr_s,
+                                atr_pct_median=_med_s, orderbook=_ob_s)
+            _res_s = run_gate_chain(MARKET_GATES, _mc)
+            if not _res_s.passed:
+                self._reject_entry("signal", _res_s.key, _res_s.detail, figi, ticker)
+                return
+        # ================= STAGE B: сигнал/тренд (кэш-карты, без брокера) ================
+        # --- Дневной MACD-bias: входы против дневного направления (veto) ---
+        if action == "open" and not (_is_momentum or _is_ai) and bool(getattr(cfg, "daily_bias", False)):
+            try:
+                _db = (await self.daily_bias_map()).get(str(ticker).upper()) or {}
+                _bias = str(_db.get("bias") or "")
+                _against = ((_bias == "up" and side == "SELL")
+                            or (_bias == "down" and side == "BUY"))
+                if _against:
+                    _hist = _db.get("hist")
+                    if str(getattr(cfg, "daily_bias_mode", "veto")).lower() == "veto":
+                        self._log(f"ПРОПУСК ВХОДА {ticker}: [trend] daily_bias — дневной MACD-bias {_bias} "
+                                  f"(hist {_hist:+}) против {side} · {_db.get('bars')} дн.")
+                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                        reason="DAILY_BIAS", detail=_bias)
+                        self._log_no_trade(figi, "daily_bias")
+                        return
+                    self._log(f"ДНЕВНОЙ BIAS {ticker}: {side} против {_bias} "
+                              f"(hist {_hist:+}, info-режим) — пропускаю дальше")
+            except Exception as _sw_e:
+                _audit_swallow('_submit_order@L4395', _sw_e)  # audit silent-except
+                pass
+        # --- Детерминированные TF-гейты входа (правила 6/7/16 из AI-гейта) ---
+        # Зашиты в движок: не зависим от того, включён ли AI-гейт/промпт.
+        if action == "open" and not (_is_momentum or _is_ai):
+            try:
+                _want = "BUY" if side == "BUY" else "SELL"
+                # (last-hour уже проверен в STAGE A — здесь не дублируем)
+                # 7) H1 MACD должен подтверждать сторону входа
+                # 6) Дневной bias и H1 не должны противоречить
+                if (bool(getattr(cfg, "entry_h1_align", True))
+                        or bool(getattr(cfg, "entry_tf_conflict", True))):
+                    _mtf = (await self.mtf_macd_map()).get(str(ticker).upper()) or {}
+                    _h1 = _mtf.get("h1") or {}
+                    _h1_side = str(_h1.get("side") or "") if _h1.get("ok") else ""
+                    _bias = ((await self.daily_bias_map()).get(str(ticker).upper()) or {}).get("bias")
+                    if (bool(getattr(cfg, "entry_h1_align", True)) and _h1_side
+                            and _h1_side != _want):
+                        self._log(f"ПРОПУСК ВХОДА {ticker}: H1 MACD {_h1_side} против {_want} "
+                                  f"(hist {_h1.get('hist'):+})")
+                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                        reason="H1_ALIGN", detail=_h1_side)
+                        self._log_no_trade(figi, "h1_align")
+                        return
+                    if (bool(getattr(cfg, "entry_tf_conflict", True)) and _h1_side
+                            and str(_bias) in ("up", "down")):
+                        _bias_side = "BUY" if _bias == "up" else "SELL"
+                        if _h1_side != _bias_side:
+                            self._log(f"ПРОПУСК ВХОДА {ticker}: [trend] tf_conflict — daily bias {_bias} "
+                                      f"против H1 {_h1_side} (противоречие ТФ)")
+                            self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                            reason="TF_CONFLICT", detail=f"{_bias}/{_h1_side}")
+                            self._log_no_trade(figi, "tf_conflict")
+                            return
+            except Exception as _ge:
+                # Не проглатываем молча: гейт не смог проверить данные — пишем в лог.
+                self._log(f"⚠ TF-ГЕЙТ {ticker}: проверка не удалась "
+                          f"({type(_ge).__name__}: {str(_ge)[:80]}) — вход пропущен")
+                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                reason="TF_GATE_ERROR", detail=str(_ge)[:120])
+                self._log_no_trade(figi, "tf_gate_error")
+                return
+        # --- MTF: H1 MACD должен подтверждать дневной bias; M5 — триггер разворота ---
+        if action == "open" and not (_is_momentum or _is_ai) and (bool(getattr(cfg, "mtf_align", False))
+                                 or bool(getattr(cfg, "mtf_trigger", False))):
+            try:
+                _mtf = (await self.mtf_macd_map()).get(str(ticker).upper()) or {}
+                _h1 = _mtf.get("h1") or {}
+                _m5 = _mtf.get("m5") or {}
+                _bias = ((await self.daily_bias_map()).get(str(ticker).upper()) or {}).get("bias")
+                _want = "BUY" if side == "BUY" else "SELL"
+                if bool(getattr(cfg, "mtf_align", False)) and _h1.get("ok"):
+                    _h1_side = str(_h1.get("side") or "")
+                    if _h1_side and _h1_side != _want:
+                        self._log(f"ПРОПУСК ВХОДА {ticker}: H1 MACD {_h1_side} против {_want} "
+                                  f"(hist {_h1.get('hist'):+})")
+                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                        reason="MTF_H1_ALIGN", detail=_h1_side)
+                        self._log_no_trade(figi, "mtf_h1_align")
+                        return
+                    if _bias in ("up", "down"):
+                        _bias_side = "BUY" if _bias == "up" else "SELL"
+                        if _h1_side and _h1_side != _bias_side:
+                            self._log(f"ПРОПУСК ВХОДА {ticker}: H1 MACD {_h1_side} против дневного "
+                                      f"bias {_bias}")
+                            self._log_no_trade(figi, "mtf_h1_align")
+                            return
+                if bool(getattr(cfg, "mtf_trigger", False)) and _m5.get("ok"):
+                    _tr = str(_m5.get("trend") or "")
+                    _ok_tr = ((_want == "BUY" and _tr == "rising")
+                              or (_want == "SELL" and _tr == "falling"))
+                    if not _ok_tr:
+                        self._log(f"ПРОПУСК ВХОДА {ticker}: M5 MACD триггер не в сторону {_want} "
+                                  f"(trend {_tr}, hist {_m5.get('hist'):+})")
+                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                        reason="MTF_M5_TRIGGER", detail=_tr)
+                        self._log_no_trade(figi, "mtf_m5_trigger")
+                        return
+            except Exception as _sw_e:
+                _audit_swallow('_submit_order@L4433', _sw_e)  # audit silent-except
+                pass
+        # --- Якорь кворума: обязательный голос (напр. macd_cross) + минимум голосов ---
+        if action == "open" and not (_is_momentum or _is_ai):
+            _req_mem = str(getattr(cfg, "ensemble_require_member", "") or "").strip()
+            if _req_mem:
+                _qe = ((meta or {}).get("quorum_event") or {}) if isinstance(meta, dict) else {}
+                _mem = [str(x) for x in (_qe.get("members_for") or [])]
+                _votes = int(_qe.get("votes") or 0)
+                _min_v = int(getattr(cfg, "ensemble_quorum", 2) or 2)
+                if _req_mem not in _mem or _votes < _min_v:
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: [trend] require_member — якорь {_req_mem} не в кворуме "
+                              f"(голоса {_votes}/{_min_v}, members: {','.join(_mem) or '—'})")
+                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                    reason="REQUIRE_MEMBER", detail=f"{_req_mem}|{_votes}")
+                    self._log_no_trade(figi, "require_member")
+                    return
+        # --- Ранжирование: разведка K сделок, затем только топ-N по прошлому net ---
+        if action == "open" and not (_is_momentum or _is_ai):
+            try:
+                await self.trade_history()
+                _rok, _rwhy = self._rank_ok(ticker)
+                if not _rok:
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: [trend] rank_filter — рейтинг — {_rwhy}")
+                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                    reason="RANK_FILTER", detail=_rwhy)
+                    self._log_no_trade(figi, "rank_filter")
+                    return
+            except Exception as _sw_e:
+                _audit_swallow('_submit_order@L4461', _sw_e)  # audit silent-except
+                pass
+
+        # ================= STAGE C: портфель (позиции/кластер/L-S, без брокера) ==========
+        # --- Лимит числа одновременных позиций ---
+        if action == "open":
+            try:
+                _max_pos = int(getattr(cfg, "max_positions", 0) or 0)
+                if _max_pos > 0 and len(self._held) >= _max_pos:
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] max_positions — лимит позиций {_max_pos} "
+                              f"(сейчас {len(self._held)})")
+                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                    reason="MAX_POSITIONS")
+                    self._log_no_trade(figi, "max_positions")
+                    return
+            except Exception as _sw_e:
+                _audit_swallow('_submit_order@L4521', _sw_e)  # audit silent-except
+                pass
+        # --- Лимит позиций в одном секторе-кластере (коррелированный риск) ---
+        if action == "open":
+            try:
+                _max_sec = int(getattr(cfg, "max_sector_positions", 0) or 0)
+                if _max_sec > 0 and self._held:
+                    _meta = await self.sector_meta()
+                    _sec = str((_meta.get(str(ticker).upper())
+                                or _meta.get(figi) or {}).get("sector") or "")
+                    if _sec and _sec != "other":
+                        _same = 0
+                        for _f in self._held:
+                            _tk = self.tickers.get(_f, "")
+                            _s2 = str((_meta.get(str(_tk).upper())
+                                       or _meta.get(_f) or {}).get("sector") or "")
+                            if _s2 == _sec:
+                                _same += 1
+                        if _same >= _max_sec:
+                            self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] sector_cluster — кластер «{_sec}» — "
+                                      f"уже {_same} позиций (лимит {_max_sec})")
+                            self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                            reason="SECTOR_CLUSTER", detail=_sec)
+                            self._log_no_trade(figi, "sector_cluster")
+                            return
+            except Exception as _sw_e:
+                _audit_swallow('_submit_order@L4546', _sw_e)  # audit silent-except
+                pass
+        # --- Баланс LONG/SHORT: не даём уйти в односторонний шорт ---
+        if action == "open" and side == "SELL":
+            try:
+                _share = float(getattr(cfg, "max_short_share", 0.0) or 0.0)
+                _min_total = int(getattr(cfg, "balance_min_positions", 3) or 3)
+                if _share > 0 and len(self._held) >= _min_total:
+                    _shorts = sum(1 for _f in self._held
+                                  if str(self._exit_side.get(_f, "")).upper() == "SHORT")
+                    _total = len(self._held)
+                    if (_shorts + 1) / (_total + 1) > _share:
+                        self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] ls_balance — дисбаланс L/S — шортов {_shorts} из {_total} "
+                                  f"(лимит {_share*100:.0f}%)")
+                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                        reason="LS_BALANCE")
+                        self._log_no_trade(figi, "ls_balance")
+                        return
+            except Exception as _sw_e:
+                _audit_swallow('_submit_order@L4564', _sw_e)  # audit silent-except
+                pass
+
+        # ================= STAGE C2: AI-чейзинг (стакан — общий, в STAGE S) =============
+        # Только для AI-ордеров: после time/trend/portfolio, но ДО запроса маржи.
+        if action == "open" and _is_ai:
+            _ai_skip: list[str] = []
+            _ch = float(getattr(cfg, "ai_chase_pct", 3.0) or 0.0)
+            _chg = None
+            try:
+                _buf_chg = self.buffers.get(figi)
+                if _buf_chg:
+                    _msk = timezone(timedelta(hours=3))
+                    _today = self._bot_now().astimezone(_msk).date()
+                    _bars_today = [b for b in _buf_chg
+                                   if b.ts.astimezone(_msk).date() == _today]
+                    if len(_bars_today) >= 2:
+                        _f0 = float(_bars_today[0].open or _bars_today[0].close or 0)
+                        _l0 = float(_bars_today[-1].close or 0)
+                        if _f0 > 0 and _l0 > 0:
+                            _chg = (_l0 / _f0 - 1.0) * 100.0
+            except Exception:
+                _chg = None
+            if _ch and _chg is not None:
+                if side == "BUY" and _chg > _ch:
+                    _ai_skip.append(f"чейзинг: +{_chg:.1f}% за день без отката")
+                if side == "SELL" and _chg < -_ch:
+                    _ai_skip.append(f"чейзинг: {_chg:.1f}% за день без отскока")
+            if _ai_skip:
+                self._log(f"ПРОПУСК ВХОДА {ticker}: [approval] ai_chase — {'; '.join(_ai_skip)}")
+                self.events.log("AI_ORDER_SKIPPED", figi=figi, ticker=ticker,
+                                reason="; ".join(_ai_skip)[:200])
+                self._log_no_trade(figi, "ai_chase")
+                return
+        # ================= STAGE D: сайзинг и маржа (запросы к брокеру) ==================
         if action == "open":
             buf = self.buffers.get(figi)
             price = float(buf[-1].close) if buf else 0.0
@@ -4202,7 +4649,8 @@ class PaperBotRuntime:
                         )).scalar_one_or_none()
                     if _l:
                         lot = int(_l)
-                except Exception:
+                except Exception as _sw_e:
+                    _audit_swallow('_submit_order@L4173', _sw_e)  # audit silent-except
                     pass
             budget = cfg.ensemble_capital
             if isinstance(self.broker, LiveBroker):
@@ -4214,11 +4662,13 @@ class PaperBotRuntime:
                     _free = await self.broker.free_funds()
                     _slot_pct = self._pos_pct() * _boost
                     budget = _eq * _slot_pct
-                except Exception:
+                except Exception as _sw_e:
+                    _audit_swallow('_submit_order@L4185', _sw_e)  # audit silent-except
                     try:
                         live_cash = await self.broker.cash()
                         budget = live_cash * self._pos_pct() * _boost
-                    except Exception:
+                    except Exception as _sw_e:
+                        _audit_swallow('_submit_order@L4189', _sw_e)  # audit silent-except
                         pass
             elif isinstance(self.broker, PaperBroker):
                 # Тест-режим: эмулируем Live — бюджет = доля от начального капитала теста
@@ -4250,7 +4700,7 @@ class PaperBotRuntime:
             lev = max(1.0, float(cfg.leverage or 1.0))
             lot_cost = price * lot
             if price <= 0 or lot <= 0 or lot_cost <= 0:
-                self._log(f"ПРОПУСК СДЕЛКИ {ticker}: цена={price} лот={lot}")
+                self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] price_lot — цена={price} лот={lot}")
                 return
             own_per_lot = lot_cost  # divide: позиция = бюджет (свои = бюджет / плечо)
             # Ранняя проверка достаточности бюджета. В divide-режиме плечо НЕ
@@ -4260,7 +4710,7 @@ class PaperBotRuntime:
             # если даже на одну акцию не хватает»). В multiply-режиме плечо
             # может спасти лот (own_per_lot = lot_cost/lev) — идём в блок MARGIN.
             if budget < lot_cost and str(cfg.margin_sizing).lower() != "multiply":
-                self._log(f"ПРОПУСК СДЕЛКИ {ticker}: бюджет {budget:.0f} < стоимость лота {lot_cost:.0f} (divide)")
+                self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] budget — бюджет {budget:.0f} < стоимость лота {lot_cost:.0f} (divide)")
                 return
             # --- Маржинальное плечо: запрашиваем у брокера ДО входа, ответ в лог ---
             if isinstance(self.broker, (LiveBroker, PaperBroker)):
@@ -4316,7 +4766,7 @@ class PaperBotRuntime:
                 except Exception as e:
                     self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed at cfg.leverage={lev:.1f}")
             if budget < own_per_lot:
-                self._log(f"ПРОПУСК СДЕЛКИ {ticker}: бюджет {budget:.0f} < стоимость лота {own_per_lot:.0f}")
+                self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] budget — бюджет {budget:.0f} < стоимость лота {own_per_lot:.0f}")
                 return
             qty = max(1, int(budget / own_per_lot))
             _used_lev = lev
@@ -4346,7 +4796,7 @@ class PaperBotRuntime:
                     max_lots = margin_max
                     _lim_kind = "свои деньги (без плеча, потолок марж. лимита)"
                 if max_lots <= 0:
-                    self._log(f"ПРОПУСК СДЕЛКИ {ticker}: лимит ({_lim_kind}) = 0")
+                    self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] margin_limit — лимит ({_lim_kind}) = 0")
                     return
                 if qty > max_lots:
                     self._log(f"QTY CAP {ticker}: {qty} → {max_lots} ({_lim_kind}, {_tss or '—'})")
@@ -4374,7 +4824,8 @@ class PaperBotRuntime:
                                     _mv_cap = float(await self.broker.market_value() or 0.0)
                                     _eff_lev = max(1.0, _mv_cap / max(_own_now, 1.0))
                                     _eq_cap = float(_ma.get("liquid") or _eq_cap)
-                            except Exception:
+                            except Exception as _sw_e:
+                                _audit_swallow('_submit_order@L4345', _sw_e)  # audit silent-except
                                 _own_now = None
                         if _own_now is None:
                             _own_now = 0.0
@@ -4389,13 +4840,14 @@ class PaperBotRuntime:
                         _own_new = ((float(price) * int(qty) * int(_lot_cap))
                                     / max(1.0, float(_eff_lev or _used_lev or 1.0)))
                         if _own_now + _own_new > _eq_cap * _cap:
-                            self._log(f"ПРОПУСК ВХОДА {ticker}: кап экспозиции "
+                            self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] max_exposure — кап экспозиции "
                                       f"{_cap*100:.0f}% (свои {_own_now:.0f}+{_own_new:.0f} > equity {_eq_cap:.0f}₽)")
                             self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                             reason="MAX_EXPOSURE")
                             self._log_no_trade(figi, "max_exposure")
                             return
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_submit_order@L4366', _sw_e)  # audit silent-except
                 pass
         order = BotOrder(
             id=_new_order_id(),
@@ -4406,92 +4858,6 @@ class PaperBotRuntime:
             qty=qty,
             meta={**dict(meta or {}), "leverage": float(_used_lev)},
         )
-        # --- Дневной MACD-bias: входы против дневного направления (veto) ---
-        if action == "open" and not (_is_momentum or _is_ai) and bool(getattr(cfg, "daily_bias", False)):
-            try:
-                _db = (await self.daily_bias_map()).get(str(ticker).upper()) or {}
-                _bias = str(_db.get("bias") or "")
-                _against = ((_bias == "up" and side == "SELL")
-                            or (_bias == "down" and side == "BUY"))
-                if _against:
-                    _hist = _db.get("hist")
-                    if str(getattr(cfg, "daily_bias_mode", "veto")).lower() == "veto":
-                        self._log(f"ПРОПУСК ВХОДА {ticker}: дневной MACD-bias {_bias} "
-                                  f"(hist {_hist:+}) против {side} · {_db.get('bars')} дн.")
-                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                        reason="DAILY_BIAS", detail=_bias)
-                        self._log_no_trade(figi, "daily_bias")
-                        return
-                    self._log(f"ДНЕВНОЙ BIAS {ticker}: {side} против {_bias} "
-                              f"(hist {_hist:+}, info-режим) — пропускаю дальше")
-            except Exception:
-                pass
-        # --- MTF: H1 MACD должен подтверждать дневной bias; M5 — триггер разворота ---
-        if action == "open" and not (_is_momentum or _is_ai) and (bool(getattr(cfg, "mtf_align", False))
-                                 or bool(getattr(cfg, "mtf_trigger", False))):
-            try:
-                _mtf = (await self.mtf_macd_map()).get(str(ticker).upper()) or {}
-                _h1 = _mtf.get("h1") or {}
-                _m5 = _mtf.get("m5") or {}
-                _bias = ((await self.daily_bias_map()).get(str(ticker).upper()) or {}).get("bias")
-                _want = "BUY" if side == "BUY" else "SELL"
-                if bool(getattr(cfg, "mtf_align", False)) and _h1.get("ok"):
-                    _h1_side = str(_h1.get("side") or "")
-                    if _h1_side and _h1_side != _want:
-                        self._log(f"ПРОПУСК ВХОДА {ticker}: H1 MACD {_h1_side} против {_want} "
-                                  f"(hist {_h1.get('hist'):+})")
-                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                        reason="MTF_H1_ALIGN", detail=_h1_side)
-                        self._log_no_trade(figi, "mtf_h1_align")
-                        return
-                    if _bias in ("up", "down"):
-                        _bias_side = "BUY" if _bias == "up" else "SELL"
-                        if _h1_side and _h1_side != _bias_side:
-                            self._log(f"ПРОПУСК ВХОДА {ticker}: H1 MACD {_h1_side} против дневного "
-                                      f"bias {_bias}")
-                            self._log_no_trade(figi, "mtf_h1_align")
-                            return
-                if bool(getattr(cfg, "mtf_trigger", False)) and _m5.get("ok"):
-                    _tr = str(_m5.get("trend") or "")
-                    _ok_tr = ((_want == "BUY" and _tr == "rising")
-                              or (_want == "SELL" and _tr == "falling"))
-                    if not _ok_tr:
-                        self._log(f"ПРОПУСК ВХОДА {ticker}: M5 MACD триггер не в сторону {_want} "
-                                  f"(trend {_tr}, hist {_m5.get('hist'):+})")
-                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                        reason="MTF_M5_TRIGGER", detail=_tr)
-                        self._log_no_trade(figi, "mtf_m5_trigger")
-                        return
-            except Exception:
-                pass
-        # --- Якорь кворума: обязательный голос (напр. macd_cross) + минимум голосов ---
-        if action == "open" and not (_is_momentum or _is_ai):
-            _req_mem = str(getattr(cfg, "ensemble_require_member", "") or "").strip()
-            if _req_mem:
-                _qe = ((meta or {}).get("quorum_event") or {}) if isinstance(meta, dict) else {}
-                _mem = [str(x) for x in (_qe.get("members_for") or [])]
-                _votes = int(_qe.get("votes") or 0)
-                _min_v = int(getattr(cfg, "ensemble_quorum", 2) or 2)
-                if _req_mem not in _mem or _votes < _min_v:
-                    self._log(f"ПРОПУСК ВХОДА {ticker}: якорь {_req_mem} не в кворуме "
-                              f"(голоса {_votes}/{_min_v}, members: {','.join(_mem) or '—'})")
-                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                    reason="REQUIRE_MEMBER", detail=f"{_req_mem}|{_votes}")
-                    self._log_no_trade(figi, "require_member")
-                    return
-        # --- Ранжирование: разведка K сделок, затем только топ-N по прошлому net ---
-        if action == "open" and not (_is_momentum or _is_ai):
-            try:
-                await self.trade_history()
-                _rok, _rwhy = self._rank_ok(ticker)
-                if not _rok:
-                    self._log(f"ПРОПУСК ВХОДА {ticker}: рейтинг — {_rwhy}")
-                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                    reason="RANK_FILTER", detail=_rwhy)
-                    self._log_no_trade(figi, "rank_filter")
-                    return
-            except Exception:
-                pass
         # --- Портфельные лимиты (net exposure / сектор / маржа / стресс) ---
         if action == "open":
             try:
@@ -4519,7 +4885,7 @@ class PaperBotRuntime:
                 _net = float(_snap.get("net_notional") or 0.0)
                 if str(_regime.get("state")) == "reversal" and (
                         (_net < 0 and side == "SELL") or (_net > 0 and side == "BUY")):
-                    self._log(f"ПРОПУСК ВХОДА {ticker}: разворот рынка против книги "
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] market_reversal — разворот рынка против книги "
                               f"(net {_net:+.0f}₽, IMOEX 20м {_regime.get('pct_20m')}%)")
                     self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                     reason="MARKET_REVERSAL")
@@ -4528,7 +4894,7 @@ class PaperBotRuntime:
                 _ok_pf, _why_pf = _pcheck(_snap, side, _notional, ticker,
                                           await self.sector_meta(), _lim)
                 if not _ok_pf:
-                    self._log(f"ПРОПУСК ВХОДА {ticker}: портфельный лимит — {_why_pf}"
+                    self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] portfolio_limit — портфельный лимит — {_why_pf}"
                               + (f" [режим {_regime.get('state')}]" if _regime.get("state") != "neutral" else ""))
                     self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                     reason="PORTFOLIO_LIMIT", detail=_why_pf)
@@ -4539,62 +4905,6 @@ class PaperBotRuntime:
                     return
             except Exception as _e:
                 self._log(f"ПОРТФЕЛЬ-ЛИМИТ {ticker}: проверка не удалась ({type(_e).__name__}) — пропускаю")
-        # --- Лимит числа одновременных позиций ---
-        if action == "open":
-            try:
-                _max_pos = int(getattr(cfg, "max_positions", 0) or 0)
-                if _max_pos > 0 and len(self._held) >= _max_pos:
-                    self._log(f"ПРОПУСК ВХОДА {ticker}: лимит позиций {_max_pos} "
-                              f"(сейчас {len(self._held)})")
-                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                    reason="MAX_POSITIONS")
-                    self._log_no_trade(figi, "max_positions")
-                    return
-            except Exception:
-                pass
-        # --- Лимит позиций в одном секторе-кластере (коррелированный риск) ---
-        if action == "open":
-            try:
-                _max_sec = int(getattr(cfg, "max_sector_positions", 0) or 0)
-                if _max_sec > 0 and self._held:
-                    _meta = await self.sector_meta()
-                    _sec = str((_meta.get(str(ticker).upper())
-                                or _meta.get(figi) or {}).get("sector") or "")
-                    if _sec and _sec != "other":
-                        _same = 0
-                        for _f in self._held:
-                            _tk = self.tickers.get(_f, "")
-                            _s2 = str((_meta.get(str(_tk).upper())
-                                       or _meta.get(_f) or {}).get("sector") or "")
-                            if _s2 == _sec:
-                                _same += 1
-                        if _same >= _max_sec:
-                            self._log(f"ПРОПУСК ВХОДА {ticker}: кластер «{_sec}» — "
-                                      f"уже {_same} позиций (лимит {_max_sec})")
-                            self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                            reason="SECTOR_CLUSTER", detail=_sec)
-                            self._log_no_trade(figi, "sector_cluster")
-                            return
-            except Exception:
-                pass
-        # --- Баланс LONG/SHORT: не даём уйти в односторонний шорт ---
-        if action == "open" and side == "SELL":
-            try:
-                _share = float(getattr(cfg, "max_short_share", 0.0) or 0.0)
-                _min_total = int(getattr(cfg, "balance_min_positions", 3) or 3)
-                if _share > 0 and len(self._held) >= _min_total:
-                    _shorts = sum(1 for _f in self._held
-                                  if str(self._exit_side.get(_f, "")).upper() == "SHORT")
-                    _total = len(self._held)
-                    if (_shorts + 1) / (_total + 1) > _share:
-                        self._log(f"ПРОПУСК ВХОДА {ticker}: дисбаланс L/S — шортов {_shorts} из {_total} "
-                                  f"(лимит {_share*100:.0f}%)")
-                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                        reason="LS_BALANCE")
-                        self._log_no_trade(figi, "ls_balance")
-                        return
-            except Exception:
-                pass
         # --- AI-гейт: дедуп и пауза после отклонения ---
         if action == "open" and not _is_ai and bool(getattr(cfg, "ai_approval", False)):
             _pend = self.pending_orders.get(figi)
@@ -4654,7 +4964,8 @@ class PaperBotRuntime:
                         _cdt = float(getattr(cfg, "ai_reject_cooldown_min", 15.0) or 0.0)
                         if _cdt > 0:
                             self._ai_reject_until[figi] = self._bot_now() + timedelta(minutes=_cdt)
-                    except Exception:
+                    except Exception as _sw_e:
+                        _audit_swallow('_execute_pending@L4625', _sw_e)  # audit silent-except
                         pass
                     self._log(f"AI-ГЕЙТ: таймаут {_tmo:.0f}с — вход {order.ticker} отклонён (default=reject)")
                     self.events.log("AI_APPROVAL_TIMEOUT", figi=figi, ticker=order.ticker,
@@ -4869,7 +5180,8 @@ class PaperBotRuntime:
                     if _row is not None:
                         _db_sl = float(_row.stop_loss) if _row.stop_loss is not None else None
                         _db_tp = float(_row.take_profit) if _row.take_profit is not None else None
-            except Exception:
+            except Exception as _sw_e:
+                _audit_swallow('_ensure_exit_state@L4840', _sw_e)  # audit silent-except
                 pass
             self._trail_stop[figi] = _db_sl if _db_sl is not None else (
                 float(_pl.stop_loss) if _pl.stop_loss is not None else 0.0)
@@ -4957,7 +5269,8 @@ class PaperBotRuntime:
         try:
             from app.config import settings as _s
             _dbg = bool(getattr(_s, "log_debug_engine", False))
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_step_exit@L4928', _sw_e)  # audit silent-except
             _dbg = False
         if _dbg:
             self._log(f"DBG-EXIT {figi[-6:]} {state.value} entry={entry_px:.2f} qty={qty_sh} "
@@ -4975,7 +5288,8 @@ class PaperBotRuntime:
                             slippage_bps=self.config.slippage_bps)
             _opp = Side.SELL if state == PositionState.LONG else Side.BUY
             price = _cm.fill_price(float(price), _opp)
-        except Exception:
+        except Exception as _sw_e:
+            _audit_swallow('_step_exit@L4946', _sw_e)  # audit silent-except
             pass
 
         trade = await self.broker.close_position(figi, price, reason)

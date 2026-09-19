@@ -2,7 +2,10 @@
 
 > Гейт: `backend/scripts/ai_approval_worker.py` (воркер) + MCP `backend/mcp_server/bot_server.py`.
 > Провайдер на .3: **opencode / big-pickle** (бесплатный Zen через локальный `opencode serve`),
-> режим **shadow** (решения не применяются, только пишутся в UI/лог).
+> либо DeepSeek API (`--provider deepseek`). Боевой/теневой режим — по флагу `--dry-run`
+> (shadow = решения не применяются, только пишутся в UI/лог).
+> **Контур (sandbox/live/test)** воркеры берут из бота (`/api/v1/bot/status` →
+> `broker_mode`/`contour`): данные, сделки, портфель и заявки — только активного счёта.
 > Смотреть в UI: правый сайдбар → вкладка **🤖 AI-гейт** → кнопка **📄** (промпт с бэкенда).
 
 ---
@@ -53,6 +56,7 @@
 | `now_msk` | — | текущее время МСК (модель не гадает) |
 | `order` | `/api/v1/bot/approvals` | ticker, side, qty, price, reason (фичи сигнала) |
 | `context.positions` | `/api/v1/bot/state` | count, same_side, this_ticker (сторона/qty/pnl/SL/TP) |
+| `context.contour` | `/api/v1/bot/state` + `/api/v1/bot/status` | активный контур: sandbox/live/test (данные только этого счёта) |
 | `context.equity` | `/api/v1/bot/state` | эквити |
 | `context.guard` | `/api/v1/bot/status` | active/pct/move/trading/stale/last_candle |
 | `context.risk` | `/api/v1/bot/status` | state (NORMAL/…), daily_pnl, лимит дня |
@@ -128,6 +132,76 @@ nohup .venv-mcp/bin/python3 scripts/ai_approval_worker.py \
 #                                      llama3.2:3b approve (18.7с, шаблонный ответ) — расхождение
 #   Вывод: локальная 3B быстрее, но данные (свечи/объём) не анализирует — только как советник/фолбэк.
 ```
+
+### 5.1 Бот+++: воркеры ДЕЙСТВУЮТ, а не только рассуждают
+
+В режиме **Бот+++** (`ai_control.mode=bot+++`) бот сам выставляет заявки, а воркеры обязаны:
+гейт — approve/reject, вахтёр — close/tighten, трейдер — open/close. Условия:
+
+1. **Гейт** — запущен БЕЗ `--dry-run` (иначе в логе `⚠ SHADOW`, решения не применяются).
+2. **Вахтёр** — запущен с `--watch-positions`; в Бот+++ сам закрывает позиции по сломанному
+   тезису и подтягивает уровни (в Бот+ только советует; `--watch-notes-only` — отключить действия).
+3. **Трейдер** — запущен БЕЗ `--report-only`; контур берёт из бота и торгует на нём.
+
+```bash
+cd ~/Dev/Deeptrading/backend
+pkill -f ai_approval_worker; pkill -f "scripts/ai_trader.py"; sleep 1
+
+# гейт (боевой)
+nohup .venv-mcp/bin/python3 scripts/ai_approval_worker.py --api http://127.0.0.1:8000 \
+  > /tmp/ai_gate.log 2>&1 &
+# вахтёр (действует в Бот+++)
+nohup .venv-mcp/bin/python3 scripts/ai_approval_worker.py --api http://127.0.0.1:8000 \
+  --watch-positions > /tmp/ai_watch.log 2>&1 &
+# AI-трейдер
+nohup .venv-mcp/bin/python3 scripts/ai_trader.py --api http://127.0.0.1:8000 \
+  --interval 300 > /tmp/ai_trader_3.log 2>&1 &
+```
+Проверка: `curl -s http://127.0.0.1:8000/api/v1/bot/status | python3 -m json.tool | grep broker_mode`
+(должен совпадать с выбранным контуром), а в логе воркеров — строка `contour=sandbox|live`.
+
+### 5.3 Жёсткие гейты AI-ордеров (`/ai_trade`)
+
+Настраиваются в BotConfig (PATCH `/bot/config`, сохраняются в `bot_config.json`):
+
+| Поле | Дефолт | Смысл |
+|---|---|---|
+| `ai_chase_pct` | 3.0 | блок входа после хода >X% за день без отката (0=выкл) |
+| `entry_ob_imbalance_max` | 0.3 | **общий (движок+AI)**: блок входа против потока стакана сильнее X (0=выкл) |
+| `entry_ob_spread_max` | 25.0 | **общий**: блок входа при спреде > X б.п. (0=выкл) |
+| `entry_min_turnover` | 0 | мин. дневной оборот тикера, ₽ (0=выкл) |
+| `ai_sl_max_pct` | 0.03 | потолок SL для AI-ордера (0=без потолка) |
+| `ai_tp_max_pct` | 0.08 | потолок TP для AI-ордера (0=без потолка) |
+| `max_sector_positions` | 0 | макс. позиций в одном секторе-кластере (0=выкл) |
+| `entry_h1_align` | true | **движок**: H1 MACD подтверждает сторону входа (правило 7) |
+| `entry_tf_conflict` | true | **движок**: daily bias и H1 не противоречат (правило 6) |
+| `entry_last_hour_block` | true | **движок**: не входить в последний час сессии (правило 16) |
+
+Правила 6/7/16 зашиты в движок (`_submit_order`) и не зависят от AI-гейта/промпта:
+отказы видны в логе как `H1_ALIGN` / `TF_CONFLICT` / `LAST_HOUR`.
+Последний час = последняя сессия бота (как overnight): вечер включён → 22:50–23:50;
+иначе день 18:00–19:00; иначе утро 08:50–09:50 (МСК). Каждый отказ пишется в
+лог (`ПРОПУСК ВХОДА ...`), в события (`SIGNAL_REJECTED`) и в `skip_counts`.
+
+Отклонённый ордер возвращает `{"ok": false, "skipped": "..."}` и пишет `AI-ORDER-SKIPPED` в лог.
+Контекст AI-трейдера: все eligible + лидеры движений (`in_universe=false`), у каждого —
+стакан, m5/h1, `d20/dv20`, точный ATR (`atr5_pct`, `atr_d_pct`), лимиты слота/маржи.
+
+### 5.2 Провайдер воркеров: self-glm-bridge (быстро и JSON)
+
+`.ai_env` (backend) задаёт провайдера для всех воркеров:
+
+```bash
+export AI_BASE_URL=http://127.0.0.1:3001/v1   # self-glm-bridge на .4 (AGENT_MODE=true)
+export AI_API_KEY=glm-local
+export AI_MODEL=x-preview-l                   # GLM-5.3-Flash: ~7-15с, валидный JSON
+```
+
+Почему не DeepRouter (`:3000`): deepseek-v4.1 отвечает прозой (markdown) и игнорирует
+`response_format` → воркер делал ретрай (30-100с) или падал в `parse_error`. Мост GLM
+возвращает чистый JSON за ~7-15с. Важно: мост стримит SSE, если в запросе нет
+`"stream": false` — воркеры теперь всегда шлют его явно (иначе `r.json()` падает).
+Бэкап прежнего провайдера: `backend/.ai_env.bak`.
 
 Требуется запущенный `opencode serve` (порт 4096) — бесплатный tier Zen работает только
 через opencode. Ключ Zen: `~/.local/share/opencode/auth.json`.

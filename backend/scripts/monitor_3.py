@@ -4,6 +4,7 @@
 Запуск: screen -dmS monitor3 bash -lc "cd ~/Dev/Deeptrading/backend && exec .venv/bin/python3 scripts/monitor_3.py"
 """
 import json
+import os
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
@@ -48,21 +49,83 @@ def start_uvicorn() -> None:
     log("⚠️ uvicorn не отвечает — поднимаю заново")
     subprocess.Popen(
         f"cd {BACKEND} && nohup .venv/bin/python3 -m uvicorn app.main:app "
-        f"--host 0.0.0.0 --port 8000 > /tmp/uvicorn_imoex.log 2>&1 &",
+        f"--host 0.0.0.0 --port 8000 --timeout-graceful-shutdown 10 "
+        f"> /tmp/uvicorn_imoex.log 2>&1 &",
         shell=True)
 
 
+_ai_log_pos: dict[str, int] = {}
+
+
 def check_ai_log(path: str, name: str) -> int:
-    """Свежие ошибки в логе AI (последние 5 минут)."""
+    """Свежие ошибки в логе AI — только НОВЫЕ строки с прошлой проверки.
+
+    Раньше читались последние 200 строк целиком, и старые ошибки (до фикса)
+    всплывали в мониторе каждый цикл как «свежие».
+    """
+    global _ai_log_pos
+    try:
+        size = os.path.getsize(path)
+    except Exception:
+        return 0
+    if path not in _ai_log_pos:
+        # Первый запуск: старые ошибки не считаем свежими — начинаем с конца файла.
+        _ai_log_pos[path] = size
+        return 0
+    start = _ai_log_pos.get(path, 0)
+    if start > size:  # лог перезаписан/ротирован
+        start = 0
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()[-200:]
+            f.seek(start)
+            lines = f.readlines()
+            _ai_log_pos[path] = f.tell()
     except Exception:
         return 0
     errs = [l for l in lines if ("цикл:" in l or "Traceback" in l or "NameError" in l)]
     if errs:
         log(f"❌ {name}: свежие ошибки в логе ({len(errs)}), последняя: {errs[-1].strip()[:140]}")
     return len(errs)
+
+
+def _env_bot_params() -> dict:
+    """Параметры контура из backend/.env — чтобы авто-рестарт не запускал paper."""
+    out = {"mode": "sandbox", "test_name": "", "replay_start": "", "replay_end": "",
+           "replay_pace": "fast"}
+    try:
+        for ln in open(f"{BACKEND}/.env", encoding="utf-8"):
+            ln = ln.strip()
+            if "=" not in ln or ln.startswith("#"):
+                continue
+            k, v = ln.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if k == "BOT_MODE" and v in ("sandbox", "live", "test"):
+                out["mode"] = v
+            elif k == "BOT_TEST_NAME":
+                out["test_name"] = v
+            elif k == "BOT_TEST_START":
+                out["replay_start"] = v
+            elif k == "BOT_TEST_END":
+                out["replay_end"] = v
+            elif k == "BOT_TEST_PACE" and v in ("fast", "wall"):
+                out["replay_pace"] = v
+    except Exception:
+        pass
+    return out
+
+
+def _restart_bot() -> None:
+    """Перезапустить бота в контуре из .env (POST /bot/mode с сохранёнными настройками).
+
+    Раньше был POST /bot/start с пустым телом — он брал StartRequest.mode="paper"
+    и бот молча уходил в бумажный режим (mode=paper), теряя live/sandbox.
+    """
+    p = _env_bot_params()
+    try:
+        httpx.post(f"{API}/api/v1/bot/mode", json=p, timeout=60)
+        log(f"⚠️ бот НЕ запущен — перезапущен в контуре {p['mode']}")
+    except Exception as e:
+        log(f"⚠️ рестарт бота не удался: {type(e).__name__}: {str(e)[:80]}")
 
 
 def main() -> None:
@@ -91,11 +154,8 @@ def main() -> None:
             eq = pf.get("equity")
             mu = pf.get("margin_use_pct")
             if not running:
-                log(f"⚠️ бот НЕ запущен (health={health}) — пробую /start")
-                try:
-                    httpx.post(f"{API}/api/v1/bot/start", json={}, timeout=20)
-                except Exception:
-                    pass
+                log(f"⚠️ бот НЕ запущен (health={health}) — перезапускаю в контуре .env")
+                _restart_bot()
             elif health not in ("HEALTHY", None):
                 log(f"⚠️ стрим: health={health}, свечей={candles}")
             if mu is not None and float(mu) > 0.85:

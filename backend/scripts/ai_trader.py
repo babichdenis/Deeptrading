@@ -14,6 +14,7 @@ import json
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -24,7 +25,8 @@ try:
 except Exception:
     pass
 
-SYSTEM = """Ты — автономный трейдер на MOEX (sandbox-счёт). Ты САМ решаешь, что делать:
+SYSTEM = """Ты — автономный трейдер на MOEX (счёт бота; активный контур указан в контексте:
+sandbox = тестовый счёт, live = реальные деньги). Ты САМ решаешь, что делать:
 открывать/закрывать позиции, какие ставить стоп/тейк. Никаких «рекомендаций» — только действия.
 
 Вход:
@@ -32,19 +34,34 @@ SYSTEM = """Ты — автономный трейдер на MOEX (sandbox-сч
 - positions[]: открытые позиции (entry/last/pnl/sl/tp/dist_*_atr/regime) + orderbook каждой;
 - orderbooks{ticker}: ЖИВОЙ СТАКАН — last, best_bid/best_ask, spread_bps, bid_qty/ask_qty,
   imbalance (-1..+1, >0 = перевес покупок), depth_rub (глубина в рублях);
-- positions[].m5/h1 и candles{ticker}.m5/h1: ЖИВЫЕ СВЕЧИ (o/h/l/c/v, время МСК) —
-  5м (10 баров) и час (6 баров); v — объём;
-- movers: движения по горизонтам 1д/1н/1м/3м (up/down + streak = дней в группе);
-- universe[]: доступные тикеры (price/turnover/rng_pct);
+- positions[].m5/h1: ЖИВЫЕ СВЕЧИ позиции (o/h/l/c/v, время МСК) — 5м и час;
+- movers: движения по горизонтам 1д/1н/1м/3м (up/down + streak; all — все тикеры);
+- universe[]: ВЕСЬ доступный универс + лидеры движений (даже вне универса — in_universe=false).
+  in_universe=false значит тикер НЕ входит в торговый универс движка (нет стрима/оптуны/лимитов
+  ликвидности) — данные по нему есть для анализа, но заявка по нему может не исполниться
+  (нет живого буфера цены); предпочитай in_universe=true, если торгуешь.
+  По каждому тикеру: price/turnover/rng_pct, chg_1d/chg_1w/chg_1m/chg_3m, ЖИВОЙ СТАКАН
+  (orderbook: spread_bps/imbalance/depth_rub), свечи m5/h1, ТОЧНЫЙ ATR (atr5/atr5_pct —
+  5м, atr_d/atr_d_pct — дневной) и d20/dv20 — 20 ДНЕВНЫХ закрытий/объёмов из БД;
+  рассматривай ЛЮБОЙ тикер из universe, а не только топы движений;
+- queue[]: очередь движка — сильнейшие кандидаты бота (ticker/side/score/why);
 - imoex: направление индекса (dir/pct_20m/pct_60m/pct_day, breadth_up_pct);
 - risk: дневной P&L/лимит; recent_trades: последние сделки; now_msk.
 
 Правила:
-- маржа: бот не даст превысить 80% equity; стресс ±5% IMOEX ≤ 10% equity;
-- максимум 6 позиций одновременно;
-- на каждый тикер — одно действие за цикл;
-- не открывай больше 3 новых позиций за цикл;
-- стоп обязателен (sl_pct 0.01-0.05), тейк по желанию (tp_pct, 0 = без тейка);
+- маржа: бот не даст превысить 80% equity; стресс ±5% IMOEX ≤ 10% equity; слот = slot_pct
+  от equity (bot.slot_pct), следи за margin_use_pct — не выходи за лимит маржи;
+- максимум 6 позиций одновременно; не открывай больше 3 новых позиций за цикл;
+- КЛАСТЕРЫ: не набирай >2 позиции в одном секторе/кластере (нефтегаз, металлы и т.п.) —
+  коррелированные лонги дают общий стресс, а не диверсификацию;
+- CHASING GATE: НЕ покупай после роста >2.5-3% за день без отката и НЕ шорти после
+  падения >2.5-3% без отскока — это погоня за ценой с плохим R/R. Вход в лонг — после
+  отката (цена ≤ high дня − 0.5×atr_d) или у VWAP; зеркально для шорта;
+- СТАКАН: не входи против потока — BUY при imbalance < −0.3 или SELL при imbalance > +0.3
+  пропускай; spread > 25 б.п. — не входить (плохая точка входа);
+- СТОП/ТЕЙК от ATR: SL ≈ 1.5-3× ATR (для интрадея обычно 2-3× atr5/atr_d), риск на
+  сделку ≤0.8% equity; TP 3-5× ATR (12+ ATR для интрадея недостижим). Если позиция дала
+  +1.5-2× ATR — подтяни TP к цене (зафиксируй часть), а SL — не хуже безубытка;
 - закрывай позиции, если тезис сломан, и фиксируй прибыль при достижении цели.
 - ВЫЖИМАЙ МАКСИМУМ: если позиция в плюсе и прибыль начала угасать (цена развернулась от
   максимума, импульс/стакан против, momentum слабеет) — ЗАКРЫВАЙ или подтяни TP, не отдавай
@@ -56,14 +73,14 @@ SYSTEM = """Ты — автономный трейдер на MOEX (sandbox-сч
 Отвечай СТРОГО JSON-объектом (без текста вокруг):
 {
   "analysis": "разбор рынка и портфеля: что вижу в данных (IMOEX, движения, стаканы, свечи),
-               как это связано с текущими позициями, общий план на цикл (5-10 предложений)",
+               как это связано с текущими позициями, общий план на цикл (3-5 предложений; короче — быстрее цикл)",
   "actions": [
     {"action":"open","ticker":"SBER","side":"SELL","notional_pct":1.0,"sl_pct":0.03,"tp_pct":0.06,
      "hold":"intraday|swing",
      "reason":"почему именно эта сделка: что в данных говорит за вход, почему эта сторона,
-               где стоп/тейк и что подтверждает/опровергает тезис (2-4 предложения)"},
+               где стоп/тейк и что подтверждает/опровергает тезис (1-2 предложения)"},
     {"action":"close","ticker":"GAZP",
-     "reason":"почему закрываю: что изменилось в данных/тезисе (2-4 предложения)"}
+     "reason":"почему закрываю: что изменилось в данных/тезисе (1-2 предложения)"}
   ],
   "suggestions": [
     "предложения по механизму бота: что мешает зарабатывать, какие гейты/лимиты поправить,
@@ -93,7 +110,14 @@ def _parse_reply(txt: str) -> tuple:
         except Exception:
             pass
     m2 = re.search(r"\[.*\]", txt, re.S)
-    return ["", json.loads(m2.group(0)), []] if m2 else ["", [], []]
+    if m2:
+        try:
+            obj = json.loads(m2.group(0))
+            if isinstance(obj, list):
+                return ["", obj, []]
+        except Exception:
+            pass
+    return ["", [], []]
 
 
 def _ask_deepseek(system: str, user: dict, model: str = "deepseek-chat") -> tuple:
@@ -113,10 +137,11 @@ def _ask_deepseek(system: str, user: dict, model: str = "deepseek-chat") -> tupl
             pass
     if not key:
         raise RuntimeError("нет DEEPSEEK_API_KEY")
-    body = {"model": model, "temperature": 0.3, "max_tokens": 4000, "messages": [
+    body = {"model": model, "stream": False, "temperature": 0.3, "max_tokens": 6000,
+            "response_format": {"type": "json_object"}, "messages": [
         {"role": "system", "content": system},
         {"role": "user",
-         "content": json.dumps(user, ensure_ascii=False, default=str)[:16000]},
+         "content": json.dumps(user, ensure_ascii=False, default=str)[:100000]},
     ]}
 
     def _call(msgs: list) -> str:
@@ -130,20 +155,11 @@ def _ask_deepseek(system: str, user: dict, model: str = "deepseek-chat") -> tupl
     msgs = list(body["messages"])
     txt = _call(msgs)
     out = _parse_reply(txt)
-    if not out[1]:  # нет actions — возможно, проза вместо JSON: жёсткий ретрай
-        msgs2 = msgs + [
-            {"role": "assistant", "content": str(txt)[:500]},
-            {"role": "user", "content": "ТВОЙ ОТВЕТ — НЕ JSON. Ответь ТОЛЬКО валидным JSON-объектом "
-                                        "{\"analysis\": \"...\", \"actions\": [...], \"suggestions\": [...]} "
-                                        "без единого слова вокруг."},
-        ]
-        try:
-            txt2 = _call(msgs2)
-            out2 = _parse_reply(txt2)
-            if out2[1] or out2[0]:
-                return out2
-        except Exception:
-            pass
+    if not out[1]:
+        if not out[0]:
+            # Модель ответила прозой без JSON — сохраняем текст как analysis.
+            # Жёсткий ретрай убран: он провоцировал ответы про формат вместо анализа.
+            return [str(txt).strip()[:3000], [], []]
     return out
 
 
@@ -156,7 +172,7 @@ def _ask(system: str, user: dict, model: str, url: str) -> tuple:
                 "model": (lambda m: {"providerID": m.split("/", 1)[0], "modelID": m.split("/", 1)[1]}
                               if "/" in m else {"providerID": "opencode", "modelID": m})(str(model)),
                 "system": system,
-                "parts": [{"type": "text", "text": json.dumps(user, ensure_ascii=False, default=str)[:16000]}],
+                "parts": [{"type": "text", "text": json.dumps(user, ensure_ascii=False, default=str)[:100000]}],
             }
             r = c.post(f"{url}/session/{sid}/message", json=body)
             r.raise_for_status()
@@ -188,6 +204,22 @@ def _bars(api: str, figi: str, tf: str = "5min", limit: int = 10) -> list:
                  "c": b["c"], "v": b["v"]} for b in (r.get("bars") or [])]
     except Exception:
         return []
+
+
+def _calc_atr(highs: list, lows: list, closes: list, period: int = 14) -> float | None:
+    """ATR (среднее True Range за period) по OHLC-сериям — для точных SL/TP уровней."""
+    n = min(len(highs), len(lows), len(closes))
+    if n < period + 1:
+        return None
+    trs = []
+    for i in range(1, n):
+        tr = max(highs[i] - lows[i],
+                 abs(highs[i] - closes[i - 1]),
+                 abs(lows[i] - closes[i - 1]))
+        trs.append(tr)
+    if len(trs) < period:
+        return None
+    return sum(trs[-period:]) / period
 
 
 _LEVEL_DISCIPLINE = """
@@ -246,10 +278,25 @@ def _context(api: str) -> dict:
         except Exception:
             pass
         _cfg = st.get("config") or {}
+        # Полный конфиг бота (лимиты слота/маржи/сектора) — status.config урезан.
+        try:
+            _full = _http("GET", f"{api}/api/v1/bot/config", timeout=10) or {}
+            if isinstance(_full, dict):
+                _cfg = {**_cfg, **_full}
+        except Exception:
+            pass
+        _contour = st.get("broker_mode") or st.get("contour") or _cfg.get("mode")
+        out["contour"] = _contour
         out["bot"] = {"session_now": st.get("session"), "sessions": _cfg.get("sessions"),
                       "entries_paused": _cfg.get("entries_paused"),
                       "overnight": _cfg.get("overnight"),
-                      "max_positions": _cfg.get("max_positions")}
+                      "max_positions": _cfg.get("max_positions"),
+                      "slot_pct": _cfg.get("pos_pct"),
+                      "max_margin_use_pct": _cfg.get("max_margin_use_pct"),
+                      "max_sector_pct": _cfg.get("max_sector_pct"),
+                      "margin_sizing": _cfg.get("margin_sizing"),
+                      "ensemble_quorum": _cfg.get("ensemble_quorum"),
+                      "contour": _contour}
     except Exception:
         pass
     # Позиции с деталями + их стаканы
@@ -292,28 +339,82 @@ def _context(api: str) -> dict:
         out["movers"] = mv.get("horizons")
     except Exception:
         out["movers"] = {}
-    # Вселенная: цена/оборот/волатильность + стаканы кандидатов (топ рост/падение 1м)
+    # Вселенная: ВСЕ eligible-тикеры + лидеры движений (даже вне универса) с полными
+    # данными: стакан, свечи m5/h1, дневная история d20/dv20 и точный ATR (день/5м).
     try:
         scr = _http("GET", f"{api}/api/v1/screener")
-        rows = [r for r in (scr.get("items") or []) if r.get("in_universe")]
-        out["universe"] = [{"ticker": r["ticker"], "price": r.get("price"),
-                            "turnover": r.get("turnover"), "rng_pct": r.get("rng_pct")}
-                           for r in rows[:40]]
-        _cand: list[tuple[str, str]] = []
-        for lbl in ("1м",):
+        _items = scr.get("items") or []
+        rows = [r for r in _items if r.get("in_universe")][:40]
+        _uni_tk = {r["ticker"] for r in rows}
+        _by_all = {r["ticker"]: r for r in _items}
+        # Лидеры движений вне eligible-универса (LKOH/OZON/YDEX/MVID…) — раньше
+        # они были видны в movers, но без стакана/свечей и «отсекались на старте».
+        _extra: list[dict] = []
+        for lbl in ("1д", "1н", "1м"):
             h = (out.get("movers") or {}).get(lbl) or {}
-            for x in (h.get("up") or [])[:3] + (h.get("down") or [])[:3]:
-                _cand.append((x.get("ticker"), x.get("ticker")))
-        _by_tk = {r["ticker"]: r["figi"] for r in rows}
-        out["orderbooks"] = {}
-        for tk, _ in _cand[:6]:
-            fg = _by_tk.get(tk)
-            if fg:
-                out["orderbooks"][tk] = _orderbook(api, fg)
-                out.setdefault("candles", {})[tk] = {
-                    "m5": _bars(api, fg, "5min", 10),
-                    "h1": _bars(api, fg, "hour", 6),
-                }
+            for x in (h.get("up") or []) + (h.get("down") or []):
+                tk = str(x.get("ticker") or "")
+                if tk and tk not in _uni_tk and tk in _by_all:
+                    _uni_tk.add(tk)
+                    _extra.append(_by_all[tk])
+        rows = rows + _extra[:6]
+        # Движение по горизонтам для каждого тикера (полные списки movers)
+        _chg: dict[str, dict] = {}
+        for lbl, key in (("1д", "chg_1d"), ("1н", "chg_1w"), ("1м", "chg_1m"), ("3м", "chg_3m")):
+            for x in (((out.get("movers") or {}).get(lbl) or {}).get("all") or []):
+                tk = str(x.get("ticker") or "")
+                if tk:
+                    _chg.setdefault(tk, {})[key] = x.get("chg")
+
+        def _enrich(r):
+            tk = r["ticker"]
+            fg = r["figi"]
+            row = {"ticker": tk, "price": r.get("price"), "turnover": r.get("turnover"),
+                   "rng_pct": r.get("rng_pct"),
+                   "in_universe": bool(r.get("in_universe"))}
+            row.update(_chg.get(tk) or {})
+            row["orderbook"] = _orderbook(api, fg)
+            row["m5"] = _bars(api, fg, "5min", 6)
+            row["h1"] = _bars(api, fg, "hour", 4)
+            # ATR на 5м (по 20 барам) — точная база для стопов/тейков
+            try:
+                _m5all = _bars(api, fg, "5min", 20)
+                _a5 = _calc_atr([b["h"] for b in _m5all], [b["l"] for b in _m5all],
+                           [b["c"] for b in _m5all], 14)
+                if _a5:
+                    row["atr5"] = round(_a5, 4)
+                    row["atr5_pct"] = round(_a5 / (row.get("price") or 1) * 100, 2)
+            except Exception:
+                pass
+            # История из БД: 20 дневных OHLCV + дневной ATR
+            try:
+                _d = _http("GET", f"{api}/api/candles/{fg}?interval_name=day&limit=20",
+                           timeout=20)
+                _cs = _d.get("candles") or []
+                _cl = [float(c.get("close") or 0) for c in _cs]
+                row["d20"] = [round(v, 4) for v in _cl]
+                row["dv20"] = [int(c.get("volume") or 0) for c in _cs]
+                _ad = _calc_atr([float(c.get("high") or 0) for c in _cs],
+                           [float(c.get("low") or 0) for c in _cs], _cl, 14)
+                if _ad:
+                    row["atr_d"] = round(_ad, 4)
+                    row["atr_d_pct"] = round(_ad / (_cl[-1] or 1) * 100, 2)
+            except Exception:
+                row["d20"] = []
+                row["dv20"] = []
+            return row
+
+        # Параллельно: ~30+ тикеров × 4 запроса; иначе ~30-60с последовательно.
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            out["universe"] = list(ex.map(_enrich, rows))
+        # Очередь движка — сильнейшие кандидаты бота по score
+        try:
+            _pf = _http("GET", f"{api}/api/v1/bot/portfolio_summary", timeout=15)
+            out["queue"] = [{"ticker": q.get("ticker"), "side": q.get("side"),
+                             "score": q.get("score"), "why": q.get("why")}
+                            for q in (_pf.get("queue") or [])[:5]]
+        except Exception:
+            out["queue"] = []
     except Exception:
         out["universe"] = []
     # Сделки
@@ -366,7 +467,7 @@ def main() -> None:
                     "positions[]": "entry/last/pnl/sl/tp/dist_*_atr/regime + orderbook + m5/h1 свечи",
                     "orderbooks{}": "стакан кандидатов (imbalance, depth_rub)",
                     "movers": "1д/1н/1м/3м + streak",
-                    "universe[]": "price/turnover/rng_pct",
+                    "universe[]": "price/turnover/rng_pct + chg_1d/1w/1m/3m + orderbook + m5/h1 + d20/dv20 (20 дней из БД)",
                     "imoex": "dir/pct_20m/pct_60m/pct_day, breadth_up_pct",
                     "recent_trades": "последние сделки",
                 },
@@ -393,8 +494,13 @@ def main() -> None:
             ctx = _context(args.api)
             n_pos = len(ctx.get("positions") or [])
             eq = (ctx.get("portfolio") or {}).get("equity")
+            _contour = str(ctx.get("contour") or "")
+            _contour_ok = (not _contour) or _contour in ("sandbox", "live")
             print(f"[ai-trader] контекст: позиций {n_pos}, equity {eq}, "
-                  f"тикеров {len(ctx.get('universe') or [])}", flush=True)
+                  f"контур {_contour or '?'}, тикеров {len(ctx.get('universe') or [])}", flush=True)
+            if not _contour_ok:
+                print(f"[ai-trader] контур {_contour}: торговля недоступна — только анализ "
+                      f"(переключи бота на sandbox/live)", flush=True)
             _ov = str(ctx.pop("prompt_override", "") or "")
             for _mk in ("— SYSTEM —", "- SYSTEM -"):
                 _i = _ov.find(_mk)
@@ -405,12 +511,13 @@ def main() -> None:
                 _j = _ov.find(_cut)
                 if _j > 0:
                     _ov = _ov[:_j]
-            _sys = (_ov.strip() or SYSTEM) + _LEVEL_DISCIPLINE + """
+            _sys = ((_ov.strip() or SYSTEM)
+                    + f"\n\n— АКТИВНЫЙ КОНТУР СЧЁТА: {_contour or 'sandbox'} —\n"
+                      f"Позиции, сделки, портфель и заявки в контексте — ТОЛЬКО этого счёта. "
+                      f"Если контур sandbox — это тестовые деньги; если live — реальные."
+                    + _LEVEL_DISCIPLINE + """
 
-— ФОРМАТ ОТВЕТА (критично) —
-Отвечай ТОЛЬКО валидным JSON-объектом. НИКАКОГО текста до или после JSON:
-ни рассуждений, ни пояснений, ни markdown. Первый символ ответа — {, последний — }.
-"""
+""")
             if str(args.provider) == "deepseek":
                 analysis, acts, sugg = _ask_deepseek(_sys, ctx, args.model or "deepseek-chat")
             else:
@@ -439,6 +546,9 @@ def main() -> None:
                     act = str(a.get("action") or "").lower()
                     tk = str(a.get("ticker") or "").upper()
                     if not tk:
+                        continue
+                    if not _contour_ok:
+                        print(f"[ai-trader] {act} {tk} пропущен (контур {_contour})", flush=True)
                         continue
                     if args.report_only and act == "open":
                         print(f"[ai-trader] open {tk} пропущен (--report-only)", flush=True)

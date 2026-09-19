@@ -383,3 +383,57 @@ RANGE: «штиль» ~44–53% баров (порог, возможно, стр
 HV/NEUTRAL→обе стороны (k=3).
 
 Следующий шаг: регистрация в каталоге+реестре, привязка через `regime_setups_filter`, A/B на июле/августе/сентябре.
+
+***
+
+# ПОЛНАЯ РЕАЛИЗАЦИЯ ПО РЕЖИМАМ (все 5) — код готов, не подключён
+
+Файл: `backend/app/engine/regime_ensembles.py` (закоммичено: `65e8d05` long/short, `ceaed71` range,
+`e83bbaf` hv, `c391ed2` neutral).
+
+## Общая архитектура (одинакова для всех режимов)
+4 группы признаков → по 1 голосу → режим-зависимый кворум → сигнал.
+Выходы: стоп, TP1/TP2, трейлинг по профилю, смена режима против позиции, тайм-аут.
+
+## По режимам
+| Режим | Обёртка | Ансамбли | Кворум | Риск / стоп |
+|---|---|---|---|---|
+| TREND_UP | `LongEnsembleStrategy` (`long_signal`) | trend_up, breakout_momentum, volume_up, vol_structure_up | k=2, breakout опц. | 1% / 1–1.5×ATR |
+| TREND_DOWN | `ShortEnsembleStrategy` (`short_signal`) | trend_down, breakdown_momentum, volume_down, vol_structure_down | k=2, breakdown обяз. | 1% / 1–1.5×ATR |
+| RANGE | `RangeEnsembleStrategy` (`range_signals`) | mr_long, mr_short, scalping | k=3, фильтр «полного штиля» | 0.75–1% / 1–1.5×ATR |
+| HIGH_VOLATILITY | `HighVolatilityEnsembleStrategy` (`hv_signals`) | hv_long, hv_short | тренд обяз. + score≥4 | 0.25–0.5% / 2–3×ATR |
+| NEUTRAL | `NeutralEnsembleStrategy` (`neutral_signals`) | те же 4 (up/down) | k=3, breakout обяз. | 0.75% / 1.75×ATR |
+
+## Ключевые функции модуля
+- Признаки: `compute_features` (down), `compute_features_long` (up), `compute_features_range`, `compute_features_hv`.
+- Ансамбли: `ensemble_trend_up/down`, `ensemble_breakout_momentum`, `ensemble_breakdown_momentum`,
+  `ensemble_volume_up/down`, `ensemble_vol_structure_up/down`, `ensemble_mr_long/short`, `ensemble_scalping`,
+  `ensemble_hv_long/short`.
+- Сигналы: `long_signal`, `short_signal`, `range_signals`, `hv_signals`, `neutral_signals`.
+- Выходы: `LongPosition`/`exit_long_signal`, `ShortPosition`/`exit_short_signal`.
+- Обёртки: 5 классов (выше), `warmup_bars=210`, `risk_per_trade`, `atr_mult_stop` в params.
+
+## Smoke-тесты (SBER/GAZP, сигналы по периодам)
+| Режим | Июль (падение) | Сентябрь (рост) |
+|---|---|---|
+| SHORT | много (82–100 у SBER/GAZP) | мало (24–42) |
+| LONG | мало (31–62) | много (55–78) |
+| NEUTRAL short | 58–76 | 15–23 |
+| NEUTRAL long | 15–25 | 30–50 |
+| HV | short 19–27 | long 7–12 |
+| RANGE | «штиль» ~44–53% баров (порог строговат) | — |
+
+## План подключения
+1. Карточки в `catalog.py` (params_schema: regime, require_breakout/breakdown, allow_scalping, risk_per_trade, atr_mult_stop, k, atr_mult_trail, max_bars).
+2. Записи в `STRATEGY_REGISTRY` + `_PARAMS_BY_STRATEGY` (`strategies.py`).
+3. `regime_setups_filter`: long→TREND_UP, short→TREND_DOWN, range→RANGE, hv→HIGH_VOLATILITY, neutral→NEUTRAL.
+4. Скрипт-бэктест `scripts/regime_ensemble_backtest.py` на периоде с 15.08 (месяц) → затем движок/A-B.
+
+## Итоговая матрица риска (из спек)
+| Режим | Лонг | Шорт | MR | Скальп | Кворум |
+|---|---|---|---|---|---|
+| TREND_UP | ✅ | ❌ | ❌ | ❌ | 2 |
+| TREND_DOWN | ❌ | ✅ | ❌ | ❌ | 2 (breakdown обяз.) |
+| RANGE | ✅ | ✅ | ✅ | ✅ (не штиль) | 3 |
+| HIGH_VOLATILITY | ✅ | ✅ | ❌ | ❌ | тренд+score≥4 |
+| NEUTRAL | ⚠️ | ⚠️ | ⚠️ | ⚠️ | 3 (breakout обяз.) |

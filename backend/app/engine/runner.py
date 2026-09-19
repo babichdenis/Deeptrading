@@ -87,8 +87,15 @@ class EngineRunner:
         last_exit_bar = -10**9
         exit_candidate: dict | None = None
         entry_confirm: dict | None = None  # {signal, side, confirm_needed} — ожидание N подряд подтверждающих свечей
+        limit_order: dict | None = None  # {side, limit, bars_left, signal} — висящий лимитный вход
         warmup = self.strategy.warmup_bars()
         total = len(candles)
+        _lim_k = float(getattr(self.cfg.signal_policy, "entry_limit_atr", 0.0) or 0.0)
+        _lim_bars = max(1, int(getattr(self.cfg.signal_policy, "entry_limit_bars", 3) or 3))
+        _lim_chase = bool(getattr(self.cfg.signal_policy, "entry_limit_chase", False))
+        _lim_atr = (self._atr_series(
+            candles, int(getattr(self.cfg.signal_policy, "entry_limit_atr_period", 14) or 14))
+            if _lim_k > 0 else None)
 
         tf_minutes = 1440
         if total > 1:
@@ -136,7 +143,12 @@ class EngineRunner:
 
             if pending is not None:
                 if pending_kind == "entry":
-                    position = self._open(i, bar, candles, pending, position, ledger)
+                    if _lim_atr is not None and _lim_atr[i] is not None:
+                        if limit_order is not None:
+                            ledger.log(i, bar.ts, "DECISION", "LIMIT_REPLACED by new signal")
+                        limit_order = self._place_limit(i, bar, pending, _lim_atr[i], _lim_bars, ledger)
+                    else:
+                        position = self._open(i, bar, candles, pending, position, ledger)
                 elif pending_kind == "flip":
                     # --- NEUTRAL gate / semi-flip ---
                     neutral_mode = self.cfg.neutral_mode
