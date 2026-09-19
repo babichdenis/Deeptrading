@@ -533,6 +533,7 @@ export async function initBot(onStateChange?: (running: boolean) => void) {
   });
 
   void pollOnce();
+  void pollLogs();
   setInterval(() => void pollOnce(onStateChange), 8000);
   setInterval(() => void pollLogs(), 1000);
   setupLogFilters();
@@ -547,7 +548,310 @@ function _loadLGF() {
 }
 const LGF: Record<string, boolean> = _loadLGF();
 let _logDateFilter = localStorage.getItem("log_date_filter") ?? new Date().toLocaleDateString("sv-SE");
-let _allLogs: string[] = [];
+let _logLevelSel = localStorage.getItem("log_level") || "";
+let _logQ = localStorage.getItem("log_q") || "";
+let _logTicker = localStorage.getItem("log_ticker") || "";
+
+// ─── Логи: единый контур, структурированные плашки ──────────────────────
+interface LogItem { id: number; ts: string; level: string; source: string; msg: string; }
+
+let _logs: LogItem[] = [];          // все полученные записи (порядок от старых к новым)
+const _seenIds = new Set<number>(); // дедупликация по id (кольцо + история БД)
+let _logSeq = 0;                    // последний полученный id (инкрементальный поллинг)
+let _logHasMore = true;             // есть ли в БД история старше показанной
+let _logLoading = false;            // флаг загрузки «раньше»
+let _stickBottom = true;            // автоскролл вниз, только если юзер внизу
+const LOG_CAP_DOM = 1500;           // предел DOM-строк (trim сверху)
+
+function logCategory(msg: string): string {
+  if (msg.includes("TECHINFO") || msg.includes("FLUSH")) return "tech";
+  if (msg.includes("СВЕЧА")) return "candles";
+  if (msg.includes("СИГНАЛ")) return "signals";
+  if (msg.includes("СДЕЛКА") || msg.includes("ВЫХОД") || msg.includes("ЗАКРЫТИЕ")) return "trades";
+  return "events";
+}
+
+function _itemVisible(it: LogItem): boolean {
+  if (!LGF[logCategory(it.msg) as keyof typeof LGF]) return false;
+  const lv = (it.level || "info").toLowerCase();
+  if (_logLevelSel && lv !== _logLevelSel) return false;
+  if (_logQ && !it.msg.toLowerCase().includes(_logQ.toLowerCase())) return false;
+  if (_logDateFilter && !it.ts.startsWith(_logDateFilter)) return false;
+  if (_logTicker) {
+    const re = new RegExp("\\b" + _logTicker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
+    if (!re.test(it.msg)) return false;
+  }
+  return true;
+}
+
+function lgRowEl(it: LogItem): HTMLElement {
+  const lv = (it.level || "info").toLowerCase();
+  const row = document.createElement("div");
+  row.className = `lg-row lg-k-${logCategory(it.msg)} lg-lv-${lv}`;
+  row.dataset.id = String(it.id);
+  const t = document.createElement("span"); t.className = "lg-t"; t.textContent = it.ts.slice(11);
+  const badge = document.createElement("span"); badge.className = "lg-lv"; badge.textContent = lv.toUpperCase().slice(0, 5);
+  badge.title = `уровень: ${lv} · источник: ${it.source}`;
+  const src = document.createElement("span"); src.className = "lg-src"; src.textContent = it.source;
+  const msg = document.createElement("span"); msg.className = "lg-msg"; msg.textContent = it.msg;
+  const copy = document.createElement("button"); copy.className = "lg-copy-row"; copy.textContent = "⧉";
+  copy.title = "Скопировать строку";
+  copy.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const txt = `[${it.ts}] ${it.msg}`;
+    (navigator.clipboard?.writeText(txt) ?? Promise.reject("no clipboard")).then(() => {
+      copy.textContent = "✓";
+      setTimeout(() => { copy.textContent = "⧉"; }, 900);
+    }).catch(() => {});
+  });
+  row.append(t, badge, src, msg, copy);
+  return row;
+}
+
+function _insertLogs(items: LogItem[], prepend: boolean) {
+  const el = $("bot-live-logs");
+  if (!el) return;
+  const fresh: LogItem[] = [];
+  for (const it of items) {
+    if (_seenIds.has(it.id)) continue;
+    _seenIds.add(it.id);
+    fresh.push(it);
+  }
+  if (!fresh.length) return;
+  if (prepend) {
+    // fresh идёт от старых к новым — вставляем в начало массива,
+    // в DOM — в обратном порядке, чтобы самый старый оказался наверху.
+    _logs = fresh.concat(_logs);
+    const rows = fresh.map(lgRowEl);
+    for (const row of rows.reverse()) el.insertBefore(row, el.firstChild);
+  } else {
+    _logs = _logs.concat(fresh);
+    const frag = document.createDocumentFragment();
+    for (const it of fresh) if (_itemVisible(it)) frag.appendChild(lgRowEl(it));
+    if (frag.childElementCount) el.appendChild(frag);
+  }
+  // Не даём DOM разрастаться бесконечно: срезаем старые строки сверху.
+  while (el.children.length > LOG_CAP_DOM) {
+    const first = el.firstElementChild as HTMLElement | null;
+    const h = first ? first.getBoundingClientRect().height : 0;
+    if (first) first.remove();
+    if (el.scrollTop > 0) el.scrollTop -= h;
+  }
+}
+
+function reRenderVisible() {
+  const el = $("bot-live-logs");
+  if (!el) return;
+  const frag = document.createDocumentFragment();
+  for (const it of _logs) if (_itemVisible(it)) frag.appendChild(lgRowEl(it));
+  el.innerHTML = "";
+  el.appendChild(frag);
+  if (_stickBottom) el.scrollTop = el.scrollHeight;
+  updateLogMeta(el);
+}
+
+function updateLogMeta(el: HTMLElement) {
+  const cnt = $("log-count");
+  if (cnt) cnt.textContent = String(_logs.length);
+  if (_stickBottom) el.scrollTop = el.scrollHeight;
+  let errs = 0, warns = 0;
+  for (let i = 0; i < el.children.length; i++) {
+    const c = el.children[i].classList;
+    if (c.contains("lg-lv-error")) errs++;
+    else if (c.contains("lg-lv-warn")) warns++;
+  }
+  const pill = $("lg-err-pill");
+  if (pill) {
+    const total = errs + warns;
+    if (total) {
+      pill.classList.add("on");
+      pill.textContent = errs ? `✕ ${errs} ошибок · ⚠ ${warns}` : `⚠ ${warns} warn`;
+    } else {
+      pill.classList.remove("on");
+    }
+  }
+}
+
+function _applyLogParams(p: URLSearchParams) {
+  if (_logLevelSel) p.set("level", _logLevelSel);
+  if (_logQ) p.set("q", _logQ);
+  if (_logTicker) p.set("ticker", _logTicker);
+  if (_logDateFilter) p.set("date", _logDateFilter);
+}
+
+async function pollLogs() {
+  const el = $("bot-live-logs");
+  if (!el) return;
+  try {
+    const p = new URLSearchParams({ limit: "300", after_id: String(_logSeq) });
+    _applyLogParams(p);
+    const r = await fetch(`${API}/api/v1/bot/logs?${p.toString()}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    const items: LogItem[] = (data.items || []) as LogItem[];
+    if (_logSeq === 0 && !items.length && el.children.length === 0) {
+      el.innerHTML = '<span class="lg-empty">нет записей под фильтр</span>';
+    }
+    if (_logSeq === 0 && items.length) {
+      // Полный сброс (первый заход или смена серверных фильтров).
+      _logs = [];
+      _seenIds.clear();
+      _logHasMore = true;
+      el.innerHTML = "";
+      _insertLogs(items, false);
+    } else {
+      _insertLogs(items, false);
+    }
+    if (items.length) _logSeq = Math.max(_logSeq, items[items.length - 1].id);
+    updateLogMeta(el);
+  } catch { /* ignore */ }
+}
+
+async function loadOlder() {
+  if (_logLoading || !_logHasMore) return;
+  const el = $("bot-live-logs");
+  const first = _logs[0];
+  if (!el || !first) return;
+  _logLoading = true;
+  try {
+    const p = new URLSearchParams({ limit: "300", before: first.ts });
+    _applyLogParams(p);
+    const r = await fetch(`${API}/api/v1/bot/logs/history?${p.toString()}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    const items: LogItem[] = (data.items || []) as LogItem[];
+    _logHasMore = !!data.has_more;
+    if (items.length) {
+      const prevH = el.scrollHeight;
+      _insertLogs(items, true);
+      el.scrollTop = el.scrollTop + (el.scrollHeight - prevH);
+    }
+  } catch { /* ignore */ } finally {
+    _logLoading = false;
+  }
+}
+
+async function copyVisibleLogs() {
+  const lines = _logs
+    .filter(_itemVisible)
+    .map((i) => `[${i.ts}] ${(i.level || "info").toUpperCase()} ${i.source}: ${i.msg}`);
+  const text = lines.join("\n");
+  const done = () => {
+    const btn = $("lg-copy");
+    if (btn) { btn.textContent = "✓"; setTimeout(() => { if (btn) btn.textContent = "⧉"; }, 1200); }
+  };
+  try {
+    await navigator.clipboard.writeText(text);
+    done();
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch { /* ignore */ }
+    ta.remove();
+    done();
+  }
+}
+
+function setupLogFilters() {
+  const resetLogs = () => {
+    _logSeq = 0;
+    _logHasMore = true;
+    void pollLogs();
+  };
+  const setLG = (id: string, key: keyof typeof LGF) => {
+    const cb = $(id) as HTMLInputElement | null;
+    if (!cb) return;
+    cb.checked = !!LGF[key];
+    cb.closest("label")?.classList.toggle("on", !!LGF[key]);
+    cb.addEventListener("change", () => {
+      LGF[key] = cb.checked;
+      cb.closest("label")?.classList.toggle("on", cb.checked);
+      localStorage.setItem("log_lgf", JSON.stringify(LGF));
+      if (key === "candles") {
+        void fetch(`${API}/api/v1/bot/logconfig`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ log_candles: cb.checked }),
+        });
+      }
+      reRenderVisible();
+    });
+  };
+  for (const [id, key] of [["lg-candles", "candles"], ["lg-signals", "signals"], ["lg-trades", "trades"], ["lg-events", "events"], ["lg-tech", "tech"]]) {
+    setLG(id, key as keyof typeof LGF);
+  }
+  const level = $("lg-level") as HTMLSelectElement | null;
+  if (level) {
+    level.value = _logLevelSel;
+    level.addEventListener("change", () => {
+      _logLevelSel = level.value;
+      localStorage.setItem("log_level", _logLevelSel);
+      resetLogs();
+    });
+  }
+  const q = $("lg-q") as HTMLInputElement | null;
+  if (q) {
+    q.value = _logQ;
+    let tId: ReturnType<typeof setTimeout> | undefined;
+    q.addEventListener("input", () => {
+      clearTimeout(tId);
+      tId = setTimeout(() => {
+        _logQ = q.value.trim().toLowerCase();
+        localStorage.setItem("log_q", _logQ);
+        resetLogs();
+      }, 300);
+    });
+  }
+  const tick = $("lg-ticker") as HTMLInputElement | null;
+  if (tick) {
+    tick.value = _logTicker;
+    let tId2: ReturnType<typeof setTimeout> | undefined;
+    tick.addEventListener("input", () => {
+      clearTimeout(tId2);
+      tId2 = setTimeout(() => {
+        _logTicker = tick.value.trim().toUpperCase();
+        localStorage.setItem("log_ticker", _logTicker);
+        resetLogs();
+      }, 300);
+    });
+  }
+  const dateInput = $("log-filter-date") as HTMLInputElement | null;
+  if (dateInput) {
+    dateInput.value = _logDateFilter;
+    dateInput.addEventListener("change", () => {
+      _logDateFilter = dateInput.value;
+      localStorage.setItem("log_date_filter", _logDateFilter);
+      resetLogs();
+    });
+  }
+  const copy = $("lg-copy");
+  if (copy) copy.addEventListener("click", () => { void copyVisibleLogs(); });
+  const clear = $("lg-clear");
+  if (clear) clear.addEventListener("click", () => {
+    _logs = [];
+    _seenIds.clear();
+    _logSeq = 0;
+    _logHasMore = true;
+    const el = $("bot-live-logs");
+    if (el) el.innerHTML = "";
+    if (dateInput) {
+      dateInput.value = "";
+      _logDateFilter = "";
+      localStorage.removeItem("log_date_filter");
+    }
+    updateLogMeta($("bot-live-logs") || document.body);
+    void fetch(`${API}/api/v1/bot/logs/clear`, { method: "POST" });
+  });
+  const el = $("bot-live-logs");
+  if (el) {
+    el.addEventListener("scroll", () => {
+      _stickBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 60;
+      if (el.scrollTop <= 30) void loadOlder();
+    });
+  }
+}
 let _lastPositions: SandboxPositionRow[] = [];
 let _lastTrades: BotTradeRow[] = [];
 let _prevVol: Record<string, number> = {};  // ticker -> предыдущий Vol (для стрелки направления)
@@ -634,96 +938,6 @@ function tradeAsTrade(t: BotTradeRow): Record<string, unknown> {
   };
 }
 
-
-function logKind(l: string): string {
-  if (l.includes("TECHINFO")) return "tech";
-  if (l.includes("СВЕЧА")) return "candles";
-  if (l.includes("СИГНАЛ")) return "signals";
-  if (l.includes("СДЕЛКА") || l.includes("ВЫХОД")) return "trades";
-  return "events";
-}
-
-function renderLogs() {
-  const el = $("bot-live-logs");
-  if (!el) return;
-  let rows = _allLogs.filter((l) => LGF[logKind(l) as keyof typeof LGF]);
-  if (_logDateFilter) rows = rows.filter((l) => l.startsWith("[" + _logDateFilter));
-  rows = rows.slice(-500);
-  el.innerHTML = rows.length
-    ? rows.map((l) => {
-        let cls = "";
-        if (l.includes("TECHINFO")) cls = ' class="lg-tech"';
-        else if (l.includes("КВОРУМ")) cls = ' class="lg-warn"';
-        else if (l.includes("ПРОПУСК") || l.includes("ошибк") || l.includes("ERROR")) cls = ' class="lg-err"';
-        else if (l.includes("СИГНАЛ")) cls = ' class="lg-sig"';
-        else if (l.includes("ВЫХОД") || l.includes("ЗАКРЫТИЕ")) cls = ' class="lg-exit"';
-        else if (l.includes("СДЕЛКА")) cls = ' class="lg-fill"';
-        else if (l.includes("СВЕЧА")) cls = ' class="lg-cnd"';
-        return `<div${cls}>${l}</div>`;
-      }).join("")
-    : '<span style="color:#666">нет записей под фильтр</span>';
-  const cnt = $("log-count");
-  if (cnt) cnt.textContent = String(_allLogs.length);
-  el.scrollTop = el.scrollHeight;
-}
-
-async function pollLogs() {
-  const el = $("bot-live-logs");
-  if (!el) return;
-  try {
-    const r = await fetch(`${API}/api/v1/bot/logs?limit=400`);
-    if (!r.ok) return;
-    const data = await r.json();
-    _allLogs = data.logs || [];
-    renderLogs();
-  } catch {
-    /* ignore */
-  }
-}
-
-function setupLogFilters() {
-  const setLG = (id: string, key: keyof typeof LGF) => {
-    const cb = $(id) as HTMLInputElement | null;
-    if (cb) cb.addEventListener("change", () => {
-      LGF[key] = cb.checked;
-      cb.closest("label")?.classList.toggle("on", cb.checked);
-      localStorage.setItem("log_lgf", JSON.stringify(LGF));
-      renderLogs();
-      if (key === "candles") {
-        void fetch(`${API}/api/v1/bot/logconfig`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ log_candles: cb.checked }),
-        });
-      }
-    });
-  };
-  for (const [id, key] of [["lg-candles","candles"],["lg-signals","signals"],["lg-trades","trades"],["lg-events","events"],["lg-tech","tech"]]) {
-    const cb = $(id) as HTMLInputElement | null;
-    if (cb) { cb.checked = !!LGF[key]; cb.closest("label")?.classList.toggle("on", cb.checked); }
-  }
-  setLG("lg-candles", "candles");
-  setLG("lg-signals", "signals");
-  setLG("lg-trades", "trades");
-  setLG("lg-events", "events");
-  setLG("lg-tech", "tech");
-  const dateInput = $("log-filter-date") as HTMLInputElement | null;
-  if (dateInput) {
-    dateInput.value = _logDateFilter;
-    dateInput.addEventListener("change", () => {
-      _logDateFilter = dateInput.value;
-      localStorage.setItem("log_date_filter", _logDateFilter);
-      renderLogs();
-    });
-  }
-  const clear = $("lg-clear");
-  if (clear) clear.addEventListener("click", () => {
-    _allLogs = [];
-    if (dateInput) { dateInput.value = ""; _logDateFilter = ""; localStorage.removeItem("log_date_filter"); }
-    renderLogs();
-    void fetch(`${API}/api/v1/bot/logs/clear`, { method: "POST" });
-  });
-}
 
 async function doPause() {
   try {
@@ -1767,7 +1981,8 @@ async function renderAiGate() {
     notes = (n && n.notes) || [];
   } catch { /* сеть/бэкенд недоступны */ }
   const shadow = decs.some((x) => !!x.shadow);
-  if (sub) sub.textContent = approvals && approvals.enabled ? (shadow ? "shadow (не применяет)" : "боевой") : "выключен";
+  const _contour = approvals && approvals.contour ? ` · ${String(approvals.contour)}` : "";
+  if (sub) sub.textContent = (approvals && approvals.enabled ? (shadow ? "shadow (не применяет)" : "боевой") : "выключен") + _contour;
   if (summ) {
     if (!approvals) {
       summ.textContent = "нет данных";

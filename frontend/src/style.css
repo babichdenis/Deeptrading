@@ -1424,38 +1424,68 @@ body.modal-open { overflow: hidden; }
 }
 
 .bot-live-logs {
+  position: relative;
   background: #050b11;
   border: 1px solid #222d3d;
-  color: #00d995;
+  color: #cfd8e3;
   font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 10px;
-  line-height: 1.38;
-  padding: 5px 6px;
+  font-size: 11px;
+  line-height: 1.42;
+  padding: 4px 6px;
   border-radius: 6px;
   min-height: 100px;
-  height: 180px;
+  height: 240px;
   max-height: 70vh;
   resize: vertical;
   overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: #334158 #080e16;
 }
 .bot-live-logs::-webkit-scrollbar { width: 7px; }
 .bot-live-logs::-webkit-scrollbar-track { background: #080e16; }
 .bot-live-logs::-webkit-scrollbar-thumb { background: #334158; border-radius: 10px; }
-.bot-live-logs div {
-  padding: 2px 4px 3px 8px;
-  margin: 0 0 3px;
-  border-left: 2px solid transparent;
-  border-radius: 0;
+
+/* Плашки-строки */
+.bot-live-logs .lg-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 6px 3px 8px;
+  margin: 0 0 2px;
+  border: 1px solid rgba(255,255,255,0.04);
+  border-left: 3px solid #334158;
+  border-radius: 5px;
+  background: rgba(255,255,255,0.015);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
-.bot-live-logs .lg-cnd { color: #55606e; border-left-color: #344154; }
-.bot-live-logs .lg-tech { color: #b8a6ff; border-left-color: #8e68ff; }
-.bot-live-logs .lg-err { color: var(--down); border-left-color: #ff4f63; }
-.bot-live-logs .lg-sig { color: #00e89f; border-left-color: #13dba5; }
-.bot-live-logs .lg-warn { color: var(--gold); font-weight: 700; border-left-color: #f8b72b; }
+.bot-live-logs .lg-empty { color: #667; display: block; padding: 6px; }
+.lg-row .lg-t { color: #6b7a90; font-size: 10px; flex: none; font-variant-numeric: tabular-nums; }
+.lg-row .lg-lv { flex: none; font-size: 9px; font-weight: 800; letter-spacing: .05em; border-radius: 4px; padding: 0 4px; color: #9fd4ff; }
+.lg-row .lg-src { flex: none; font-size: 9px; color: #7c8aa0; border: 1px solid rgba(255,255,255,.08); border-radius: 4px; padding: 0 4px; }
+.lg-row .lg-msg { flex: 1 1 auto; min-width: 0; }
+.lg-row .lg-copy-row { flex: none; visibility: hidden; background: transparent; border: none; color: #6b7a90; cursor: pointer; font-size: 10px; padding: 0 2px; }
+.lg-row:hover .lg-copy-row { visibility: visible; }
+.lg-row .lg-copy-row:hover { color: var(--accent); }
+
+/* Цвета категорий (левая кромка + текст) */
+.bot-live-logs .lg-k-candles { border-left-color: #344154; }
+.bot-live-logs .lg-k-candles .lg-msg { color: #5d6874; }
+.bot-live-logs .lg-k-tech { border-left-color: #8e68ff; }
+.bot-live-logs .lg-k-tech .lg-msg { color: #b8a6ff; }
+.bot-live-logs .lg-k-signals { border-left-color: #13dba5; }
+.bot-live-logs .lg-k-signals .lg-msg { color: #00e89f; }
+.bot-live-logs .lg-k-trades { border-left-color: var(--accent); }
+.bot-live-logs .lg-k-trades .lg-msg { color: #7fb0ff; }
+.bot-live-logs .lg-k-events { border-left-color: #3b7dd8; }
+.bot-live-logs .lg-k-events .lg-msg { color: #9bb8d9; }
+
+/* Уровни — приоритетнее категорий, ошибки видны сразу */
+.bot-live-logs .lg-lv-warn { background: rgba(248,183,43,.08); border-left-color: #f8b72b; }
+.bot-live-logs .lg-lv-warn .lg-msg { color: var(--gold); font-weight: 600; }
+.bot-live-logs .lg-lv-warn .lg-lv { color: #1a1305; background: #f8b72b; }
+.bot-live-logs .lg-lv-debug .lg-lv { color: #7c8aa0; }
 .log-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
 .lg-chip {
   display: inline-flex; align-items: center; gap: 4px;
@@ -1478,11 +1508,34 @@ body.modal-open { overflow: hidden; }
   border-radius: 6px; padding: 3px 10px; font-size: 11px; cursor: pointer;
 }
 .lg-btn:hover { color: var(--down); border-color: var(--down); }
-.bot-live-logs .lg-cnd { color: #55606e; }
-.bot-live-logs .lg-tech { color: var(--cyan); }
-.bot-live-logs .lg-err { color: var(--down); }
-.bot-live-logs .lg-sig { color: var(--gold); }
-.bot-live-logs .lg-warn { color: var(--gold); font-weight: 700; }
+.bot-live-logs .lg-lv-error { background: rgba(255,79,99,.10); border-left-color: #ff4f63; }
+.bot-live-logs .lg-lv-error .lg-msg { color: #ff8a97; font-weight: 700; }
+.bot-live-logs .lg-lv-error .lg-lv { color: #fff; background: #ff4f63; }
+
+/* Управление логами: селект уровня, поиск, тикер, pill ошибок */
+.lg-head-btns { display: flex; gap: 4px; }
+.log-toolbar-r2 { margin-top: -2px !important; }
+.log-select {
+  background: var(--bg-soft); border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 14px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+  max-width: 110px;
+}
+.log-q {
+  flex: 1 1 60px; min-width: 40px;
+  background: var(--bg-soft); border: 1px solid var(--border); color: var(--text);
+  border-radius: 14px; padding: 3px 10px; font-size: 11px; outline: none;
+}
+.log-q-t { flex: 0 0 52px; }
+.log-q::placeholder { color: var(--text-dim); }
+.log-q:focus { border-color: rgba(var(--accent-rgb),0.6); }
+.log-toolbar-r3 { margin-top: -2px !important; }
+.lg-err-pill {
+  display: none; flex: 1; text-align: right;
+  font-size: 10px; font-weight: 700; color: #ff8a97;
+  background: rgba(255,79,99,.10); border: 1px solid #ff4f63;
+  border-radius: 10px; padding: 2px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lg-err-pill.on { display: inline-block; }
 
 /* Правый сайдбар: вкладки Рынок / Голоса */
 .sr-tabs { display: flex; gap: 4px; padding: 6px 8px 0; }
@@ -1558,8 +1611,6 @@ body.modal-open { overflow: hidden; }
 .stats-table tbody tr:nth-child(even) { background: rgba(255,255,255,0.015); }
 .stats-table tbody tr:hover { background: rgba(var(--accent-rgb),0.08); }
 .reg-tag { font-size: 9px; font-weight: 700; border: 1px solid; border-radius: 4px; padding: 0 3px; margin-left: 3px; vertical-align: middle; }
-.bot-live-logs .lg-fill { color: var(--accent); }
-.bot-live-logs .lg-exit { color: #ff8a65; }
 
 /* ===== header bot controls + resizable sidebar with logs ===== */
 .sidebar {

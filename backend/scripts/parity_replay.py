@@ -118,7 +118,8 @@ async def main():
         runtime.request_stop()
         print("!! Таймаут: бот не завершился за 40 мин, остановлен принудительно")
 
-    logs = list(runtime._live_logs)
+    from app.services.loghub import hub as _hub
+    logs = [r.line for r in _hub.tail(400)]
     print("=== ПОЛНЫЙ ЛОГ РЕПЛЕЯ (первые 40 + последние 25) ===")
     for l in logs[:40]:
         print(l)

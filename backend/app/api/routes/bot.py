@@ -71,6 +71,7 @@ def _config_payload(cfg: BotConfig) -> dict:
         "max_short_share": float(getattr(cfg, "max_short_share", 0.7) or 0.0),
         "max_net_exposure_pct": float(getattr(cfg, "max_net_exposure_pct", 0.5) or 0.0),
         "max_sector_pct": float(getattr(cfg, "max_sector_pct", 0.35) or 0.0),
+        "max_sector_positions": int(getattr(cfg, "max_sector_positions", 0) or 0),
         "max_margin_use_pct": float(getattr(cfg, "max_margin_use_pct", 0.8) or 0.0),
         "max_stress_loss_pct": float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.0),
         "queue_enabled": bool(getattr(cfg, "queue_enabled", True)),
@@ -126,12 +127,18 @@ def _config_payload(cfg: BotConfig) -> dict:
     }
 
 _sandbox_broker = None
+_sandbox_broker_mode = ""
 
 def _get_sandbox_broker():
-    global _sandbox_broker
-    if _sandbox_broker is None:
+    """Брокер активного контура (sandbox|live). Пересоздаётся при смене контура,
+    иначе после переключения sandbox↔live заявки уходили бы на старый счёт."""
+    global _sandbox_broker, _sandbox_broker_mode
+    from app.config import get_settings
+    _mode = get_settings().bot_mode if get_settings().bot_mode in ("sandbox", "live") else "sandbox"
+    if _sandbox_broker is None or _sandbox_broker_mode != _mode:
         from app.bot.live_broker import LiveBroker
-        _sandbox_broker = LiveBroker(SessionLocal)
+        _sandbox_broker = LiveBroker(SessionLocal, mode=_mode)
+        _sandbox_broker_mode = _mode
     return _sandbox_broker
 from app.database import get_db, SessionLocal
 from app.engine.strategies import ParamValidationError, build_strategy
@@ -261,6 +268,7 @@ class BotConfigPatch(BaseModel):
     max_short_share: float | None = None  # макс. доля SHORT среди позиций (0.7 = 70%)
     max_net_exposure_pct: float | None = None  # |net| <= X equity
     max_sector_pct: float | None = None        # сектор <= X equity
+    max_sector_positions: int | None = None    # макс. позиций в одном секторе (0=выкл)
     max_margin_use_pct: float | None = None    # starting_margin <= X equity
     max_stress_loss_pct: float | None = None   # убыток при ±5% IMOEX <= X equity
     queue_enabled: bool | None = None          # очередь кандидатов (топ-1 входит с бустом)
@@ -422,6 +430,11 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
         if abs(_msc - float(getattr(cfg, "max_sector_pct", 0.35) or 0.0)) > 1e-9:
             changes.append(f"сектор: {float(getattr(cfg, 'max_sector_pct', 0.35) or 0.0)*100:.0f}% → {_msc*100:.0f}% equity")
         cfg.max_sector_pct = _msc
+    if req.max_sector_positions is not None:
+        _msp = max(0, int(req.max_sector_positions))
+        if _msp != int(getattr(cfg, "max_sector_positions", 0) or 0):
+            changes.append(f"кластер сектора: {int(getattr(cfg, 'max_sector_positions', 0) or 0)} → {_msp} позиций")
+        cfg.max_sector_positions = _msp
     if req.max_margin_use_pct is not None:
         _mmu = max(0.0, min(1.0, float(req.max_margin_use_pct)))
         if abs(_mmu - float(getattr(cfg, "max_margin_use_pct", 0.8) or 0.0)) > 1e-9:
@@ -830,12 +843,15 @@ async def bot_orders(limit: int = 50) -> dict:
 
 @router.get("/approvals")
 async def bot_approvals() -> dict:
-    """Ожидающие подтверждения входы (AI-гейт) + настройки гейта."""
+    """Ожидающие подтверждения входы (AI-гейт) + настройки гейта + активный контур."""
     cfg = runtime.config
     return {
         "enabled": bool(getattr(cfg, "ai_approval", False)),
         "timeout_sec": float(getattr(cfg, "ai_approval_timeout_sec", 45.0) or 45.0),
         "default": str(getattr(cfg, "ai_approval_default", "approve") or "approve"),
+        "broker_mode": runtime.broker_mode,
+        "contour": runtime.active_contour,
+        "ai_mode": str(runtime.get_ai_control().get("mode") or ""),
         "pending": runtime.list_approvals(),
     }
 
@@ -913,9 +929,37 @@ class AiTradeRequest(BaseModel):
     reason: str = ""
 
 
+def _day_change_pct(figi: str) -> float | None:
+    """Изменение цены с начала дня (МСК) по живому буферу 1м — для гейта чейзинга."""
+    try:
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        bb = runtime.tcs_to_bbg.get(figi, figi)
+        buf = runtime.buffers.get(bb) or runtime.buffers.get(figi)
+        if not buf:
+            return None
+        _msk = _tz(_td(hours=3))
+        _today = _dt.now(_msk).date()
+        bars = [c for c in buf if c.ts.astimezone(_msk).date() == _today]
+        if len(bars) < 2:
+            return None
+        first = float(bars[0].open or bars[0].close or 0)
+        last = float(bars[-1].close or 0)
+        if first <= 0 or last <= 0:
+            return None
+        return round((last / first - 1.0) * 100.0, 2)
+    except Exception:
+        return None
+
+
 @router.post("/ai_trade")
 async def bot_ai_trade(req: AiTradeRequest) -> dict:
-    """Заявка внешнего AI-трейдера: лимиты маржи/стресса действуют, AI-гейт — нет."""
+    """Заявка внешнего AI-трейдера: лимиты маржи/стресса действуют, AI-гейт — нет.
+
+    Плюс жёсткие гейты (настраиваются в BotConfig):
+      ai_chase_pct — запрет входа после сильного дневного хода без отката;
+      ai_ob_imbalance_max / ai_ob_spread_max — стакан против входа / широкий спред;
+      ai_sl_max_pct / ai_tp_max_pct — потолки SL/TP.
+    """
     import asyncio as _aio
     ticker = str(req.ticker or "").strip().upper()
     figi = next((u.get("figi") for u in (runtime.universe or [])
@@ -952,9 +996,51 @@ async def bot_ai_trade(req: AiTradeRequest) -> dict:
         return {"ok": bool(res.get("ok", True)), "ticker": ticker, "action": _act,
                 "levels": _lvl, "result": res, "reason": str(req.reason)[:200]}
     _side = "BUY" if str(req.side).upper() in ("BUY", "LONG") else "SELL"
+    # --- Жёсткие гейты AI-ордера: чейзинг, стакан, потолки SL/TP ---
+    _cfg = runtime.config
+    _skip: list[str] = []
+    _ch = float(getattr(_cfg, "ai_chase_pct", 3.0) or 0.0)
+    _chg = _day_change_pct(figi)
+    if _ch and _chg is not None:
+        if _side == "BUY" and _chg > _ch:
+            _skip.append(f"чейзинг: +{_chg:.1f}% за день без отката")
+        if _side == "SELL" and _chg < -_ch:
+            _skip.append(f"чейзинг: {_chg:.1f}% за день без отскока")
+    _ob = {}
+    try:
+        _ob = await bot_orderbook(figi, depth=10)
+    except Exception:
+        _ob = {}
+    _lim = float(getattr(_cfg, "ai_ob_imbalance_max", 0.3) or 0.0)
+    _imb = _ob.get("imbalance")
+    if _lim > 0 and _imb is not None:
+        if _side == "BUY" and float(_imb) < -_lim:
+            _skip.append(f"стакан: imbalance {_imb} против BUY")
+        if _side == "SELL" and float(_imb) > _lim:
+            _skip.append(f"стакан: imbalance {_imb} против SELL")
+    _spr_max = float(getattr(_cfg, "ai_ob_spread_max", 25.0) or 0.0)
+    _spr = _ob.get("spread_bps")
+    if _spr_max > 0 and _spr is not None and float(_spr) > _spr_max:
+        _skip.append(f"стакан: спред {_spr} > {_spr_max} б.п.")
+    if _skip:
+        try:
+            runtime.events.log("AI_ORDER_SKIPPED", figi=figi, ticker=ticker,
+                               reason="; ".join(_skip)[:200])
+            runtime._log(f"AI-ГЕЙТ ОРДЕРА: {ticker} {_side} отклонён — {'; '.join(_skip)}")
+        except Exception:
+            pass
+        return {"ok": False, "ticker": ticker, "side": _side, "action": "open",
+                "skipped": "; ".join(_skip)}
+    _sl, _tp = req.sl_pct, req.tp_pct
+    _sl_cap = float(getattr(_cfg, "ai_sl_max_pct", 0.03) or 0.0)
+    if _sl and _sl_cap > 0:
+        _sl = min(float(_sl), _sl_cap)
+    _tp_cap = float(getattr(_cfg, "ai_tp_max_pct", 0.08) or 0.0)
+    if _tp and _tp_cap > 0:
+        _tp = min(float(_tp), _tp_cap)
     await runtime._submit_order(figi, ticker, "open", _side, meta={
         "ai_trader": True, "priority": True, "ai_reason": str(req.reason)[:200],
-        "notional_pct": req.notional_pct, "sl_pct": req.sl_pct, "tp_pct": req.tp_pct,
+        "notional_pct": req.notional_pct, "sl_pct": _sl, "tp_pct": _tp,
         "hold": str(req.hold or "intraday"),
     })
     return {"ok": True, "ticker": ticker, "side": _side, "action": "open",
@@ -1162,7 +1248,8 @@ async def bot_state() -> dict:
 
 @router.get("/logconfig")
 async def bot_logconfig_get() -> dict:
-    return {"log_candles": runtime.log_candles, "buffer_max": runtime._live_logs.maxlen}
+    from app.services.loghub import hub
+    return {"log_candles": runtime.log_candles, "buffer_max": hub.maxlen}
 
 
 @router.post("/logconfig")
@@ -1174,14 +1261,142 @@ async def bot_logconfig_set(payload: dict) -> dict:
 
 @router.post("/logs/clear")
 async def bot_logs_clear() -> dict:
-    runtime._live_logs.clear()
+    from app.services.loghub import hub
+    hub.clear()
     return {"cleared": True}
 
 
+def _log_match(r, levels, src_low, q_low, ticker_re, date) -> bool:
+    if levels and r.level not in levels:
+        return False
+    if src_low and src_low not in r.source:
+        return False
+    if q_low and q_low not in r.msg.lower():
+        return False
+    if ticker_re and not ticker_re.search(r.msg):
+        return False
+    if date and not r.ts.startswith(date):
+        return False
+    return True
+
+
 @router.get("/logs")
-async def bot_logs(limit: int = 200) -> dict:
-    logs = list(runtime._live_logs)[-limit:]
-    return {"logs": logs, "count": len(logs)}
+async def bot_logs(
+    limit: int = 400,
+    after_id: int = 0,
+    level: str = "",
+    source: str = "",
+    q: str = "",
+    ticker: str = "",
+    date: str = "",
+    plain: int = 0,
+) -> dict:
+    """Структурированные логи бота (in-memory кольцо).
+
+    after_id=0  → последние `limit` записей (tail),
+    after_id>0  → только записи с id > after_id (инкрементальный поллинг).
+    Фильтры: level (в т.ч. список через запятую), source, q (подстрока msg),
+    ticker (граница слова), date (МСК 'YYYY-MM-DD'). plain=1 → старый формат.
+    """
+    import re
+    from app.services.loghub import hub
+
+    levels = {x.strip() for x in level.split(",") if x.strip()} or None
+    q_low = q.lower() if q else None
+    src_low = source.lower() if source else None
+    ticker_re = None
+    if ticker and ticker.strip():
+        ticker_re = re.compile(
+            r"\b" + re.escape(ticker.strip()) + r"\b", re.IGNORECASE
+        )
+
+    items: list = []
+    src_records = hub.after(after_id, limit=2000) if after_id else hub.tail(limit=2000)
+    for r in src_records:
+        if not _log_match(r, levels, src_low, q_low, ticker_re, date):
+            continue
+        items.append(r)
+        if len(items) >= limit:
+            break
+    if plain:
+        return {"logs": [r.line for r in items], "count": len(items)}
+    return {"items": [r.to_dict() for r in items], "count": len(items), "total": hub.len()}
+
+
+@router.get("/logs/history")
+async def bot_logs_history(
+    before: str = "",
+    limit: int = 500,
+    level: str = "",
+    source: str = "",
+    q: str = "",
+    ticker: str = "",
+    date: str = "",
+) -> dict:
+    """История логов из PostgreSQL (за границей in-memory кольца).
+
+    before — МСК timestamp 'YYYY-MM-DD HH:MM:SS[.mmm]'; возвращаются записи
+    СТАРШЕ этого момента, по возрастанию id (для подгрузки «вверх»).
+    """
+    import re
+    from datetime import datetime as _dt, timedelta, timezone
+    from sqlalchemy import text as _text
+
+    from app.database import SessionLocal
+    from app.services.loghub import strip_legacy_ts
+
+    before_utc = None
+    if before.strip():
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                _d = _dt.strptime(before.strip(), fmt)
+                before_utc = _d.replace(tzinfo=timezone(timedelta(hours=3)))
+                break
+            except ValueError:
+                continue
+
+    where: list[str] = []
+    params: dict = {"limit": min(limit, 2000)}
+    if before_utc:
+        where.append("ts < :before_utc")
+        params["before_utc"] = before_utc
+    lvls = [x.strip() for x in level.split(",") if x.strip()]
+    if lvls:
+        where.append("level = ANY(:levels)")
+        params["levels"] = lvls
+    if source:
+        where.append("source ILIKE :source")
+        params["source"] = f"%{source}%"
+    if q:
+        where.append("msg ILIKE :q")
+        params["q"] = f"%{q}%"
+    if ticker.strip():
+        where.append("msg ~* :ticker")
+        params["ticker"] = r"\m" + re.escape(ticker.strip()) + r"\M"
+    if date.strip():
+        where.append("(ts AT TIME ZONE 'Europe/Moscow')::date = :date")
+        params["date"] = date.strip()
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    sql = _text(
+        "SELECT id, "
+        "to_char(ts AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD HH24:MI:SS.MS') AS ts_s, "
+        "COALESCE(level,'info') AS lvl, COALESCE(source,'bot') AS src, msg "
+        f"FROM bot_logs{where_sql} ORDER BY id DESC LIMIT :limit"
+    )
+    try:
+        async with SessionLocal() as db:
+            rows = (await db.execute(sql, params)).all()
+    except Exception as e:
+        return {"items": [], "error": str(e)[:200], "has_more": False}
+
+    items = [
+        {"id": int(r.id), "ts": r.ts_s, "level": (r.lvl or "info")[:16],
+         "source": (r.src or "bot")[:16], "msg": strip_legacy_ts(r.msg or "")}
+        for r in rows
+    ]
+    items.reverse()  # старые → новые, для вставки в начало списка
+    return {"items": items, "has_more": len(rows) >= limit}
 
 
 @router.get("/status")
@@ -1277,9 +1492,52 @@ async def bot_positions(db: AsyncSession = Depends(get_db)) -> dict:
 
 @router.get("/trades")
 async def bot_trades(limit: int = 50) -> dict:
-    trades = await runtime.broker.trades_history(min(limit, 500))
+    """История закрытых сделок АКТИВНОГО контура (sandbox/live).
+
+    Важно: раньше отдавали общую таблицу PaperTrade без фильтра контура — AI-воркеры
+    видели live-сделки, когда бот уже переключён на sandbox (и наоборот). Теперь
+    выборка идёт из sandbox_trades по mode активного счёта.
+    """
+    _lim = min(limit, 500)
+    _mode = str(getattr(runtime, "broker_mode", "") or "")
+    if _mode in ("sandbox", "live"):
+        from sqlalchemy import func as _fn
+        from sqlalchemy import select as _sel
+        from app.database import SessionLocal as _DB
+        from app.models.sandbox_trade import SandboxTrade
+        async with _DB() as db:
+            rows = (await db.execute(
+                _sel(SandboxTrade)
+                .where(SandboxTrade.mode == _mode, SandboxTrade.exit_time.is_not(None),
+                       _fn.coalesce(SandboxTrade.exit_reason, "") != "reopened")
+                .order_by(SandboxTrade.exit_time.desc())
+                .limit(_lim)
+            )).scalars().all()
+        return {
+            "count": len(rows),
+            "broker_mode": _mode,
+            "trades": [
+                {
+                    "figi": t.figi,
+                    "ticker": t.ticker,
+                    "side": t.side,
+                    "qty": int(t.qty or 0),
+                    "entry_time": t.entry_time.isoformat() if t.entry_time else "",
+                    "entry_price": float(t.entry_price or 0),
+                    "exit_time": t.exit_time.isoformat() if t.exit_time else "",
+                    "exit_price": float(t.exit_price or 0),
+                    "net_pnl": float(t.net_pnl or 0),
+                    "commission": float(t.commission or 0),
+                    "exit_reason": t.exit_reason or "",
+                    "strategy_id": "v4_enhanced",
+                }
+                for t in rows
+            ],
+        }
+    trades = await runtime.broker.trades_history(_lim)
     return {
         "count": len(trades),
+        "broker_mode": _mode or "paper",
         "trades": [
             {
                 "figi": t.figi,
@@ -1308,29 +1566,48 @@ async def bot_reset(initial_cash: float = 10_000.0) -> dict:
     return {"reset": True}
 
 
+_orderbook_client = None
+_orderbook_client_key = None
+_orderbook_lock = __import__("threading").Lock()
+_orderbook_cache: dict[tuple[str, int], tuple[float, dict]] = {}
+_ORDERBOOK_TTL = 5.0
+
+
 @router.get("/orderbook/{figi}")
 async def bot_orderbook(figi: str, depth: int = 10) -> dict:
     """Стакан (order book) на момент запроса: топ-N уровней + метрики для AI-гейта.
 
     spread_bps — ширина спреда (б.п.); imbalance — перевес бидов (-1..+1);
     depth_rub — ликвидность в топе (₽). В реплее/вне торгов может быть недоступен.
+
+    Клиент T-Invest — переиспользуемый (создание Client на каждый запрос ~14с!),
+    плюс короткий кэш 5с: гейт и трейдер дёргают стакан десятками за цикл.
     """
     import asyncio as _aio
+    import time as _time
     from t_tech.invest import Client
     from app.config import get_settings
     _s = get_settings()
     _depth = max(1, min(int(depth), 20))
+    _key = (figi, _depth)
+    _hit = _orderbook_cache.get(_key)
+    if _hit is not None and (_time.monotonic() - _hit[0]) < _ORDERBOOK_TTL:
+        return _hit[1]
 
     def _fetch():
-        with Client(_s.feed_token) as c:
-            ob = c.market_data.get_order_book(figi=figi, depth=_depth)
+        global _orderbook_client, _orderbook_client_key
+        with _orderbook_lock:
+            if _orderbook_client is None or _orderbook_client_key != _s.feed_token:
+                _orderbook_client = Client(_s.feed_token).__enter__()
+                _orderbook_client_key = _s.feed_token
+        ob = _orderbook_client.market_data.get_order_book(figi=figi, depth=_depth)
 
-            def _q(v):
-                return float(v.units) + float(v.nano) / 1e9 if v is not None else 0.0
+        def _q(v):
+            return float(v.units) + float(v.nano) / 1e9 if v is not None else 0.0
 
-            bids = [{"p": _q(b.price), "q": int(b.quantity)} for b in (ob.bids or [])]
-            asks = [{"p": _q(a.price), "q": int(a.quantity)} for a in (ob.asks or [])]
-            return bids, asks, _q(ob.last_price), getattr(ob, "order_book_ts", None)
+        bids = [{"p": _q(b.price), "q": int(b.quantity)} for b in (ob.bids or [])]
+        asks = [{"p": _q(a.price), "q": int(a.quantity)} for a in (ob.asks or [])]
+        return bids, asks, _q(ob.last_price), getattr(ob, "order_book_ts", None)
 
     try:
         bids, asks, last, ts = await _aio.to_thread(_fetch)
@@ -1345,7 +1622,7 @@ async def bot_orderbook(figi: str, depth: int = 10) -> dict:
     aq = sum(a["q"] for a in asks)
     imb = (bq - aq) / (bq + aq) if (bq + aq) > 0 else None
     depth_rub = sum(b["p"] * b["q"] for b in bids) + sum(a["p"] * a["q"] for a in asks)
-    return {
+    _out = {
         "figi": figi, "ts": str(ts) if ts else None, "last": last,
         "best_bid": bb, "best_ask": ba,
         "spread_bps": round(spread_bps, 1) if spread_bps is not None else None,
@@ -1354,6 +1631,14 @@ async def bot_orderbook(figi: str, depth: int = 10) -> dict:
         "depth_rub": round(depth_rub, 0),
         "top_bids": bids[:5], "top_asks": asks[:5],
     }
+    try:
+        _orderbook_cache[_key] = (_time.monotonic(), _out)
+        if len(_orderbook_cache) > 64:
+            _oldest = min(_orderbook_cache, key=lambda k: _orderbook_cache[k][0])
+            _orderbook_cache.pop(_oldest, None)
+    except Exception:
+        pass
+    return _out
 
 
 @router.get("/trading_status")

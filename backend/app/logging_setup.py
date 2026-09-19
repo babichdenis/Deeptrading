@@ -31,6 +31,12 @@ def setup_logging() -> None:
     if level > logging.DEBUG:
         for noisy in ("httpx", "httpcore", "grpc", "asyncio", "sqlalchemy.engine", "uvicorn.access"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
+    # Единый контур: все консольные записи процесса дублируются в UI-буфер логов.
+    from app.services.loghub import attach_hub_handler
+    try:
+        attach_hub_handler()
+    except Exception:
+        pass
 
 
 def engine_debug_enabled() -> bool:

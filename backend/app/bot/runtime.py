@@ -98,6 +98,7 @@ class BotConfig:
     # --- Портфельные лимиты (в деньгах) ---
     max_net_exposure_pct: float = 0.5   # |net notional| <= X equity (0=выкл)
     max_sector_pct: float = 0.35        # notional сектора <= X equity (0=выкл)
+    max_sector_positions: int = 0       # макс. позиций в одном секторе-кластере (0=выкл)
     max_margin_use_pct: float = 0.8     # starting_margin <= X equity (0=выкл)
     max_stress_loss_pct: float = 0.10   # убыток при ±5% IMOEX <= X equity (0=выкл)
     queue_enabled: bool = True           # очередь кандидатов: топ-1 по силе входит с бустом
@@ -189,6 +190,12 @@ class BotConfig:
     ai_approval_timeout_sec: float = 45.0  # сколько ждать решение, сек
     ai_approval_default: str = "approve"   # approve | reject — что делать по таймауту
     ai_reject_cooldown_min: float = 15.0   # пауза входов по тикеру после отклонения ИИ, мин (0=выкл)
+    # --- AI-ордера (AI-трейдер): жёсткие гейты на входе ---
+    ai_chase_pct: float = 3.0         # блок входа после хода >X% за день без отката (0=выкл)
+    ai_ob_imbalance_max: float = 0.3  # блок входа против потока стакана сильнее X (0=выкл)
+    ai_ob_spread_max: float = 25.0    # блок входа при спреде > X б.п. (0=выкл)
+    ai_sl_max_pct: float = 0.03       # потолок SL для AI-ордера, доля (0=без потолка)
+    ai_tp_max_pct: float = 0.08       # потолок TP для AI-ордера, доля (0=без потолка)
 
 
 # Поля BotConfig, которые сохраняются в БД и восстанавливаются при старте бота.
@@ -206,6 +213,7 @@ BOT_PERSIST_FIELDS = (
     "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
     "pos_pct", "max_positions", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
+    "max_sector_positions",
     "queue_enabled", "queue_ttl_min", "queue_interval_sec", "top_boost",
     "queue_min_turnover", "queue_adv_multiple", "queue_history_veto",
     "top_sizing", "top_relax_caps",
@@ -217,6 +225,8 @@ BOT_PERSIST_FIELDS = (
     "imoex_release_frac", "imoex_min_block_min", "imoex_guard_min_beta", "imoex_chase_block_pct",
     "ai_approval", "ai_approval_timeout_sec", "ai_approval_default",
     "ai_reject_cooldown_min",
+    "ai_chase_pct", "ai_ob_imbalance_max", "ai_ob_spread_max",
+    "ai_sl_max_pct", "ai_tp_max_pct",
 )
 
 
@@ -514,9 +524,7 @@ class PaperBotRuntime:
         self._held: set[str] = set()
         self._swing: set[str] = set()  # figis AI-сделок "swing" (не закрывать на EOD/ночь)
         self._held_since: dict[str, float] = {}  # figi -> время добавления в _held (для grace синка)
-        self._live_logs: deque[str] = deque(maxlen=400)
-        self._log_persist_queue: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (level, source, msg) — дренится в bot_logs флашером
-        self._log_persist_queue: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (level, source, msg) — дренится в bot_logs флашером
+        self._log_persist_queue: deque[tuple[str, str, str, str]] = deque(maxlen=2000)  # (level, source, msg, ts_msk)
         self.stream_manager: StreamManager | None = None
         self.carousel_diag: dict = {
             "eligible_count": 0,
@@ -1347,11 +1355,12 @@ class PaperBotRuntime:
             return POS_PCT
 
     def _log(self, msg: str, level: str = "info", source: str = "bot") -> None:
-        ts = datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d %H:%M:%S")
-        self._live_logs.append(f"[{ts}] {msg}")
-        # Персистентная копия (level/source) — пишется в bot_logs флашером,
+        from app.services.loghub import hub, msk_now_str
+        ts = msk_now_str()
+        hub.push(msg, level=level, source=source, ts=ts)
+        # Персистентная копия (level/source/msg/ts) — пишется в bot_logs флашером,
         # переживает рестарт и видна в Live через фильтры UI.
-        self._log_persist_queue.append((level, source, f"[{ts}] {msg}"))
+        self._log_persist_queue.append((level, source, msg, ts))
 
 
     def _get_5m_bars(self, figi: str, buf_list: list) -> list:
@@ -2312,11 +2321,19 @@ class PaperBotRuntime:
             # Восстановить хвост live-логов из bot_logs (переживают рестарт; Live видит
             # постоянные логи через фильтры UI, а не только deque in-memory).
             try:
-                _hd = await _db.execute(
-                    _text("SELECT to_char(ts AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD HH24:MI:SS') || ' ' || msg "
-                          "FROM (SELECT ts, msg FROM bot_logs ORDER BY id DESC LIMIT 400) t ORDER BY id")
-                )
-                self._live_logs.extend(_hd.scalars().all())
+                _rows = (await _db.execute(
+                    _text(
+                        "SELECT id, to_char(ts AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD HH24:MI:SS.MS') AS ts_s, "
+                        "COALESCE(level,'info') AS lvl, COALESCE(source,'bot') AS src, msg "
+                        "FROM (SELECT id, ts, level, source, msg FROM bot_logs ORDER BY id DESC LIMIT 400) t ORDER BY id"
+                    )
+                )).all()
+                from app.services.loghub import hub, strip_legacy_ts
+                for _rid, _ts_s, _lvl, _src, _msg in _rows:
+                    hub.push(strip_legacy_ts(_msg or ""), level=_lvl, source=_src, ts=_ts_s)
+                if _rows:
+                    hub.set_seq(int(_rows[-1][0]))
+                self._log(f"ВОССТАНОВЛЕНО {len(_rows)} строк логов из истории")
             except Exception:
                 pass
         except Exception:
@@ -2641,11 +2658,31 @@ class PaperBotRuntime:
             except Exception:
                 pass
             self.stream_manager = None
+        # Закрыть gRPC-канал брокера: non-daemon потоки Client держат процесс
+        # после завершения uvicorn (shutdown «висит» до kill -9).
+        try:
+            _cl = getattr(self.broker, "close", None)
+            if callable(_cl):
+                _cl()
+        except Exception:
+            pass
         for t in (self.startup_task, self.task):
             if t and not t.done():
                 t.cancel()
                 try:
                     await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+        # Хвостовые циклы (persist/imoex/queue/…): если _run уже завершился сам,
+        # они остаются висеть и блокируют graceful shutdown uvicorn — гасим явно.
+        for _attr in ('_persist_task', '_held_sync_task', '_hot_add_task', '_reconcile_task',
+                      '_session_task', '_metrics_task', '_intrabar_task', '_imoex_task',
+                      '_queue_task', '_momentum_task', '_guard_task'):
+            _t = getattr(self, _attr, None)
+            if _t and not _t.done():
+                _t.cancel()
+                try:
+                    await _t
                 except (asyncio.CancelledError, Exception):
                     pass
         self.startup_task = None
@@ -3573,12 +3610,12 @@ class PaperBotRuntime:
             if log_rows:
                 try:
                     async with SessionLocal() as db:
-                        _payload = [{"level": l, "source": s, "msg": m}
-                                    for (l, s, m) in log_rows]
+                        _payload = [{"level": l, "source": s, "msg": m, "ts": t + "+03:00"}
+                                    for (l, s, m, t) in log_rows]
                         await db.execute(
                             _text(
-                                "INSERT INTO bot_logs (level, source, msg) "
-                                "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, msg text)"
+                                "INSERT INTO bot_logs (level, source, ts, msg) "
+                                "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, ts timestamptz, msg text)"
                             ),
                             {"rows": json.dumps(_payload, ensure_ascii=False)},
                         )
@@ -3673,7 +3710,9 @@ class PaperBotRuntime:
                     await self._persist_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task', '_metrics_task', '_intrabar_task', '_imoex_task'):
+            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task', '_metrics_task',
+                      '_intrabar_task', '_imoex_task', '_session_task', '_queue_task',
+                      '_momentum_task', '_guard_task'):
                 task = getattr(self, t, None)
                 if task:
                     task.cancel()
@@ -4107,7 +4146,10 @@ class PaperBotRuntime:
         if _is_ai:
             _boost = float((meta or {}).get("notional_pct") or 1.0)
         _sizing = str(getattr(cfg, "margin_sizing", "divide") or "divide").lower()
-        if _is_priority:
+        # Топ-1 очередь: multiply-сайзинг только для сигналов движка. Для AI-трейдера
+        # (priority=True, ai_trader=True) — обычный divide: иначе позиция ×плечо
+        # (7000×5.95≈42k) и ордер режется портфельным лимитом экспозиции.
+        if _is_priority and not _is_ai:
             _sizing = str(getattr(cfg, "top_sizing", "multiply") or "multiply").lower()
         if action == "open":
             buf = self.buffers.get(figi)
@@ -4117,6 +4159,19 @@ class PaperBotRuntime:
                 if u.get("figi") == figi and u.get("lot"):
                     lot = int(u["lot"])
                     break
+            else:
+                # Не в eligible-универсе (AI-трейдер может брать лидеров движения) —
+                # лот берём из БД, иначе дефолт 10 даёт ошибку размера в 10 раз.
+                try:
+                    from app.models.instrument import Instrument as _Inst
+                    async with SessionLocal() as _db:
+                        _l = (await _db.execute(
+                            select(_Inst.lot).where(_Inst.figi == figi)
+                        )).scalar_one_or_none()
+                    if _l:
+                        lot = int(_l)
+                except Exception:
+                    pass
             budget = cfg.ensemble_capital
             if isinstance(self.broker, LiveBroker):
                 try:
@@ -4224,7 +4279,7 @@ class PaperBotRuntime:
                         self._log(f"MARGIN LEV {ticker}: брокер ×{_max_lev:.2f} ({_lev_src}"
                                   + (f", риск {_risk:.3f}" if 0 < _risk < 1 else "") + ") · "
                                   f"выбрано {'Max' if _want <= 0 else '×'+format(_want, 'g')} → ×{lev:.2f} · "
-                                  f"режим={_sizing}{' [топ-1]' if _is_priority else ''} "
+                                  f"режим={_sizing}{' [топ-1]' if (_is_priority and not _is_ai) else ''} "
                                   f"(позиция {_pos:.0f}₽ = свои {_own:.0f}₽ + заём {_pos-_own:.0f}₽)")
                 except Exception as e:
                     self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed at cfg.leverage={lev:.1f}")
@@ -4419,7 +4474,7 @@ class PaperBotRuntime:
                     max_stress_loss_pct=float(getattr(cfg, "max_stress_loss_pct", 0.1) or 0.0),
                 )
                 _lim = _rlim(_base, _regime)
-                if _is_priority and bool(getattr(cfg, "top_relax_caps", True)):
+                if _is_priority and not _is_ai and bool(getattr(cfg, "top_relax_caps", True)):
                     # Сильнейшему — большая сумма: сектор без лимита, net до 100%
                     # (если net-лимит вообще включён). Жёсткими остаются стресс и маржа.
                     if _lim.max_net_exposure_pct > 0:
@@ -4463,6 +4518,31 @@ class PaperBotRuntime:
                                     reason="MAX_POSITIONS")
                     self._log_no_trade(figi, "max_positions")
                     return
+            except Exception:
+                pass
+        # --- Лимит позиций в одном секторе-кластере (коррелированный риск) ---
+        if action == "open":
+            try:
+                _max_sec = int(getattr(cfg, "max_sector_positions", 0) or 0)
+                if _max_sec > 0 and self._held:
+                    _meta = await self.sector_meta()
+                    _sec = str((_meta.get(str(ticker).upper())
+                                or _meta.get(figi) or {}).get("sector") or "")
+                    if _sec and _sec != "other":
+                        _same = 0
+                        for _f in self._held:
+                            _tk = self.tickers.get(_f, "")
+                            _s2 = str((_meta.get(str(_tk).upper())
+                                       or _meta.get(_f) or {}).get("sector") or "")
+                            if _s2 == _sec:
+                                _same += 1
+                        if _same >= _max_sec:
+                            self._log(f"ПРОПУСК ВХОДА {ticker}: кластер «{_sec}» — "
+                                      f"уже {_same} позиций (лимит {_max_sec})")
+                            self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                            reason="SECTOR_CLUSTER", detail=_sec)
+                            self._log_no_trade(figi, "sector_cluster")
+                            return
             except Exception:
                 pass
         # --- Баланс LONG/SHORT: не даём уйти в односторонний шорт ---

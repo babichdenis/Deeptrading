@@ -241,7 +241,7 @@ def get_events(limit: int = 100, kind: str = "") -> dict:
 def get_logs(limit: int = 100, grep: str = "") -> list:
     """Последние строки лога бота (сигналы, входы/выходы, MARGIN, TECHINFO).
     grep — подстрока для фильтра (например 'IMOEX', 'ПРОПУСК', 'ERROR')."""
-    d = _get("/api/v1/bot/logs", limit=limit)
+    d = _get("/api/v1/bot/logs", limit=limit, plain=1)
     if not isinstance(d, dict) or d.get("ok") is False:
         return [str(d)]
     logs = d.get("logs") or []

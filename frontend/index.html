@@ -33,8 +33,11 @@
         </div>
         <div class="sidebar-logs">
           <div class="logs-heading">
-            <div class="sl-title">🤖 ЛОГИ БОТА <span>(МСК)</span></div>
-            <button class="lg-btn lg-clear-btn" id="lg-clear" title="Очистить логи">⋮</button>
+            <div class="sl-title">📜 ЛОГИ <span>(МСК)</span></div>
+            <div class="lg-head-btns">
+              <button class="lg-btn" id="lg-copy" title="Скопировать видимые логи как текст">⧉</button>
+              <button class="lg-btn lg-clear-btn" id="lg-clear" title="Очистить экран логов">🗑</button>
+            </div>
           </div>
           <div class="log-toolbar">
             <label class="lg-chip on"><input type="checkbox" id="lg-candles" checked><span>Свечи</span></label>
@@ -43,9 +46,23 @@
             <label class="lg-chip on"><input type="checkbox" id="lg-events" checked><span>События</span></label>
             <label class="lg-chip on"><input type="checkbox" id="lg-tech" checked><span>Тех</span></label>
           </div>
-          <input type="date" id="log-filter-date" class="log-date-input" title="Фильтр по дате" />
-          <div class="bot-live-logs" id="bot-live-logs"><span style="color:#666">нет логов — запусти бота</span></div>
-          <div class="log-footer"><span><i></i>Система работает стабильно</span><span class="lf-count">Логи <b id="log-count">0</b></span></div>
+          <div class="log-toolbar log-toolbar-r2">
+            <select id="lg-level" class="log-select" title="Фильтр по уровню">
+              <option value="">уровень: любой</option>
+              <option value="debug">debug</option>
+              <option value="info">info</option>
+              <option value="warn">warn ⚠</option>
+              <option value="error">error ✕</option>
+            </select>
+            <input type="text" id="lg-q" class="log-q" placeholder="🔍 поиск…" />
+            <input type="text" id="lg-ticker" class="log-q log-q-t" placeholder="тикер…" />
+          </div>
+          <div class="log-toolbar log-toolbar-r3">
+            <input type="date" id="log-filter-date" class="log-date-input" title="Фильтр по дате (МСК). Очисти, чтобы видеть все дни" />
+            <span class="lg-err-pill" id="lg-err-pill" title="Ошибок и предупреждений среди видимых логов"></span>
+          </div>
+          <div class="bot-live-logs" id="bot-live-logs"></div>
+          <div class="log-footer"><span class="lf-count" id="lg-title-hint">Логи <b id="log-count">0</b></span></div>
         </div>
         <div class="sidebar-grip" title="Изменить ширину"></div>
       </aside>
