@@ -4407,197 +4407,81 @@ class PaperBotRuntime:
                 self._reject_entry("signal", _res_s.key, _res_s.detail, figi, ticker)
                 return
         # ================= STAGE B: сигнал/тренд (кэш-карты, без брокера) ================
-        # --- Дневной MACD-bias: входы против дневного направления (veto) ---
-        if action == "open" and not (_is_momentum or _is_ai) and bool(getattr(cfg, "daily_bias", False)):
+        # TREND_GATES из app/bot/gates.py: daily_bias → h1_align → tf_conflict →
+        # legacy MTF → якорь кворума → рейтинг. Short-circuit: первый отказ — стоп.
+        if action == "open" and not (_is_momentum or _is_ai):
+            from app.bot.gates import TrendContext, TREND_GATES, run_gate_chain
             try:
+                _mtf = (await self.mtf_macd_map()).get(str(ticker).upper()) or {}
                 _db = (await self.daily_bias_map()).get(str(ticker).upper()) or {}
-                _bias = str(_db.get("bias") or "")
+            except Exception as _ge:
+                self._reject_entry("trend", "tf_gate_error",
+                                   f"{type(_ge).__name__}: {str(_ge)[:80]}", figi, ticker)
+                return
+            _h1 = _mtf.get("h1") or {}
+            _m5 = _mtf.get("m5") or {}
+            _qe = ((meta or {}).get("quorum_event") or {}) if isinstance(meta, dict) else {}
+            _bias = str(_db.get("bias") or "")
+            # info-режим daily_bias: только лог, без блокировки (veto — через гейт)
+            if (bool(getattr(cfg, "daily_bias", False)) and _bias in ("up", "down")
+                    and str(getattr(cfg, "daily_bias_mode", "veto")).lower() != "veto"):
                 _against = ((_bias == "up" and side == "SELL")
                             or (_bias == "down" and side == "BUY"))
                 if _against:
-                    _hist = _db.get("hist")
-                    if str(getattr(cfg, "daily_bias_mode", "veto")).lower() == "veto":
-                        self._log(f"ПРОПУСК ВХОДА {ticker}: [trend] daily_bias — дневной MACD-bias {_bias} "
-                                  f"(hist {_hist:+}) против {side} · {_db.get('bars')} дн.")
-                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                        reason="DAILY_BIAS", detail=_bias)
-                        self._log_no_trade(figi, "daily_bias")
-                        return
                     self._log(f"ДНЕВНОЙ BIAS {ticker}: {side} против {_bias} "
-                              f"(hist {_hist:+}, info-режим) — пропускаю дальше")
-            except Exception as _sw_e:
-                _audit_swallow('_submit_order@L4395', _sw_e)  # audit silent-except
-                pass
-        # --- Детерминированные TF-гейты входа (правила 6/7/16 из AI-гейта) ---
-        # Зашиты в движок: не зависим от того, включён ли AI-гейт/промпт.
-        if action == "open" and not (_is_momentum or _is_ai):
-            try:
-                _want = "BUY" if side == "BUY" else "SELL"
-                # (last-hour уже проверен в STAGE A — здесь не дублируем)
-                # 7) H1 MACD должен подтверждать сторону входа
-                # 6) Дневной bias и H1 не должны противоречить
-                if (bool(getattr(cfg, "entry_h1_align", True))
-                        or bool(getattr(cfg, "entry_tf_conflict", True))):
-                    _mtf = (await self.mtf_macd_map()).get(str(ticker).upper()) or {}
-                    _h1 = _mtf.get("h1") or {}
-                    _h1_side = str(_h1.get("side") or "") if _h1.get("ok") else ""
-                    _bias = ((await self.daily_bias_map()).get(str(ticker).upper()) or {}).get("bias")
-                    if (bool(getattr(cfg, "entry_h1_align", True)) and _h1_side
-                            and _h1_side != _want):
-                        self._log(f"ПРОПУСК ВХОДА {ticker}: H1 MACD {_h1_side} против {_want} "
-                                  f"(hist {_h1.get('hist'):+})")
-                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                        reason="H1_ALIGN", detail=_h1_side)
-                        self._log_no_trade(figi, "h1_align")
-                        return
-                    if (bool(getattr(cfg, "entry_tf_conflict", True)) and _h1_side
-                            and str(_bias) in ("up", "down")):
-                        _bias_side = "BUY" if _bias == "up" else "SELL"
-                        if _h1_side != _bias_side:
-                            self._log(f"ПРОПУСК ВХОДА {ticker}: [trend] tf_conflict — daily bias {_bias} "
-                                      f"против H1 {_h1_side} (противоречие ТФ)")
-                            self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                            reason="TF_CONFLICT", detail=f"{_bias}/{_h1_side}")
-                            self._log_no_trade(figi, "tf_conflict")
-                            return
-            except Exception as _ge:
-                # Не проглатываем молча: гейт не смог проверить данные — пишем в лог.
-                self._log(f"⚠ TF-ГЕЙТ {ticker}: проверка не удалась "
-                          f"({type(_ge).__name__}: {str(_ge)[:80]}) — вход пропущен")
-                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                reason="TF_GATE_ERROR", detail=str(_ge)[:120])
-                self._log_no_trade(figi, "tf_gate_error")
-                return
-        # --- MTF: H1 MACD должен подтверждать дневной bias; M5 — триггер разворота ---
-        if action == "open" and not (_is_momentum or _is_ai) and (bool(getattr(cfg, "mtf_align", False))
-                                 or bool(getattr(cfg, "mtf_trigger", False))):
-            try:
-                _mtf = (await self.mtf_macd_map()).get(str(ticker).upper()) or {}
-                _h1 = _mtf.get("h1") or {}
-                _m5 = _mtf.get("m5") or {}
-                _bias = ((await self.daily_bias_map()).get(str(ticker).upper()) or {}).get("bias")
-                _want = "BUY" if side == "BUY" else "SELL"
-                if bool(getattr(cfg, "mtf_align", False)) and _h1.get("ok"):
-                    _h1_side = str(_h1.get("side") or "")
-                    if _h1_side and _h1_side != _want:
-                        self._log(f"ПРОПУСК ВХОДА {ticker}: H1 MACD {_h1_side} против {_want} "
-                                  f"(hist {_h1.get('hist'):+})")
-                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                        reason="MTF_H1_ALIGN", detail=_h1_side)
-                        self._log_no_trade(figi, "mtf_h1_align")
-                        return
-                    if _bias in ("up", "down"):
-                        _bias_side = "BUY" if _bias == "up" else "SELL"
-                        if _h1_side and _h1_side != _bias_side:
-                            self._log(f"ПРОПУСК ВХОДА {ticker}: H1 MACD {_h1_side} против дневного "
-                                      f"bias {_bias}")
-                            self._log_no_trade(figi, "mtf_h1_align")
-                            return
-                if bool(getattr(cfg, "mtf_trigger", False)) and _m5.get("ok"):
-                    _tr = str(_m5.get("trend") or "")
-                    _ok_tr = ((_want == "BUY" and _tr == "rising")
-                              or (_want == "SELL" and _tr == "falling"))
-                    if not _ok_tr:
-                        self._log(f"ПРОПУСК ВХОДА {ticker}: M5 MACD триггер не в сторону {_want} "
-                                  f"(trend {_tr}, hist {_m5.get('hist'):+})")
-                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                        reason="MTF_M5_TRIGGER", detail=_tr)
-                        self._log_no_trade(figi, "mtf_m5_trigger")
-                        return
-            except Exception as _sw_e:
-                _audit_swallow('_submit_order@L4433', _sw_e)  # audit silent-except
-                pass
-        # --- Якорь кворума: обязательный голос (напр. macd_cross) + минимум голосов ---
-        if action == "open" and not (_is_momentum or _is_ai):
-            _req_mem = str(getattr(cfg, "ensemble_require_member", "") or "").strip()
-            if _req_mem:
-                _qe = ((meta or {}).get("quorum_event") or {}) if isinstance(meta, dict) else {}
-                _mem = [str(x) for x in (_qe.get("members_for") or [])]
-                _votes = int(_qe.get("votes") or 0)
-                _min_v = int(getattr(cfg, "ensemble_quorum", 2) or 2)
-                if _req_mem not in _mem or _votes < _min_v:
-                    self._log(f"ПРОПУСК ВХОДА {ticker}: [trend] require_member — якорь {_req_mem} не в кворуме "
-                              f"(голоса {_votes}/{_min_v}, members: {','.join(_mem) or '—'})")
-                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                    reason="REQUIRE_MEMBER", detail=f"{_req_mem}|{_votes}")
-                    self._log_no_trade(figi, "require_member")
-                    return
-        # --- Ранжирование: разведка K сделок, затем только топ-N по прошлому net ---
-        if action == "open" and not (_is_momentum or _is_ai):
+                              f"(hist {_db.get('hist'):+}, info-режим) — пропускаю дальше")
+            _rwhy = ""
             try:
                 await self.trade_history()
                 _rok, _rwhy = self._rank_ok(ticker)
-                if not _rok:
-                    self._log(f"ПРОПУСК ВХОДА {ticker}: [trend] rank_filter — рейтинг — {_rwhy}")
-                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                    reason="RANK_FILTER", detail=_rwhy)
-                    self._log_no_trade(figi, "rank_filter")
-                    return
-            except Exception as _sw_e:
-                _audit_swallow('_submit_order@L4461', _sw_e)  # audit silent-except
-                pass
-
+                _rwhy = "" if _rok else str(_rwhy)
+            except Exception:
+                _rwhy = ""
+            _tctx = TrendContext(
+                cfg=cfg, side=side,
+                daily_bias=_bias, daily_hist=_db.get("hist"),
+                h1_ok=bool(_h1.get("ok")), h1_side=str(_h1.get("side") or ""),
+                h1_hist=_h1.get("hist"),
+                m5_ok=bool(_m5.get("ok")), m5_trend=str(_m5.get("trend") or ""),
+                m5_hist=_m5.get("hist"),
+                require_member=str(getattr(cfg, "ensemble_require_member", "") or "").strip(),
+                members_for=tuple(str(x) for x in (_qe.get("members_for") or [])),
+                votes=int(_qe.get("votes") or 0),
+                quorum=int(getattr(cfg, "ensemble_quorum", 2) or 2),
+                rank_why=_rwhy,
+            )
+            _res_b = run_gate_chain(TREND_GATES, _tctx)
+            if not _res_b.passed:
+                self._reject_entry("trend", _res_b.key, _res_b.detail, figi, ticker)
+                return
         # ================= STAGE C: портфель (позиции/кластер/L-S, без брокера) ==========
-        # --- Лимит числа одновременных позиций ---
+        # PORTFOLIO_GATES из app/bot/gates.py: max_positions → sector_cluster → ls_balance.
         if action == "open":
+            from app.bot.gates import PortfolioContext, PORTFOLIO_GATES, run_gate_chain
+            _sector = ""
+            _sector_count = 0
             try:
-                _max_pos = int(getattr(cfg, "max_positions", 0) or 0)
-                if _max_pos > 0 and len(self._held) >= _max_pos:
-                    self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] max_positions — лимит позиций {_max_pos} "
-                              f"(сейчас {len(self._held)})")
-                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                    reason="MAX_POSITIONS")
-                    self._log_no_trade(figi, "max_positions")
-                    return
-            except Exception as _sw_e:
-                _audit_swallow('_submit_order@L4521', _sw_e)  # audit silent-except
+                _meta_s = await self.sector_meta()
+                _sector = str((_meta_s.get(str(ticker).upper())
+                               or _meta_s.get(figi) or {}).get("sector") or "")
+                if _sector and _sector != "other":
+                    for _f in self._held:
+                        _tk = self.tickers.get(_f, "")
+                        _s2 = str((_meta_s.get(str(_tk).upper())
+                                   or _meta_s.get(_f) or {}).get("sector") or "")
+                        if _s2 == _sector:
+                            _sector_count += 1
+            except Exception:
                 pass
-        # --- Лимит позиций в одном секторе-кластере (коррелированный риск) ---
-        if action == "open":
-            try:
-                _max_sec = int(getattr(cfg, "max_sector_positions", 0) or 0)
-                if _max_sec > 0 and self._held:
-                    _meta = await self.sector_meta()
-                    _sec = str((_meta.get(str(ticker).upper())
-                                or _meta.get(figi) or {}).get("sector") or "")
-                    if _sec and _sec != "other":
-                        _same = 0
-                        for _f in self._held:
-                            _tk = self.tickers.get(_f, "")
-                            _s2 = str((_meta.get(str(_tk).upper())
-                                       or _meta.get(_f) or {}).get("sector") or "")
-                            if _s2 == _sec:
-                                _same += 1
-                        if _same >= _max_sec:
-                            self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] sector_cluster — кластер «{_sec}» — "
-                                      f"уже {_same} позиций (лимит {_max_sec})")
-                            self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                            reason="SECTOR_CLUSTER", detail=_sec)
-                            self._log_no_trade(figi, "sector_cluster")
-                            return
-            except Exception as _sw_e:
-                _audit_swallow('_submit_order@L4546', _sw_e)  # audit silent-except
-                pass
-        # --- Баланс LONG/SHORT: не даём уйти в односторонний шорт ---
-        if action == "open" and side == "SELL":
-            try:
-                _share = float(getattr(cfg, "max_short_share", 0.0) or 0.0)
-                _min_total = int(getattr(cfg, "balance_min_positions", 3) or 3)
-                if _share > 0 and len(self._held) >= _min_total:
-                    _shorts = sum(1 for _f in self._held
-                                  if str(self._exit_side.get(_f, "")).upper() == "SHORT")
-                    _total = len(self._held)
-                    if (_shorts + 1) / (_total + 1) > _share:
-                        self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] ls_balance — дисбаланс L/S — шортов {_shorts} из {_total} "
-                                  f"(лимит {_share*100:.0f}%)")
-                        self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                        reason="LS_BALANCE")
-                        self._log_no_trade(figi, "ls_balance")
-                        return
-            except Exception as _sw_e:
-                _audit_swallow('_submit_order@L4564', _sw_e)  # audit silent-except
-                pass
-
+            _shorts_c = sum(1 for _f in self._held
+                            if str(self._exit_side.get(_f, "")).upper() == "SHORT")
+            _pctx = PortfolioContext(cfg=cfg, side=side, held_count=len(self._held),
+                                     sector=_sector, sector_count=_sector_count,
+                                     short_count=_shorts_c)
+            _res_c = run_gate_chain(PORTFOLIO_GATES, _pctx)
+            if not _res_c.passed:
+                self._reject_entry("portfolio", _res_c.key, _res_c.detail, figi, ticker)
+                return
         # ================= STAGE C2: AI-чейзинг (стакан — общий, в STAGE S) =============
         # Только для AI-ордеров: после time/trend/portfolio, но ДО запроса маржи.
         if action == "open" and _is_ai:

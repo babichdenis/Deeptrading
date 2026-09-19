@@ -425,3 +425,149 @@ def apply_gates_config(cfg) -> list[str]:
         except Exception:
             pass
     return applied
+
+
+@dataclass
+class TrendContext:
+    """Контекст слоя trend (STAGE B): daily/H1/M5 + якорь кворума + рейтинг."""
+    cfg: object
+    side: str
+    daily_bias: str = ""
+    daily_hist: float | None = None
+    h1_ok: bool = False
+    h1_side: str = ""
+    h1_hist: float | None = None
+    m5_ok: bool = False
+    m5_trend: str = ""
+    m5_hist: float | None = None
+    require_member: str = ""
+    members_for: tuple = ()
+    votes: int = 0
+    quorum: int = 2
+    rank_why: str = ""
+
+
+def gate_daily_bias(ctx: TrendContext) -> GateResult:
+    if not bool(getattr(ctx.cfg, "daily_bias", False)):
+        return GateResult(True)
+    _against = ((ctx.daily_bias == "up" and ctx.side == "SELL")
+                or (ctx.daily_bias == "down" and ctx.side == "BUY"))
+    if _against and str(getattr(ctx.cfg, "daily_bias_mode", "veto")).lower() == "veto":
+        return GateResult(False, "daily_bias",
+                          f"дневной MACD-bias {ctx.daily_bias} против {ctx.side} "
+                          f"(hist {ctx.daily_hist:+})" if ctx.daily_hist is not None
+                          else f"дневной MACD-bias {ctx.daily_bias} против {ctx.side}")
+    return GateResult(True)
+
+
+def gate_h1_align(ctx: TrendContext) -> GateResult:
+    if (bool(getattr(ctx.cfg, "entry_h1_align", True)) and ctx.h1_ok
+            and ctx.h1_side and ctx.h1_side != ctx.side):
+        _h = f"{ctx.h1_hist:+.3f}" if ctx.h1_hist is not None else "—"
+        return GateResult(False, "h1_align",
+                          f"H1 MACD {ctx.h1_side} против {ctx.side} (hist {_h})")
+    return GateResult(True)
+
+
+def gate_tf_conflict(ctx: TrendContext) -> GateResult:
+    if not bool(getattr(ctx.cfg, "entry_tf_conflict", True)):
+        return GateResult(True)
+    if ctx.h1_ok and ctx.h1_side and ctx.daily_bias in ("up", "down"):
+        _bias_side = "BUY" if ctx.daily_bias == "up" else "SELL"
+        if ctx.h1_side != _bias_side:
+            return GateResult(False, "tf_conflict",
+                              f"daily bias {ctx.daily_bias} против H1 {ctx.h1_side} "
+                              f"(противоречие ТФ)")
+    return GateResult(True)
+
+
+def gate_mtf_h1(ctx: TrendContext) -> GateResult:
+    if (not bool(getattr(ctx.cfg, "mtf_align", False)) or not ctx.h1_ok
+            or not ctx.h1_side):
+        return GateResult(True)
+    if ctx.h1_side != ctx.side:
+        _h = f"{ctx.h1_hist:+.3f}" if ctx.h1_hist is not None else "—"
+        return GateResult(False, "mtf_h1_align",
+                          f"H1 MACD {ctx.h1_side} против {ctx.side} (hist {_h})")
+    if ctx.daily_bias in ("up", "down"):
+        _bias_side = "BUY" if ctx.daily_bias == "up" else "SELL"
+        if ctx.h1_side != _bias_side:
+            return GateResult(False, "mtf_h1_align",
+                              f"H1 MACD {ctx.h1_side} против дневного bias {ctx.daily_bias}")
+    return GateResult(True)
+
+
+def gate_mtf_m5(ctx: TrendContext) -> GateResult:
+    if not bool(getattr(ctx.cfg, "mtf_trigger", False)) or not ctx.m5_ok:
+        return GateResult(True)
+    _ok = ((ctx.side == "BUY" and ctx.m5_trend == "rising")
+           or (ctx.side == "SELL" and ctx.m5_trend == "falling"))
+    if not _ok:
+        _h = f"{ctx.m5_hist:+.3f}" if ctx.m5_hist is not None else "—"
+        return GateResult(False, "mtf_m5_trigger",
+                          f"M5 MACD триггер не в сторону {ctx.side} "
+                          f"(trend {ctx.m5_trend}, hist {_h})")
+    return GateResult(True)
+
+
+def gate_require_member(ctx: TrendContext) -> GateResult:
+    if not ctx.require_member:
+        return GateResult(True)
+    _mem = [str(x) for x in (ctx.members_for or ())]
+    if ctx.require_member not in _mem or int(ctx.votes) < int(ctx.quorum):
+        return GateResult(False, "require_member",
+                          f"якорь {ctx.require_member} не в кворуме "
+                          f"(голоса {ctx.votes}/{ctx.quorum}, members: {','.join(_mem) or '—'})")
+    return GateResult(True)
+
+
+def gate_rank(ctx: TrendContext) -> GateResult:
+    if ctx.rank_why:
+        return GateResult(False, "rank_filter", f"рейтинг — {ctx.rank_why}")
+    return GateResult(True)
+
+
+TREND_GATES = (gate_daily_bias, gate_h1_align, gate_tf_conflict, gate_mtf_h1, gate_mtf_m5,
+               gate_require_member, gate_rank)
+
+
+@dataclass
+class PortfolioContext:
+    """Контекст слоя portfolio (STAGE C): позиции/сектор/баланс L-S."""
+    cfg: object
+    side: str
+    held_count: int = 0
+    sector: str = ""
+    sector_count: int = 0
+    short_count: int = 0
+
+
+def gate_max_positions(ctx: PortfolioContext) -> GateResult:
+    _mp = int(getattr(ctx.cfg, "max_positions", 0) or 0)
+    if _mp > 0 and ctx.held_count >= _mp:
+        return GateResult(False, "max_positions",
+                          f"лимит позиций {_mp} (сейчас {ctx.held_count})")
+    return GateResult(True)
+
+
+def gate_sector_cluster(ctx: PortfolioContext) -> GateResult:
+    _ms = int(getattr(ctx.cfg, "max_sector_positions", 0) or 0)
+    if _ms > 0 and ctx.sector and ctx.sector != "other" and ctx.sector_count >= _ms:
+        return GateResult(False, "sector_cluster",
+                          f"кластер «{ctx.sector}» — уже {ctx.sector_count} позиций (лимит {_ms})")
+    return GateResult(True)
+
+
+def gate_ls_balance(ctx: PortfolioContext) -> GateResult:
+    _share = float(getattr(ctx.cfg, "max_short_share", 0.0) or 0.0)
+    _min_total = int(getattr(ctx.cfg, "balance_min_positions", 3) or 3)
+    if ctx.side != "SELL" or _share <= 0 or ctx.held_count < _min_total:
+        return GateResult(True)
+    if (ctx.short_count + 1) / (ctx.held_count + 1) > _share:
+        return GateResult(False, "ls_balance",
+                          f"дисбаланс L/S — шортов {ctx.short_count} из {ctx.held_count} "
+                          f"(лимит {_share*100:.0f}%)")
+    return GateResult(True)
+
+
+PORTFOLIO_GATES = (gate_max_positions, gate_sector_cluster, gate_ls_balance)

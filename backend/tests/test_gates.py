@@ -109,3 +109,101 @@ def test_chain_short_circuit():
     ctx = TimeContext(cfg=_cfg(long_allowed=False), side="BUY", entries_paused=True)
     r = run_gate_chain(TIME_GATES, ctx)
     assert not r.passed and r.key == "entries_paused"  # первый по рангу
+
+
+# --- trend / portfolio (STAGE B/C) ---------------------------------------------------
+
+from app.bot.gates import (  # noqa: E402
+    PortfolioContext, TrendContext, PORTFOLIO_GATES, TREND_GATES,
+    gate_daily_bias, gate_h1_align, gate_ls_balance, gate_max_positions,
+    gate_mtf_h1, gate_mtf_m5, gate_rank, gate_require_member, gate_sector_cluster,
+    gate_tf_conflict,
+)
+
+
+def _tcfg(**kw):
+    base = dict(daily_bias=True, daily_bias_mode="veto", entry_h1_align=True,
+                entry_tf_conflict=True, mtf_align=False, mtf_trigger=False,
+                ensemble_require_member="", ensemble_quorum=2,
+                max_positions=5, max_sector_positions=2, balance_min_positions=3,
+                max_short_share=0.7)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_daily_bias_veto_and_info():
+    ctx = TrendContext(cfg=_tcfg(), side="SELL", daily_bias="up", daily_hist=0.4)
+    assert not gate_daily_bias(ctx).passed
+    ctx_info = TrendContext(cfg=_tcfg(daily_bias_mode="info"), side="SELL", daily_bias="up")
+    assert gate_daily_bias(ctx_info).passed
+    ctx_ok = TrendContext(cfg=_tcfg(), side="BUY", daily_bias="up")
+    assert gate_daily_bias(ctx_ok).passed
+    ctx_off = TrendContext(cfg=_tcfg(daily_bias=False), side="SELL", daily_bias="up")
+    assert gate_daily_bias(ctx_off).passed
+
+
+def test_h1_align_and_tf_conflict():
+    assert not gate_h1_align(TrendContext(cfg=_tcfg(), side="SELL", h1_ok=True,
+                                          h1_side="BUY", h1_hist=0.2)).passed
+    assert gate_h1_align(TrendContext(cfg=_tcfg(entry_h1_align=False), side="SELL",
+                                      h1_ok=True, h1_side="BUY")).passed
+    # daily up vs H1 SELL — конфликт
+    assert not gate_tf_conflict(TrendContext(cfg=_tcfg(), side="BUY", daily_bias="up",
+                                             h1_ok=True, h1_side="SELL")).passed
+    # daily up и H1 BUY — ок
+    assert gate_tf_conflict(TrendContext(cfg=_tcfg(), side="BUY", daily_bias="up",
+                                         h1_ok=True, h1_side="BUY")).passed
+
+
+def test_legacy_mtf_off_by_default():
+    ctx = TrendContext(cfg=_tcfg(), side="SELL", h1_ok=True, h1_side="BUY")
+    assert gate_mtf_h1(ctx).passed
+    assert gate_mtf_m5(TrendContext(cfg=_tcfg(), side="SELL", m5_ok=True,
+                                    m5_trend="rising")).passed
+    # включили legacy — блокирует
+    assert not gate_mtf_h1(TrendContext(cfg=_tcfg(mtf_align=True), side="SELL",
+                                        h1_ok=True, h1_side="BUY")).passed
+    assert not gate_mtf_m5(TrendContext(cfg=_tcfg(mtf_trigger=True), side="SELL",
+                                        m5_ok=True, m5_trend="rising")).passed
+
+
+def test_require_member_and_rank():
+    ctx = TrendContext(cfg=_tcfg(ensemble_require_member="macd_cross"), side="BUY",
+                       require_member="macd_cross",
+                       members_for=("rsi_reversal",), votes=2, quorum=2)
+    assert not gate_require_member(ctx).passed
+    ctx_ok = TrendContext(cfg=_tcfg(ensemble_require_member="macd_cross"), side="BUY",
+                          require_member="macd_cross",
+                          members_for=("macd_cross", "rsi_reversal"), votes=2, quorum=2)
+    assert gate_require_member(ctx_ok).passed
+    assert not gate_rank(TrendContext(cfg=_tcfg(), side="BUY", rank_why="net -120₽ n=6")).passed
+    assert gate_rank(TrendContext(cfg=_tcfg(), side="BUY")).passed
+
+
+def test_portfolio_gates():
+    assert not gate_max_positions(PortfolioContext(cfg=_tcfg(max_positions=3), side="BUY",
+                                                   held_count=3)).passed
+    assert gate_max_positions(PortfolioContext(cfg=_tcfg(max_positions=3), side="BUY",
+                                               held_count=2)).passed
+    assert not gate_sector_cluster(PortfolioContext(cfg=_tcfg(max_sector_positions=2),
+                                                    side="BUY", sector="oil",
+                                                    sector_count=2)).passed
+    assert gate_sector_cluster(PortfolioContext(cfg=_tcfg(max_sector_positions=2),
+                                                side="BUY", sector="other",
+                                                sector_count=5)).passed
+    # шорт-перекос: 3 шорта из 3 при лимите 70%
+    assert not gate_ls_balance(PortfolioContext(cfg=_tcfg(max_short_share=0.7), side="SELL",
+                                                held_count=3, short_count=3)).passed
+    # меньше min_total — баланс не ограничиваем
+    assert gate_ls_balance(PortfolioContext(cfg=_tcfg(max_short_share=0.7), side="SELL",
+                                            held_count=1, short_count=1)).passed
+    # BUY не ограничивается балансом
+    assert gate_ls_balance(PortfolioContext(cfg=_tcfg(max_short_share=0.5), side="BUY",
+                                            held_count=4, short_count=4)).passed
+
+
+def test_trend_portfolio_chains():
+    assert run_gate_chain(TREND_GATES, TrendContext(cfg=_tcfg(), side="BUY")).passed
+    r = run_gate_chain(PORTFOLIO_GATES,
+                       PortfolioContext(cfg=_tcfg(max_positions=1), side="BUY", held_count=1))
+    assert not r.passed and r.key == "max_positions"
