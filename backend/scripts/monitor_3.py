@@ -147,6 +147,12 @@ def main() -> None:
                 continue
             _bad = 0
             running = bool(st.get("running"))
+            starting = bool(st.get("starting"))
+            if starting and not running:
+                # Идёт прогрев (загрузка 32 тикеров из БД) — НЕ трогаем, иначе цикл рестартов.
+                log("⏳ бот стартует (warmup) — жду")
+                time.sleep(INTERVAL)
+                continue
             health = (st.get("data") or {}).get("health")
             candles = st.get("candles_seen") or 0
             pos = (st.get("long_short") or {}).get("total")
