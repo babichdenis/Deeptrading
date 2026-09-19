@@ -1446,44 +1446,67 @@ body.modal-open { overflow: hidden; }
 .bot-live-logs::-webkit-scrollbar-track { background: #080e16; }
 .bot-live-logs::-webkit-scrollbar-thumb { background: #334158; border-radius: 10px; }
 
-/* Плашки-строки */
+/* Плашки-строки: ШАПКА (время · уровень · источник · ×N · копия) + ТЕЛО (текст) */
 .bot-live-logs .lg-row {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 2px 6px 3px 8px;
-  margin: 0 0 2px;
-  border: 1px solid rgba(255,255,255,0.04);
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 8px 4px;
+  margin: 0 0 3px;
+  border: 1px solid rgba(255,255,255,0.05);
   border-left: 3px solid #334158;
   border-radius: 5px;
   background: rgba(255,255,255,0.015);
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 .bot-live-logs .lg-empty { color: #667; display: block; padding: 6px; }
-.lg-row .lg-t { color: #6b7a90; font-size: 10px; flex: none; font-variant-numeric: tabular-nums; }
-.lg-row .lg-lv { flex: none; font-size: 9px; font-weight: 800; letter-spacing: .05em; border-radius: 4px; padding: 0 4px; color: #9fd4ff; }
-.lg-row .lg-src { flex: none; font-size: 9px; color: #7c8aa0; border: 1px solid rgba(255,255,255,.08); border-radius: 4px; padding: 0 4px; }
-.lg-row .lg-msg { flex: 1 1 auto; min-width: 0; }
-.lg-row .lg-copy-row { flex: none; visibility: hidden; background: transparent; border: none; color: #6b7a90; cursor: pointer; font-size: 10px; padding: 0 2px; }
+.lg-row .lg-hd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 10px;
+}
+.lg-row .lg-t { color: #6b7a90; font-size: 10px; font-variant-numeric: tabular-nums; }
+.lg-row .lg-lv {
+  font-size: 9px; font-weight: 800; letter-spacing: .05em;
+  border-radius: 4px; padding: 0 4px; color: #9fd4ff;
+}
+.lg-row .lg-src {
+  font-size: 9px; color: #aeb9c9; background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,.09); border-radius: 4px; padding: 0 5px;
+  max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lg-row .lg-rep {
+  font-size: 9px; font-weight: 700; color: var(--gold);
+  background: rgba(248,183,43,.10); border: 1px solid rgba(248,183,43,.35);
+  border-radius: 4px; padding: 0 4px;
+}
+.lg-row .lg-copy-row { visibility: hidden; background: transparent; border: none; color: #6b7a90; cursor: pointer; font-size: 10px; padding: 0 2px; margin-left: auto; }
 .lg-row:hover .lg-copy-row { visibility: visible; }
 .lg-row .lg-copy-row:hover { color: var(--accent); }
+.lg-row .lg-txt {
+  font-size: 11px; line-height: 1.45;
+  color: #cfd8e3;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
 
-/* Цвета категорий (левая кромка + текст) */
+/* Цвета категорий (левая кромка плитки + оттенок текста тела) */
 .bot-live-logs .lg-k-candles { border-left-color: #344154; }
-.bot-live-logs .lg-k-candles .lg-msg { color: #5d6874; }
+.bot-live-logs .lg-k-candles .lg-txt { color: #7b8794; }
 .bot-live-logs .lg-k-tech { border-left-color: #8e68ff; }
-.bot-live-logs .lg-k-tech .lg-msg { color: #b8a6ff; }
+.bot-live-logs .lg-k-tech .lg-txt { color: #b8a6ff; }
 .bot-live-logs .lg-k-signals { border-left-color: #13dba5; }
-.bot-live-logs .lg-k-signals .lg-msg { color: #00e89f; }
+.bot-live-logs .lg-k-signals .lg-txt { color: #00e89f; }
 .bot-live-logs .lg-k-trades { border-left-color: var(--accent); }
-.bot-live-logs .lg-k-trades .lg-msg { color: #7fb0ff; }
+.bot-live-logs .lg-k-trades .lg-txt { color: #7fb0ff; }
 .bot-live-logs .lg-k-events { border-left-color: #3b7dd8; }
-.bot-live-logs .lg-k-events .lg-msg { color: #9bb8d9; }
+.bot-live-logs .lg-k-events .lg-txt { color: #9bb8d9; }
 
-/* Уровни — приоритетнее категорий, ошибки видны сразу */
+/* Уровни — приоритетнее категорий, ошибки видны сразу (подсветка всей плитки) */
 .bot-live-logs .lg-lv-warn { background: rgba(248,183,43,.08); border-left-color: #f8b72b; }
-.bot-live-logs .lg-lv-warn .lg-msg { color: var(--gold); font-weight: 600; }
+.bot-live-logs .lg-lv-warn .lg-txt { color: var(--gold); font-weight: 600; }
 .bot-live-logs .lg-lv-warn .lg-lv { color: #1a1305; background: #f8b72b; }
 .bot-live-logs .lg-lv-debug .lg-lv { color: #7c8aa0; }
 .log-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
@@ -1509,7 +1532,7 @@ body.modal-open { overflow: hidden; }
 }
 .lg-btn:hover { color: var(--down); border-color: var(--down); }
 .bot-live-logs .lg-lv-error { background: rgba(255,79,99,.10); border-left-color: #ff4f63; }
-.bot-live-logs .lg-lv-error .lg-msg { color: #ff8a97; font-weight: 700; }
+.bot-live-logs .lg-lv-error .lg-txt { color: #ff8a97; font-weight: 700; }
 .bot-live-logs .lg-lv-error .lg-lv { color: #fff; background: #ff4f63; }
 
 /* Управление логами: селект уровня, поиск, тикер, pill ошибок */

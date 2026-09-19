@@ -548,12 +548,12 @@ function _loadLGF() {
 }
 const LGF: Record<string, boolean> = _loadLGF();
 let _logDateFilter = localStorage.getItem("log_date_filter") ?? new Date().toLocaleDateString("sv-SE");
-let _logLevelSel = localStorage.getItem("log_level") || "";
+let _logLevelSel = localStorage.getItem("log_level") || "info";
 let _logQ = localStorage.getItem("log_q") || "";
 let _logTicker = localStorage.getItem("log_ticker") || "";
 
 // ─── Логи: единый контур, структурированные плашки ──────────────────────
-interface LogItem { id: number; ts: string; level: string; source: string; msg: string; }
+interface LogItem { id: number; ts: string; level: string; source: string; msg: string; rep?: number; }
 
 let _logs: LogItem[] = [];          // все полученные записи (порядок от старых к новым)
 const _seenIds = new Set<number>(); // дедупликация по id (кольцо + история БД)
@@ -562,6 +562,22 @@ let _logHasMore = true;             // есть ли в БД история ст
 let _logLoading = false;            // флаг загрузки «раньше»
 let _stickBottom = true;            // автоскролл вниз, только если юзер внизу
 const LOG_CAP_DOM = 1500;           // предел DOM-строк (trim сверху)
+
+const LG_SRC_LABEL: Record<string, string> = {
+  "t_tech.invest.lo": "tinkoff",
+  "app.bot.stream_m": "streams",
+  "portfolio_reconc": "reconcile",
+  "candle_feed": "candles",
+  "lab.queue": "queue",
+  "bot": "bot",
+};
+const LG_SRC_KEYS = Object.keys(LG_SRC_LABEL).sort((a, b) => b.length - a.length);
+function lgSrcLabel(src: string): string {
+  const k = LG_SRC_KEYS.find((p) => src.startsWith(p));
+  if (k) return LG_SRC_LABEL[k];
+  const s = src.replace(/_/g, " ");
+  return s.length > 12 ? s.slice(0, 12) + "…" : s;
+}
 
 function logCategory(msg: string): string {
   if (msg.includes("TECHINFO") || msg.includes("FLUSH")) return "tech";
@@ -589,11 +605,16 @@ function lgRowEl(it: LogItem): HTMLElement {
   const row = document.createElement("div");
   row.className = `lg-row lg-k-${logCategory(it.msg)} lg-lv-${lv}`;
   row.dataset.id = String(it.id);
+  // Шапка: время · уровень · источник · счётчик ×N · копия
+  const hd = document.createElement("div"); hd.className = "lg-hd";
   const t = document.createElement("span"); t.className = "lg-t"; t.textContent = it.ts.slice(11);
+  t.title = it.ts;
   const badge = document.createElement("span"); badge.className = "lg-lv"; badge.textContent = lv.toUpperCase().slice(0, 5);
-  badge.title = `уровень: ${lv} · источник: ${it.source}`;
-  const src = document.createElement("span"); src.className = "lg-src"; src.textContent = it.source;
-  const msg = document.createElement("span"); msg.className = "lg-msg"; msg.textContent = it.msg;
+  badge.title = `уровень: ${lv}`;
+  const src = document.createElement("span"); src.className = "lg-src"; src.textContent = lgSrcLabel(it.source);
+  src.title = it.source;
+  const rep = document.createElement("span"); rep.className = "lg-rep"; rep.textContent = it.rep && it.rep > 1 ? "×" + it.rep : "";
+  rep.title = "одинаковых записей подряд";
   const copy = document.createElement("button"); copy.className = "lg-copy-row"; copy.textContent = "⧉";
   copy.title = "Скопировать строку";
   copy.addEventListener("click", (ev) => {
@@ -604,7 +625,10 @@ function lgRowEl(it: LogItem): HTMLElement {
       setTimeout(() => { copy.textContent = "⧉"; }, 900);
     }).catch(() => {});
   });
-  row.append(t, badge, src, msg, copy);
+  hd.append(t, badge, src, rep, copy);
+  // Тело: полный текст сообщения отдельной строкой
+  const msg = document.createElement("div"); msg.className = "lg-txt"; msg.textContent = it.msg;
+  row.append(hd, msg);
   return row;
 }
 
@@ -613,7 +637,17 @@ function _insertLogs(items: LogItem[], prepend: boolean) {
   if (!el) return;
   const fresh: LogItem[] = [];
   for (const it of items) {
-    if (_seenIds.has(it.id)) continue;
+    if (_seenIds.has(it.id)) {
+      // Коллапс на бэкенде: тот же id пришёл с новым счётчиком ×N — обновляем живьём.
+      if (!prepend && it.rep && it.rep > 1 && el.querySelector) {
+        const row = el.querySelector(`[data-id="${it.id}"]`) as HTMLElement | null;
+        const repEl = row?.querySelector(".lg-rep");
+        if (repEl && repEl.textContent !== "×" + it.rep) repEl.textContent = "×" + it.rep;
+        const sameId = _logs.find((x) => x.id === it.id);
+        if (sameId) sameId.rep = it.rep;
+      }
+      continue;
+    }
     _seenIds.add(it.id);
     fresh.push(it);
   }
