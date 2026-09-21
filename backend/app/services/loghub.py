@@ -44,7 +44,7 @@ def _legacy_re():
 
 
 def msk_now_str() -> str:
-    return datetime.now(MSK).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    return datetime.now(MSK).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def strip_legacy_ts(msg: str) -> str:

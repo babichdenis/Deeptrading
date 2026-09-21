@@ -258,8 +258,8 @@ def _portfolio_to_dict(p):
     if _init_cash_cache is None:
         try:
             from sqlalchemy import create_engine, text
-            from app.config import settings
-            _eng = create_engine(settings.database_url.replace("+asyncpg", ""), pool_pre_ping=True)
+            from app.config import get_settings
+            _eng = create_engine(get_settings().database_url.replace("+asyncpg", ""), pool_pre_ping=True)
             with _eng.connect() as _conn:
                 row = _conn.execute(text("SELECT initial_cash FROM paper_accounts WHERE name='default'")).fetchone()
                 _init_cash_cache = float(row[0]) if row else 10000.0
@@ -599,9 +599,13 @@ async def _test_last_close(figi: str) -> float | None:
     return None
 
 
-def _test_portfolio_digest(test_name: str, rows: list) -> dict:
+async def _test_portfolio_digest(test_name: str, rows: list) -> dict:
     """Портфель теста только из нашей таблицы: closed net + unrealized открытых.
-    initial_cash берём из runtime.config (капитал реплея), fallback 10000."""
+
+    initial_cash берём из runtime.config (капитал реплея), fallback 10000.
+    equity = initial + closed_net + unreal (mark-to-market по цене реплея).
+    Обеспечение (own) = нотионал / плечо; свободные свои = initial + closed_net − own.
+    """
     initial = 10000.0
     try:
         from app.bot.runtime import runtime
@@ -614,35 +618,47 @@ def _test_portfolio_digest(test_name: str, rows: list) -> dict:
     open_ = [r for r in rows if r.exit_time is None]
     closed_net = sum(float(r.net_pnl or 0) for r in closed)
     unreal = 0.0
-    mv = 0.0
+    mv = 0.0          # рыночная стоимость открытых (по текущей цене реплея)
+    own = 0.0         # наше обеспечение = нотионал / плечо
+    net_shares = 0.0  # знаковая стоимость: LONG +, SHORT −
     for r in open_:
-        cur = None  # лениво: посчитаем ниже через cache
-        # используем последнее значение из мета-хука ниже если нужно; для скорости — entry
-        p = float(r.entry_price)
-        q = abs(int(r.qty))
-        mv += p * q
+        entry = float(r.entry_price)
+        qty = abs(int(r.qty))
+        cur = await _test_price(r.figi)
+        if cur is None:
+            cur = entry
+        side = str(r.side or "LONG").upper()
+        is_long = side in ("LONG", "BUY")
+        unreal += ((cur - entry) if is_long else (entry - cur)) * qty
+        notional = cur * qty
+        lev = max(1.0, float(r.leverage or 1.0))
+        mv += notional
+        own += notional / lev
+        net_shares += notional if is_long else -notional
     positions_open = len(open_)
     wins = len([r for r in closed if (r.net_pnl or 0) > 0])
     total = len(closed)
+    free_own = initial + closed_net - own
+    equity = initial + closed_net + unreal
     return {
-        "cash": round(initial + closed_net - mv, 2),
+        "cash": round(free_own, 2),
         "initial_cash": round(initial, 2),
-        "equity": round(initial + closed_net + unreal, 2),
+        "equity": round(equity, 2),
         "market_value": round(mv, 2),
-        "pnl": round(closed_net, 2),
+        "pnl": round(closed_net + unreal, 2),
         "positions_open": positions_open,
-        "own_in_positions": round(mv, 2),
+        "own_in_positions": round(own, 2),
         "positions_value": round(mv, 2),
-        "tinkoff_currencies": 0,
-        "tinkoff_shares": 0,
+        "tinkoff_currencies": round(free_own, 2),
+        "tinkoff_shares": round(net_shares, 2),
         "trades": {
             "total": total,
             "wins": wins,
             "winrate": round(wins / total * 100, 1) if total else 0,
         },
         "reconcile": {"ok": True},
-        "free_funds": round(initial + closed_net - mv, 2),
-        "starting_margin": round(initial, 2),
+        "free_funds": round(equity - own, 2),
+        "starting_margin": round(own, 2),
     }
 
 
@@ -668,12 +684,14 @@ def _test_trade_row(r) -> dict:
 
 def _test_position_row(r, cur: float | None) -> dict:
     """Открытая позиция теста в формате /sandbox/positions."""
-    side = r.side
+    _raw_side = str(r.side or "LONG").upper()
+    is_long = _raw_side in ("LONG", "BUY")
+    side = "LONG" if is_long else "SHORT"   # нормализация для UI (кнопка Продать/Купить)
     entry = float(r.entry_price)
     qty = int(r.qty)
     if cur is None:
         cur = entry
-    pnl = (cur - entry) * qty if side == "LONG" else (entry - cur) * qty
+    pnl = (cur - entry) * qty if is_long else (entry - cur) * qty
     notional = entry * qty
     lev = max(1.0, float(r.leverage or 1.0))
     own = notional / lev          # свои средства (обеспечение)
@@ -715,17 +733,28 @@ def _test_position_row(r, cur: float | None) -> dict:
     }
 
 
-# Кэш последних цен для unrealized тестовых позиций (5м обновление — достаточно).
-_test_price_cache: dict[str, tuple[float, float | None]] = {}
+# Кэш последних цен для unrealized тестовых позиций. Ключ — (figi, виртуальное
+# время реплея): цена должна обновляться с каждым поданным баром, иначе цифры
+# портфеля «замирают» на 5 реальных минут (в реплее это часы торгов).
+_test_price_cache: dict[tuple[str, str], tuple[float, float | None]] = {}
 
 async def _test_price(figi: str) -> float | None:
     import time as _t
     now = _t.monotonic()
-    hit = _test_price_cache.get(figi)
+    vt = None
+    try:
+        from app.bot.runtime import runtime as _rt
+        vt = getattr(_rt, "_replay_cur", None)
+    except Exception:
+        vt = None
+    key = (figi, vt.isoformat() if vt is not None else "")
+    hit = _test_price_cache.get(key)
     if hit and now - hit[0] < 300:
         return hit[1]
     p = await _test_last_close(figi)
-    _test_price_cache[figi] = (now, p)
+    if len(_test_price_cache) > 1024:
+        _test_price_cache.clear()
+    _test_price_cache[key] = (now, p)
     return p
 
 
@@ -735,7 +764,7 @@ async def sandbox_status():
     if tn:
         try:
             rows = await _test_trades_db(tn)
-            dig = _test_portfolio_digest(tn, rows)
+            dig = await _test_portfolio_digest(tn, rows)
             _log.info("status: TEST mode %r → positions=%d trades=%d pnl=%.2f",
                       tn, dig["positions_open"], dig["trades"]["total"], dig["pnl"])
             return {"running": _bot_running(), "mode": f"TEST:{tn}", "portfolio": dig, "test_name": tn}
@@ -1081,6 +1110,10 @@ async def sandbox_trades(limit: int = 50):
                     "exit_reason": "на торгах",
                     "entry_reason": e.get("entry_reason"), "meta": e.get("meta"),
                     "exit_meta": None, "strategy_id": "v4_enhanced",
+                    "leverage": round(float(e.get("leverage") or 1.0), 1),
+                    "notional": round(float(e.get("entry_price") or round(avg, 6)) * int(abs(qty)), 2),
+                    "own_money": round(round(float(e.get("entry_price") or round(avg, 6)) * int(abs(qty)), 2)
+                                       / (float(e.get("leverage") or 1.0)), 2),
                 })
         except Exception:
             pass
@@ -1101,6 +1134,8 @@ async def sandbox_trades(limit: int = 50):
                 )
                 rows = res.scalars().all()
                 for r in rows:
+                    _not = round(float(r.entry_price) * int(r.qty), 2)
+                    _lev = float(r.leverage) if r.leverage else 1.0
                     closed_stored.append({
                         "figi": r.figi, "ticker": r.ticker, "side": r.side,
                         "qty": r.qty,
@@ -1117,6 +1152,9 @@ async def sandbox_trades(limit: int = 50):
                         "meta": r.meta,
                         "exit_meta": r.exit_meta,
                         "strategy_id": "v4_enhanced",
+                        "leverage": round(_lev, 1),
+                        "notional": _not,
+                        "own_money": round(_not / _lev, 2),
                     })
         except Exception:
             closed_stored = []

@@ -97,17 +97,16 @@ async def lifespan(app: FastAPI):
             cfg.mode = _mode
             cfg.feed = "replay" if _mode == "test" else "stream"
             if _mode == "test":
-                try:
-                    from app.bot.runtime import apply_test_overrides
-                    apply_test_overrides(cfg)
-                except Exception:
-                    pass
+                # Тест-оверрайды (вариант + секция "bot" вариант-файла) применяет
+                # runtime.start() — единственное место, ПОСЛЕДНИМИ по приоритету,
+                # чтобы bot_config.json/gates_config.json их не затирали.
                 cfg.mode = "test"
                 cfg.feed = "replay"
                 cfg.test_name = _s.bot_test_name or os.environ.get("BOT_TEST_NAME", "")
                 cfg.replay_start = _s.bot_test_start or os.environ.get("BOT_TEST_START", "")
                 cfg.replay_end = _s.bot_test_end or os.environ.get("BOT_TEST_END", "")
                 cfg.replay_pace = _s.bot_test_pace or os.environ.get("BOT_TEST_PACE", "fast")
+                cfg.test_variant = _s.bot_test_variant or os.environ.get("TEST_VARIANT", "")
             asyncio.create_task(runtime.start(cfg))
     except Exception as e:
         import logging

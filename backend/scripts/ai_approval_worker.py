@@ -92,7 +92,18 @@ SYSTEM = """Ты — риск-менеджер торгового бота (MOEX
   осторожно/отклонить; depth_rub — плотность стакана (мало, < ~100 тыс ₽ → совет уменьшить размер).
 
 Не выдумывай данные, опирайся только на переданный JSON. Учитывай сессию (МСК): утро/вечер
-менее ликвидны, вечером движения чаще ложные."""
+менее ликвидны, вечером движения чаще ложные.
+
+НОВОСТИ ПО ТИКЕРУ (news_ticker): [{source, age_min, title}] — свежие заголовки (≤2ч).
+Правила:
+- свежая (≤60 мин) МАТЕРИАЛЬНАЯ негативная новость (санкции, дестабилизация цен/дискретный
+  аукцион, приостановка торгов, допэмиссия, отмена/невыплата дивидендов, авария, крупный иск,
+  банкротство) → REJECT или совет уменьшить размер;
+- позитив (байбэк, дивиденды, крупный контракт, инвестиции) → допустимо одобрить при прочих равных;
+- новости старше 2 часов и технические сообщения биржи (РЕПО, облигации, режимы торгов)
+  игнорируй, если они не про сам тикер;
+- не переоценивай шум: «Газпромбанк размещает облигации» — не событие по GAZP;
+  «Сбер Инвестиции» — не про SBER. Заголовок без цифр и без тикера — не повод."""
 
 
 def _load_env() -> None:
@@ -402,6 +413,19 @@ def _ctx_compact(api: str, order: dict) -> dict:
             out["signal_features"] = _feats
     except Exception:
         pass
+    # Новости по тикеру заявки (≤2ч, топ-3 по свежести) — для правила «не входить в негатив».
+    try:
+        _nr = _http("GET", f"{api}/api/v1/news?tickers={tk}&limit=10", timeout=15)
+        _items = [x for x in (_nr.get("news") or [])
+                  if x.get("age_min") is not None and int(x["age_min"]) <= 120]
+        _items.sort(key=lambda x: int(x.get("age_min") or 999))
+        out["news_ticker"] = [
+            {"source": x.get("source"), "age_min": x.get("age_min"),
+             "title": str(x.get("title") or "")[:180]}
+            for x in _items[:3]
+        ]
+    except Exception:
+        out["news_ticker"] = []
     return out
 
 
@@ -418,21 +442,32 @@ def _ask_deepseek(order: dict, ctx: dict, model: str, base: str, key: str,
         "temperature": 0.1,
         "max_tokens": 300,
         "response_format": {"type": "json_object"},
+        "reasoning": os.environ.get("AI_THINKING", "0").lower() in ("1", "true", "yes", "on"),
     }
     _prs = parser or _parse_decision
 
+    _usage: dict = {}
+
     def _call(msgs: list) -> str:
         payload["messages"] = msgs
-        with httpx.Client(timeout=90.0) as c:
+        with httpx.Client(timeout=240.0) as c:
             r = c.post(f"{base.rstrip('/')}/chat/completions",
                        headers={"Authorization": f"Bearer {key}"}, json=payload)
             r.raise_for_status()
             data = r.json()
+        try:
+            _usage.update(data.get("usage") or {})
+        except Exception:
+            pass
         return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "{}"
 
     msgs = list(payload["messages"])
     txt = _call(msgs)
     out = _prs(txt)
+    try:
+        out["_usage"] = dict(_usage)
+    except Exception:
+        pass
     # Веб-модель (V4.1) любит отвечать прозой — один жёсткий ретрай на JSON
     if isinstance(out, dict) and str(out.get("reason", "")).startswith("parse_error"):
         msgs2 = msgs + [
@@ -1116,6 +1151,7 @@ def main() -> None:
     def _process_order(order: dict, tmo: float) -> None:
         """Одна заявка: контекст → вердикты провайдеров → применение → запись решений."""
         oid = order.get("id")
+        _sys = _eff_system(args.api, "gate", SYSTEM)
         try:
             ctx = _ctx(args.api) if args.full_context else _ctx_compact(args.api, order)
 
@@ -1145,9 +1181,18 @@ def main() -> None:
                     applied_res = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
             for p in _provs:
                 d = decs[p]
+                _u = dict(d.get("_usage") or {})
+                _p_est = (len(_sys) + len(json.dumps({"order": order, "context": ctx},
+                                                      ensure_ascii=False, default=str))) // 4
+                _u_out = {"prompt": int(_u.get("prompt_tokens") or 0) or _p_est,
+                          "completion": int(_u.get("completion_tokens") or 0),
+                          "estimated": not bool(_u.get("prompt_tokens"))}
+                _u_out["total"] = _u_out["prompt"] + _u_out["completion"]
                 rec = {"ts": datetime.now(timezone.utc).isoformat(), "order_id": oid,
                        "ticker": order.get("ticker"), "side": order.get("side"),
                        "qty": order.get("qty"), "figi": order.get("figi"),
+                       "news_ticker": ctx.get("news_ticker") or [],
+                       "usage": _u_out,
                        "provider": p, "model": _models.get(p, ""),
                        "decision": d.get("decision"), "reason": d.get("reason", ""),
                        "advice": d.get("advice", ""), "confidence": d.get("confidence"),

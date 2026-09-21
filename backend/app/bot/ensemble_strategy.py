@@ -26,6 +26,7 @@ V2_SETUPS = [
 @dataclass
 class EnsembleParams:
     figi: str
+    ticker: str = ""
     lot: int = 10
     capital: float = 2000.0
     quorum: int = 2
@@ -37,6 +38,7 @@ class EnsembleParams:
     # --- Таймфреймы ансамбля (как в semi-flip тестах) ---
     bias_tf: str = "hour"        # направление (bias): "5min" | "15min" | "hour"
     bias_period: int = 50        # период EMA для bias
+    bias_mode: str = "info"      # "info" | "veto" | "strict_ct" — отбрасывать ли входы ПРОТИВ bias
     entry_tf: str = "5min"       # микро-вход: "1min" | "5min"
     entry_lookback: int = 1      # окно микро-брейкаута (бары entry_tf)
     # --- per-ticker optuna-параметры (расширение; дефолты == прежний хардкод) ---
@@ -76,6 +78,11 @@ class EnsembleV4Strategy:
         self._last_votes = None
         self._last_skip: str | None = None
         self._regime_cache: dict = {"key": None, "state": None}
+
+    @property
+    def _tag(self) -> str:
+        """Метка инструмента для логов: тикер, иначе последние 6 символов FIGI."""
+        return (getattr(self.p, "ticker", "") or (self.p.figi[-6:] if self.p.figi else "?"))
 
     def warmup_bars(self) -> int:
         return 50
@@ -121,7 +128,8 @@ class EnsembleV4Strategy:
 
             req = {
                 "figi": self.p.figi,
-                "bias_mode": "info",
+                "ticker": self.p.ticker,
+                "bias_mode": self.p.bias_mode,
                 "bias": {"tf": self.p.bias_tf, "period": self.p.bias_period},
                 "entry_tf": self.p.entry_tf,
                 "entry": {"tf": self.p.entry_tf, "lookback": self.p.entry_lookback},
@@ -173,13 +181,13 @@ class EnsembleV4Strategy:
             import logging as _lg
             self._last_skip = f"compute_error: {type(e).__name__}: {str(e)[:120]}"
             _lg.getLogger("ensemble_strategy").exception(
-                "on_bar compute_ensemble FAILED figi=%s candles=%d: %s", self.p.figi[-6:], len(candles), e)
+                "on_bar compute_ensemble FAILED inst=%s candles=%d: %s", self._tag, len(candles), e)
             return None
         if "error" in res:
             import logging as _lg
             self._last_skip = f"res_error: {res.get('error')} bars={res.get('bars')} buf={len(candles)}"
             _lg.getLogger("ensemble_strategy").warning(
-                "on_bar compute_ensemble ERROR figi=%s: %s", self.p.figi[-6:], res.get("error"))
+                "on_bar compute_ensemble ERROR inst=%s: %s", self._tag, res.get("error"))
             return None
         try:
             tl = (res.get("regime") or {}).get("timeline") or []
@@ -206,8 +214,8 @@ class EnsembleV4Strategy:
             if last.ts.minute % 5 == 0:
                 import logging as _lg
                 _lg.getLogger("ensemble_strategy").debug(
-                    "on_bar no-entries figi=%s candles=%d funnel=%s",
-                    self.p.figi[-6:], len(candles),
+                    "on_bar no-entries inst=%s candles=%d funnel=%s",
+                    self._tag, len(candles),
                     (res.get("static", {}).get("funnel") or {}).get("entries_raw"))
             return None
         cutoff = last.ts - timedelta(minutes=FRESH_MIN)
@@ -217,8 +225,8 @@ class EnsembleV4Strategy:
             if last.ts.minute % 5 == 0:
                 import logging as _lg
                 _lg.getLogger("ensemble_strategy").debug(
-                    "on_bar no-fresh-entries figi=%s last=%s newest_entry=%s",
-                    self.p.figi[-6:], last.ts.isoformat(), entries[-1].get("ts"))
+                    "on_bar no-fresh-entries inst=%s last=%s newest_entry=%s",
+                    self._tag, last.ts.isoformat(), entries[-1].get("ts"))
             return None
         self._last_skip = None
         last_e = fresh[-1]

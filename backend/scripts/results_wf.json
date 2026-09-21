@@ -1,0 +1,592 @@
+{
+ "stage": "14 walk-forward",
+ "env": {
+  "n_trials": 40,
+  "min_train_days": 6,
+  "timeline_first": "2026-09-01",
+  "ref_thr": 2.0,
+  "joint_thr": 1.2095819693493357,
+  "sources": [
+   "blind_data.pkl=270195",
+   "q2optuna_data.pkl=145049",
+   "wf_fresh.pkl=35488"
+  ]
+ },
+ "folds": [
+  {
+   "test_day": "2026-09-07",
+   "train_days": 6,
+   "train_net": 2324.94,
+   "thr": 1.592,
+   "oos_ref_net": 63.62,
+   "oos_joint_net": -419.37,
+   "oos_wf_net": -13.11,
+   "oos_ref_n": 18,
+   "oos_joint_n": 22,
+   "oos_wf_n": 23,
+   "params": {
+    "rsi_reversal": {
+     "period": 12,
+     "oversold": 32.9,
+     "overbought": 83.0
+    },
+    "bollinger_reclaim": {
+     "period": 28,
+     "k": 0.7
+    },
+    "vwap_reclaim": {
+     "k": 0.94
+    },
+    "macd_cross": {
+     "fast": 9,
+     "slow": 36,
+     "signal_period": 13
+    },
+    "donchian_breakout": {
+     "period": 48
+    },
+    "volume_drop": {
+     "ma_len": 16,
+     "drop_ratio": 1.3
+    }
+   },
+   "sec": 139.7
+  },
+  {
+   "test_day": "2026-09-08",
+   "train_days": 7,
+   "train_net": 2530.02,
+   "thr": 1.625,
+   "oos_ref_net": -140.94,
+   "oos_joint_net": 314.53,
+   "oos_wf_net": 293.78,
+   "oos_ref_n": 34,
+   "oos_joint_n": 43,
+   "oos_wf_n": 37,
+   "params": {
+    "rsi_reversal": {
+     "period": 23,
+     "oversold": 30.1,
+     "overbought": 78.4
+    },
+    "bollinger_reclaim": {
+     "period": 27,
+     "k": 0.63
+    },
+    "vwap_reclaim": {
+     "k": 0.8
+    },
+    "macd_cross": {
+     "fast": 10,
+     "slow": 20,
+     "signal_period": 9
+    },
+    "donchian_breakout": {
+     "period": 65
+    },
+    "volume_drop": {
+     "ma_len": 39,
+     "drop_ratio": 1.57
+    }
+   },
+   "sec": 142.2
+  },
+  {
+   "test_day": "2026-09-09",
+   "train_days": 8,
+   "train_net": 2785.0,
+   "thr": 1.58,
+   "oos_ref_net": 958.21,
+   "oos_joint_net": 890.35,
+   "oos_wf_net": 1107.18,
+   "oos_ref_n": 77,
+   "oos_joint_n": 74,
+   "oos_wf_n": 91,
+   "params": {
+    "rsi_reversal": {
+     "period": 19,
+     "oversold": 28.5,
+     "overbought": 68.4
+    },
+    "bollinger_reclaim": {
+     "period": 15,
+     "k": 0.71
+    },
+    "vwap_reclaim": {
+     "k": 1.84
+    },
+    "macd_cross": {
+     "fast": 6,
+     "slow": 37,
+     "signal_period": 5
+    },
+    "donchian_breakout": {
+     "period": 63
+    },
+    "volume_drop": {
+     "ma_len": 21,
+     "drop_ratio": 1.64
+    }
+   },
+   "sec": 139.2
+  },
+  {
+   "test_day": "2026-09-10",
+   "train_days": 9,
+   "train_net": 4299.67,
+   "thr": 1.776,
+   "oos_ref_net": -46.39,
+   "oos_joint_net": -55.89,
+   "oos_wf_net": -32.14,
+   "oos_ref_n": 72,
+   "oos_joint_n": 70,
+   "oos_wf_n": 98,
+   "params": {
+    "rsi_reversal": {
+     "period": 11,
+     "oversold": 28.9,
+     "overbought": 69.4
+    },
+    "bollinger_reclaim": {
+     "period": 15,
+     "k": 0.86
+    },
+    "vwap_reclaim": {
+     "k": 0.75
+    },
+    "macd_cross": {
+     "fast": 6,
+     "slow": 36,
+     "signal_period": 5
+    },
+    "donchian_breakout": {
+     "period": 60
+    },
+    "volume_drop": {
+     "ma_len": 14,
+     "drop_ratio": 1.62
+    }
+   },
+   "sec": 139.3
+  },
+  {
+   "test_day": "2026-09-11",
+   "train_days": 10,
+   "train_net": 4087.8,
+   "thr": 1.497,
+   "oos_ref_net": 1335.56,
+   "oos_joint_net": 1729.35,
+   "oos_wf_net": 1696.91,
+   "oos_ref_n": 88,
+   "oos_joint_n": 78,
+   "oos_wf_n": 111,
+   "params": {
+    "rsi_reversal": {
+     "period": 20,
+     "oversold": 38.5,
+     "overbought": 64.3
+    },
+    "bollinger_reclaim": {
+     "period": 29,
+     "k": 1.16
+    },
+    "vwap_reclaim": {
+     "k": 2.84
+    },
+    "macd_cross": {
+     "fast": 7,
+     "slow": 33,
+     "signal_period": 5
+    },
+    "donchian_breakout": {
+     "period": 20
+    },
+    "volume_drop": {
+     "ma_len": 23,
+     "drop_ratio": 1.89
+    }
+   },
+   "sec": 131.7
+  },
+  {
+   "test_day": "2026-09-12",
+   "train_days": 11,
+   "train_net": 6812.61,
+   "thr": 1.592,
+   "oos_ref_net": -106.17,
+   "oos_joint_net": -149.39,
+   "oos_wf_net": -186.01,
+   "oos_ref_n": 15,
+   "oos_joint_n": 16,
+   "oos_wf_n": 20,
+   "params": {
+    "rsi_reversal": {
+     "period": 23,
+     "oversold": 33.3,
+     "overbought": 85.2
+    },
+    "bollinger_reclaim": {
+     "period": 15,
+     "k": 0.73
+    },
+    "vwap_reclaim": {
+     "k": 1.56
+    },
+    "macd_cross": {
+     "fast": 6,
+     "slow": 21,
+     "signal_period": 5
+    },
+    "donchian_breakout": {
+     "period": 76
+    },
+    "volume_drop": {
+     "ma_len": 37,
+     "drop_ratio": 2.12
+    }
+   },
+   "sec": 143.3
+  },
+  {
+   "test_day": "2026-09-13",
+   "train_days": 12,
+   "train_net": 4379.32,
+   "thr": 1.247,
+   "oos_ref_net": -198.12,
+   "oos_joint_net": -229.17,
+   "oos_wf_net": -391.61,
+   "oos_ref_n": 21,
+   "oos_joint_n": 19,
+   "oos_wf_n": 22,
+   "params": {
+    "rsi_reversal": {
+     "period": 17,
+     "oversold": 37.3,
+     "overbought": 62.4
+    },
+    "bollinger_reclaim": {
+     "period": 24,
+     "k": 0.96
+    },
+    "vwap_reclaim": {
+     "k": 0.62
+    },
+    "macd_cross": {
+     "fast": 16,
+     "slow": 28,
+     "signal_period": 10
+    },
+    "donchian_breakout": {
+     "period": 55
+    },
+    "volume_drop": {
+     "ma_len": 27,
+     "drop_ratio": 1.45
+    }
+   },
+   "sec": 136.4
+  },
+  {
+   "test_day": "2026-09-14",
+   "train_days": 13,
+   "train_net": 4612.29,
+   "thr": 1.203,
+   "oos_ref_net": 1023.52,
+   "oos_joint_net": 1164.33,
+   "oos_wf_net": 608.14,
+   "oos_ref_n": 82,
+   "oos_joint_n": 93,
+   "oos_wf_n": 84,
+   "params": {
+    "rsi_reversal": {
+     "period": 14,
+     "oversold": 40.0,
+     "overbought": 84.1
+    },
+    "bollinger_reclaim": {
+     "period": 11,
+     "k": 0.75
+    },
+    "vwap_reclaim": {
+     "k": 1.35
+    },
+    "macd_cross": {
+     "fast": 10,
+     "slow": 30,
+     "signal_period": 10
+    },
+    "donchian_breakout": {
+     "period": 64
+    },
+    "volume_drop": {
+     "ma_len": 12,
+     "drop_ratio": 1.41
+    }
+   },
+   "sec": 139.8
+  },
+  {
+   "test_day": "2026-09-15",
+   "train_days": 14,
+   "train_net": 6042.07,
+   "thr": 1.769,
+   "oos_ref_net": 888.77,
+   "oos_joint_net": 1281.75,
+   "oos_wf_net": 1016.48,
+   "oos_ref_n": 91,
+   "oos_joint_n": 97,
+   "oos_wf_n": 109,
+   "params": {
+    "rsi_reversal": {
+     "period": 9,
+     "oversold": 22.6,
+     "overbought": 79.5
+    },
+    "bollinger_reclaim": {
+     "period": 19,
+     "k": 1.1
+    },
+    "vwap_reclaim": {
+     "k": 0.69
+    },
+    "macd_cross": {
+     "fast": 9,
+     "slow": 34,
+     "signal_period": 6
+    },
+    "donchian_breakout": {
+     "period": 52
+    },
+    "volume_drop": {
+     "ma_len": 15,
+     "drop_ratio": 1.4
+    }
+   },
+   "sec": 138.8
+  },
+  {
+   "test_day": "2026-09-16",
+   "train_days": 15,
+   "train_net": 7401.64,
+   "thr": 1.888,
+   "oos_ref_net": 1125.87,
+   "oos_joint_net": 1150.29,
+   "oos_wf_net": 406.1,
+   "oos_ref_n": 106,
+   "oos_joint_n": 116,
+   "oos_wf_n": 88,
+   "params": {
+    "rsi_reversal": {
+     "period": 12,
+     "oversold": 23.6,
+     "overbought": 65.8
+    },
+    "bollinger_reclaim": {
+     "period": 9,
+     "k": 0.8
+    },
+    "vwap_reclaim": {
+     "k": 2.65
+    },
+    "macd_cross": {
+     "fast": 10,
+     "slow": 22,
+     "signal_period": 7
+    },
+    "donchian_breakout": {
+     "period": 75
+    },
+    "volume_drop": {
+     "ma_len": 23,
+     "drop_ratio": 2.29
+    }
+   },
+   "sec": 141.3
+  },
+  {
+   "test_day": "2026-09-17",
+   "train_days": 16,
+   "train_net": 8113.34,
+   "thr": 1.344,
+   "oos_ref_net": 613.44,
+   "oos_joint_net": 857.33,
+   "oos_wf_net": 865.78,
+   "oos_ref_n": 89,
+   "oos_joint_n": 101,
+   "oos_wf_n": 77,
+   "params": {
+    "rsi_reversal": {
+     "period": 9,
+     "oversold": 39.6,
+     "overbought": 87.2
+    },
+    "bollinger_reclaim": {
+     "period": 15,
+     "k": 2.33
+    },
+    "vwap_reclaim": {
+     "k": 2.18
+    },
+    "macd_cross": {
+     "fast": 7,
+     "slow": 25,
+     "signal_period": 9
+    },
+    "donchian_breakout": {
+     "period": 57
+    },
+    "volume_drop": {
+     "ma_len": 18,
+     "drop_ratio": 1.29
+    }
+   },
+   "sec": 135.5
+  },
+  {
+   "test_day": "2026-09-18",
+   "train_days": 17,
+   "train_net": 9551.55,
+   "thr": 1.642,
+   "oos_ref_net": 814.52,
+   "oos_joint_net": 630.72,
+   "oos_wf_net": 832.52,
+   "oos_ref_n": 56,
+   "oos_joint_n": 50,
+   "oos_wf_n": 61,
+   "params": {
+    "rsi_reversal": {
+     "period": 20,
+     "oversold": 27.1,
+     "overbought": 81.2
+    },
+    "bollinger_reclaim": {
+     "period": 15,
+     "k": 0.8
+    },
+    "vwap_reclaim": {
+     "k": 2.37
+    },
+    "macd_cross": {
+     "fast": 7,
+     "slow": 24,
+     "signal_period": 9
+    },
+    "donchian_breakout": {
+     "period": 68
+    },
+    "volume_drop": {
+     "ma_len": 40,
+     "drop_ratio": 1.34
+    }
+   },
+   "sec": 140.1
+  },
+  {
+   "test_day": "2026-09-19",
+   "train_days": 18,
+   "train_net": 10519.44,
+   "thr": 1.673,
+   "oos_ref_net": -125.6,
+   "oos_joint_net": 62.26,
+   "oos_wf_net": -82.76,
+   "oos_ref_n": 43,
+   "oos_joint_n": 42,
+   "oos_wf_n": 51,
+   "params": {
+    "rsi_reversal": {
+     "period": 8,
+     "oversold": 39.4,
+     "overbought": 86.1
+    },
+    "bollinger_reclaim": {
+     "period": 14,
+     "k": 0.9
+    },
+    "vwap_reclaim": {
+     "k": 2.28
+    },
+    "macd_cross": {
+     "fast": 14,
+     "slow": 22,
+     "signal_period": 5
+    },
+    "donchian_breakout": {
+     "period": 70
+    },
+    "volume_drop": {
+     "ma_len": 20,
+     "drop_ratio": 1.5
+    }
+   },
+   "sec": 142.3
+  },
+  {
+   "test_day": "2026-09-20",
+   "train_days": 19,
+   "train_net": 9856.85,
+   "thr": 1.805,
+   "oos_ref_net": -202.17,
+   "oos_joint_net": -167.01,
+   "oos_wf_net": -34.98,
+   "oos_ref_n": 41,
+   "oos_joint_n": 40,
+   "oos_wf_n": 39,
+   "params": {
+    "rsi_reversal": {
+     "period": 14,
+     "oversold": 25.2,
+     "overbought": 86.8
+    },
+    "bollinger_reclaim": {
+     "period": 25,
+     "k": 0.68
+    },
+    "vwap_reclaim": {
+     "k": 1.6
+    },
+    "macd_cross": {
+     "fast": 9,
+     "slow": 39,
+     "signal_period": 6
+    },
+    "donchian_breakout": {
+     "period": 83
+    },
+    "volume_drop": {
+     "ma_len": 22,
+     "drop_ratio": 1.7
+    }
+   },
+   "sec": 147.1
+  }
+ ],
+ "oos_ref": {
+  "net": 6004.14,
+  "n": 833,
+  "wr": 67.9,
+  "pf": 2.01,
+  "maxdd": 459.9
+ },
+ "oos_joint": {
+  "net": 7060.09,
+  "n": 861,
+  "wr": 69.6,
+  "pf": 2.13,
+  "maxdd": 677.26
+ },
+ "oos_wf": {
+  "net": 6086.28,
+  "n": 911,
+  "wr": 68.9,
+  "pf": 1.86,
+  "maxdd": 626.15
+ },
+ "conclusions": [
+  "timeline 2026-09-07..2026-09-20: 14 folds x 40 trials (expanding train >= 6d)",
+  "OOS totals: REF +6004.14 (n=833) | JOINT-fixed +7060.09 (n=861) | WF-refit +6086.28 (n=911)",
+  "per-day: WF-refit beats REF on 9/14 days; thr 1.20..1.89",
+  "refit stability (min..max over folds): bollinger_reclaim.k 0.63..2.33; bollinger_reclaim.period 9..29; donchian_breakout.period 20..83; macd_cross.fast 6..16; macd_cross.signal_period 5..13; macd_cross.slow 20..39; rsi_reversal.overbought 62.4..87.2; rsi_reversal.oversold 22.6..40.0; rsi_reversal.period 8..23; volume_drop.drop_ratio 1.29..2.29; volume_drop.ma_len 12..40; vwap_reclaim.k 0.62..2.84",
+  "VERDICT: WF-refit ADDS OOS value -> consider scheduled refit in live ops"
+ ],
+ "done": true
+}

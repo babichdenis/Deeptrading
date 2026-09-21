@@ -185,6 +185,7 @@ class LiveBroker:
 
     async def flush_portfolio(self):
         """Async-обёртка над _flush_portfolio() для вызова из runtime."""
+        import asyncio
         await asyncio.to_thread(self._flush_portfolio)
 
     async def cash(self) -> float:

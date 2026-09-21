@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -69,6 +69,76 @@ async def _spawn_ensure_1min(figi: str) -> None:
     _bg_ensure[figi] = task
 
 
+# Интрадей-ТФ, которые можно досчитывать из минутных свечей (без T-Invest API).
+# day/week/month не трогаем: у них свои таблицы и свежая история.
+_TF_REFRESHABLE = {"5min", "10min", "15min", "hour", "2h", "4h"}
+_bg_tf_ensure: dict[tuple, asyncio.Task] = {}
+
+
+async def _spawn_ensure_tf(figi: str, interval_name: str, limit: int) -> None:
+    """Фоновая дотяжка просевшего ТФ из 1m: заполняет пропуск [последний бар; сейчас].
+
+    Не блокирует HTTP-ответ. Повторно не запускается, пока таск жив.
+    """
+    key = (figi, interval_name)
+    existing = _bg_tf_ensure.get(key)
+    if existing is not None and not existing.done():
+        return
+
+    async def _worker() -> None:
+        from app.database import SessionLocal
+        from app.services.candle_cache import _INTERVAL_STEP_SEC, ensure_candles
+
+        step_sec = _INTERVAL_STEP_SEC.get(interval_name) or 3600
+        days = max(30, int(limit * step_sec / 86400) + 5)
+        try:
+            async with SessionLocal() as db:
+                res = await asyncio.wait_for(
+                    ensure_candles(db, figi, interval_name, days=days,
+                                   range_to=datetime.now(_tz.utc)),
+                    timeout=25,
+                )
+                logger.info("ensure_tf %s %s: down=%s req=%s", figi[-6:], interval_name,
+                            res.get("downloaded"), res.get("requests"))
+        except asyncio.TimeoutError:
+            logger.warning("ensure_tf %s %s timeout(25s)", figi[-6:], interval_name)
+        except Exception as e:
+            logger.warning("ensure_tf %s %s err %s: %s", figi[-6:], interval_name,
+                           type(e).__name__, str(e)[:100])
+
+    task = asyncio.create_task(_worker())
+    _bg_tf_ensure[key] = task
+
+
+async def _maybe_spawn_ensure_tf(db: AsyncSession, figi: str, interval_name: str, limit: int) -> None:
+    """Запускает _spawn_ensure_tf, если таблица ТФ отстала от живого 1m более чем на ~2 шага."""
+    from app.services.candle_cache import _INTERVAL_STEP_SEC
+
+    step_sec = _INTERVAL_STEP_SEC.get(interval_name)
+    one = INTERVAL_NAMES.get("1min")
+    target = INTERVAL_NAMES.get(interval_name)
+    if step_sec is None or one is None or target is None:
+        return
+    try:
+        one_value = int(one.value)
+        target_value = int(target.value)
+        one_max = (await db.execute(
+            select(func.max(Candle.ts)).where(Candle.figi == figi, Candle.interval == one_value)
+        )).scalar_one_or_none()
+        tf_max = (await db.execute(
+            select(func.max(Candle.ts)).where(Candle.figi == figi, Candle.interval == target_value)
+        )).scalar_one_or_none()
+        if one_max is None:
+            return
+        # дотяжка, только если ТФ отстала от живого 1m более чем на 1 шаг
+        if tf_max is not None and (one_max - tf_max).total_seconds() <= step_sec:
+            return
+    except Exception as e:
+        logger.debug("tf staleness check %s %s: %s", figi[-6:], interval_name, e)
+        return
+    await _spawn_ensure_tf(figi, interval_name, limit)
+
+
 def _bollinger(closes: list[float], period: int = 20, k: float = 2.0) -> tuple[list, list]:
     upper: list[float | None] = [None] * len(closes)
     lower: list[float | None] = [None] * len(closes)
@@ -87,13 +157,25 @@ async def get_analysis(
     figi: str,
     interval_name: str = Query("day"),
     limit: int = Query(1500, ge=10, le=5000),
+    before_ts: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     interval = INTERVAL_NAMES.get(interval_name)
     if interval is None:
         raise HTTPException(400, f"Unknown interval. Available: {', '.join(INTERVAL_NAMES)}")
 
-    cache_key = (figi, interval_name, int(limit))
+    # before_ts: окно заканчивается на указанном времени (для тестов/реплея —
+    # иначе «последние N баров» уходят в сегодня и историческое окно не видно).
+    _before_dt = None
+    if before_ts:
+        try:
+            _before_dt = datetime.fromisoformat(before_ts.replace("Z", "+00:00"))
+            if _before_dt.tzinfo is None:
+                _before_dt = _before_dt.replace(tzinfo=_tz.utc)
+        except Exception:
+            _before_dt = None
+
+    cache_key = (figi, interval_name, int(limit), _before_dt.isoformat() if _before_dt else "")
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -113,12 +195,20 @@ async def get_analysis(
 
     interval_value = int(getattr(interval, "value", interval))
 
+    # Старший интрадей-ТФ отстал от «живого» 1m (15m/1h/2h и т.п. не обновлялись
+    # автоматически) — фоново дотягиваем из минутных свечей, не блокируя ответ.
+    # Для before_ts (история/реплей) дотяжку не делаем.
+    if not _before_dt and interval_name in _TF_REFRESHABLE:
+        await _maybe_spawn_ensure_tf(db, resolved_figi, interval_name, limit)
+
     stmt = (
         select(Candle)
         .where(Candle.figi == resolved_figi, Candle.interval == int(getattr(interval, "value", interval)))
         .order_by(Candle.ts.desc())
         .limit(limit)
     )
+    if _before_dt is not None:
+        stmt = stmt.where(Candle.ts <= _before_dt)
     result = await db.execute(stmt)
     candles = list(reversed(result.scalars().all()))
     # Для 1min — если последний бар в БД старше 10 минут, запускаем фоновую

@@ -117,6 +117,11 @@ def _schedule_refresh() -> None:
     global _refresh_task
     if _refresh_task is not None and not _refresh_task.done():
         return
+    # Вызов из потока без event loop (напр. asyncio.to_thread) — планировать некуда.
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
     async def _worker() -> None:
         async with _refresh_lock:
             try:
@@ -125,7 +130,25 @@ def _schedule_refresh() -> None:
                                breadth=_breadth_from_quotes(quotes))
             except Exception:
                 pass
-    _refresh_task = asyncio.create_task(_worker())
+    _refresh_task = loop.create_task(_worker())
+
+
+async def fetch_tqbr_market_async() -> dict:
+    """Асинхронный аналог fetch_tqbr_market для вызова из корутин (vol_carousel).
+
+    НЕ планирует фоновую задачу из треда (иначе RuntimeError: no running event
+    loop): при просрочке кэша обновляет его здесь же через to_thread.
+    """
+    now = time.monotonic()
+    if _cached["quotes"] is not None and now - _cached["ts"] < CACHE_TTL:
+        return _cached["quotes"]
+    try:
+        quotes = await asyncio.to_thread(_fetch_quotes_uncached)
+        _cached.update(ts=time.monotonic(), quotes=quotes,
+                       breadth=_breadth_from_quotes(quotes))
+        return quotes
+    except Exception:
+        return _cached["quotes"] or {}
 
 
 def fetch_tqbr_market() -> dict:
@@ -292,6 +315,35 @@ async def _compute_movers(top: int = 5) -> dict:
     return out
 
 
+@router.get("/vol-carousel/preview")
+async def vol_carousel_preview(db: AsyncSession = Depends(get_db)):
+    """Dry-run отчёт волатильной карусели: что бы добавили/сняли при включении.
+
+    Только диагностика — БД НЕ трогает. Управление настройками —
+    через VOL_CAROUSEL_* в .env/settings (включение = осознанное решение).
+    """
+    from app.config import get_settings
+    from app.bot.runtime import runtime
+    from app.services.vol_carousel import run_vol_carousel_once
+
+    settings = get_settings()
+    report = await run_vol_carousel_once(db, settings, runtime,
+                                         emit=lambda m: print(m, flush=True))
+    return {
+        "mode": report.get("mode", "dry-run"),
+        "enabled": settings.vol_carousel_enabled,
+        "ts": report.get("ts"),
+        "universe_now": report.get("universe_now"),
+        "target_count": report.get("target_count"),
+        "top_n": settings.vol_carousel_top_n,
+        "min_rng_pct": settings.vol_carousel_min_rng,
+        "would_add": report.get("would_add", []),
+        "would_keep": report.get("would_keep", []),
+        "would_drop": report.get("would_drop", []),
+        "reasons_dropped": report.get("reasons_dropped", {}),
+    }
+
+
 @router.get("/movers")
 async def movers(top: int = 5) -> dict:
     """Срезы движений по горизонтам (1д/1н/1м/3м) — витрина для UI и AI."""
@@ -381,10 +433,26 @@ async def add_eligible(req: _EligibleReq, db: AsyncSession = Depends(get_db)) ->
 
 @router.delete("/eligible/{ticker}")
 async def remove_eligible(ticker: str, db: AsyncSession = Depends(get_db)) -> dict:
-    """Убрать тикер из eligible."""
+    """Убрать тикер из eligible: снять метку в БД + немедленно деактивировать в рантайме."""
+    row = (await db.execute(
+        text("SELECT figi FROM universe WHERE ticker = :t AND eligible_tier = 'eligible'"),
+        {"t": ticker},
+    )).first()
     await db.execute(text(
         "UPDATE universe SET eligible_tier = NULL WHERE ticker = :t"
     ), {"t": ticker})
     await db.commit()
     _carousel_log_add("remove", ticker, "убран из eligible")
+    # Немедленная деактивация в работающем боте (без ожидания цикла 60с
+    # в _hot_add_universe). Если бот не запущен — метка снята, при старте
+    # тикер просто не попадёт в universe.
+    if row and row[0]:
+        try:
+            from app.bot.runtime import runtime
+            _res = await runtime.deactivate_figi(row[0])
+            if _res.get("ok"):
+                _carousel_log_add("remove", ticker,
+                                  f"тикер отключён в боте (позиций закрыто: {_res.get('closed', 0)})")
+        except Exception as _e:
+            _carousel_log_add("remove", ticker, f"бот не запущен — тикер снят из БД ({type(_e).__name__})")
     return {"ok": True, "ticker": ticker}

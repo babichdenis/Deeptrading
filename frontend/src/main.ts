@@ -39,6 +39,7 @@ import { initTest } from "./test";
 import type { SyncReport } from "./api";
 import { initEnsLab } from "./enslab";
 import { OracleZones } from "./test";
+import { ZonesPrimitive } from "./labchart";
 
 declare global {
   interface Window {
@@ -123,6 +124,9 @@ const COLORS = {
   sma: "#4a90e2",
   macdLine: "#2962ff",
   signalLine: "#ff9800",
+  // Метки сделок: не путать со свечами (красные/зелёные).
+  long: "#ffd740",   // ярко-жёлтый — LONG (вход и выход)
+  short: "#00e5ff",  // ярко-голубой — SHORT (вход и выход)
 };
 
 
@@ -197,6 +201,12 @@ interface ChartRefs {
 
 let refs: ChartRefs | null = null;
 let oraclePrim: ReturnType<typeof makeOraclePrim> | null = null;
+// Фоновые зоны сделок на встроенном графике: зелёная — плюс, красная — минус,
+// жёлтая — открытая (как в тестовом графике labchart).
+let _tradeZonePrim: ZonesPrimitive | null = null;
+// В тестовом режиме график заморожен: не докачиваем/не добавляем новые свечи,
+// только показываем метки сделки и переносим вид на её время.
+let _embedTestMode = false;
 let _overlayLines: IPriceLine[] = [];
 let oracleBusy = false;
 let analysis: AnalysisDto | null = null;
@@ -835,6 +845,30 @@ async function sendActiveToLab() {
   }
 }
 
+// Перерисовать фоновые зоны сделок по фокусу (все сделки выбранной бумаги).
+function setTradeZones(trades: Array<Record<string, unknown>>) {
+  if (!refs) return;
+  if (_tradeZonePrim) {
+    try { refs.candles.detachPrimitive(_tradeZonePrim as never); } catch { /* noop */ }
+    _tradeZonePrim = null;
+  }
+  const candles = (analysis?.candles || []) as { ts: string }[];
+  const lastTs = candles.length ? Number(toUnix(candles[candles.length - 1].ts)) : null;
+  const zones: Array<{ timeFrom: UTCTimestamp; timeTo: UTCTimestamp; win: boolean | null }> = [];
+  for (const tr of trades) {
+    const et = tr.entry_time ? Number(toUnix(String(tr.entry_time))) : null;
+    if (et == null || isNaN(et)) continue;
+    const closed = tr.exit_price != null && (tr.ts != null || tr.exit_time != null);
+    const rawExit = tr.ts != null ? tr.ts : tr.exit_time;
+    const xt = closed && rawExit ? Number(toUnix(String(rawExit))) : null;
+    const win = !closed ? null : (tr.net_pnl != null ? Number(tr.net_pnl) >= 0 : null);
+    zones.push({ timeFrom: et as UTCTimestamp, timeTo: (xt ?? lastTs ?? et) as UTCTimestamp, win });
+  }
+  if (!zones.length) return;
+  _tradeZonePrim = new ZonesPrimitive(refs.chart, zones as never);
+  try { refs.candles.attachPrimitive(_tradeZonePrim as never); } catch { /* noop */ }
+}
+
 function consumeTradeFocus() {
   const focus = window.__tradeFocus;
   if (!focus || !refs || !analysis) return;
@@ -946,6 +980,7 @@ async function loadOracle() {
 
 async function ensureForViewport() {
   if (!refs || !analysis || panBusy) return;
+  if (_embedTestMode) return;  // тест: окно фиксировано, свечи не докачиваем
   const logical = latestLogical;
   if (!logical) return;
   const bars = analysis.candles.length;
@@ -1137,12 +1172,12 @@ window.__chartOverlay = (trade: Record<string, unknown>) => {
     const side = String(trade.side);
     const pnl = trade.net_pnl != null ? Number(trade.net_pnl) : null;
     const isLong = side === "LONG" || side === "BUY";
-    const color = isLong ? COLORS.up : COLORS.down;
+    const color = isLong ? COLORS.long : COLORS.short;
     const markers: SeriesMarker<Time>[] = [
       { time: entryTime, position: isLong ? "belowBar" : "aboveBar", color, shape: isLong ? "arrowUp" : "arrowDown", text: `Вход` },
     ];
     if (exitTime != null) {
-      markers.push({ time: exitTime, position: isLong ? "aboveBar" : "belowBar", color: pnl != null && pnl >= 0 ? COLORS.up : COLORS.down, shape: "circle", text: pnl != null ? `Выход ${money(pnl)} ₽` : "Выход" });
+      markers.push({ time: exitTime, position: isLong ? "aboveBar" : "belowBar", color, shape: "circle", text: pnl != null ? `Выход ${money(pnl)} ₽` : "Выход" });
     }
     window.__setTradeLines?.(trade);
     refs.markers.setMarkers(markers);
@@ -1639,6 +1674,10 @@ if (IS_EMBEDDED) {
   let _lastFocusMks: SeriesMarker<Time>[] = [];
   let _lastFocusTrade: Record<string, unknown> | null = null;
   let _lastTradeSig = "";
+  // Режим контура из родителя: в тесте график показывает окно реплея, а не live.
+  let _embedMode = "sandbox";
+  let _embedStart = "";
+  let _embedEnd = "";
   const _tradeSigOf = (t: Record<string, unknown>) => `${String(t.entry_time ?? "")}|${String(t.entry_price ?? "")}|${String(t.stop_loss ?? "")}|${String(t.take_profit ?? "")}`;
   const syncBtn = document.getElementById("btn-sync");
   if (syncBtn) {
@@ -1663,6 +1702,7 @@ if (IS_EMBEDDED) {
   // auto-refresh: свежие свечи каждые 8с, правая кромка прилипает к now
   window.setInterval(() => {
     void (async () => {
+      if (_embedMode === "test") return;  // в тесте окно фиксировано — live-обновление не нужно
       // Обновляем всегда: текущий инструмент (_liveFigi из focus, иначе curFigi).
       const wantFigi = _liveFigi || curFigi;
       if (!wantFigi) return;
@@ -1711,33 +1751,73 @@ if (IS_EMBEDDED) {
     })();
   }, 8000);
   window.addEventListener("message", (ev) => {
-    const d = ev.data as { type?: string; figi?: string; ticker?: string; trade?: Record<string, unknown> };
+    const d = ev.data as { type?: string; figi?: string; ticker?: string; trade?: Record<string, unknown>;
+                           mode?: string; replay_start?: string; replay_end?: string };
+    if (d && d.type === "mode") {
+      _embedMode = String(d.mode || "sandbox");
+      _embedStart = String(d.replay_start || "");
+      _embedEnd = String(d.replay_end || "");
+      _embedTestMode = _embedMode === "test";
+      cdbg("embed", "mode=" + _embedMode, "window=" + _embedStart + ".." + _embedEnd);
+      return;
+    }
     if (!d || d.type !== "focus") return;
+    // Сообщение focus само несёт режим/окно теста: не полагаемся на отдельный
+    // "mode" (он мог прийти до регистрации слушателя — iframe ещё грузился).
+    if (d.mode) _embedMode = String(d.mode);
+    if (d.replay_start) _embedStart = String(d.replay_start);
+    if (d.replay_end) _embedEnd = String(d.replay_end);
+    _embedTestMode = _embedMode === "test";
     void (async () => {
       try {
         const f = String(d.figi || "");
+        const _lim = _embedTestMode ? 5000 : windowLimit(currentTf.interval);
+        let _before: string | undefined;
+        if (_embedTestMode) {
+          const _tr = (d.trade || {}) as Record<string, unknown>;
+          const _tSrc = _tr.exit_time || _tr.entry_time || _embedEnd;
+          if (_tSrc) {
+            const _tMs = new Date(String(_tSrc)).getTime();
+            if (!isNaN(_tMs)) _before = new Date(_tMs + 2 * 3600 * 1000).toISOString();
+          }
+        }
         if (f && f !== curFigi) {
           curFigi = f;
           FIGI = f;
           window.FIGI = f;
           _liveFigi = f;
-          let data = await fetchAnalysis(f, currentTf.interval, windowLimit(currentTf.interval));
-          if (!(data && data.candles && data.candles.length)) {
+          // Тест: окно заканчиваем чуть позже сделки — иначе API отдаёт
+          // «последние N баров» (сегодня), и метки 14.09 висят в пустоте.
+          let data = await fetchAnalysis(f, currentTf.interval, _lim, _before);
+          if (!(data && data.candles && data.candles.length) && !_embedTestMode) {
             try {
               await syncCandles(f, currentTf.interval, currentTf.days);
             } catch { /* noop */ }
-            data = await fetchAnalysis(f, currentTf.interval, windowLimit(currentTf.interval));
+            data = await fetchAnalysis(f, currentTf.interval, _lim, _before);
           }
           if (data && data.candles && data.candles.length) {
+            if (_embedMode === "test" && _embedStart) {
+              // Оставляем окно реплея (±1 день запаса). Если баров мало и срез
+              // пустой — оставляем то, что есть (торцы не режем).
+              const _s = toUnix(_embedStart);
+              const _e = _embedEnd ? toUnix(_embedEnd) : Number.MAX_SAFE_INTEGER;
+              const _f = data.candles.filter((c) => {
+                const t = toUnix(c.ts);
+                return t >= _s - 86400 && t <= _e + 86400;
+              });
+              if (_f.length >= 10) data = { ...data, candles: _f };
+            }
+            analysis = data;
             renderData(data);
-            setStatus(`${data.ticker ?? d.ticker ?? f} — ${data.candles.length} свечей`);
+            setStatus(`${data.ticker ?? d.ticker ?? f} — ${data.candles.length} свечей` +
+                      (_embedMode === "test" ? " (тест)" : ""));
           } else {
             setStatus("нет свечей в базе для " + (d.ticker || f));
           }
         } else if (f === curFigi) {
           // тот же инструмент — тихо обновляем свечи, не трогая масштаб
           try {
-            const nd = await fetchAnalysis(f, currentTf.interval, windowLimit(currentTf.interval));
+            const nd = await fetchAnalysis(f, currentTf.interval, _lim, _before);
             if (nd && nd.candles && nd.candles.length) {
               analysis = nd;
               renderData(nd, true);
@@ -1746,16 +1826,41 @@ if (IS_EMBEDDED) {
         }
         if (refs) {
           const hist = ((d as { trades?: unknown[] }).trades || []) as Record<string, unknown>[];
+          // Время маркеров привязываем к времени свечей графика: иначе lightweight-charts
+          // не рисует стрелки (метка 1м не совпадает с 5м баром и т.п.).
+          const _times = ((analysis?.candles || []) as { ts: string }[]).map((c) => Number(toUnix(c.ts)));
+          const _snap = (want: number | null): number | null => {
+            if (want == null || isNaN(Number(want)) || !_times.length) return null;
+            let lo = 0, hi = _times.length - 1, best: number | null = null;
+            while (lo <= hi) {
+              const mid = (lo + hi) >> 1;
+              if (_times[mid] <= Number(want)) { best = _times[mid]; lo = mid + 1; } else { hi = mid - 1; }
+            }
+            return best ?? _times[0];
+          };
           const mks: SeriesMarker<Time>[] = [];
           for (const tr of hist) {
-            const et = tr.entry_time ? toUnix(String(tr.entry_time)) : null;
-            const xt = tr.ts ? toUnix(String(tr.ts)) : null;
-            const isL = String(tr.side) === "LONG";
-            if (et != null && !isNaN(Number(et))) mks.push({ time: et, position: isL ? "belowBar" : "aboveBar", color: COLORS.up, shape: "arrowUp", text: String(tr.qty ?? "") });
-            if (xt != null && tr.exit_price != null && !isNaN(Number(xt))) mks.push({ time: xt, position: isL ? "aboveBar" : "belowBar", color: COLORS.down, shape: "arrowDown", text: "" });
+            const et = tr.entry_time ? Number(toUnix(String(tr.entry_time))) : null;
+            const xt = tr.ts ? Number(toUnix(String(tr.ts))) : null;
+            // side сделок бота = BUY/SELL (позиции — LONG/SHORT): раньше
+            // лонги не распознавались и ВСЕ входы рисовались шорт-маркерами.
+            const isL = String(tr.side) === "LONG" || String(tr.side) === "BUY";
+            const et2 = _snap(et);
+            const xt2 = _snap(xt);
+            const pnl = tr.net_pnl != null ? Number(tr.net_pnl) : null;
+            const sideColor = isL ? COLORS.long : COLORS.short;
+            if (et2 != null) mks.push({ time: et2 as UTCTimestamp, position: isL ? "belowBar" : "aboveBar", color: sideColor, shape: isL ? "arrowUp" : "arrowDown", text: `Вход${tr.qty != null ? " " + String(tr.qty) : ""}` });
+            if (xt2 != null && tr.exit_price != null) mks.push({
+              time: xt2 as UTCTimestamp,
+              position: isL ? "aboveBar" : "belowBar",
+              color: sideColor,
+              shape: "circle",
+              text: pnl != null ? `Выход ${pnl >= 0 ? "+" : ""}${pnl.toFixed(0)} ₽` : "Выход",
+            });
           }
           _lastFocusMks = mks;
           refs.markers.setMarkers(mks);
+          setTradeZones(hist);
           const fHist = (d as unknown as { trades?: unknown[] }).trades ?? [];
           cdbg("focus", "figi=" + f, "curFigi=" + curFigi, "trades=" + fHist.length, "mks=" + mks.length, "hasTrade=" + (d.trade ? "yes" : "no"));
           if (d.trade) {
@@ -1764,6 +1869,21 @@ if (IS_EMBEDDED) {
             window.__setTradeLines?.(d.trade);
             cdbgView("focus-trade");
           }
+          // Прыжок к сделке: в тесте live scrollToRealTime не подходит (уводит в «сейчас»).
+          try {
+            const _tr = (d.trade || {}) as Record<string, unknown>;
+            const _et = _tr.entry_time ? _snap(Number(toUnix(String(_tr.entry_time)))) : null;
+            if (_et != null) {
+              const _idx = _times.indexOf(_et);
+              if (_idx >= 0) {
+                const _span = WINDOW_BARS[currentTf.interval] ?? 60;
+                refs.chart.timeScale().setVisibleLogicalRange({
+                  from: Math.max(0, _idx - _span),
+                  to: Math.min(Math.max(0, _times.length - 1), _idx + _span),
+                });
+              }
+            }
+          } catch { /* noop */ }
         }
       } catch (e) {
         console.warn("embed focus error", e);

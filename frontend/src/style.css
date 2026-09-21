@@ -2235,3 +2235,24 @@ body.sb-resizing .sr-grip { background: rgba(41, 98, 255, 0.3); }
 .an-table .mv-tk { font-weight: 600; }
 .an-table .mv-up { color: var(--up); }
 .an-table .mv-dn { color: var(--down); }
+
+/* --- Анализ: аккуратная сетка карточек-срезов (вместо таблиц на весь экран) --- */
+#page-analytics { max-width: 1520px; margin: 0 auto; }
+#page-analytics .stats-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 10px;
+  align-items: start;
+  padding: 6px 0 18px;
+  max-width: none;
+}
+#page-analytics .stats-overall { grid-column: 1 / -1; margin-bottom: 2px; }
+#page-analytics .stats-sec { background: var(--bg-soft); }
+#page-analytics .stats-sec .stats-title { display: flex; justify-content: space-between; gap: 8px; }
+#page-analytics .stats-sec .stats-title .dim { font-weight: 400; }
+#page-analytics .stats-sec .stats-table td:first-child {
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#page-analytics .an-aireport .ar-text { max-height: 340px; overflow: auto; }
+#page-analytics .an-aireport, #page-analytics .an-aigate { border-radius: 10px; }
+#page-analytics .an-aigate .an-ag-head { line-height: 1.45; }

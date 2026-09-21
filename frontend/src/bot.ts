@@ -636,7 +636,13 @@ function lgRowEl(it: LogItem): HTMLElement {
   // Шапка: время · уровень · источник · счётчик ×N · копия (разделители-пробелы,
   // чтобы при выделении/копировании элементы не склеивались в одно слово).
   const hd = document.createElement("div"); hd.className = "lg-hd";
-  const t = document.createElement("span"); t.className = "lg-t"; t.textContent = it.ts.slice(11) + "  ";
+  const t = document.createElement("span"); t.className = "lg-t";
+  const _d = it.ts.slice(0, 10), _tm = it.ts.slice(11, 19);
+  let _todayMsk = "";
+  try {
+    _todayMsk = new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10);
+  } catch { /* noop */ }
+  t.textContent = (_d && _d !== _todayMsk ? `${it.ts.slice(5, 10)} ${_tm}` : _tm) + "  ";
   t.title = it.ts;
   const badge = document.createElement("span"); badge.className = "lg-lv"; badge.textContent = lv.toUpperCase().slice(0, 5) + " ";
   badge.title = `уровень: ${lv}`;
@@ -1445,6 +1451,13 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     _embedReplayEnd = newEnd;
     _setActiveModeBtn(_curMode);
     if (modeOrWindowChanged) sendEmbedMode();
+    // Активный тест: помечаем строку в таблице тестов, чтобы клик по ней
+    // не перезапускал прогон заново (в т.ч. после перезагрузки страницы).
+    _runningTest = mm === "test" ? String(tn || "") : "";
+    if (_runningTest && _selectedTest !== _runningTest) {
+      _selectedTest = _runningTest;
+      renderTests();
+    }
     const testChip = $("bot-mode-test");
     if (testChip && mm === "test") {
       testChip.textContent = tn ? `Тест: ${tn}` : "Тест";
@@ -1676,7 +1689,7 @@ async function pollEvents() {
           : e.type === "ORDER_FILLED"
             ? side === "SELL" || e.payload?.action === "close" ? "ev-sell" : "ev-buy"
             : e.type === "POSITION_OPENED"
-              ? String(e.payload?.side) === "SHORT" ? "ev-sell" : "ev-buy"
+              ? ["SELL", "SHORT"].includes(String(e.payload?.side)) ? "ev-sell" : "ev-buy"
               : e.type.startsWith("PAUSE") || e.type.includes("CANCEL") ? "ev-warn" : "ev-info";
       const pnlTxt = pnl != null ? ` · P&L ${pnl >= 0 ? "+" : ""}${pnl}` : "";
       return `<div class="ev-line ${cls}"><span class="ev-ts">${t}</span>` +
@@ -2124,13 +2137,14 @@ async function renderAiGate() {
     const prov = d.provider ? ` · ${_agEsc(d.provider)}` : "";
     const agree = d.agreement === true ? " · 🤝" : (d.agreement === false ? " · ≠" : "");
     const applied = d.applied ? " · применено" : (d.shadow ? " · shadow" : "");
+    const toks = d.usage && d.usage.total ? ` · ${(Number(d.usage.total) / 1000).toFixed(1)}k tok` : "";
     return `<div class="ag-row ${cls}${d.shadow ? " shadow" : ""}" title="${_agEsc(d.reason)}">
       <div class="ag-r1">
         <span class="ag-t">${_agEsc(t)}</span>
         <span class="ag-tk">${_agEsc(d.ticker)} ${_agEsc(d.side)}${d.qty ? " ×" + _agEsc(d.qty) : ""}</span>
         <span class="ag-dec">${label}</span>
       </div>
-      <div class="ag-r2">${_agEsc(d.reason)}<span class="ag-meta">${_agEsc(d.model || "")}${prov}${conf}${lat}${agree}${applied}</span></div>
+      <div class="ag-r2">${_agEsc(d.reason)}<span class="ag-meta">${_agEsc(d.model || "")}${prov}${conf}${lat}${toks}${agree}${applied}</span></div>
       ${d.advice ? `<div class="ag-advice" title="совет нейросети">💡 ${_agEsc(d.advice)}</div>` : ""}
     </div>`;
     }).join("");
@@ -2673,8 +2687,11 @@ export async function renderStats() {
         const acts = (rp.actions || []).map((a: any) =>
           `<span class="ar-act">${_agEsc(a.action || "")} ${_agEsc(a.ticker || "")}` +
           `${a.side ? " " + _agEsc(a.side) : ""}</span>`).join(" ");
+        const u = rp.usage || {};
+        const uTxt = u.total ? ` · ~${(Number(u.total) / 1000).toFixed(1)}k токенов` +
+          ` (prompt ${(Number(u.prompt) / 1000).toFixed(1)}k + out ${(Number(u.completion) / 1000).toFixed(1)}k${u.estimated ? ", оценка" : ""})` : "";
         ar.innerHTML = `<div class="an-ag-head">🧠 AI о рынке <span class="dim">${_agEsc(rp.model || "")}` +
-          `${rp.now_msk ? " · " + _agEsc(rp.now_msk) : ""}</span></div>` +
+          `${rp.now_msk ? " · " + _agEsc(rp.now_msk) : ""}${uTxt}</span></div>` +
           `<div class="ar-text">${_agEsc(rp.analysis)}</div>` +
           (sugg ? `<div class="ar-sugg"><b>Предложения по механизму бота:</b><ul>${sugg}</ul></div>` : "") +
           (acts ? `<div class="ar-acts">Действия: ${acts}</div>` : "");
@@ -2710,13 +2727,16 @@ export async function renderStats() {
     body.innerHTML = `<div class="mini-hint">нет данных по прогону</div>`;
     return;
   }
+  const SEC_MAX = 12;
   const sec = (title: string, rows: StatsRow[] | undefined) => {
     if (!rows || !rows.length) return "";
-    const trs = rows.map((r) =>
+    const _rest = Math.max(0, rows.length - SEC_MAX);
+    const trs = rows.slice(0, SEC_MAX).map((r) =>
       `<tr><td>${esc(r.key)}</td><td class="n">${r.trades}</td><td class="n">${r.wr}%</td>` +
       `<td class="n" style="color:${r.net >= 0 ? "var(--up)" : "var(--down)"}">${r.net >= 0 ? "+" : ""}${r.net}</td>` +
       `<td class="n">${r.pf ?? "—"}</td></tr>`).join("");
-    return `<div class="stats-sec"><div class="stats-title">${title}</div>` +
+    return `<div class="stats-sec"><div class="stats-title">${title}` +
+      ` <span class="dim">${rows.length}${_rest ? `, ещё ${_rest}` : ""}</span></div>` +
       `<table class="stats-table"><thead><tr><th>Ключ</th><th>N</th><th>WR</th><th>Net</th><th>PF</th></tr></thead>` +
       `<tbody>${trs}</tbody></table></div>`;
   };
@@ -2791,6 +2811,7 @@ function initSidebarRightResize() {
 let _testResults: TestRunRow[] = [];
 let _selectedTest: string | null = null;
 let _lastRunTest: string | null = null;
+let _runningTest: string = "";   // имя теста, который прямо сейчас крутится на бэке
 
 function initTestResults() {
   $("btn-test-new")?.addEventListener("click", openTestModal);
@@ -2865,6 +2886,9 @@ async function _rerunTest(name: string) {
   const t = _testResults.find((x) => x.name === name);
   if (!t || !t.replay_start) { alert("Нет периода для перезапуска"); return; }
   if (_selectedTest !== name) _selectedTest = name;
+  // Этот тест уже идёт на бэке — просто открываем его, НЕ перезапускаем
+  // (иначе реплей стартует с начала и сделки обнуляются).
+  if (_curMode === "test" && _runningTest === name) { renderTests(); return; }
   if (t.replay_start === _lastRunTest) { renderTests(); return; }
   _lastRunTest = t.replay_start;
   try {

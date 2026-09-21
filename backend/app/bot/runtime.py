@@ -145,6 +145,8 @@ class BotConfig:
     max_net_exposure_pct: float = 0.5   # |net notional| <= X equity (0=выкл)
     max_sector_pct: float = 0.35        # notional сектора <= X equity (0=выкл)
     max_sector_positions: int = 0       # макс. позиций в одном секторе-кластере (0=выкл)
+    beta_filter_enabled: bool = False    # лимит позиций по бета-группе (low/mid/high)
+    confirmed_cluster_enabled: bool = False  # лимит позиций в подтверждённых кластерах
     max_margin_use_pct: float = 0.8     # starting_margin <= X equity (0=выкл)
     max_stress_loss_pct: float = 0.10   # убыток при ±5% IMOEX <= X equity (0=выкл)
     queue_enabled: bool = True           # очередь кандидатов: топ-1 по силе входит с бустом
@@ -245,6 +247,8 @@ class BotConfig:
     entry_ob_spread_max: float = 25.0    # блок входа при спреде > X б.п. (0=выкл)
     entry_min_turnover: float = 0.0      # мин. дневной оборот тикера, ₽ (0=выкл)
     entry_volatility_max_mult: float = 3.0  # блок если ATR% > X × медианы (0=выкл)
+    entry_news_blackout: bool = True     # блок входа по свежей негативной новости
+    entry_news_blackout_min: int = 60    # окно новостей для стоп-блока, минут
     # --- AI-ордера (AI-трейдер): чейзинг и потолки SL/TP ---
     ai_chase_pct: float = 3.0         # блок входа после хода >X% за день без отката (0=выкл)
     ai_sl_max_pct: float = 0.03       # потолок SL для AI-ордера, доля (0=без потолка)
@@ -268,6 +272,7 @@ BOT_PERSIST_FIELDS = (
     "pos_pct", "max_positions", "reconcile_enabled", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
     "max_sector_positions",
+    "beta_filter_enabled", "confirmed_cluster_enabled",
     "queue_enabled", "queue_ttl_min", "queue_interval_sec", "top_boost",
     "queue_min_turnover", "queue_adv_multiple", "queue_history_veto",
     "top_sizing", "top_relax_caps",
@@ -281,7 +286,8 @@ BOT_PERSIST_FIELDS = (
     "ai_reject_cooldown_min",
     "ai_chase_pct", "ai_sl_max_pct", "ai_tp_max_pct",
     "entry_ob_imbalance_max", "entry_ob_spread_max", "entry_min_turnover",
-    "entry_volatility_max_mult",
+    "entry_volatility_max_mult", "entry_news_blackout", "entry_news_blackout_min",
+    "daily_loss_limit", "max_margin_pct",
 )
 
 
@@ -362,6 +368,7 @@ def default_ensemble_config() -> dict:
                "tf": "5min", "params": V2P.get(s, {})} for s in _ENSEMBLE_ALL_STRATEGIES]
     return {"quorum": 2, "neutral_mode": "semi_flip", "setups": setups,
             "regime_setups_filter": {}, "bias": {"tf": "hour", "period": 50},
+            "bias_mode": "info",
             "entry_tf": "5min"}
 
 
@@ -449,7 +456,11 @@ async def load_ensemble_config(mode: str = "") -> dict:
             if _p.exists():
                 _d = json.loads(_p.read_text(encoding="utf-8"))
                 if isinstance(_d, dict) and _d.get("setups"):
-                    return _d
+                    # Дополняем недостающие ключи дефолтами (напр. bias_mode в старых
+                    # ensemble_config.json) — файл остаётся приоритетным.
+                    _base = default_ensemble_config()
+                    _base.update(_d)
+                    return _base
         except Exception as _sw_e:
             _audit_swallow('load_ensemble_config@L393', _sw_e)  # audit silent-except
             continue
@@ -673,6 +684,7 @@ class PaperBotRuntime:
         self._hist_cache: dict[str, dict] = {}
         self._hist_ts: float = 0.0
         self._turnover_cache: dict[str, float] = {}
+        self._turnover_ts: float = 0.0
         self._cand_queue: dict[str, dict] = {}
         self._equity_peak: float = 0.0
         self._mtf_cache: dict[str, dict] = {}
@@ -1452,10 +1464,20 @@ class PaperBotRuntime:
     def _log(self, msg: str, level: str = "info", source: str = "bot") -> None:
         from app.services.loghub import hub, msk_now_str
         ts = msk_now_str()
+        # Реплей/тест: время в логе = ВИРТУАЛЬНОЕ время бота (чтобы видеть дату/время свечей).
+        try:
+            if str(getattr(self.config, "feed", "")) == "replay":
+                ts = self._bot_now().astimezone(timezone(timedelta(hours=3))).strftime(
+                    "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
         hub.push(msg, level=level, source=source, ts=ts)
         # Персистентная копия (level/source/msg/ts) — пишется в bot_logs флашером,
         # переживает рестарт и видна в Live через фильтры UI.
-        self._log_persist_queue.append((level, source, msg, ts))
+        # НЕ в реплее: тест гонит десятки тысяч баров, запись в БД стоит ~235мс/бар,
+        # а история логов прогона не нужна (в памяти кольцо остаётся).
+        if str(getattr(self.config, "feed", "")) != "replay":
+            self._log_persist_queue.append((level, source, msg, ts))
 
 
     def _get_5m_bars(self, figi: str, buf_list: list) -> list:
@@ -1563,6 +1585,8 @@ class PaperBotRuntime:
             entry_macd_1m=True,
             bias_tf=str(_bias.get("tf", "hour")),
             bias_period=int(_bias.get("period", 50)),
+            bias_mode=str(ec.get("bias_mode") or "info"),
+            ticker=str(ticker or ""),
             regime_setups_filter=ec.get("regime_setups_filter") or {},
             trade_regimes=list(getattr(self.config, "trade_regimes", []) or []),
             ml_filter=ec.get("ml_filter") or {},
@@ -1592,6 +1616,30 @@ class PaperBotRuntime:
         except Exception as e:
             self._log(f"⚙ КОНФИГ КВОРУМА: ошибка применения: {e}")
         return n
+
+    async def _daily_turnover(self, ticker: str) -> float:
+        """Дневной оборот тикера (VALTODAY из TQBR quotes, кэш 5 мин).
+
+        В universe.avg_daily_turnover лежит не дневной оборот (мелкие значения),
+        поэтому ликвидность считаем по живым котировкам биржи.
+        """
+        import time as _t
+        tk = str(ticker or "").upper()
+        now = _t.monotonic()
+        if self._turnover_cache and self._turnover_ts and (now - self._turnover_ts) < 300.0:
+            return float(self._turnover_cache.get(tk) or 0.0)
+        # Кэш пуст/устарел — обновляем дневной оборот с MOEX ISS (VALTODAY).
+        try:
+            from app.api.routes.screener import fetch_tqbr_market
+            q = await asyncio.to_thread(fetch_tqbr_market)
+            for _tk, row in (q or {}).items():
+                val = float((row or {}).get("turnover") or 0.0)
+                if val > 0:
+                    self._turnover_cache[str(_tk).upper()] = val
+            self._turnover_ts = now
+        except Exception:
+            pass
+        return float(self._turnover_cache.get(tk) or 0.0)
 
     def _log_no_trade(self, figi: str, reason: str, detail: str = "") -> None:
         """Log why no trade was made for diagnostics (NO_TRADE analysis)."""
@@ -2329,6 +2377,8 @@ class PaperBotRuntime:
         if self._daily_pnl_cache and now - self._daily_pnl_cache[0] < DAILY_PNL_TTL:
             return self._daily_pnl_cache[1]
         self._daily_pnl_cache = (now, 0.0)
+        self._turnover_cache: dict[str, float] = {}
+        self._turnover_ts = 0.0
         return self._daily_pnl_cache[1]
 
     async def refresh_daily_pnl(self) -> float:
@@ -2821,7 +2871,8 @@ class PaperBotRuntime:
                     pass
         # Хвостовые циклы (persist/imoex/queue/…): если _run уже завершился сам,
         # они остаются висеть и блокируют graceful shutdown uvicorn — гасим явно.
-        for _attr in ('_persist_task', '_held_sync_task', '_hot_add_task', '_reconcile_task',
+        for _attr in ('_persist_task', '_held_sync_task', '_hot_add_task', '_vol_carousel_task',
+                  '_reconcile_task',
                       '_session_task', '_metrics_task', '_intrabar_task', '_imoex_task',
                       '_queue_task', '_momentum_task', '_guard_task'):
             _t = getattr(self, _attr, None)
@@ -2952,6 +3003,7 @@ class PaperBotRuntime:
             "applied": bool(payload.get("applied", False)),
             "latency_ms": payload.get("latency_ms"),
             "shadow": bool(payload.get("shadow", False)),
+            "usage": payload.get("usage") or {},
         }
         self._ai_decisions.append(rec)
         self.events.log("AI_DECISION", figi=payload.get("figi"), ticker=rec["ticker"],
@@ -3150,6 +3202,7 @@ class PaperBotRuntime:
             "suggestions": payload.get("suggestions") or [],
             "actions": payload.get("actions") or [],
             "now_msk": str(payload.get("now_msk") or ""),
+            "usage": payload.get("usage") or {},
         }
         return {"ok": True, "updated_ts": self._ai_report["updated_ts"]}
 
@@ -3214,6 +3267,77 @@ class PaperBotRuntime:
         self.events.log("CLOSE_ALL", reason=f"closed={len(closed)}")
         return {"closed": len(closed), "positions": closed}
 
+    async def deactivate_figi(self, figi: str) -> dict:
+        """Убрать тикер из работающей карусели без рестарта (метка в БД уже снята).
+
+        Закрывает открытую позицию, отписывает стрим, вычищает стратегию/буфер
+        и все локальные state. Возвращает результат деактивации (для лога UI).
+        """
+        ticker = self.tickers.get(figi, figi[-6:])
+        closed = []
+        # 1) Закрываем открытую позицию (если есть) — как close_all, но для одной figi.
+        if self.broker is not None:
+            try:
+                pos = await self.broker.get_position(figi)
+                if pos is not None:
+                    buf = self.buffers.get(figi)
+                    price = float(buf[-1].close) if buf else float(pos.entry_price)
+                    try:
+                        trade = await self.broker.close_position(figi, price, "carousel_remove")
+                    except Exception as _cl_e:
+                        # Вне торговой сессии sandbox не принимает заявки (30079) — тикер
+                        # со снятой меткой останется в карусели до закрытия позиции, каждый
+                        # следующий цикл hot-add повторит попытку.
+                        self._log(f"⚠ deactivate {ticker}: позиция не закрылась — "
+                                  f"{type(_cl_e).__name__}: {str(_cl_e)[:120]}. Тикер остаётся до закрытия.")
+                        return {"ok": False, "ticker": ticker, "figi": figi,
+                                "closed": 0, "pending_position": True}
+                    self._held.discard(figi)
+                    self._clear_exit_state(figi)
+                    self._entry_bar_index.pop(figi, None)
+                    try:
+                        await self._st_close(figi,
+                                             float(trade.price) if (trade and getattr(trade, "price", None)) else price,
+                                             reason="carousel_remove",
+                                             net=float(trade.net_pnl) if trade else None)
+                    except Exception as _sw_e:
+                        _audit_swallow('deactivate_figi@st_close', _sw_e)
+                    closed.append({"figi": figi, "ticker": ticker, "price": round(price, 6),
+                                   "net_pnl": float(trade.net_pnl) if trade else None})
+                    self.events.log("POSITION_CLOSED", figi=figi, ticker=ticker,
+                                    reason="carousel_remove", net_pnl=closed[-1]["net_pnl"])
+            except Exception as _pos_e:
+                self._log(f"⚠ deactivate {ticker}: позиция — {type(_pos_e).__name__}: {str(_pos_e)[:120]}")
+
+        # 2) Отписываем стрим данных (stream-unsubscribe / polling берёт из self.figis).
+        try:
+            if self.feed is not None and figi in self.feed.figis:
+                self.feed.remove_figis([figi])
+                self._log(f"➖ FEED отписка {ticker} ({figi[-6:]})")
+        except Exception as _fb_e:
+            self._log(f"⚠ deactivate {ticker}: feed — {type(_fb_e).__name__}: {str(_fb_e)[:120]}")
+        try:
+            if figi in self.stream_universe:
+                self.stream_universe.remove(figi)
+        except Exception:
+            pass
+
+        # 3) Вычищаем все локальные state тикера.
+        self.strategies.pop(figi, None)
+        self.buffers.pop(figi, None)
+        self.tickers.pop(figi, None)
+        self.universe = [u for u in self.universe if u.get("figi") != figi]
+        self._clear_exit_state(figi)
+        self._entry_bar_index.pop(figi, None)
+        self._opposite_count.pop(figi, None)
+        self.pending_orders.pop(figi, None)
+        self._cand_queue.pop(figi, None)
+        self.events.log("CAROUSEL_REMOVE", figi=figi, ticker=ticker,
+                        reason=f"closed={len(closed)}", universe_now=len(self.universe))
+        self._log(f"➖ КАРУСЕЛЬ: {ticker} убран (позиций закрыто: {len(closed)}), "
+                  f"universe={len(self.universe)}")
+        return {"ok": True, "ticker": ticker, "figi": figi, "closed": len(closed)}
+
     async def _sync_held(self) -> None:
         while self.running:
             await asyncio.sleep(30.0)
@@ -3249,11 +3373,9 @@ class PaperBotRuntime:
 
         while self.running:
             try:
-                # Вне торговых сессий (ночь/выходной) хоровод универса не крутим:
-                # свечи стрима пишутся, а hot-add/стратегии подождём до сессии.
-                if not _sessions_allowed(self._bot_now(), self.config.sessions):
-                    await asyncio.sleep(60.0)
-                    continue
+                # Хоровод универса крутим независимо от торговых сессий:
+                # добавление/удаление тикеров должно работать как часы (ночью/в выходные
+                # свечи всё равно пишутся в БД потоком, а подписку подтянем к сессии).
                 async with SessionLocal() as db:
                     # Ищем eligible тикеры которые ещё НЕ в universe
                     current_figi = {u["figi"] for u in self.universe}
@@ -3342,8 +3464,29 @@ class PaperBotRuntime:
                             "atr_pct": _atr_pct, "avg_price": 0, "avg_turnover": 0, "sector": "",
                         })
                         self.tickers[figi] = ticker
+                        # Подписываем feed (stream-unsubscribe карусельный): новый тикер
+                        # получает живые свечи теми же батовыми механизмами, что и остальные.
+                        try:
+                            if self.feed is not None and figi not in self.feed.figis:
+                                self.feed.add_figis([figi])
+                        except Exception as _fa_e:
+                            self._log(f"⚠ HOT-ADD feed.subscribe {ticker}: {type(_fa_e).__name__}: {str(_fa_e)[:100]}")
+                        if figi not in self.stream_universe:
+                            self.stream_universe.append(figi)
                         hot_adds_this_cycle += 1
                         self._log(f"➕ HOT-ADD: {ticker} ({figi[-6:]}) {cnt} bars")
+
+                    # --- Удаление: тикеры в universe, которых больше нет в eligible (метка снята) ---
+                    eligible_set = {r[0] for r in all_eligible}
+                    for _cur in list(self.universe):
+                        _f = _cur.get("figi")
+                        if _f in eligible_set:
+                            continue
+                        try:
+                            self._log(f"➖ КАРУСЕЛЬ (цикл): {_cur.get('ticker', _f[-6:])} — метка снята, убираю")
+                            await self.deactivate_figi(_f)
+                        except Exception as _de_e:
+                            self._log(f"⚠ карусель-remove {_f[-6:]}: {type(_de_e).__name__}: {str(_de_e)[:120]}")
 
                     # Обновляем диагностику
                     self.carousel_diag = {
@@ -3362,6 +3505,48 @@ class PaperBotRuntime:
                 self._log(f"⚠ HOT-ADD: ошибка — {type(_e).__name__}: {_e}")
                 self.carousel_diag["last_error"] = str(_e)
             await asyncio.sleep(60.0)
+
+    async def _vol_carousel_loop(self) -> None:
+        """Волатильная карусель: периодически ранжирует TQBR по RNG% и обновляет
+        eligible-метки (реализация — app/services/vol_carousel.py).
+
+        Чтобы ничего не сломать «втемную», работает всегда, но:
+          - enabled=False (по умолчанию) → DRY-RUN: только диагностика/лог,
+            БД не трогает;
+          - enabled=True → реально меняет eligible_tier, а дальше обычный
+            hot-add/remove цикл подхватывает без рестарта.
+        Управление только через settings (VOL_CAROUSEL_ENABLED и т.д.).
+        """
+        from app.config import get_settings
+        from app.services.vol_carousel import run_vol_carousel_once
+        from app.database import SessionLocal as _SL
+
+        _cycle = get_settings().vol_carousel_cycle_sec
+        while self.running:
+            try:
+                _settings = get_settings()
+                async with _SL() as db:
+                    _report = await run_vol_carousel_once(db, _settings, self,
+                                                          emit=self._log)
+                # Кладём свежий отчёт в carousel_diag для UI/лог-диагностики.
+                self.carousel_diag["vol_carousel"] = {
+                    "mode": _report.get("mode", "dry-run"),
+                    "ts": _report.get("ts"),
+                    "universe_now": _report.get("universe_now"),
+                    "target": _report.get("target_count"),
+                    "would_add": len(_report.get("would_add", [])),
+                    "would_drop": len(_report.get("would_drop", [])),
+                    "top": [e["ticker"] for e in _report.get("now", [])],
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as _e:
+                self._log(f"⚠ VOL-CAROUSEL: ошибка — {type(_e).__name__}: {_e}")
+                try:
+                    self.carousel_diag["vol_carousel"] = {"error": str(_e)}
+                except Exception:
+                    pass
+            await asyncio.sleep(_cycle)
 
     async def _session_monitor(self) -> None:
         """Фоновая задача: логирует состояние при смене торговой сессии.
@@ -3845,6 +4030,7 @@ class PaperBotRuntime:
         self._persist_task = asyncio.create_task(self._flush_persist())
         self._held_sync_task = asyncio.create_task(self._sync_held())
         self._hot_add_task = asyncio.create_task(self._hot_add_universe())
+        self._vol_carousel_task = asyncio.create_task(self._vol_carousel_loop())
         self._reconcile_task = asyncio.create_task(self._reconcile_loop())
         self._session_task = asyncio.create_task(self._session_monitor())
         self._metrics_task = asyncio.create_task(self._metrics_loop())
@@ -3889,7 +4075,8 @@ class PaperBotRuntime:
                     await self._persist_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task', '_metrics_task',
+            for t in ('_held_sync_task', '_hot_add_task', '_vol_carousel_task', '_reconcile_task',
+                      '_metrics_task',
                       '_intrabar_task', '_imoex_task', '_session_task', '_queue_task',
                       '_momentum_task', '_guard_task'):
                 task = getattr(self, t, None)
@@ -4021,9 +4208,13 @@ class PaperBotRuntime:
             _tk = self.tickers.get(figi, figi[-6:])
             _ch = ((c.close - c.open) / c.open * 100) if c.open else 0.0
             _dir = "▲" if _ch > 0 else ("▼" if _ch < 0 else "·")
+            # Свечи — debug: в UI (info) не спамим; в консоль/БД пишутся для разбора.
+            # В реплее/тесте показываем и дату свечи (видно, где идёт прогон).
+            _cfmt = "%d.%m %H:%M" if str(getattr(self.config, "feed", "")) == "replay" else "%H:%M"
             self._log(
-                f"Свеча {_tk} {_msk_fmt(c.ts, '%H:%M')} МСК: {c.open:.2f} → {c.close:.2f} "
-                f"({_dir} {_ch:+.2f}%), объём {c.volume:g}"
+                f"Свеча {_tk} {_msk_fmt(c.ts, _cfmt)} МСК: {c.open:.2f} → {c.close:.2f} "
+                f"({_dir} {_ch:+.2f}%), объём {c.volume:g}",
+                level="debug",
             )
 
         _lookup = self.tcs_to_bbg.get(figi, figi)
@@ -4377,11 +4568,13 @@ class PaperBotRuntime:
         # до тренда/портфеля/маржи. Данные — app/services/orderbook.py (кэш 5с).
         if action == "open":
             from app.bot.gates import MarketContext, MARKET_GATES, run_gate_chain
-            _to_s = 0.0
+            # В реплее живые котировки не относятся к датам прогона — гейт ликвидности
+            # пропускаем (иначе ложные блоки на устаревшем/нулевом обороте).
+            _to_s = (0.0 if str(getattr(cfg, "feed", "")) == "replay"
+                     else await self._daily_turnover(ticker))
             _atr_s = None
             for _u in self.universe:
                 if _u.get("figi") == figi:
-                    _to_s = float(_u.get("avg_turnover") or 0.0)
                     _ap = _u.get("atr_pct")
                     _atr_s = float(_ap) if _ap else None
                     break
@@ -4400,8 +4593,19 @@ class PaperBotRuntime:
                     _ob_s = await fetch_orderbook(figi, 10)
                 except Exception:
                     _ob_s = None  # gate_orderbook вернёт orderbook_error
+            _nb_reason = ""
+            if bool(getattr(cfg, "entry_news_blackout", True)):
+                try:
+                    import asyncio as _aio_n
+                    from app.services.news import blackout_reason as _nbr, fetch_news as _nf
+                    _news_items = await _aio_n.to_thread(_nf)
+                    _nb_reason = _nbr(_news_items, ticker,
+                                      int(getattr(cfg, "entry_news_blackout_min", 60) or 60)) or ""
+                except Exception:
+                    _nb_reason = ""
             _mc = MarketContext(cfg=cfg, side=side, turnover=_to_s, atr_pct=_atr_s,
-                                atr_pct_median=_med_s, orderbook=_ob_s)
+                                atr_pct_median=_med_s, orderbook=_ob_s,
+                                news_blackout_reason=_nb_reason)
             _res_s = run_gate_chain(MARKET_GATES, _mc)
             if not _res_s.passed:
                 self._reject_entry("signal", _res_s.key, _res_s.detail, figi, ticker)
@@ -4477,7 +4681,9 @@ class PaperBotRuntime:
                             if str(self._exit_side.get(_f, "")).upper() == "SHORT")
             _pctx = PortfolioContext(cfg=cfg, side=side, held_count=len(self._held),
                                      sector=_sector, sector_count=_sector_count,
-                                     short_count=_shorts_c)
+                                     short_count=_shorts_c, ticker=ticker,
+                                     held_tickers=tuple(self.tickers.get(_f, "").upper()
+                                                        for _f in self._held))
             _res_c = run_gate_chain(PORTFOLIO_GATES, _pctx)
             if not _res_c.passed:
                 self._reject_entry("portfolio", _res_c.key, _res_c.detail, figi, ticker)
@@ -5151,7 +5357,8 @@ class PaperBotRuntime:
         tp = None if (trail_active or self._trail_active.get(figi, False)) else self._exit_target.get(figi)
         stop = self._trail_stop.get(figi)
         try:
-            from app.config import settings as _s
+            from app.config import get_settings as _get_settings
+            _s = _get_settings()
             _dbg = bool(getattr(_s, "log_debug_engine", False))
         except Exception as _sw_e:
             _audit_swallow('_step_exit@L4928', _sw_e)  # audit silent-except

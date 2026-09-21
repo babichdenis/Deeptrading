@@ -124,6 +124,55 @@ def resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]
 _resample_cache: dict[int, list[EngineCandle]] = {}
 
 
+def _bar_stats_1m(candles: list[EngineCandle], tf_sec: int) -> dict:
+    """Для каждого tf-бара: (сколько 1м-минут внутри, оборот ₽ = Σ close×volume).
+
+    Нужно для гейта разряженности: бар, собранный из пары минут и единичных
+    лотов, не должен порождать торговые сигналы.
+    """
+    stats: dict = {}
+    for c in candles:
+        secs = c.ts.hour * 3600 + c.ts.minute * 60 + c.ts.second
+        bucket = (secs // tf_sec) * tf_sec
+        key = c.ts.replace(hour=bucket // 3600, minute=(bucket % 3600) // 60,
+                           second=0, microsecond=0)
+        st = stats.get(key)
+        to = float(c.close) * float(c.volume or 0.0)
+        if st is None:
+            stats[key] = [1, to]
+        else:
+            st[0] += 1
+            st[1] += to
+    return stats
+
+
+def _filter_sparse_signals(sigs: list[dict], candles: list[EngineCandle], tf_sec: int,
+                           min_density: float, min_turnover: float) -> list[dict]:
+    """Убрать сигналы на разряженных барах.
+
+    min_density — минимальная доля присутствующих 1м-минут внутри tf-бара (0..1);
+    min_turnover — минимальный оборот бара в ₽. Иначе одна сделка на 1 лот
+    «разворачивает» бота (кейс MVID 14.09: vol_ratio 1.6 при объёмах 1-3).
+    """
+    if not sigs or (min_density <= 0 and min_turnover <= 0):
+        return sigs
+    stats = _bar_stats_1m(candles, tf_sec)
+    _minutes = max(1, int(round(tf_sec / 60.0)))
+    need_minutes = int(min_density * _minutes + 0.9999) if min_density > 0 else 0
+    out: list[dict] = []
+    for sg in sigs:
+        st = stats.get(sg.get("ts"))
+        if st is None:
+            continue
+        cnt, turnover = st
+        if need_minutes and cnt < need_minutes:
+            continue
+        if min_turnover and turnover < min_turnover:
+            continue
+        out.append(sg)
+    return out
+
+
 def cached_resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]:
     """Resample with per-call cache. Within one compute_ensemble call,
     same tf_seconds returns cached result (avoids redundant O(N) passes).
@@ -746,10 +795,14 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     setup_runs: list[tuple[str, list[dict]]] = []
     setup_out: dict[str, dict] = {}
     _rsf = req.get("regime_setups_filter") or {}
+    # Гейт разряженности данных (0 = выкл): доля 1м-минут внутри бара и его оборот.
+    _min_density = float(req.get("min_bar_density", 0.0) or 0.0)
+    _min_turnover = float(req.get("min_bar_turnover", 0.0) or 0.0)
     for s in setups_cfg:
         sid = s["strategy_id"]
         tf_sec = TF_SECONDS.get(s.get("tf", "5min"), 300)
         sigs = generate_signals(sid, s.get("params"), cached_resample(candles, tf_sec))
+        sigs = _filter_sparse_signals(sigs, candles, tf_sec, _min_density, _min_turnover)
         # Фильтр по режиму: стратегия активна только в разрешённых режимах.
         _allowed = _rsf.get(sid)
         if _allowed is not None and regime_bars:
@@ -1584,6 +1637,18 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     }
 
 
+def _inst_tag(req: dict) -> str:
+    """Короткая метка инструмента для логов: тикер, иначе последние 6 символов FIGI."""
+    t = str(req.get("ticker") or "").strip()
+    if t:
+        return t
+    f = str(req.get("figi") or "").strip()
+    return f[-6:] if f else "?"
+
+
+_drop_useless_last: dict[str, str] = {}
+
+
 def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
     lot = int(req.get("lot", 10))
     capital = float(req.get("capital", 100_000))
@@ -1599,6 +1664,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
     adaptive_cfg = req.get("adaptive", [])
     use_all = bool(req.get("use_all_setups", False))
     drop_useless = bool(req.get("drop_useless", False))
+    _tag = _inst_tag(req)
 
     # --- ML-фильтр: LightGBM gate качества сигналов (опционально) ---
     ml_filter_cfg = req.get("ml_filter")
@@ -1627,7 +1693,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
     # --- Validate candles for anomalies ---
     candles, skipped_count = _validate_candles(candles)
     if skipped_count > 0:
-        logger.warning("Skipped %d broken candles", skipped_count)
+        logger.warning("Skipped %d broken candles [%s]", skipped_count, _tag)
     if len(candles) < 120:
         return {"error": "мало свечей после валидации", "bars": len(candles)}
 
@@ -1699,18 +1765,41 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
 
     # --- отсев бесполезных (по предварительному прогону сигналов) ---
     if drop_useless and len(setups_cfg) > 1:
+        _n_before = len(setups_cfg)
         keep: list[dict] = []
+        dropped: list[tuple[str, str]] = []
         for s in setups_cfg:
-            if s["strategy_id"] in VOLUME_STRATEGY_IDS:
+            _sid = s["strategy_id"]
+            if _sid in VOLUME_STRATEGY_IDS:
                 keep.append(s)
                 continue
-            sigs = generate_signals(s["strategy_id"], s.get("params"),
+            sigs = generate_signals(_sid, s.get("params"),
                                     cached_resample(candles, TF_SECONDS.get(s.get("tf", "5min"), 300)))
-            q = _signal_quality("setup", s["strategy_id"], s.get("tf", "5min"), sigs,
+            q = _signal_quality("setup", _sid, s.get("tf", "5min"), sigs,
                                 o_points, entry_window_min)
-            if not any(x.get("useless") for x in q):
+            if any(x.get("useless") for x in q):
+                _why = ("нет сигналов"
+                        if all(int(x.get("signals", 0)) == 0 for x in q)
+                        else "0% совпадений с разворотами")
+                dropped.append((_sid, _why))
+            else:
                 keep.append(s)
-        setups_cfg = keep or setups_cfg
+        _droplist = ", ".join(f"{s}[{w}]" for s, w in dropped) or "—"
+        # Кворум не должен вырождаться в «все оставшиеся»: если после отсева
+        # голосующих ≤ quorum, отсев отменяем — иначе «2 из 2» = один голос
+        # решает всё (кейс MVID: молчащие стратегии выброшены, остались 2).
+        if len(keep) > quorum_k:
+            setups_cfg = keep
+            _msg = (f"отсев ПРИМЕНЁН: отброшено {len(dropped)} из {_n_before} "
+                    f"({_droplist}) → голосующих {len(keep)} при quorum={quorum_k}")
+        else:
+            _msg = (f"отсев ОТМЕНЁН (осталось бы {len(keep)} голосующих ≤ quorum={quorum_k}, "
+                    f"кворум выродится) — кандидаты: {_droplist} → голосуют все {_n_before}")
+        if _drop_useless_last.get(_tag) != _msg:
+            _drop_useless_last[_tag] = _msg
+            logger.info("drop_useless [%s]: %s", _tag, _msg)
+        else:
+            logger.debug("drop_useless [%s]: %s", _tag, _msg)
 
     static_exit = build_exit_policy(exit_cfg["id"], exit_cfg.get("params"))
 
@@ -1757,9 +1846,9 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
         _model = _mloaded.get("clf") if isinstance(_mloaded, dict) else _mloaded
         _tcode = ml_vote_cfg.get("tcode")
         if _tcode is None:
-            logger.warning("ml_vote: tcode not resolved, disabled")
+            logger.warning("ml_vote [%s]: tcode not resolved, disabled", _tag)
         elif _model is None:
-            logger.warning("ml_vote: clf not found in model, disabled")
+            logger.warning("ml_vote [%s]: clf not found in model, disabled", _tag)
         else:
             ml_vote_obj = {"model": _model,
                            "tcode": int(_tcode),

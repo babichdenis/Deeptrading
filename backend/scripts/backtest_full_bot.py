@@ -46,8 +46,8 @@ from app.services.signals import _load_candles as _lc
 
 print("Imports OK", flush=True)
 
-DATE_FROM = datetime(2026, 8, 1, tzinfo=timezone.utc)
-DATE_TO   = datetime(2026, 9, 1, tzinfo=timezone.utc)
+DATE_FROM = datetime(2026, 8, 18, tzinfo=timezone.utc)
+DATE_TO   = datetime(2026, 8, 25, tzinfo=timezone.utc)
 WARMUP_DAYS = 60
 INITIAL_CASH = 10_000.0
 SIGNAL_WINDOW = 2000
@@ -292,6 +292,7 @@ async def run_backtest():
     skipped_cooldown = 0
     skipped_opposite = 0
     skipped_held = 0
+    gate_blocked = 0
 
     for idx, (ts, figi, candle) in enumerate(merged):
         bar_counter += 1
@@ -326,7 +327,23 @@ async def run_backtest():
                 buf_5m = _resample5(buf_raw[-SIGNAL_WINDOW:], 300) if buf_raw else []
                 side_enum = Side.BUY if order.side == "BUY" else Side.SELL
                 plan = exit_policy.plan_entry(side_enum, candle.open, buf_5m)
-                fill_price = await broker.open_position(
+                gate_result = None
+                if (getattr(CFG, "beta_filter_enabled", False)
+                        or getattr(CFG, "confirmed_cluster_enabled", False)):
+                    from app.bot.gates import (PortfolioContext, run_gate_chain,
+                                              PORTFOLIO_GATES)
+                    gate_result = run_gate_chain(PORTFOLIO_GATES, PortfolioContext(
+                        cfg=CFG, side=order.side, held_count=len(broker.positions),
+                        ticker=ticker,
+                        held_tickers=tuple(p.ticker.upper()
+                                           for p in broker.positions.values())))
+                if gate_result is not None and not gate_result.passed:
+                    order.status = "CANCELLED"
+                    gate_blocked += 1
+                    bt_logger.debug("  GATE BLOCK %s %s (%s: %s)" % (
+                        order.side, ticker, gate_result.key, gate_result.detail))
+                else:
+                    fill_price = await broker.open_position(
                     figi=figi, ticker=ticker, side=order.side, qty=order.qty,
                     price=candle.open,
                     stop_loss=round(plan.stop_loss, 6) if plan.stop_loss else None,
@@ -563,6 +580,7 @@ async def run_backtest():
     report.append("  Skipped (cooldown):%d" % skipped_cooldown)
     report.append("  Skipped (opposite):%d" % skipped_opposite)
     report.append("  Skipped (held):    %d" % skipped_held)
+    report.append("  Gate blocked:      %d" % gate_blocked)
     report.append("  Log: %s" % os.path.join(LOG_DIR, "backtest_august.log"))
     report.append("=" * 80)
 

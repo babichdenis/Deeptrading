@@ -34,14 +34,16 @@ async def _cfg_from_saved(mode: str = "sandbox", test_name: str = "", replay_sta
         cfg.replay_start = replay_start
         cfg.replay_end = replay_end
         cfg.replay_pace = replay_pace
-        try:
-            from app.bot.runtime import apply_test_overrides
-            _ov = apply_test_overrides(cfg)
-            if _ov:
-                import logging as _lg
-                _lg.getLogger("uvicorn").info("TEST overrides: %s", ", ".join(_ov))
-        except Exception:
-            pass
+        # Вариант теста (ensemble_config.test.<variant>.json): сетапы/выходы —
+        # из файл-варианта; оверрайды BotConfig (секция "bot") применяет
+        # runtime.start() — единственное место, последними по приоритету.
+        if not str(getattr(cfg, "test_variant", "") or ""):
+            try:
+                from app.config import get_settings as _gs
+                cfg.test_variant = _gs().bot_test_variant or ""
+            except Exception:
+                import os as _os
+                cfg.test_variant = _os.environ.get("TEST_VARIANT", "") or ""
     return cfg
 
 
@@ -100,6 +102,8 @@ def _config_payload(cfg: BotConfig) -> dict:
         "entry_ob_spread_max": float(getattr(cfg, "entry_ob_spread_max", 25.0) or 0.0),
         "entry_min_turnover": float(getattr(cfg, "entry_min_turnover", 0.0) or 0.0),
         "entry_volatility_max_mult": float(getattr(cfg, "entry_volatility_max_mult", 3.0) or 0.0),
+        "entry_news_blackout": bool(getattr(cfg, "entry_news_blackout", True)),
+        "entry_news_blackout_min": int(getattr(cfg, "entry_news_blackout_min", 60) or 0),
         "daily_bias": bool(getattr(cfg, "daily_bias", True)),
         "daily_bias_mode": str(getattr(cfg, "daily_bias_mode", "veto")),
         "top_sizing": str(getattr(cfg, "top_sizing", "multiply")),
@@ -307,6 +311,8 @@ class BotConfigPatch(BaseModel):
     entry_ob_spread_max: float | None = None       # стакан: блок при широком спреде (0=выкл)
     entry_min_turnover: float | None = None        # мин. дневной оборот, ₽ (0=выкл)
     entry_volatility_max_mult: float | None = None  # ATR% > X× медианы → блок (0=выкл)
+    entry_news_blackout: bool | None = None        # блок по свежей негативной новости
+    entry_news_blackout_min: int | None = None     # окно новостей для стоп-блока, мин
     daily_bias_mode: str | None = None         # veto | info
     top_sizing: str | None = None              # режим размера топ-1 (divide|multiply)
     top_relax_caps: bool | None = None         # топ-1: сектор off, net до 100%
@@ -527,6 +533,12 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.entry_volatility_max_mult is not None:
         cfg.entry_volatility_max_mult = max(0.0, float(req.entry_volatility_max_mult))
         changes.append(f"Волатильность max: {cfg.entry_volatility_max_mult:g}× медианы")
+    if req.entry_news_blackout is not None:
+        cfg.entry_news_blackout = bool(req.entry_news_blackout)
+        changes.append(f"Новостной стоп-блок: {'вкл' if cfg.entry_news_blackout else 'выкл'}")
+    if req.entry_news_blackout_min is not None:
+        cfg.entry_news_blackout_min = max(0, int(req.entry_news_blackout_min))
+        changes.append(f"Окно новостей: {cfg.entry_news_blackout_min} мин")
     if req.daily_bias is not None:
         cfg.daily_bias = bool(req.daily_bias)
         changes.append(f"дневной bias: {'вкл' if cfg.daily_bias else 'выкл'}")
@@ -694,7 +706,65 @@ async def bot_gates() -> dict:
         sk = runtime.get_no_trade_stats()
     except Exception:
         sk = {}
-    return gates_report(runtime.config, sk)
+    ec = await load_ensemble_config()
+    return gates_report(runtime.config, sk, ec)
+
+
+class GateToggleIn(BaseModel):
+    key: str
+    on: bool
+
+
+@router.post("/gates/toggle")
+async def bot_gates_toggle(req: GateToggleIn) -> dict:
+    """Вкл/выкл гейта через UI: мутирует BotConfig (или ensemble_config) и персистит."""
+    from app.bot.gates import toggle_gate, gates_report
+    cfg = runtime.config if (runtime.running or runtime.starting) else await _cfg_from_saved()
+    ec = await load_ensemble_config()
+    res = toggle_gate(cfg, req.key, bool(req.on), ec=ec)
+    if not res.get("ok"):
+        return res
+    if res.get("ensemble"):
+        try:
+            await save_ensemble_config(ec)
+        except Exception:
+            pass
+        try:
+            await runtime.reload_ensemble()
+        except Exception:
+            pass
+    else:
+        try:
+            await save_bot_settings(cfg)
+        except Exception:
+            pass
+        try:
+            from app.bot.gates import save_gates_config as _sgc
+            _sgc(cfg)
+        except Exception:
+            pass
+    try:
+        sk = runtime.get_no_trade_stats()
+    except Exception:
+        sk = {}
+    return {"ok": True, "toggle": res, "gates": gates_report(cfg, sk, ec)}
+
+
+@router.get("/funnel")
+async def bot_funnel(figi: str = "", ticker: str = "", limit: int = 400) -> dict:
+    """Воронка решений: судьба каждого сигнала — «кто что глушит».
+
+    stage: signal → strategy → gate → order → exit (+ queue/ai).
+      stats — счётчики по stage:action[:reason];
+      ring  — последние записи (повторы схлопнуты в ×N) с ВИРТУАЛЬНЫМ
+              временем реплея (не реальным);
+      фильтры ?figi= / ?ticker= — вся история по одной бумаге: видно, кто
+      и чем глушил сигналы конкретной сделки (strategy → gate → order → exit).
+    """
+    try:
+        return runtime.get_funnel(figi=figi, ticker=ticker, limit=limit)
+    except Exception:
+        return {"stats": {}, "ring": [], "total": 0, "ring_size": 0}
 
 
 @router.get("/ensemble")
@@ -1343,12 +1413,22 @@ async def bot_logs(
 
     items: list = []
     src_records = hub.after(after_id, limit=2000) if after_id else hub.tail(limit=2000)
-    for r in src_records:
-        if not _log_match(r, levels, src_low, q_low, ticker_re, date):
-            continue
-        items.append(r)
-        if len(items) >= limit:
-            break
+    if after_id:
+        for r in src_records:
+            if not _log_match(r, levels, src_low, q_low, ticker_re, date):
+                continue
+            items.append(r)
+            if len(items) >= limit:
+                break
+    else:
+        matched: list = []
+        for r in reversed(src_records):
+            if not _log_match(r, levels, src_low, q_low, ticker_re, date):
+                continue
+            matched.append(r)
+            if len(matched) >= limit:
+                break
+        items = list(reversed(matched))
     if plain:
         return {"logs": [r.line for r in items], "count": len(items)}
     return {"items": [r.to_dict() for r in items], "count": len(items), "total": hub.len()}
@@ -1463,7 +1543,7 @@ async def bot_status() -> dict:
         _tn = _active_test_name()
         if _tn:
             _rows = await _test_trades_db(_tn)
-            portfolio = _test_portfolio_digest(_tn, _rows)
+            portfolio = await _test_portfolio_digest(_tn, _rows)
     except Exception:
         portfolio = {}
     if not portfolio:
@@ -1713,6 +1793,21 @@ async def bot_tests() -> dict:
             .distinct()
         )
         names = [x[0] for x in r.all() if x[0]]
+    # Истинные окна прогонов (пишет runtime при старте реплея). Fallback — по сделкам.
+    windows: dict[str, tuple] = {}
+    try:
+        from sqlalchemy import text as _t
+        async with _DB() as db:
+            wr = await db.execute(_t(
+                "SELECT name, replay_start, replay_end, updated_at FROM bot_test_runs"))
+            for _n, _s, _e, _u in wr.all():
+                windows[str(_n)] = (_s, _e, _u)
+    except Exception:
+        windows = {}
+    # Идущий прогон появляется в списке сразу, даже до первой сделки.
+    for _wn in windows:
+        if _wn not in names:
+            names.append(_wn)
     items = []
     for name in names:
         async with _DB() as db:
@@ -1730,11 +1825,15 @@ async def bot_tests() -> dict:
         pf = (gw / gl) if gl > 0 else (gw if gw else 0.0)
         entries = [t.entry_time for t in rows if t.entry_time]
         exits = [t.exit_time for t in rows if t.exit_time]
+        _w = windows.get(name)
         items.append(TestRunInfo(
             name=name,
-            replay_start=min(entries).isoformat() if entries else "",
-            replay_end=max(entries).isoformat() if entries else "",
-            created_at=min(entries).isoformat() if entries else "",
+            replay_start=(_w[0].isoformat() if _w and _w[0] else
+                          (min(entries).isoformat() if entries else "")),
+            replay_end=(_w[1].isoformat() if _w and _w[1] else
+                        (max(entries).isoformat() if entries else "")),
+            created_at=(_w[2].isoformat() if _w and _w[2] else
+                        (min(entries).isoformat() if entries else "")),
             trades=len(closed),
             wins=len(wins), losses=len(losses),
             gross_win=round(gw, 2), gross_loss=round(gl, 2),
