@@ -703,6 +703,7 @@ class PaperBotRuntime:
         self._ai_prompt: dict = {}  # текущий промпт/модель AI-гейта (для UI)
         # Управление AI из UI: переопределения промптов (gate/watch/trader) + срочная заметка.
         self._ai_control: dict = {"prompts": {}, "note": "", "updated_ts": ""}
+        self._ai_save_task = None  # ссылка на фоновое сохранение настроек AI (защита от GC)
         self._ai_defaults: dict = {}  # дефолтные промпты воркеров (gate/watch/trader)
         try:
             _acp = Path(_AI_CONTROL_FILE)
@@ -1303,6 +1304,9 @@ class PaperBotRuntime:
     async def reduce_positions(self, close_pct: float, reason: str, side: str = "",
                                figis: set[str] | None = None) -> dict:
         """Закрыть долю позиций (худшие по P&L) — трейлинг-стоп портфеля/разворот/ночь."""
+        if not self._in_trading_session():
+            self._session_gate_log("закрытие позиций")
+            return {}
         positions = await self.broker.positions()
         items = []
         for p in positions:
@@ -1478,6 +1482,28 @@ class PaperBotRuntime:
         # а история логов прогона не нужна (в памяти кольцо остаётся).
         if str(getattr(self.config, "feed", "")) != "replay":
             self._log_persist_queue.append((level, source, msg, ts))
+
+
+    _last_session_gate_log: float = 0.0
+
+    def _session_gate_log(self, what: str) -> None:
+        """INFO-дедуп для операций, отложенных из-за закрытой торговой сессии.
+
+        Раз/минуту (не на каждый цикл intrabar/reduce), чтобы не спамить лог
+        ошибками, которые предсказуемы: sandbox/биржа не принимает заявки
+        вне сессии (код 30079), и SDK печатает это как ERROR.
+        """
+        now = _time.monotonic()
+        if now - self._last_session_gate_log < 60.0:
+            return
+        self._last_session_gate_log = now
+        self._log(f"ВНЕ ТОРГОВОЙ СЕССИИ: {what} отложен(а) до открытия биржи")
+
+    def _in_trading_session(self) -> bool:
+        """True, если сейчас активна хотя бы одна торговая сессия бота."""
+        if not self.config.sessions:
+            return True
+        return _sessions_allowed(datetime.now(timezone.utc), self.config.sessions)
 
 
     def _get_5m_bars(self, figi: str, buf_list: list) -> list:
@@ -2019,6 +2045,11 @@ class PaperBotRuntime:
                             continue
                         pos = await self.broker.get_position(figi)
                         if pos is None:
+                            continue
+                        # Вне сессии биржа/sandbox не принимает заявки (30079) —
+                        # не дёргаем брокера, выход дожидается открытия сессии.
+                        if not self._in_trading_session():
+                            self._session_gate_log("intrabar-выход")
                             continue
                         reason = "intrabar_sl" if hit_sl else "intrabar_tp"
                         trade = await self.broker.close_position(figi, float(px), reason)
@@ -3148,7 +3179,12 @@ class PaperBotRuntime:
             pass
         try:
             import asyncio as _aio
-            _aio.get_running_loop().create_task(save_bot_settings(self.config))
+            # Ссылку держим в self: «голая» create_task без ссылки может быть
+            # собрана GC до закрытия asyncpg-соединения ->
+            # «non-checked-in connection ... will be terminated» в логах.
+            _t = _aio.get_running_loop().create_task(save_bot_settings(self.config))
+            self._ai_save_task = _t
+            _t.add_done_callback(lambda _ft: setattr(self, "_ai_save_task", None))
         except Exception as _sw_e:
             _audit_swallow('apply_ai_mode@L2951', _sw_e)  # audit silent-except
             pass
@@ -3175,6 +3211,9 @@ class PaperBotRuntime:
         _mode = str(payload.get("mode") or "").lower()
         if _mode in AI_MODES:
             self._ai_control["mode"] = _mode
+        elif "mode" in payload:
+            # Выбор «— не задан —» (пустая строка) — сброс: убираем override, бот работает по конфигу.
+            self._ai_control.pop("mode", None)
         self._ai_control["updated_ts"] = datetime.now(timezone.utc).isoformat()
         try:
             _p = Path(_AI_CONTROL_FILE)
@@ -3242,6 +3281,9 @@ class PaperBotRuntime:
         return {"ok": False, "error": "order not found or not pending approval"}
 
     async def close_all(self) -> dict:
+        if not self._in_trading_session():
+            self._session_gate_log("закрытие всех позиций (kill-switch)")
+            return {"closed": 0, "positions": []}
         positions = await self.broker.positions()
         closed = []
         for p in positions:
@@ -4256,16 +4298,19 @@ class PaperBotRuntime:
         # стрим отдаёт бэклог (ночные свечи) и позиции ложно закрывались как overnight.
         if (not _closed and figi not in self._swing
                 and _should_force_close(self._bot_now(), self.config.sessions, self.config.overnight)):
-            trade = await self.broker.close_position(figi, float(c.open), "overnight_force_close")
-            self._held.discard(figi)
-            self._opposite_count.pop(figi, None)
-            self._last_exit_bar[figi] = self._bar_counter
-            self._clear_exit_state(figi)
-            _bh_overnight = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
-            if trade:
-                await self._st_close(figi, float(c.open), reason="overnight_force_close",
-                                      net=float(trade.net_pnl), meta={"bars_held": _bh_overnight})
-                self._log(f"ВЫХОД {figi[-6:]} (overnight) pnl={float(trade.net_pnl):+.2f}")
+            if self._in_trading_session():
+                trade = await self.broker.close_position(figi, float(c.open), "overnight_force_close")
+                self._held.discard(figi)
+                self._opposite_count.pop(figi, None)
+                self._last_exit_bar[figi] = self._bar_counter
+                self._clear_exit_state(figi)
+                _bh_overnight = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
+                if trade:
+                    await self._st_close(figi, float(c.open), reason="overnight_force_close",
+                                          net=float(trade.net_pnl), meta={"bars_held": _bh_overnight})
+                    self._log(f"ВЫХОД {figi[-6:]} (overnight) pnl={float(trade.net_pnl):+.2f}")
+            else:
+                self._session_gate_log("overnight закрытие")
 
         # --- Re-entry cooldown check ---
         cooldown = self.config.reentry_cooldown_bars
@@ -5298,6 +5343,11 @@ class PaperBotRuntime:
              выход — только по трейлинговому стопу.
         Возвращает True, если позиция закрыта на этом баре.
         """
+        # Вне сессии позицию не закрываем: sandbox/биржа не принимает заявки (30079),
+        # а бэклог ночных свечей не должен генерировать исполнения.
+        if not self._in_trading_session():
+            self._session_gate_log("сигнальный выход")
+            return False
         from app.engine.exits import intrabar_exit as _ibe
         policy = self._exit_plans[figi]
         _raw_side = self._exit_side.get(figi) or getattr(pos, "side", "LONG")
