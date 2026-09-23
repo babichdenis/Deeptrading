@@ -2,7 +2,7 @@ declare global {
   interface Window { lucide?: { createIcons: (o?: unknown) => void } }
 }
 
-const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
+const API = ["5173", "5174"].includes(window.location.port) ? `http://${window.location.hostname}:8000` : "";
 
 import {
   botCancelPending,
@@ -1419,9 +1419,14 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   // AI-гейт (4-я вкладка правого сайдбара): обновляем, если открыта.
   if (!$("sr-pane-aigate")?.classList.contains("hidden")) void renderAiGate();
 
-  $("btn-bot-start").classList.toggle("hidden", engineRunning);
-  $("btn-bot-stop").classList.toggle("hidden", !engineRunning);
-  $("btn-bot-pause").classList.toggle("hidden", !engineRunning);
+  $("btn-bot-start")?.classList.toggle("hidden", engineRunning);
+  $("btn-bot-stop")?.classList.toggle("hidden", !engineRunning);
+  const toggleBtn = $("btn-bot-toggle") as HTMLButtonElement | null;
+  if (toggleBtn) {
+    toggleBtn.textContent = engineRunning ? "■ Остановить" : "▶ Запустить бота";
+    toggleBtn.classList.toggle("stop", !!engineRunning);
+  }
+  $("btn-bot-pause")?.classList.toggle("hidden", !engineRunning);
   updatePauseButton();
 
   const modeChip = $("bot-mode");

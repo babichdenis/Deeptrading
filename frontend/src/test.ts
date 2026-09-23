@@ -1,4 +1,4 @@
-const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
+const API = ["5173", "5174"].includes(window.location.port) ? `http://${window.location.hostname}:8000` : "";
 
 import {
   CandlestickSeries,
