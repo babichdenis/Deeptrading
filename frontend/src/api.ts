@@ -1,4 +1,4 @@
-const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
+const API = ["5173", "5174"].includes(window.location.port) ? `http://${window.location.hostname}:8000` : "";
 
 export interface CandleDto {
   ts: string;
@@ -27,8 +27,10 @@ export async function fetchAnalysis(
   figi: string,
   intervalName: string,
   limit = 2000,
+  beforeTs?: string,
 ): Promise<AnalysisDto> {
-  const res = await fetch(`${API}/api/analysis/${figi}?interval_name=${intervalName}&limit=${limit}`);
+  const q = `interval_name=${encodeURIComponent(intervalName)}&limit=${limit}` + (beforeTs ? `&before_ts=${encodeURIComponent(beforeTs)}` : "");
+  const res = await fetch(`${API}/api/analysis/${figi}?${q}`);
   if (!res.ok) throw new Error(`Ошибка загрузки анализа (${res.status})`);
   return res.json();
 }
@@ -486,6 +488,7 @@ export interface EnsembleConfig {
   setups: EnsembleSetup[];
   regime_setups_filter?: Record<string, string[]>;
   bias?: { tf: string; period: number };
+  bias_mode?: string;
   entry_tf?: string;
   _all_strategies?: string[];
 }
@@ -509,6 +512,93 @@ export async function botEnsemblePatch(payload: Partial<EnsembleConfig>): Promis
 export async function botEnsembleReset(): Promise<{ ok: boolean; config: EnsembleConfig }> {
   const res = await fetch(`${API}/api/v1/bot/ensemble/reset`, { method: "POST" });
   if (!res.ok) throw new Error(`ensemble reset ${res.status}`);
+  return res.json();
+}
+
+export async function botAiControlPut(payload: { mode?: string }): Promise<{ ok: boolean; updated_ts?: string }> {
+  const res = await fetch(`${API}/api/v1/bot/ai_control`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`ai_control ${res.status}`);
+  return res.json();
+}
+
+// ============ Гейты входа / воронка сигналов (аудит конвейера бота) ============
+
+export interface GateItem {
+  key: string;
+  title: string;
+  category: string;
+  stage: string;
+  config: string;
+  scope: string;
+  desc: string;
+  enabled: boolean | null;
+  logical_enabled: boolean;
+  toggleable: boolean;
+  flag_value: unknown;
+  rejects: number;
+}
+
+export interface GatesByStage {
+  gates: number;
+  enabled: number;
+  rejects: number;
+}
+
+export interface GatesReport {
+  count: number;
+  categories: Record<string, GateItem[]>;
+  by_stage: Record<string, GatesByStage>;
+  skip_counts: Record<string, number>;
+  order: string[];
+}
+
+export async function botGates(): Promise<GatesReport> {
+  const res = await fetch(`${API}/api/v1/bot/gates`);
+  if (!res.ok) throw new Error(`gates ${res.status}`);
+  return res.json();
+}
+
+export async function botGatesToggle(key: string, on: boolean): Promise<GatesReport> {
+  const res = await fetch(`${API}/api/v1/bot/gates/toggle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key, on }),
+  });
+  if (!res.ok) throw new Error(`gates toggle ${res.status}`);
+  const d = await res.json();
+  if (!d || d.ok === false) throw new Error(d?.error ?? `gates toggle ${key}`);
+  return d.gates as GatesReport;
+}
+
+export interface FunnelEntry {
+  ts: string;
+  stage: string;
+  action: string;
+  figi: string;
+  ticker: string;
+  reason: string;
+  detail: string;
+  n: number;
+}
+
+export interface FunnelReport {
+  stats: Record<string, number>;
+  ring: FunnelEntry[];
+  total: number;
+  ring_size: number;
+}
+
+export async function botFunnel(figi?: string, ticker?: string, limit = 120): Promise<FunnelReport> {
+  const p = new URLSearchParams();
+  if (figi) p.set("figi", figi);
+  if (ticker) p.set("ticker", ticker);
+  p.set("limit", String(limit));
+  const res = await fetch(`${API}/api/v1/bot/funnel?${p.toString()}`);
+  if (!res.ok) throw new Error(`funnel ${res.status}`);
   return res.json();
 }
 

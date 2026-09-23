@@ -1,616 +1,2853 @@
-const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
-
-import {
-  ColorType,
-  CandlestickSeries,
-  CrosshairMode,
-  HistogramSeries,
-  LineSeries,
-  createChart,
-  createSeriesMarkers,
-  type CandlestickData,
-  type HistogramData,
-  type IChartApi,
-  type IPriceLine,
-  type ISeriesApi,
-  type ISeriesMarkersPluginApi,
-  type LineData,
-  type SeriesMarker,
-  type Time,
-  TickMarkType,
-  type UTCTimestamp,
-} from "lightweight-charts";
 import "./style.css";
-import {
-  computeQuorum,
-  computeSignals,
-  fetchAnalysis,
-  fetchCatalog,
-  fetchMaxProfit,
-  fetchRuns,
-  syncCandles,
-  type AnalysisDto,
-  type StrategyCardDto,
-  previewConfiguration,
-} from "./api";
-import { initBot, pollOnce, renderStats } from "./bot";
-import { initLab, refreshConfigs } from "./lab";
-import { initTest } from "./test";
-import type { SyncReport } from "./api";
-import { initEnsLab } from "./enslab";
-import { OracleZones } from "./test";
-
-declare global {
-  interface Window {
-    FIGI: string;
-    __setTradeLines?: (trade: Record<string, unknown>) => void;
-    __chartOverlay?: ((trade: Record<string, unknown>) => void) | null;
-    __tradeFocus?: Record<string, unknown> | null;
-  }
-}
-window.FIGI = "BBG004730N88";
-
-let FIGI = "BBG004730N88";
-let _renderedFigi = "";
-const $ = (id: string) => document.getElementById(id) as HTMLElement;
-const money = (n: number | null | undefined): string =>
-  n == null ? "—" : new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(n);
-
-const ENSURE_DAYS: Record<string, number> = {
-  "1min": 14,
-  "5min": 60,
-  "10min": 90,
-  "15min": 90,
-  hour: 120,
-  "2h": 180,
-  "4h": 180,
-  day: 120,
-  week: 260,
-  month: 730,
-};
-
-// Сколько баров показывать по умолчанию (1min=1.5ч, 5min=5ч, 10min=10ч, …):
-const WINDOW_BARS: Record<string, number> = {
-  "1min": 90,
-  "5min": 60,
-  "10min": 60,
-  "15min": 60,
-  hour: 60,
-  "2h": 60,
-  "4h": 60,
-  day: 60,
-  week: 60,
-  month: 60,
-};
-
-// Барам сверх окна (warmup) — чтобы индикаторы (SMA/EMA/MACD) были корректны у правого края
-const TF_LIMIT: Record<string, number> = {
-  "1min": 150,
-  "5min": 120,
-  "10min": 120,
-  "15min": 120,
-  hour: 120,
-  "2h": 120,
-  "4h": 120,
-  day: 120,
-  week: 120,
-  month: 120,
-};
-function windowLimit(tf: string): number {
-  return TF_LIMIT[tf] ?? (WINDOW_BARS[tf] ?? 60) + 40;
-}
-
-const TIMEFRAMES: { label: string; interval: string; days: number }[] = [
-  { label: "1М", interval: "1min", days: ENSURE_DAYS["1min"] },
-  { label: "5М", interval: "5min", days: ENSURE_DAYS["5min"] },
-  { label: "10М", interval: "10min", days: ENSURE_DAYS["10min"] },
-  { label: "15М", interval: "15min", days: ENSURE_DAYS["15min"] },
-  { label: "1Ч", interval: "hour", days: ENSURE_DAYS.hour },
-  { label: "2Ч", interval: "2h", days: ENSURE_DAYS["2h"] },
-  { label: "4Ч", interval: "4h", days: ENSURE_DAYS["4h"] },
-  { label: "Д", interval: "day", days: ENSURE_DAYS.day },
-  { label: "Н", interval: "week", days: ENSURE_DAYS.week },
-  { label: "Мес", interval: "month", days: ENSURE_DAYS.month },
-];
-
-const COLORS = {
-  bg: "#131722",
-  panel: "#1b2030",
-  grid: "#1e2433",
-  text: "#787b86",
-  up: "#26a69a",
-  down: "#ef5350",
-  sma: "#4a90e2",
-  macdLine: "#2962ff",
-  signalLine: "#ff9800",
-};
-
-
-
-const priceFmt = new Intl.NumberFormat("ru-RU", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-const volFmt = new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 });
-
-const PAGE_TITLES: Record<string, string> = {
-  chart: "Склад — свечи, стратегии, конфигурации",
-  test: "Тест — потолок торговли",
-  lab: "Lab — тесты стратегий",
-  bot: "Paper-бот — дашборд",
-  analytics: "Анализ — статистика и AI-гейт",
-};
+import { CandlestickSeries, HistogramSeries, LineSeries, createChart, createSeriesMarkers, LineStyle, PriceScaleMode, type CandlestickData, type HistogramData, type IChartApi, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type LineData, type SeriesMarker, type Time, type UTCTimestamp } from "lightweight-charts";
+import { fetchAnalysis, fetchCatalog, computeSignals, fetchTestStats, fetchTests, fetchTestsCompare, botGates, botGatesToggle, botEnsembleConfig, botEnsemblePatch, botFunnel, botAiControlPut, type AnalysisDto, type StrategyCardDto, type StatsRow, type TestCompareEntry, type TestsCompare, type TestStats, type GatesReport, type EnsembleConfig } from "./api";
 
 const IS_EMBEDDED = new URLSearchParams(window.location.search).get("embedded") === "1";
-if (IS_EMBEDDED) {
-  document.body.classList.add("embedded");
-  const chartPage = document.getElementById("page-chart");
-  const botPage = document.getElementById("page-bot");
-  if (chartPage) chartPage.classList.add("active");
-  if (botPage) botPage.classList.remove("active");
-  const chartBtn = document.querySelector('.nav-btn[data-page="chart"]');
-  const botBtn = document.querySelector('.nav-btn[data-page="bot"]');
-  if (chartBtn) chartBtn.classList.add("active");
-  if (botBtn) botBtn.classList.remove("active");
-  const _pt = document.getElementById("page-title");
-  if (_pt) _pt.textContent = "График";
-}
-const lk = (k: string) => (IS_EMBEDDED ? "bote_" : "") + k;
 
-function initNav() {
-  const $ = (id: string) => document.getElementById(id) as HTMLElement;
-  const btns = document.querySelectorAll<HTMLButtonElement>(".nav-btn");
-  btns.forEach((b) =>
-    b.addEventListener("click", () => {
-      btns.forEach((x) => x.classList.remove("active"));
-      b.classList.add("active");
-      const page = b.dataset.page!;
-      document.querySelectorAll(".page").forEach((p) => p.classList.remove("active"));
-      document.getElementById(`page-${page}`)!.classList.add("active");
-      const _pt = $("page-title");
-      if (_pt) _pt.textContent = PAGE_TITLES[page] ?? page;
-      if (page === "lab") void refreshConfigs();
-      if (page === "bot") void pollOnce();
-      if (page === "analytics") void renderStats();
-    }),
-  );
-}
+const API = window.location.port === "5173" || window.location.port === "5174"
+  ? `http://${window.location.hostname}:8000`
+  : "";
 
-function toUnix(ts: string): UTCTimestamp {
-  return Math.floor(new Date(ts).getTime() / 1000) as UTCTimestamp;
-}
+void API;
 
-interface ChartRefs {
-  chart: IChartApi;
-  candles: ISeriesApi<"Candlestick">;
-  volume: ISeriesApi<"Histogram">;
-  sma: ISeriesApi<"Line">;
-  emaLine: ISeriesApi<"Line">;
-  bbUpper: ISeriesApi<"Line">;
-  bbLower: ISeriesApi<"Line">;
-  macdHist: ISeriesApi<"Histogram"> | null;
-  macdLine: ISeriesApi<"Line"> | null;
-  signalLine: ISeriesApi<"Line"> | null;
-  rsiLine: ISeriesApi<"Line"> | null;
-  markers: ISeriesMarkersPluginApi<Time>;
-}
+const PAGES = ["chart", "bot", "analytics"] as const;
+type Page = (typeof PAGES)[number];
 
-let refs: ChartRefs | null = null;
-let oraclePrim: ReturnType<typeof makeOraclePrim> | null = null;
-let _overlayLines: IPriceLine[] = [];
-let oracleBusy = false;
-let analysis: AnalysisDto | null = null;
-
-// ---- CDBG: диагностика графика (временный харнесс) ----
-const __CDBG: string[] = [];
-let _cdbgEl: HTMLElement | null = null;
-let _cdbgCount = 0;
-function cdbg(...args: unknown[]) {
-  const line = `[${new Date().toISOString().slice(11, 23)}] ${args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")}`;
-  __CDBG.push(line);
-  if (__CDBG.length > 1500) __CDBG.splice(0, __CDBG.length - 1500);
-  _cdbgCount++;
-  try { console.log(line); } catch { /* noop */ }
-  let el = _cdbgEl;
-  if (!el) {
-    el = document.getElementById("cdbg") as HTMLElement | null;
-    if (!el) {
-      el = document.createElement("div");
-      el.id = "cdbg";
-      el.style.cssText = "display:none;white-space:pre;font:10px monospace;";
-      document.body.appendChild(el);
-    }
-    _cdbgEl = el;
+function showPage(page: Page): void {
+  document.querySelectorAll<HTMLElement>(".nav-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.page === page);
+  });
+  document.querySelectorAll<HTMLElement>(".page").forEach((p) => {
+    p.classList.toggle("active", p.id === `page-${page}`);
+  });
+  document.getElementById("app")?.setAttribute("data-active-page", page);
+  if (page === "bot") {
+    initBotTab();
+    initBotChartResizer();
+  } else if (page === "analytics") {
+    void renderStats();
   }
-  el.textContent = __CDBG.join("\n");
+}
+
+function initNav(): void {
+  document.querySelectorAll<HTMLElement>(".nav-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const page = btn.dataset.page as Page | undefined;
+      if (page && (PAGES as readonly string[]).includes(page)) showPage(page);
+    });
+  });
+  showPage("bot");
+}
+
+async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
+  const res = await fetch(`${API}${url}`, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+function $(id: string): HTMLElement | null { return document.getElementById(id); }
+
+function setText(id: string, text: string): void { const el = $(id); if (el) el.textContent = text; }
+
+
+
+function showModal(id: string): void { $(id)?.classList.remove("hidden"); }
+function hideModal(id: string): void { $(id)?.classList.add("hidden"); }
+
+function money(n: number): string { return n.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+function pct(n: number): string { return (n >= 0 ? "+" : "") + n.toFixed(2) + "%"; }
+
+function fmtShortDT(iso?: string): string {
+  if (!iso) return "—";
   try {
-    const lines = __CDBG.slice(-6);
-    document.title = "G|" + lines.join("§").replace(/"/g, "'").slice(-170);
+    return new Date(iso).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  } catch { return iso; }
+}
+
+function fmtEmDateTime(ts: string): string {
+  try {
+    return new Date(ts).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch { return ts; }
+}
+
+let botPollTimer: number | null = null;
+let botRunning = false;
+let botPaused = false;
+let _botChartInit = false;
+let _botFocusFigi: string | null = null;
+let _botFocusSig = "";
+
+async function pollBotStatus(): Promise<void> {
+  try {
+    const status = await fetchJSON<{
+      running: boolean;
+      equity: number;
+      cash: number;
+      positions_value: number;
+      pnl: number;
+      currencies: number;
+      shares_value: number;
+      session: string;
+      trading_status: string;
+      imoex_guard?: { active?: number | boolean; pct?: number; dir_pct_20m?: number; dir_pct_5m?: number; blocks?: number; age_sec?: number; last_candle?: string; enabled?: boolean; stale?: boolean };
+      ai_mode: string;
+      mode: string;
+      config?: { mode?: string };
+      entries_paused?: boolean;
+      universe?: Array<{ figi: string; ticker?: string; atr_pct?: number }>;
+      votes?: Array<{ figi: string; ticker?: string; buy?: number; sell?: number; votes?: number; side?: string; regime?: string | null; vol_abs?: number | null }>;
+    }>("/api/v1/bot/status");
+    _srUniverse = new Map((status.universe ?? []).map((u) => [u.figi, { atr_pct: u.atr_pct }]));
+    _srVotes = new Map((status.votes ?? []).map((v) => [v.figi, { votes: v.votes ?? 0, side: v.side ?? "", regime: v.regime ?? null, buy: v.buy ?? 0, sell: v.sell ?? 0, vol_abs: v.vol_abs ?? null }]));
+    if (_srRows.length) renderSrTable();
+    botRunning = status.running;
+    // Шапка: цифры по-режимно из /api/v1/sandbox/status (test→тест, live→брокер,
+    // sandbox→sandbox) — как в оригинале. /api/v1/bot/status остаётся источником режима.
+    try {
+      const ctl = new AbortController();
+      const tid = setTimeout(() => ctl.abort(), 5000);
+      const sbst = await fetchJSON<{ portfolio?: { equity?: number; free_funds?: number; cash?: number; pnl?: number; tinkoff_currencies?: number | null; tinkoff_shares?: number | null; starting_margin?: number | null; own_in_positions?: number | null } }>("/api/v1/sandbox/status", { signal: ctl.signal });
+      clearTimeout(tid);
+      const pf = sbst.portfolio;
+      if (pf) {
+        setText("bs-equity", money(pf.equity ?? 0));
+        const ff = pf.free_funds ?? pf.cash;
+        setText("bs-cash", money(ff ?? 0));
+        const margin = pf.starting_margin ?? pf.own_in_positions;
+        setText("bs-positions-value", margin != null ? money(margin) : "—");
+        const pnl = pf.pnl ?? 0;
+        setText("bs-pnl", (pnl >= 0 ? "+" : "-") + money(Math.abs(pnl)));
+        ($("bs-pnl") as HTMLElement).style.color = pnl >= 0 ? "var(--up)" : "var(--down)";
+        setText("bs-currencies", pf.tinkoff_currencies != null ? money(pf.tinkoff_currencies) : "—");
+        const shEl = $("bs-shares");
+        const sh = pf.tinkoff_shares;
+        if (shEl) {
+          if (sh != null) {
+            shEl.textContent = `${sh < 0 ? "−" : sh > 0 ? "+" : ""}${money(Math.abs(sh))}`;
+            shEl.classList.remove("pos", "neg");
+            shEl.classList.add(sh < 0 ? "neg" : sh > 0 ? "pos" : "");
+          } else {
+            shEl.textContent = "—";
+          }
+        }
+      }
+    } catch { /* sandbox/status может лежать при реплее — не роняем опрос */ }
+    setText("bs-session", status.session);
+    // MOEX: одна плашка = режим рынка + направление индекса (IMOEX guard, 20м).
+    const moexEl = $("bs-moex");
+    const moexText = $("bs-trading-status");
+    const moexDot = $("bs-moex-dot") as HTMLElement | null;
+    if (moexText) {
+      const sess = String(status.session ?? "").toUpperCase();
+      const regLabel = sess === "TRADING" ? "торги" : sess === "PRE_MARKET" ? "пре-маркет" : sess === "CLEARING" ? "клиринг" : "закрыто";
+      const ig = status.imoex_guard as { active?: number; pct?: number; dir_pct_20m?: number; dir_pct_5m?: number; blocks?: number; last_candle?: string; age_sec?: number } | undefined;
+      let dirTxt: string, dirCls: string;
+      if (ig && ig.active != null && Number(ig.active) > 0) { dirTxt = `↑${Number(ig.pct).toFixed(2)}% SELL-блок`; dirCls = "neg"; }
+      else if (ig && ig.active != null && Number(ig.active) < 0) { dirTxt = `↓${Number(ig.pct).toFixed(2)}% BUY-блок`; dirCls = "neg"; }
+      else {
+        const d20 = ig && ig.dir_pct_20m != null ? Number(ig.dir_pct_20m) : null;
+        if (d20 == null) { dirTxt = ""; dirCls = "warn"; }
+        else {
+          const arrow = d20 > 0.05 ? "↑" : d20 < -0.05 ? "↓" : "→";
+          dirTxt = `${arrow}${d20 >= 0 ? "+" : ""}${d20.toFixed(2)}%`;
+          dirCls = d20 > 0.05 ? "pos" : d20 < -0.05 ? "neg" : "warn";
+        }
+      }
+      moexText.classList.remove("pos", "neg", "warn");
+      moexText.textContent = dirTxt ? `${regLabel} ${dirTxt}` : regLabel;
+      moexText.classList.add(dirTxt ? dirCls : "neg");
+      const dotBg = sess === "TRADING" ? "var(--up)" : (sess === "PRE_MARKET" || sess === "CLEARING") ? "var(--gold)" : "var(--down)";
+      if (moexDot) moexDot.style.background = dotBg;
+      if (moexEl) {
+        const d5 = ig && ig.dir_pct_5m != null ? ` · 5м ${Number(ig.dir_pct_5m) >= 0 ? "+" : ""}${Number(ig.dir_pct_5m).toFixed(2)}%` : "";
+        const bk = ig && ig.active != null && ig.active !== 0 ? ` · блокировок: ${ig.blocks ?? 0}` : "";
+        const ageMin = ig && ig.age_sec != null ? " · свеча " + Math.round(Number(ig.age_sec) / 60) + " мин назад" : "";
+        moexEl.title = `MOEX: ${regLabel} · направление индекса за 20м${dirTxt ? " " + dirTxt : ""}${d5}${bk}${ageMin}`;
+      }
+    }
+    const aiSel = $("ai-mode-select") as HTMLSelectElement;
+    // Не затираем выбор пользователя, пока его PUT ещё в полёте.
+    if (aiSel && status.ai_mode && aiSel.dataset.aiUser !== "1") aiSel.value = status.ai_mode;
+    const pill = $("bot-pill-top");
+    const stateText = $("bot-state-text");
+    const modeChip = $("bot-mode");
+    const curMode = String(((status as { config?: { mode?: string } }).config?.mode) ?? status.mode ?? "sandbox").toLowerCase();
+    const modeKey = curMode.startsWith("test") ? "test" : (curMode === "live" ? "live" : curMode === "sandbox" ? "sandbox" : null);
+    _setActiveModeBtn(modeKey);
+    const testBlock = $("bot-test-block");
+    if (testBlock) testBlock.style.display = modeKey === "test" ? "" : "none";
+    if (pill && stateText) {
+      if (status.running) {
+        pill.classList.remove("off"); pill.classList.add("on");
+        stateText.textContent = "Бот работает";
+        if (modeChip) { modeChip.textContent = String(status.config?.mode ?? status.mode ?? ""); modeChip.classList.remove("hidden"); }
+      } else {
+        pill.classList.remove("on"); pill.classList.add("off");
+        stateText.textContent = "Бот выключен";
+        if (modeChip) modeChip.classList.add("hidden");
+      }
+    }
+    const syncBtn = (id: string) => {
+      const b = $(id) as HTMLButtonElement | null;
+      if (b) {
+        if (status.running) { b.textContent = "■ Остановить"; b.classList.add("stop"); }
+        else { b.textContent = "▶ Запустить бота"; b.classList.remove("stop"); }
+      }
+    };
+    syncBtn("btn-bot-toggle");
+    botPaused = !!status.entries_paused;
+    const pbtn = $("btn-bot-pause");
+    if (pbtn) {
+      pbtn.classList.toggle("hidden", !status.running);
+      updatePauseButton();
+    }
+  } catch (e) {
+    console.warn("bot status poll error", e);
+  }
+}
+
+async function pollPositions(): Promise<void> {
+  try {
+    const data = await fetchJSON<{ positions: Array<{
+      figi: string; ticker: string; side: string; qty: number; entry_price: number;
+      entry_time: string; stop_loss?: number | null; take_profit?: number | null;
+      trail_active?: boolean; current_price?: number | null; unrealized_pnl?: number | null;
+      roi_pct?: number | null; leverage?: number | null; notional?: number | null;
+      own_money?: number | null;
+      regime?: string | null; vol?: number | null;
+    }> }>("/api/v1/sandbox/positions");
+    const tbody = document.querySelector("#bot-positions-table tbody");
+    if (!tbody) return;
+    tbody.innerHTML = "";
+    for (const p of data.positions) {
+      const tr = document.createElement("tr");
+      tr.dataset.figi = p.figi;
+      const entryPrice = p.entry_price ?? 0;
+      const qty = p.qty ?? 0;
+      const lev = p.leverage ?? 1;
+      const notional = p.notional ?? entryPrice * qty;
+      const own = p.own_money ?? (lev > 0 ? notional / lev : notional);
+      const cur = p.current_price ?? entryPrice;
+      const pnl = p.unrealized_pnl ?? (p.side === "LONG" ? (cur - entryPrice) * qty : (entryPrice - cur) * qty);
+      const pnlCls = pnl >= 0 ? "pos" : "neg";
+      const roi = p.roi_pct ?? 0;
+      const sl = p.stop_loss ?? null;
+      const tp = p.take_profit ?? null;
+      const vol = typeof p.vol === "number" ? p.vol : null;
+      const entryTime = fmtShortDT(p.entry_time);
+      tr.innerHTML = `
+        <td>${entryTime}</td>
+        <td>${p.ticker}</td>
+        <td><span class="${p.side === "LONG" ? "pos" : "neg"}">${p.side}</span></td>
+        <td>${qty}</td>
+        <td>${money(entryPrice)}</td>
+        <td>${money(notional)}₽ <span class="dim">(${money(own)}₽ обесп.)</span></td>
+        <td>${money(cur)}</td>
+        <td class="${pnlCls}">${pnl >= 0 ? "+" : ""}${money(pnl)}</td>
+        <td class="${pnlCls}">${pct(roi)}</td>
+        <td>${lev.toFixed(1)}x</td>
+        <td>${p.regime || "—"}</td>
+        <td>${vol != null ? vol.toFixed(1) + "%" : "—"}</td>
+        <td>${sl != null ? money(sl) + (p.trail_active ? " · trail" : "") : "—"}</td>
+        <td>${tp != null ? money(tp) : "—"}</td>
+        <td><button class="btn-sm ${p.side === "LONG" ? "btn-sell" : "btn-buy"}" data-action="close" data-figi="${p.figi}">${p.side === "LONG" ? "Продать" : "Купить"}</button></td>
+      `;
+      tbody.appendChild(tr);
+    }
+    tbody.querySelectorAll<HTMLButtonElement>("button[data-action=close]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const figi = btn.dataset.figi;
+        if (!figi) return;
+        btn.disabled = true; btn.textContent = "...";
+        try { await fetchJSON(`/api/v1/bot/positions/close?figi=${encodeURIComponent(figi)}`, { method: "POST" }); }
+        catch (err) { alert("Ошибка закрытия: " + err); }
+finally { await pollPositions(); }
+      });
+    });
+    tbody.querySelectorAll<HTMLTableRowElement>("tr[data-figi]").forEach(tr => {
+      tr.addEventListener("click", () => {
+        const figi = tr.dataset.figi;
+        if (!figi) return;
+        const p = data.positions.find((x) => x.figi === figi);
+        if (!p) return;
+        sendEmbedFocus({
+          figi, ticker: p.ticker,
+          trade: {
+            entry_price: p.entry_price,
+            stop_loss: p.stop_loss ?? undefined,
+            take_profit: p.take_profit ?? undefined,
+          },
+          trades: [{ side: p.side, entry_time: p.entry_time, exit_time: undefined }],
+          centerSec: emEpoch(p.entry_time) ?? undefined,
+        });
+      });
+    });
+    // Автофокус: график сразу смотрит на первую открытую позицию (как в оригинале),
+    // при изменении SL/TP/trailing пересылаем обновлённый trade в iframe.
+    if (data.positions.length > 0) {
+      if (!_botChartInit) {
+        _botChartInit = true;
+        const first = data.positions[0];
+        _botFocusFigi = first.figi;
+        sendEmbedFocus({
+          figi: first.figi, ticker: first.ticker,
+          trade: {
+            entry_price: first.entry_price,
+            stop_loss: first.stop_loss ?? undefined,
+            take_profit: first.take_profit ?? undefined,
+          },
+          trades: [],
+        });
+      } else if (_botFocusFigi) {
+        const cur = data.positions.find((x) => x.figi === _botFocusFigi);
+        if (cur) {
+          const sig = `${cur.side}|${cur.entry_price}|${cur.stop_loss}|${cur.take_profit}|${cur.trail_active}`;
+          if (sig !== _botFocusSig) {
+            _botFocusSig = sig;
+            sendEmbedFocus({
+              figi: cur.figi, ticker: cur.ticker,
+              trade: {
+                entry_price: cur.entry_price,
+                stop_loss: cur.stop_loss ?? undefined,
+                take_profit: cur.take_profit ?? undefined,
+              },
+              trades: [{ side: cur.side, entry_time: cur.entry_time, exit_time: undefined }],
+            });
+          }
+        }
+      }
+    }
+
+  } catch (e) {
+    console.warn("pollPositions error", e);
+  }
+}
+
+async function pollTrades(): Promise<void> {
+  try {
+    const data = await fetchJSON<{ trades: SandboxTrade[] }>("/api/v1/sandbox/trades?limit=100");
+    _lastTrades = data.trades;
+    _lastTradeHist = new Map();
+    for (const t of data.trades) {
+      const row = _lastTradeHist.get(t.figi) ?? [];
+      row.push({ side: t.side, entry_time: t.entry_time, exit_time: t.ts });
+      _lastTradeHist.set(t.figi, row);
+    }
+    bindTradesClicks();
+    renderTrades();
+  } catch (e) {
+    console.warn("pollTrades error", e);
+  }
+}
+
+function bindTradesClicks(): void {
+  const tbody = document.querySelector<HTMLTableSectionElement>("#bot-trades-table tbody");
+  if (!tbody || tbody.dataset.bound) return;
+  tbody.dataset.bound = "1";
+  tbody.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+    const tr = target.closest<HTMLTableRowElement>("tr.trade-row");
+    if (!tr) return;
+    const idx = Number(tr.dataset.idx ?? "-1");
+    const t = _lastTrades[idx];
+    if (!t) return;
+    // Стрелка справа → toggle деталей (БЕЗ открытия графика).
+    if (target.closest(".td-arrow")) {
+      const key = tr.dataset.key ?? "";
+      if (_openDetails.has(key)) _openDetails.delete(key); else _openDetails.add(key);
+      renderTrades();
+      return;
+    }
+    // Любой другой клик по строке → фокус графика на этой сделке (все таймфреймы, центр по сделке).
+    const figi = tr.dataset.figi;
+    if (!figi) return;
+    const enSec = emEpoch(t.entry_time);
+    const exSec = t.ts ? emEpoch(t.ts) : null;
+    const centerSec = enSec != null && exSec != null ? Math.floor((enSec + exSec) / 2) : (enSec ?? undefined);
+    sendEmbedFocus({
+      figi, ticker: t.ticker,
+      trade: {
+        entry_price: t.entry_price ?? undefined,
+        exit_price: t.exit_price ?? undefined,
+        stop_loss: t.stop_loss ?? undefined,
+        take_profit: t.take_profit ?? undefined,
+      },
+      trades: _lastTradeHist.get(figi) ?? [],
+      centerSec,
+    });
+  });
+}
+
+function renderTrades(): void {
+  const tbody = document.querySelector<HTMLTableSectionElement>("#bot-trades-table tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  const trades = _lastTrades;
+  for (let i = 0; i < trades.length; i++) {
+    const t = trades[i];
+    const tr = document.createElement("tr");
+    tr.dataset.figi = t.figi;
+    const key = `${t.ticker}|${t.entry_time}`;
+    const selected = _openDetails.has(key);
+    tr.dataset.idx = String(i);
+    tr.dataset.key = key;
+    tr.classList.add("trade-row");
+    if (selected) tr.classList.add("selected");
+    const isLong = String(t.side).toUpperCase() === "BUY" || String(t.side).toUpperCase() === "LONG";
+    const isOpen = !t.ts || t.exit_reason === "на торгах" || t.exit_price == null;
+    const entry = fmtShortDT(t.entry_time);
+    const exit = t.ts ? fmtShortDT(t.ts) : "—";
+    const notional = t.notional ?? (t.entry_price ?? 0) * (t.qty ?? 0);
+    const lev = t.leverage ?? 1;
+    const own = t.own_money ?? (lev > 0 ? notional / lev : notional);
+    const netPnl = isOpen ? 0 : (t.net_pnl ?? 0);
+    const pnlCls = netPnl >= 0 ? "pos" : "neg";
+    const comm = t.commission ?? 0;
+    let exitChip = `<span class="exit-chip">${t.exit_reason}</span>`;
+    if (t.exit_reason === "stop_loss") exitChip = `<span class="exit-chip stop">SL</span>`;
+    else if (t.exit_reason === "take_profit") exitChip = `<span class="exit-chip">TP</span>`;
+    else if (t.exit_reason === "flip") exitChip = `<span class="exit-chip">Flip</span>`;
+    else if (t.exit_reason === "session_end") exitChip = `<span class="exit-chip pending">Session</span>`;
+    else if (isOpen) exitChip = `<span class="exit-chip pending">Открыта</span>`;
+    // Вход (голоса ансамбля) из meta.entry / meta.quorum_event.
+    let entryCell = "—";
+    try {
+      const m = t.meta ? JSON.parse(t.meta) : null;
+      const er = String(m?.entry?.reason ?? m?.entry_reason ?? "");
+      const f = ((m?.entry?.features || m?.quorum_event || {}) as Record<string, unknown>) || {};
+      if (er) {
+        let votes = "";
+        if (typeof f.long_votes === "number" || typeof f.short_votes === "number") votes = ` ↑${f.long_votes ?? 0}/↓${f.short_votes ?? 0}`;
+        else if (typeof f.votes_up === "number" || typeof f.votes_dn === "number") votes = ` ↑${f.votes_up ?? 0}/↓${f.votes_dn ?? 0}`;
+        else if (typeof f.votes === "number" || typeof f.buy_votes === "number" || typeof f.sell_votes === "number") {
+          const bv = typeof f.buy_votes === "number" ? f.buy_votes : 0;
+          const sv = typeof f.sell_votes === "number" ? f.sell_votes : 0;
+          votes = ` v${typeof f.votes === "number" ? f.votes : bv + sv}`;
+        }
+        const short = er.replace("_ensemble", "").replace("neutral_", "neu:").replace("range_", "rng:").replace("hv_", "hv:");
+        entryCell = `<span class="entry-chip" title="${esc(er)}">${esc(short)}${votes}</span>`;
+      }
+    } catch { /* noop */ }
+    // R-множитель = net_pnl / риск (|entry−SL|×qty).
+    let rVal = "—"; let rCls = "";
+    if (!isOpen && t.stop_loss != null && t.entry_price != null && t.stop_loss !== t.entry_price) {
+      const risk = Math.abs(t.entry_price - t.stop_loss) * (t.qty ?? 0);
+      if (risk > 0) {
+        const r = netPnl / risk;
+        rVal = `${r >= 0 ? "+" : ""}${r.toFixed(2)}`;
+        rCls = `class="num ${r >= 0 ? "pos" : "neg"}"`;
+      }
+    }
+    tr.innerHTML = `
+      <td>${entry} → ${exit}</td>
+      <td>${t.ticker}</td>
+      <td><span class="${isLong ? "pos" : "neg"}">${isLong ? "LONG" : "SHORT"}</span></td>
+      <td>${t.qty}</td>
+      <td>${money(notional)}₽ <span class="dim">(${money(own)}₽)</span></td>
+      <td>${lev.toFixed(1)}x</td>
+      <td>${money(t.entry_price)}${t.exit_price != null ? " → " + money(t.exit_price) : ""}</td>
+      <td class="${pnlCls}">${isOpen ? "на торгах" : (netPnl >= 0 ? "+" : "") + money(netPnl)}</td>
+      <td>${isOpen ? "—" : money(comm)}</td>
+      <td>${exitChip}</td>
+      <td>${entryCell}</td>
+      <td ${rCls}>${rVal}</td>
+      <td class="td-arrow" title="раскрыть детали">${selected ? "▲" : "▼"}</td>
+    `;
+    tbody.appendChild(tr);
+    if (selected) {
+      const details = document.createElement("tr");
+      details.className = "trade-details-row";
+      details.innerHTML = tradeDetailsHtml(t);
+      tbody.appendChild(details);
+    }
+  }
+  if (!trades.length) {
+    tbody.innerHTML = `<tr><td colspan="13" style="color:var(--text-dim)">пока нет сделок</td></tr>`;
+  }
+}
+
+// Детали сделки: состав ансамбля, голоса кворума, bias и entry при входе.
+function tradeDetailsHtml(t: SandboxTrade): string {
+  let m: Record<string, unknown> | null = null;
+  try { m = t.meta ? JSON.parse(t.meta) : null; } catch { m = null; }
+  const entry = (m?.entry as Record<string, unknown>) || {};
+  const qe = (m?.quorum_event as Record<string, unknown>) || {};
+  const setups = (m?.setups as Record<string, Record<string, unknown>>) || {};
+  const vol = (m?.volume as Record<string, number>) || {};
+  const regNow = m?.regime as string | undefined;
+  const ab = entry.against_bias;
+  const chip = (txt: string, col: string) =>
+    `<span style="display:inline-block;padding:1px 7px;margin:2px;border-radius:6px;border:1px solid ${col};color:${col};font-size:10px;font-weight:700">${txt}</span>`;
+  const fnum = (x: number | undefined) => (x == null ? "—" : new Intl.NumberFormat("ru-RU").format(Math.round(x)));
+  const rows: string[] = [];
+  rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Вход:</b> ${String(t.side)} · ${String(entry.reason ?? "—")}` +
+    (ab === true ? ` ${chip("ПРОТИВ bias", "#e74c3c")}` : ab === false ? ` ${chip("по bias", "#2ecc71")}` : "") +
+    (entry.features ? ` · level ${(entry.features as Record<string, unknown>).breakout_level ?? "—"}` : "") + `</div>`);
+  try {
+    const f = (entry.features as Record<string, unknown>) || {};
+    const up: string[] = [];
+    const dn: string[] = [];
+    for (const [k, v] of Object.entries(f)) {
+      if (k.startsWith("m1_") || k.startsWith("m5_")) {
+        const nm = k.replace(/^m[15]_/, "");
+        if (v === "BUY") up.push(nm);
+        else if (v === "SELL") dn.push(nm);
+      }
+    }
+    if (up.length || dn.length) {
+      rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Голоса:</b> ` +
+        `<span style="color:var(--up)">↑ ${up.join(", ") || "—"}</span> &nbsp;` +
+        `<span style="color:var(--down)">↓ ${dn.join(", ") || "—"}</span></div>`);
+    }
   } catch { /* noop */ }
-}
-(window as any).__CDBG = __CDBG;
-(window as any).cdbg = cdbg;
-function cdbgView(tag: string) {
-  if (!refs) { cdbg(tag, "no-refs"); return; }
-  try {
-    const lg = refs.chart.timeScale().getVisibleLogicalRange();
-    const vr = refs.chart.timeScale().getVisibleRange();
-    cdbg(tag, "lg=" + (lg ? `${lg.from.toFixed(1)}..${lg.to.toFixed(1)}` : "null"), "vr=" + (vr ? `${Math.floor(Number(vr.from))}..${Math.floor(Number(vr.to))}` : "null"));
-  } catch (e) { cdbg(tag, "view-err", String(e)); }
-}
-// ---------------------------------------------
-const savedTf = localStorage.getItem(lk("sklad_tf"));
-const defTf = IS_EMBEDDED ? "1min" : "day";
-let currentTf = TIMEFRAMES.find((t) => t.interval === savedTf) ?? TIMEFRAMES.find((t) => t.interval === defTf)!;
-window.LAB_INTERVAL = currentTf.interval;
-let ensuredFrom: UTCTimestamp | null = null;
-let ensuredTo: UTCTimestamp | null = null;
-let panTimer: ReturnType<typeof setTimeout> | null = null;
-let panBusy = false;
-let catalogCards: StrategyCardDto[] = [];
-const activeRuns = new Map<string, { runId: string; signals: { ts: string; side: string }[]; params: Record<string, number> }>();
-let quorumState: { runId: string; k: number; m: number; signals: { ts: string; side: string; features: Record<string, unknown> }[] } | null = null;
-
-const TAG_BY_STRATEGY: Record<string, string> = {
-  rsi_reversal: "RSI",
-  bollinger_reclaim: "BB",
-  pullback_ema: "PB",
-  vwap_reclaim: "VWAP",
-  range_compression_breakout: "SQZ",
-  macd_cross: "MACD",
-  donchian_breakout: "DON",
-};
-
-const STEP_SEC: Record<string, number> = {
-  "1min": 60,
-  "5min": 300,
-  "10min": 600,
-  "15min": 900,
-  hour: 3600,
-  "2h": 7200,
-  "4h": 14400,
-  day: 86400,
-  week: 604800,
-  month: 2592000,
-};
-
-interface IndicatorState {
-  sma: boolean;
-  ema: boolean;
-  bb: boolean;
-  rsi: boolean;
-  macd: boolean;
-}
-
-function loadIndicatorState(): IndicatorState {
-  const fallback: IndicatorState = { sma: true, ema: false, bb: false, rsi: false, macd: true };
-  try {
-    const raw = localStorage.getItem(lk("indicators"));
-    return raw ? { ...fallback, ...JSON.parse(raw) } : fallback;
-  } catch {
-    return fallback;
+  if (vol.v != null) {
+    rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Объём (вход):</b> ` +
+      `${fnum(vol.v)} <span style="color:var(--text-dim)">(max ${fnum(vol.max)}, min ${fnum(vol.min)})</span>` +
+      ` · <b style="color:var(--text-dim)">Режим:</b> ${regNow || "—"}</div>`);
   }
+  if (Object.keys(qe).length) {
+    rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Кворум:</b> ${String(qe.side ?? "")} · голосов ${String(qe.votes ?? "?")}/${String(qe.total_members ?? "?")} (k=${String(qe.quorum_k ?? "?")}) · BUY ${String(qe.buy_votes ?? 0)} / SELL ${String(qe.sell_votes ?? 0)}</div>`);
+    const mf = (qe.members_for as string[]) || [];
+    const op = (qe.opposition as string[]) || [];
+    if (mf.length) rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">За:</b> ${mf.map((x) => chip(x, "#2ecc71")).join("")}</div>`);
+    if (op.length) rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Против:</b> ${op.map((x) => chip(x, "#e74c3c")).join("")}</div>`);
+  }
+  const sk = Object.keys(setups);
+  if (sk.length) {
+    rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Стратегии (5m):</b> ${sk.map((k) => {
+      const s = setups[k];
+      const b = Number(s.BUY ?? 0), sl = Number(s.SELL ?? 0);
+      const col = b > sl ? "#2ecc71" : sl > b ? "#e74c3c" : "var(--text-dim)";
+      return chip(`${k}: ↑${b}/↓${sl}`, col);
+    }).join("")}</div>`);
+  }
+  if (!rows.length) rows.push(`<div style="color:var(--text-dim)">нет данных meta</div>`);
+  return `<td colspan="11" style="background:var(--bg-soft);padding:8px 12px;font-size:11px;line-height:1.6">${rows.join("")}</td>`;
 }
 
-let indicators = loadIndicatorState();
-let chartFlags = { oscPane: indicators.macd || indicators.rsi };
-
-function buildChart(): ChartRefs {
-  const container = document.getElementById("chart")!;
-  const chart = createChart(container, {
-    autoSize: true,
-    layout: {
-      background: { type: ColorType.Solid, color: COLORS.bg },
-      textColor: COLORS.text,
-      panes: { separatorColor: COLORS.grid, separatorHoverColor: "rgba(41,98,255,0.2)" },
-    },
-    grid: {
-      vertLines: { color: COLORS.grid },
-      horzLines: { color: COLORS.grid },
-    },
-    crosshair: {
-      mode: CrosshairMode.Normal,
-      vertLine: { labelBackgroundColor: "#363a45" },
-      horzLine: { labelBackgroundColor: "#363a45" },
-    },
-    rightPriceScale: { borderColor: COLORS.grid },
-    timeScale: {
-      borderColor: COLORS.grid,
-      timeVisible: true,
-      secondsVisible: false,
-      tickMarkFormatter: (t: Time, type: TickMarkType) => axisTickLabel(t, type),
-    },
-    localization: {
-      locale: "ru-RU",
-      priceFormatter: (p: number) => priceFmt.format(p),
-      timeFormatter: (t: Time) => axisTimeLabel(t as never),
-    },
-  });
-
-  const candleSeries = chart.addSeries(CandlestickSeries, {
-    upColor: COLORS.up,
-    downColor: COLORS.down,
-    wickUpColor: COLORS.up,
-    wickDownColor: COLORS.down,
-    borderVisible: false,
-  });
-
-  const volumeSeries = chart.addSeries(
-    HistogramSeries,
-    {
-      priceScaleId: "",
-      priceLineVisible: false,
-      lastValueVisible: false,
-      priceFormat: { type: "volume" },
-    },
-    0,
-  );
-  volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
-
-  const smaSeries = chart.addSeries(
-    LineSeries,
-    {
-      color: COLORS.sma,
-      lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
-    },
-    0,
-  );
-
-  const emaLine = chart.addSeries(
-    LineSeries,
-    {
-      color: "#e6a23c",
-      lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
-      visible: indicators.ema,
-    },
-    0,
-  );
-  const bbUpper = chart.addSeries(
-    LineSeries,
-    {
-      color: "rgba(155,89,182,0.8)",
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
-      visible: indicators.bb,
-    },
-    0,
-  );
-  const bbLower = chart.addSeries(
-    LineSeries,
-    {
-      color: "rgba(155,89,182,0.8)",
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      crosshairMarkerVisible: false,
-      visible: indicators.bb,
-    },
-    0,
-  );
-
-  const oscPane = indicators.macd || indicators.rsi;
-  let macdHist: ISeriesApi<"Histogram"> | null = null;
-  let macdLine: ISeriesApi<"Line"> | null = null;
-  let signalLine: ISeriesApi<"Line"> | null = null;
-  let rsiLine: ISeriesApi<"Line"> | null = null;
-
-  if (indicators.macd) {
-    macdHist = chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, 1);
-    macdLine = chart.addSeries(
-      LineSeries,
-      { color: COLORS.macdLine, lineWidth: 2, priceLineVisible: false, lastValueVisible: false },
-      1,
-    );
-    signalLine = chart.addSeries(
-      LineSeries,
-      { color: COLORS.signalLine, lineWidth: 2, priceLineVisible: false, lastValueVisible: false },
-      1,
-    );
-  }
-  if (indicators.rsi) {
-    rsiLine = chart.addSeries(
-      LineSeries,
-      { color: "#c39bd3", lineWidth: 2, priceLineVisible: false, lastValueVisible: false },
-      1,
-    );
-  }
-
+async function pollTests(): Promise<void> {
   try {
-    const panes = chart.panes();
-    if (panes[1] && oscPane) {
-      panes[0].setStretchFactor(3);
-      panes[1].setStretchFactor(2);
+    const data = await fetchJSON<{ tests: Array<{
+      id: string; name: string; period: string; trades: number; wins: number; losses: number;
+      gross_win: number; gross_loss: number; net: number; pf: number; wr: number;
+    }> }>("/api/v1/bot/tests");
+    const tbody = document.querySelector("#bot-tests-table tbody");
+    if (!tbody) return;
+    tbody.innerHTML = "";
+    for (const t of data.tests) {
+      const tr = document.createElement("tr");
+      tr.dataset.testId = t.id;
+      const netCls = t.net >= 0 ? "pos" : "neg";
+      tr.innerHTML = `
+        <td>${t.name}</td>
+        <td>${t.period}</td>
+        <td>${t.trades}</td>
+        <td>${t.wins}</td>
+        <td>${t.losses}</td>
+        <td class="pos">+${money(t.gross_win)}</td>
+        <td class="neg">-${money(t.gross_loss)}</td>
+        <td class="${netCls}">${t.net >= 0 ? "+" : ""}${money(t.net)}</td>
+        <td>${t.pf.toFixed(2)}</td>
+        <td>${t.wr.toFixed(1)}%</td>
+        <td><button class="btn-sm" data-action="replay" data-test-id="${t.id}">▶ Реплей</button></td>
+      `;
+      tbody.appendChild(tr);
     }
-  } catch {
-    // panes API может отсутствовать в старых версиях
+    tbody.querySelectorAll<HTMLButtonElement>("button[data-action=replay]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const testId = btn.dataset.testId;
+        if (!testId) return;
+        btn.disabled = true; btn.textContent = "...";
+        try { await fetchJSON(`/api/v1/bot/tests/${testId}/replay`, { method: "POST" }); }
+        catch (err) { alert("Ошибка реплея: " + err); }
+        finally { btn.disabled = false; btn.textContent = "▶ Реплей"; }
+      });
+    });
+  } catch (e) {
+    console.warn("pollTests error", e);
   }
-
-  return {
-    chart,
-    candles: candleSeries,
-    volume: volumeSeries,
-    sma: smaSeries,
-    emaLine,
-    bbUpper,
-    bbLower,
-    macdHist,
-    macdLine,
-    signalLine,
-    rsiLine,
-    markers: createSeriesMarkers(candleSeries, []),
-  };
 }
 
-function renderData(data: AnalysisDto, keepView = false) {
-  cdbg("renderData", "keepView=" + keepView, "n=" + data.candles.length, "first=" + (data.candles[0]?.ts ?? "-"), "last=" + (data.candles[data.candles.length - 1]?.ts ?? "-"));
-  if (!refs) refs = buildChart();
-  const r = refs;
-  const n = data.candles.length;
-  const dataFigi = data.figi ?? FIGI;
-  const figiChanged = dataFigi !== _renderedFigi && _renderedFigi !== "";
-  if (figiChanged && keepView) {
-    cdbg("renderData", "figi сменился (" + _renderedFigi + "→" + dataFigi + ") — принудительный reset вместо keepView");
-    keepView = false;
-  }
-  if (!keepView && refs) { try { refs.markers.setMarkers([]); } catch { /* noop */ } }
+let sidebarRendered = false;
+function renderSidebar(): void {
+  const body = document.getElementById("sidebar-body");
+  if (!body || sidebarRendered) return;
+  sidebarRendered = true;
+  body.innerHTML = `
+    <div class="sidebar-logs">
+      <div class="logs-heading">
+        <div class="sl-title">📜 ЛОГИ <span>(МСК)</span></div>
+        <div class="lg-head-btns">
+          <button class="lg-btn" id="lg-copy" title="Скопировать видимые логи как текст">⧉</button>
+          <button class="lg-btn lg-clear-btn" id="lg-clear" title="Очистить экран логов">🗑</button>
+        </div>
+      </div>
+      <div class="log-toolbar">
+        <label class="lg-chip on"><input type="checkbox" id="lg-candles"><span>Свечи</span></label>
+        <label class="lg-chip on"><input type="checkbox" id="lg-signals"><span>Сигналы</span></label>
+        <label class="lg-chip on"><input type="checkbox" id="lg-trades"><span>Сделки</span></label>
+        <label class="lg-chip on"><input type="checkbox" id="lg-events"><span>События</span></label>
+        <label class="lg-chip on"><input type="checkbox" id="lg-tech"><span>Тех</span></label>
+      </div>
+      <div class="log-toolbar log-toolbar-r2">
+        <select id="lg-level" class="log-select" title="Фильтр по уровню">
+          <option value="">уровень: любой</option>
+          <option value="debug">debug</option>
+          <option value="info">info</option>
+          <option value="warn">warn ⚠</option>
+          <option value="error">error ✕</option>
+        </select>
+        <input type="text" id="lg-q" class="log-q" placeholder="🔍 поиск…" />
+        <input type="text" id="lg-ticker" class="log-q log-q-t" placeholder="тикер…" />
+      </div>
+      <div class="log-toolbar log-toolbar-r3">
+        <input type="date" id="log-filter-date" class="log-date-input" title="Фильтр по дате (МСК). Очисти, чтобы видеть все дни" />
+        <span class="lg-err-pill" id="lg-err-pill" title="Ошибок и предупреждений среди видимых логов"></span>
+      </div>
+      <div class="bot-live-logs" id="bot-live-logs"><span class="lg-empty">Бот не запущен — логов нет</span></div>
+      <div class="log-footer"><span class="lf-count">Логи <b id="log-count">0</b></span></div>
+    </div>`;
+  setupLogFilters();
+}
 
-  const candlePoints: CandlestickData[] = [];
-  const volumePoints: HistogramData[] = [];
-  for (let i = 0; i < n; i++) {
-    const c = data.candles[i];
-    const t = toUnix(c.ts);
-    candlePoints.push({ time: t, open: c.open, high: c.high, low: c.low, close: c.close });
-    volumePoints.push({
-      time: t,
-      value: c.volume,
-      color: c.close >= c.open ? "rgba(38,166,154,0.45)" : "rgba(239,83,80,0.45)",
+// ─── Логи: единый контур, структурированные плашки (порт из оригинала) ───
+interface LogItem { id: number; ts: string; level: string; source: string; msg: string; rep?: number }
+
+function _loadLGF(): Record<string, boolean> {
+  const saved = localStorage.getItem("log_lgf");
+  if (saved) { try { const p = JSON.parse(saved); if (p && typeof p === "object") return p; } catch { /* ignore */ } }
+  return { candles: true, signals: true, trades: true, events: true, tech: true };
+}
+const LGF: Record<string, boolean> = _loadLGF();
+let _logDateFilter = localStorage.getItem("log_date_filter") ?? new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10);
+let _logLevelSel = localStorage.getItem("log_level") || "";
+let _logQ = localStorage.getItem("log_q") || "";
+let _logTicker = localStorage.getItem("log_ticker") || "";
+
+let _logs: LogItem[] = [];
+const _seenIds = new Set<number>();
+let _logSeq = 0;
+let _logHasMore = true;
+let _logLoading = false;
+let _stickBottom = true;
+const LOG_CAP_DOM = 1500;
+
+const LG_SRC_LABEL: Record<string, string> = {
+  "t_tech.invest.lo": "tinkoff",
+  "app.bot.stream_m": "streams",
+  "portfolio_reconcile": "reconcile",
+  "portfolio_reconc": "reconcile",
+  "candle_feed": "candles",
+  "lab.queue": "queue",
+  "bot": "bot",
+};
+const LG_SRC_KEYS = Object.keys(LG_SRC_LABEL).sort((a, b) => b.length - a.length);
+function lgSrcLabel(src: string): string {
+  const k = LG_SRC_KEYS.find((p) => src.startsWith(p));
+  if (k) return LG_SRC_LABEL[k];
+  const s = src.replace(/_/g, " ");
+  return s.length > 12 ? s.slice(0, 12) + "…" : s;
+}
+
+const _LOG_KW: Record<string, RegExp> = {
+  candles: /новые свеч|свеч|candle/i,
+  signals: /сигнал|свитч|флип/i,
+  trades: /сделк|вход|выход|закрыт|открыт|игнор выхода|трейлинг/i,
+};
+function logCategory(it: LogItem): string {
+  const src = it.source || "";
+  const msg = it.msg;
+  if (src.startsWith("candle_feed")) return "candles";
+  if (src.startsWith("portfolio_reconc")) return "trades";
+  const m = msg.toLocaleLowerCase();
+  if (m.includes("techinfo") || m.includes("flush")) return "tech";
+  if (_LOG_KW.candles.test(msg)) return "candles";
+  if (_LOG_KW.signals.test(msg)) return "signals";
+  if (_LOG_KW.trades.test(msg)) return "trades";
+  return "events";
+}
+
+function _itemVisible(it: LogItem): boolean {
+  if (!LGF[logCategory(it)]) return false;
+  const lv = (it.level || "info").toLowerCase();
+  if (_logLevelSel && lv !== _logLevelSel) return false;
+  if (_logQ && !it.msg.toLowerCase().includes(_logQ.toLowerCase())) return false;
+  if (_logDateFilter && !it.ts.startsWith(_logDateFilter)) return false;
+  if (_logTicker) {
+    const re = new RegExp("\\b" + _logTicker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "i");
+    if (!re.test(it.msg)) return false;
+  }
+  return true;
+}
+
+function lgRowEl(it: LogItem): HTMLElement {
+  const lv = (it.level || "info").toLowerCase();
+  const row = document.createElement("div");
+  row.className = `lg-row lg-k-${logCategory(it)} lg-lv-${lv}`;
+  row.dataset.id = String(it.id);
+  const hd = document.createElement("div"); hd.className = "lg-hd";
+  const t = document.createElement("span"); t.className = "lg-t";
+  let _todayMsk = "";
+  try { _todayMsk = new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10); } catch { /* noop */ }
+  const _d = it.ts.slice(0, 10), _tm = it.ts.slice(11, 19);
+  t.textContent = (_d && _d !== _todayMsk ? `${it.ts.slice(5, 10)} ${_tm}` : _tm) + "  ";
+  t.title = it.ts;
+  const badge = document.createElement("span"); badge.className = "lg-lv"; badge.textContent = lv.toUpperCase().slice(0, 5) + " ";
+  badge.title = `уровень: ${lv}`;
+  const src = document.createElement("span"); src.className = "lg-src"; src.textContent = lgSrcLabel(it.source) + " ";
+  src.title = it.source;
+  const rep = document.createElement("span"); rep.className = "lg-rep"; rep.textContent = it.rep && it.rep > 1 ? "×" + it.rep : "";
+  rep.title = "одинаковых записей подряд";
+  const copy = document.createElement("button"); copy.className = "lg-copy-row"; copy.textContent = "⧉";
+  copy.title = "Скопировать строку";
+  copy.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const txt = `[${it.ts}] ${it.msg}`;
+    (navigator.clipboard?.writeText(txt) ?? Promise.reject("no clipboard")).then(() => {
+      copy.textContent = "✓";
+      setTimeout(() => { copy.textContent = "⧉"; }, 900);
+    }).catch(() => { });
+  });
+  hd.append(t, badge, src, rep, copy);
+  const msg = document.createElement("div"); msg.className = "lg-txt"; msg.textContent = it.msg;
+  row.append(hd, msg);
+  return row;
+}
+
+function _insertLogs(items: LogItem[], prepend: boolean): void {
+  const el = $("bot-live-logs");
+  if (!el) return;
+  const fresh: LogItem[] = [];
+  for (const it of items) {
+    if (_seenIds.has(it.id)) {
+      if (!prepend && it.rep && it.rep > 1) {
+        const row = el.querySelector(`[data-id="${it.id}"]`) as HTMLElement | null;
+        const repEl = row?.querySelector(".lg-rep");
+        if (repEl && repEl.textContent !== "×" + it.rep) repEl.textContent = "×" + it.rep;
+        const sameId = _logs.find((x) => x.id === it.id);
+        if (sameId) sameId.rep = it.rep;
+      }
+      continue;
+    }
+    _seenIds.add(it.id);
+    fresh.push(it);
+  }
+  if (!fresh.length) return;
+  if (prepend) {
+    _logs = fresh.concat(_logs);
+    const rows = fresh.map(lgRowEl);
+    for (const row of rows.reverse()) el.insertBefore(row, el.firstChild);
+  } else {
+    _logs = _logs.concat(fresh);
+    const frag = document.createDocumentFragment();
+    for (const it of fresh) if (_itemVisible(it)) frag.appendChild(lgRowEl(it));
+    if (frag.childElementCount) el.appendChild(frag);
+  }
+  while (el.children.length > LOG_CAP_DOM) {
+    const first = el.firstElementChild as HTMLElement | null;
+    const h = first ? first.getBoundingClientRect().height : 0;
+    if (first) first.remove();
+    if (el.scrollTop > 0) el.scrollTop -= h;
+  }
+}
+
+function reRenderLogs(): void {
+  const el = $("bot-live-logs");
+  if (!el) return;
+  const frag = document.createDocumentFragment();
+  for (const it of _logs) if (_itemVisible(it)) frag.appendChild(lgRowEl(it));
+  el.innerHTML = "";
+  el.appendChild(frag);
+  updateLogMeta(el);
+}
+
+function updateLogMeta(el: HTMLElement): void {
+  const cnt = $("log-count");
+  if (cnt) cnt.textContent = String(_logs.length);
+  if (_stickBottom) el.scrollTop = el.scrollHeight;
+  let errs = 0, warns = 0;
+  for (let i = 0; i < el.children.length; i++) {
+    const c = el.children[i].classList;
+    if (c.contains("lg-lv-error")) errs++;
+    else if (c.contains("lg-lv-warn")) warns++;
+  }
+  const pill = $("lg-err-pill");
+  if (pill) {
+    const total = errs + warns;
+    if (total) {
+      pill.classList.add("on");
+      pill.textContent = errs ? `✕ ${errs} ошибок · ⚠ ${warns}` : `⚠ ${warns} warn`;
+    } else {
+      pill.classList.remove("on");
+    }
+  }
+}
+
+function _applyLogParams(p: URLSearchParams): void {
+  if (_logLevelSel) p.set("level", _logLevelSel);
+  if (_logQ) p.set("q", _logQ);
+  if (_logTicker) p.set("ticker", _logTicker);
+  if (_logDateFilter) p.set("date", _logDateFilter);
+}
+
+async function pollLogs(): Promise<void> {
+  const el = $("bot-live-logs");
+  if (!el) return;
+  try {
+    const p = new URLSearchParams({ limit: "300", after_id: String(_logSeq) });
+    _applyLogParams(p);
+    const data = await fetchJSON<{ items?: LogItem[] }>(`/api/v1/bot/logs?${p.toString()}`);
+    const items: LogItem[] = data.items || [];
+    if (_logSeq === 0 && !items.length && el.children.length === 0) {
+      el.innerHTML = '<span class="lg-empty">нет записей под фильтр</span>';
+    }
+    if (_logSeq === 0 && items.length) {
+      _logs = [];
+      _seenIds.clear();
+      _logHasMore = true;
+      el.innerHTML = "";
+      _insertLogs(items, false);
+    } else {
+      _insertLogs(items, false);
+    }
+    if (items.length) _logSeq = Math.max(_logSeq, items[items.length - 1].id);
+    updateLogMeta(el);
+  } catch { /* ignore */ }
+}
+
+async function loadLogOlder(): Promise<void> {
+  if (_logLoading || !_logHasMore) return;
+  const el = $("bot-live-logs");
+  const first = _logs[0];
+  if (!el || !first) return;
+  _logLoading = true;
+  try {
+    const p = new URLSearchParams({ limit: "300", before: first.ts });
+    _applyLogParams(p);
+    const data = await fetchJSON<{ items?: LogItem[]; has_more?: boolean }>(`/api/v1/bot/logs/history?${p.toString()}`);
+    const items: LogItem[] = data.items || [];
+    _logHasMore = data.has_more !== false;
+    if (items.length) {
+      const prevH = el.scrollHeight;
+      _insertLogs(items, true);
+      el.scrollTop = el.scrollTop + (el.scrollHeight - prevH);
+    }
+  } catch { /* ignore */ } finally {
+    _logLoading = false;
+  }
+}
+
+async function copyVisibleLogs(): Promise<void> {
+  const lines = _logs.filter(_itemVisible).map((i) => `[${i.ts}] ${(i.level || "info").toUpperCase()} ${i.source}: ${i.msg}`);
+  const text = lines.join("\n");
+  const done = () => {
+    const btn = $("lg-copy");
+    if (btn) { btn.textContent = "✓"; setTimeout(() => { if (btn) btn.textContent = "⧉"; }, 1200); }
+  };
+  try { await navigator.clipboard.writeText(text); done(); }
+  catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch { /* ignore */ }
+    ta.remove();
+    done();
+  }
+}
+
+function setupLogFilters(): void {
+  const resetLogs = () => { _logSeq = 0; _logHasMore = true; void pollLogs(); };
+  const chipDefs: Array<[string, string]> = [["lg-candles", "candles"], ["lg-signals", "signals"], ["lg-trades", "trades"], ["lg-events", "events"], ["lg-tech", "tech"]];
+  for (const [id, key] of chipDefs) {
+    const cb = $(id) as HTMLInputElement | null;
+    if (!cb) continue;
+    cb.checked = !!LGF[key];
+    cb.closest("label")?.classList.toggle("on", !!LGF[key]);
+    cb.addEventListener("change", () => {
+      LGF[key] = cb.checked;
+      cb.closest("label")?.classList.toggle("on", cb.checked);
+      localStorage.setItem("log_lgf", JSON.stringify(LGF));
+      if (key === "candles") {
+        void fetch(`${API}/api/v1/bot/logconfig`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ log_candles: cb.checked }) });
+      }
+      reRenderLogs();
     });
   }
-  r.candles.setData(candlePoints);
-  r.volume.setData(volumePoints);
+  const level = $("lg-level") as HTMLSelectElement | null;
+  if (level) {
+    level.value = _logLevelSel;
+    level.addEventListener("change", () => { _logLevelSel = level.value; localStorage.setItem("log_level", _logLevelSel); resetLogs(); });
+  }
+  const q = $("lg-q") as HTMLInputElement | null;
+  if (q) {
+    q.value = _logQ;
+    let tId: ReturnType<typeof setTimeout> | undefined;
+    q.addEventListener("input", () => { clearTimeout(tId); tId = setTimeout(() => { _logQ = q.value.trim().toLowerCase(); localStorage.setItem("log_q", _logQ); resetLogs(); }, 300); });
+  }
+  const tick = $("lg-ticker") as HTMLInputElement | null;
+  if (tick) {
+    tick.value = _logTicker;
+    let tId2: ReturnType<typeof setTimeout> | undefined;
+    tick.addEventListener("input", () => { clearTimeout(tId2); tId2 = setTimeout(() => { _logTicker = tick.value.trim().toUpperCase(); localStorage.setItem("log_ticker", _logTicker); resetLogs(); }, 300); });
+  }
+  const dateInput = $("log-filter-date") as HTMLInputElement | null;
+  if (dateInput) {
+    dateInput.value = _logDateFilter;
+    dateInput.addEventListener("change", () => { _logDateFilter = dateInput.value; localStorage.setItem("log_date_filter", _logDateFilter); resetLogs(); });
+  }
+  const copy = $("lg-copy");
+  if (copy) copy.addEventListener("click", () => { void copyVisibleLogs(); });
+  const clear = $("lg-clear");
+  if (clear) clear.addEventListener("click", () => {
+    _logs = [];
+    _seenIds.clear();
+    _logSeq = 0;
+    _logHasMore = true;
+    const el = $("bot-live-logs");
+    if (el) el.innerHTML = "";
+    if (dateInput) { dateInput.value = ""; _logDateFilter = ""; localStorage.removeItem("log_date_filter"); }
+    updateLogMeta($("bot-live-logs") || document.body);
+    void fetch(`${API}/api/v1/bot/logs/clear`, { method: "POST" });
+  });
+  const el = $("bot-live-logs");
+  if (el) {
+    el.addEventListener("scroll", () => {
+      _stickBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 60;
+      if (el.scrollTop <= 30) void loadLogOlder();
+    });
+  }
+}
 
-  const smaPoints: LineData[] = [];
-  const emaPoints: LineData[] = [];
-  const bbUpperPoints: LineData[] = [];
-  const bbLowerPoints: LineData[] = [];
-  const rsiPoints: LineData[] = [];
-  const macdPoints: LineData[] = [];
-  const signalPoints: LineData[] = [];
-  const histPoints: HistogramData[] = [];
-  for (let i = 0; i < n; i++) {
-    const t = toUnix(data.candles[i].ts);
-    const s = data.sma20[i];
-    if (s != null) smaPoints.push({ time: t, value: s });
-    const e = data.ema50?.[i];
-    if (e != null) emaPoints.push({ time: t, value: e });
-    const bu = data.bb_upper?.[i];
-    if (bu != null) bbUpperPoints.push({ time: t, value: bu });
-    const bl = data.bb_lower?.[i];
-    if (bl != null) bbLowerPoints.push({ time: t, value: bl });
-    const rv = data.rsi?.[i];
-    if (rv != null) rsiPoints.push({ time: t, value: rv });
-    const m = data.macd.macd[i];
-    if (m != null) macdPoints.push({ time: t, value: m });
-    const sg = data.macd.signal[i];
-    if (sg != null) signalPoints.push({ time: t, value: sg });
-    const h = data.macd.hist[i];
-    if (h != null) {
-      histPoints.push({
-        time: t,
-        value: h,
-        color: h >= 0 ? "rgba(38,166,154,0.55)" : "rgba(239,83,80,0.55)",
+function startBotPolling(): void {
+  if (botPollTimer) return;
+  pollBotStatus(); pollPositions(); pollTrades(); pollTests();
+  void loadScreener();
+  botPollTimer = window.setInterval(() => {
+    pollBotStatus(); pollPositions(); pollTrades(); pollTests();
+    if ((pollTick++ % 3) === 0) void loadScreener();
+  }, 5000);
+}
+
+let pollTick = 0;
+
+function startPolling(): void {
+  startBotPolling();
+  renderSidebar();
+  pollLogs();
+  window.setInterval(() => void pollLogs(), 1000);
+}
+
+async function toggleBot(): Promise<void> {
+  const btn = $("btn-bot-toggle") as HTMLButtonElement;
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    if (botRunning) {
+      await fetchJSON("/api/v1/bot/stop", { method: "POST" });
+    } else {
+      await fetchJSON("/api/v1/bot/start", { method: "POST" });
+    }
+    await pollBotStatus();
+  } catch (e) { alert("Ошибка: " + e); }
+  finally { btn.disabled = false; }
+}
+
+let botTabInit = false;
+
+function toUTCISO(v: string): string {
+  if (!v) return "";
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? v : d.toISOString();
+}
+
+function _setActiveModeBtn(mode: string | null): void {
+  document.querySelectorAll<HTMLButtonElement>("#mode-switch .mode-btn").forEach((b) => {
+    b.classList.toggle("active", mode != null && b.dataset.mode === mode);
+  });
+}
+
+async function doToggleMode(mode: "live" | "sandbox" | "test"): Promise<void> {
+  if (mode === "test") { showModal("test-modal-overlay"); return; }
+  const warn = mode === "live"
+    ? "Переключить на LIVE (реальные деньги)?\nБот будет ОСТАНОВЛЕН и перезапущен на боевом счёте."
+    : "Переключить на SANDBOX (тестовый счёт)?\nБот будет остановлен и перезапущен.";
+  if (!confirm(warn)) return;
+  const mb = document.querySelector(`#mode-switch .mode-btn[data-mode="${mode}"]`) as HTMLButtonElement | null;
+  if (mb) mb.classList.add("busy");
+  try {
+    await fetchJSON("/api/v1/bot/mode", { method: "POST", body: JSON.stringify({ mode }) });
+    _setActiveModeBtn(mode);
+    await pollBotStatus();
+  } catch (e) { alert("Ошибка переключения: " + e); }
+  finally { if (mb) mb.classList.remove("busy"); }
+}
+
+function updatePauseButton(): void {
+  const b = $("btn-bot-pause");
+  if (!b) return;
+  b.textContent = botPaused ? "▶ Снять паузу" : "⏸ Пауза входов";
+  b.classList.toggle("paused", botPaused);
+}
+
+async function doPause(): Promise<void> {
+  try {
+    const r = await fetchJSON<{ entries_paused: boolean }>("/api/v1/bot/pause", { method: "POST", body: JSON.stringify({ paused: !botPaused }) });
+    botPaused = r.entries_paused;
+    updatePauseButton();
+    void pollBotStatus();
+  } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+}
+
+function initBotTab(): void {
+  if (botTabInit) { startBotPolling(); return; }
+  botTabInit = true;
+  initSessChips();
+  const btn = $("btn-bot-toggle");
+  $("btn-bot-settings")?.addEventListener("click", () => { void fillBotSettings(); showModal("bot-modal-overlay"); });
+  $("btn-bot-pause")?.addEventListener("click", () => void doPause());
+  $("stats-refresh")?.addEventListener("click", () => { void renderStats(); });
+  $("stats-apply")?.addEventListener("click", () => { void renderStats(); });
+  ($("stats-mode") as HTMLSelectElement | null)?.addEventListener("change", () => { void renderStats(); });
+  $("stats-cmp-toggle")?.addEventListener("click", () => {
+    const p = $("stats-cmp-panel");
+    if (!p) return;
+    p.classList.toggle("hidden");
+    if (!p.classList.contains("hidden")) void loadCompareList();
+  });
+  $("stats-cmp-run")?.addEventListener("click", () => { void runCompare(); });
+  document.querySelectorAll("#mode-switch .mode-btn").forEach((mb) => {
+    mb.addEventListener("click", () => {
+      const m = (mb as HTMLElement).dataset.mode as "live" | "sandbox" | "test" | undefined;
+      if (m) void doToggleMode(m);
+    });
+  });
+  btn?.addEventListener("click", toggleBot);
+  $("bs-close")?.addEventListener("click", () => hideModal("bot-modal-overlay"));
+  $("bot-pill-top")?.addEventListener("click", () => showModal("bot-modal-overlay"));
+  $("btn-test-new")?.addEventListener("click", () => showModal("test-modal-overlay"));
+  $("ts-close")?.addEventListener("click", () => hideModal("test-modal-overlay"));
+  $("ts-run")?.addEventListener("click", async () => {
+    const name = ($("ts-name") as HTMLInputElement)?.value?.trim();
+    const start = ($("ts-start") as HTMLInputElement)?.value;
+    const end = ($("ts-end") as HTMLInputElement)?.value;
+    if (!name || !start) { alert("Укажите название теста и начало периода"); return; }
+    const btn = $("ts-run") as HTMLButtonElement;
+    btn.disabled = true; btn.textContent = "Запускаю…";
+    try {
+      await fetchJSON("/api/v1/bot/mode", { method: "POST", body: JSON.stringify({ mode: "test", test_name: name, replay_start: toUTCISO(start), replay_end: end ? toUTCISO(end) : "" }) });
+      _setActiveModeBtn("test");
+      hideModal("test-modal-overlay");
+      await pollBotStatus();
+    } catch (e) { alert("Ошибка запуска теста: " + e); }
+    finally { btn.disabled = false; btn.textContent = "Запустить"; }
+  });
+
+  document.querySelectorAll("#bot-modal-overlay input[name=sl-mode]").forEach(r => {
+    r.addEventListener("change", () => {
+      const v = (r as HTMLInputElement).value;
+      $("bs-atr-section")?.classList.toggle("bs-hidden", v !== "atr");
+      $("bs-fixed-section")?.classList.toggle("bs-hidden", v !== "fixed");
+    });
+  });
+  document.querySelectorAll("#bot-modal-overlay input[name=sl-source]").forEach(r => {
+    r.addEventListener("change", _applySlSourceUI);
+  });
+  $("bs-save")?.addEventListener("click", async () => {
+    const mode = (document.querySelector("#bot-modal-overlay input[name=sl-mode]:checked") as HTMLInputElement)?.value || "atr";
+    const slSource = (document.querySelector("#bot-modal-overlay input[name=sl-source]:checked") as HTMLInputElement)?.value || "manual";
+    const payload = {
+      sl_mode: mode,
+      sl_source: slSource,
+      atr_period: Number(($("bs-atr-period") as HTMLInputElement)?.value || 14),
+      atr_mult: Number(($("bs-atr-mult") as HTMLInputElement)?.value || 4),
+      atr_rr: Number(($("bs-atr-rr") as HTMLInputElement)?.value || 4),
+      sl_override: Number(($("bs-sl-override") as HTMLInputElement)?.value || 0),
+      rr_override: Number(($("bs-rr-override") as HTMLInputElement)?.value || 0),
+      fixed_sl: Number(($("bs-sl") as HTMLInputElement)?.value || 2.5),
+      fixed_tp: Number(($("bs-tp") as HTMLInputElement)?.value || 2.5),
+      top_n: Number(($("bs-topn") as HTMLInputElement)?.value || 20),
+      commission: Number(($("bs-commission") as HTMLInputElement)?.value || 0.3),
+      reentry_cooldown: Number(($("bs-reentry") as HTMLInputElement)?.value || 15),
+      confirm_flip: Number(($("bs-confirm-flip") as HTMLInputElement)?.value || 2),
+      quorum: Number(($("bs-quorum") as HTMLInputElement)?.value || 2),
+    };
+    const btn = $("bs-save") as HTMLButtonElement;
+    btn.disabled = true; btn.textContent = "Сохранение...";
+    try { await fetchJSON("/api/v1/bot/settings", { method: "POST", body: JSON.stringify(payload) }); hideModal("bot-modal-overlay"); }
+    catch (e) { alert("Ошибка: " + e); }
+    finally { btn.disabled = false; btn.textContent = "Сохранить"; }
+  });
+
+  startPolling();
+}
+
+function _applySlSourceUI(): void {
+  const v = (document.querySelector("#bot-modal-overlay input[name=sl-source]:checked") as HTMLInputElement)?.value || "manual";
+  $("bs-optuna-section")?.classList.toggle("bs-hidden", v !== "optuna");
+  $("bs-atr-section")?.classList.toggle("bs-hidden", v !== "manual");
+  const hint = $("bs-src-hint");
+  if (hint) hint.textContent = v === "optuna"
+    ? "Параметры берутся из optuna по каждому инструменту; override > 0 переопределяет."
+    : "Глобальные множители из конфига (перекрывают per-ticker optuna).";
+}
+
+async function fillBotSettings(): Promise<void> {
+  try {
+    const c = await fetchJSON<Record<string, unknown>>("/api/v1/bot/ensemble");
+    const set = (id: string, v: unknown) => {
+      const el = $(id) as HTMLInputElement | null;
+      if (el && v != null) el.value = String(v);
+    };
+    const src = c.sl_source === "optuna" ? "optuna" : "manual";
+    const radio = document.querySelector(`#bot-modal-overlay input[name=sl-source][value="${src}"]`) as HTMLInputElement | null;
+    if (radio) radio.checked = true;
+    set("bs-sl-override", c.sl_override);
+    set("bs-rr-override", c.rr_override);
+    set("bs-atr-mult", c.sl_mult);
+    set("bs-atr-rr", c.rr);
+    set("bs-quorum", c.quorum);
+    _applySlSourceUI();
+  } catch { /* бот/конфиг недоступен — значения по умолчанию из разметки */ }
+}
+
+// ============ Пилы-фильтры бота → PATCH /api/v1/bot/config + слайдеры плеча/слота ============
+
+const MARGIN_LEV_STEPS = [2, 3, 4, 5, 0]; // 0 = Max (как одобрит брокер)
+function levSliderToValue(i: number): number { return MARGIN_LEV_STEPS[i] ?? 0; }
+function levValueToSlider(v: number): number {
+  const i = MARGIN_LEV_STEPS.indexOf(v);
+  if (i >= 0) return i;
+  return 4; // не из списка → Max
+}
+function levLabel(v: number): string { return v > 0 ? `×${v}` : "Max"; }
+function levPaint(idx: number | string): void {
+  const el = $("mg-lev") as HTMLInputElement | null;
+  if (!el) return;
+  const i = Math.min(4, Math.max(0, Number(idx) || 0));
+  const pct = (i / 4) * 100;
+  el.style.setProperty("--fill", `${pct}%`);
+}
+function sendBotConfigPatch(extra?: Record<string, unknown>): void {
+  const sessMap: Record<string, string> = {
+    "sg-morning": "morning", "sg-day": "day", "sg-evening": "evening"
+  };
+  const sessKeys = ["sg-morning", "sg-day", "sg-evening"];
+  const sessions = sessKeys.filter((x) => ($(x) as HTMLInputElement | null)?.checked ?? false).map((x) => sessMap[x]);
+  const longOn = ($("dg-long") as HTMLInputElement | null)?.checked ?? true;
+  const shortOn = ($("dg-short") as HTMLInputElement | null)?.checked ?? false;
+  const mgMap: Record<string, string> = {
+    "mg-morning": "morning", "mg-day": "day", "mg-evening": "evening"
+  };
+  const mgKeys = ["mg-morning", "mg-day", "mg-evening"];
+  const margin_sessions = mgKeys
+    .filter((x) => ($(x) as HTMLInputElement | null)?.checked)
+    .map((x) => mgMap[x]);
+  const levEl = $("mg-lev") as HTMLInputElement | null;
+  const margin_leverage = levEl ? levSliderToValue(Number(levEl.value)) : 0;
+  const rgMap: Record<string, string> = {
+    "rg-neutral": "NEUTRAL", "rg-trendup": "TREND_UP", "rg-trenddown": "TREND_DOWN",
+    "rg-highvol": "HIGH_VOLATILITY", "rg-range": "RANGE",
+  };
+  const trade_regimes = Object.keys(rgMap)
+    .filter((x) => ($(x) as HTMLInputElement | null)?.checked)
+    .map((x) => rgMap[x]);
+  const _szPos = $("sz-pos") as HTMLInputElement | null;
+  const _szMax = $("sz-max") as HTMLInputElement | null;
+  const body: Record<string, unknown> = {
+    sessions: sessions.length ? sessions : ["day"],
+    ...(_szPos ? { pos_pct: Math.max(0.1, Math.min(1.0, Number(_szPos.value) / 100)) } : {}),
+    ...(_szMax ? { max_positions: Math.max(1, Math.min(10, Number(_szMax.value))) } : {}),
+    long_allowed: longOn,
+    short_allowed: shortOn,
+    margin_sessions,
+    margin_leverage,
+    trade_regimes,
+    overnight: ($("sg-overnight") as HTMLInputElement | null)?.checked ?? false,
+  };
+  if (extra) Object.assign(body, extra);
+  fetch(`${API}/api/v1/bot/config`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+function applyChip(cb: HTMLInputElement | null, on: boolean): void {
+  if (!cb) return;
+  if (cb.checked !== on) {
+    cb.checked = on;
+    cb.closest("label")?.classList.toggle("on", on);
+  }
+}
+
+function initSessChips(): void {
+  const sessMap: Record<string, string> = { morning: "sg-morning", day: "sg-day", evening: "sg-evening" };
+  let saved: string[] = [];
+  try {
+    saved = JSON.parse(localStorage.getItem("bot_sess") || "[]");
+  } catch { saved = []; }
+  const sessKeys = Object.values(sessMap);
+  const defaultSess = saved.length ? saved : ["sg-morning", "sg-day", "sg-evening"];
+  for (const id of sessKeys) {
+    const cb = $(id) as HTMLInputElement | null;
+    if (!cb) continue;
+    cb.checked = defaultSess.includes(id);
+    cb.closest("label")?.classList.toggle("on", cb.checked);
+    cb.addEventListener("change", () => {
+      cb.closest("label")?.classList.toggle("on", cb.checked);
+      const on = sessKeys.filter((x) => ($(x) as HTMLInputElement).checked);
+      localStorage.setItem("bot_sess", JSON.stringify(on.length ? on : ["sg-morning", "sg-day", "sg-evening"]));
+      sendBotConfigPatch();
+    });
+  }
+
+  // Загружаем настройки с сервера (config-файл) и применяем ко всем чипам.
+  void (async () => {
+    try {
+      const resp = await fetch(`${API}/api/v1/bot/config`);
+      if (!resp.ok) return;
+      const cfg = await resp.json() as Record<string, unknown>;
+      // Сессии.
+      const sArr = Array.isArray(cfg.sessions) ? cfg.sessions as string[] : null;
+      if (sArr && sArr.length) {
+        for (const [s, id] of Object.entries(sessMap)) {
+          const cb = $(id) as HTMLInputElement | null;
+          if (!cb) continue;
+          const on = sArr.includes(s);
+          if (cb.checked !== on) {
+            cb.checked = on;
+            cb.closest("label")?.classList.toggle("on", on);
+          }
+        }
+        localStorage.setItem("bot_sess", JSON.stringify(sArr.map((x) => sessMap[x]).filter(Boolean)));
+      }
+      // Направления.
+      const lOn = (cfg as { long_allowed?: boolean }).long_allowed;
+      const sOn = (cfg as { short_allowed?: boolean }).short_allowed;
+      const dLong = $("dg-long") as HTMLInputElement | null;
+      const dShort = $("dg-short") as HTMLInputElement | null;
+      if (typeof lOn === "boolean" && dLong) applyChip(dLong, lOn);
+      if (typeof sOn === "boolean" && dShort) applyChip(dShort, sOn);
+      // Маржа.
+      const msArr = Array.isArray(cfg.margin_sessions) ? cfg.margin_sessions as string[] : null;
+      if (msArr) {
+        for (const [s, id] of Object.entries({ morning: "mg-morning", day: "mg-day", evening: "mg-evening" })) {
+          const cb = $(id) as HTMLInputElement | null;
+          if (!cb) continue;
+          const on = msArr.includes(s);
+          if (cb.checked !== on) {
+            cb.checked = on;
+            cb.closest("label")?.classList.toggle("on", on);
+          }
+        }
+      } else { sendBotConfigPatch(); }
+      const _sp = $("sz-pos") as HTMLInputElement | null;
+      const _spl = $("sz-pos-label");
+      const _spv = Math.round(Number((cfg as { pos_pct?: number }).pos_pct || 0.3) * 100);
+      if (_sp && document.activeElement !== _sp) {
+        _sp.value = String(Math.max(10, Math.min(100, _spv)));
+        if (_spl) _spl.textContent = `${_sp.value}%`;
+      }
+      const _sm = $("sz-max") as HTMLInputElement | null;
+      const _sml = $("sz-max-label");
+      const _smv = Number((cfg as { max_positions?: number }).max_positions || 6);
+      if (_sm && document.activeElement !== _sm) {
+        _sm.value = String(Math.max(1, Math.min(10, _smv)));
+        if (_sml) _sml.textContent = _sm.value;
+      }
+      const mlv = (cfg as { margin_leverage?: number }).margin_leverage;
+      const levEl = $("mg-lev") as HTMLInputElement | null;
+      if (typeof mlv === "number" && levEl) {
+        const idx = levValueToSlider(mlv);
+        if (Number(levEl.value) !== idx) {
+          levEl.value = String(idx);
+          const lbl = $("mg-lev-label");
+          if (lbl) lbl.textContent = levLabel(mlv);
+          levPaint(idx);
+        }
+      }
+      // Режимы.
+      const trArr = Array.isArray(cfg.trade_regimes) ? cfg.trade_regimes as string[] : null;
+      const trMap: Record<string, string> = {
+        NEUTRAL: "rg-neutral", TREND_UP: "rg-trendup", TREND_DOWN: "rg-trenddown",
+        HIGH_VOLATILITY: "rg-highvol", RANGE: "rg-range",
+      };
+      if (trArr) {
+        for (const [k, id] of Object.entries(trMap)) {
+          const cb = $(id) as HTMLInputElement | null;
+          if (!cb) continue;
+          const on = trArr.includes(k);
+          if (cb.checked !== on) {
+            cb.checked = on;
+            cb.closest("label")?.classList.toggle("on", on);
+          }
+        }
+      }
+      // Overnight.
+      const ov = (cfg as { overnight?: boolean }).overnight;
+      const ovEl = $("sg-overnight") as HTMLInputElement | null;
+      if (typeof ov === "boolean" && ovEl) applyChip(ovEl, ov);
+      // Сверка с брокером.
+      const rec = (cfg as { reconcile_enabled?: boolean }).reconcile_enabled;
+      const recEl = $("rec-on") as HTMLInputElement | null;
+      if (typeof rec === "boolean" && recEl) applyChip(recEl, rec);
+    } catch { /* бэкенд недоступен — остаёмся на localStorage */ }
+  })();
+
+  // Overnight: держать позиции через ночь.
+  const ovEl = $("sg-overnight") as HTMLInputElement | null;
+  if (ovEl) {
+    let ovSaved = false;
+    try { ovSaved = localStorage.getItem("bot_overnight") === "1"; } catch { ovSaved = false; }
+    ovEl.checked = ovSaved;
+    ovEl.closest("label")?.classList.toggle("on", ovSaved);
+    ovEl.addEventListener("change", () => {
+      ovEl.closest("label")?.classList.toggle("on", ovEl.checked);
+      localStorage.setItem("bot_overnight", ovEl.checked ? "1" : "0");
+      sendBotConfigPatch();
+    });
+  }
+  // Сверка с брокером (позиции/кэш) — только в торговое время.
+  const recEl = $("rec-on") as HTMLInputElement | null;
+  if (recEl) {
+    let recSaved = true;
+    try { recSaved = localStorage.getItem("bot_reconcile") !== "0"; } catch { recSaved = true; }
+    recEl.checked = recSaved;
+    recEl.closest("label")?.classList.toggle("on", recSaved);
+    recEl.addEventListener("change", () => {
+      recEl.closest("label")?.classList.toggle("on", recEl.checked);
+      localStorage.setItem("bot_reconcile", recEl.checked ? "1" : "0");
+      sendBotConfigPatch();
+    });
+  }
+  // Блок «Маржа»: сессии, где торговля идёт с плечом.
+  const mgKeys = ["mg-morning", "mg-day", "mg-evening"];
+  let mgSaved: string[] = [];
+  try { mgSaved = JSON.parse(localStorage.getItem("bot_margin") || "[]"); } catch { mgSaved = []; }
+  const defMg = mgSaved.length ? mgSaved : ["mg-day"];
+  for (const id of mgKeys) {
+    const cb = $(id) as HTMLInputElement | null;
+    if (!cb) continue;
+    cb.checked = defMg.includes(id);
+    cb.closest("label")?.classList.toggle("on", cb.checked);
+    cb.addEventListener("change", () => {
+      cb.closest("label")?.classList.toggle("on", cb.checked);
+      const on = mgKeys.filter((x) => ($(x) as HTMLInputElement).checked);
+      localStorage.setItem("bot_margin", JSON.stringify(on));
+      sendBotConfigPatch();
+    });
+  }
+  // Ползунок плеча при марже: 2-3-4-5-Max.
+  const levEl = $("mg-lev") as HTMLInputElement | null;
+  if (levEl) {
+    const updLabel = () => {
+      const v = levSliderToValue(Number(levEl.value));
+      const lbl = $("mg-lev-label");
+      if (lbl) lbl.textContent = levLabel(v);
+    };
+    const savedLev = localStorage.getItem("bot_margin_lev");
+    if (savedLev != null) levEl.value = String(levValueToSlider(Number(savedLev)));
+    updLabel();
+    levPaint(levEl.value);
+    levEl.addEventListener("input", () => {
+      localStorage.setItem("bot_margin_lev", String(levSliderToValue(Number(levEl.value))));
+      updLabel();
+      levPaint(levEl.value);
+      sendBotConfigPatch();
+    });
+  }
+  // Блок «Режимы»: в каких режимах рынка разрешены входы.
+  const rgIds = ["rg-neutral", "rg-trendup", "rg-trenddown", "rg-highvol", "rg-range"];
+  let rgSaved: string[] = [];
+  try { rgSaved = JSON.parse(localStorage.getItem("bot_regimes") || "[]"); } catch { rgSaved = []; }
+  const defRg = rgSaved.length ? rgSaved : rgIds;
+  for (const id of rgIds) {
+    const cb = $(id) as HTMLInputElement | null;
+    if (!cb) continue;
+    cb.checked = defRg.includes(id);
+    cb.closest("label")?.classList.toggle("on", cb.checked);
+    cb.addEventListener("change", () => {
+      cb.closest("label")?.classList.toggle("on", cb.checked);
+      const on = rgIds.filter((x) => ($(x) as HTMLInputElement).checked);
+      localStorage.setItem("bot_regimes", JSON.stringify(on));
+      sendBotConfigPatch();
+    });
+  }
+  const dirIds = ["dg-long", "dg-short"];
+  let dirSaved: string[] = [];
+  try { dirSaved = JSON.parse(localStorage.getItem("bot_dir") || "[]"); } catch { dirSaved = []; }
+  const defDir = dirSaved.length ? dirSaved : ["dg-long"];
+  for (const id of dirIds) {
+    const cb = $(id) as HTMLInputElement | null;
+    if (!cb) continue;
+    cb.checked = defDir.includes(id);
+    cb.closest("label")?.classList.toggle("on", cb.checked);
+    cb.addEventListener("change", () => {
+      cb.closest("label")?.classList.toggle("on", cb.checked);
+      const on = dirIds.filter((x) => ($(x) as HTMLInputElement).checked);
+      localStorage.setItem("bot_dir", JSON.stringify(on));
+      sendBotConfigPatch();
+    });
+  }
+  // Слайдеры слота и макс. позиций (в сайдбаре) → PATCH при отпускании.
+  ($("sz-pos") as HTMLInputElement | null)?.addEventListener("input", () => {
+    const v = ($("sz-pos") as HTMLInputElement).value;
+    const l = $("sz-pos-label");
+    if (l) l.textContent = `${v}%`;
+  });
+  ($("sz-pos") as HTMLInputElement | null)?.addEventListener("change", () => sendBotConfigPatch());
+  ($("sz-max") as HTMLInputElement | null)?.addEventListener("input", () => {
+    const v = ($("sz-max") as HTMLInputElement).value;
+    const l = $("sz-max-label");
+    if (l) l.textContent = v;
+  });
+  ($("sz-max") as HTMLInputElement | null)?.addEventListener("change", () => sendBotConfigPatch());
+}
+
+// ============ Вкладка «Анализ»: статистика прогона, сравнение тестов, AI-гейт, движения ============
+
+function esc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escFlag(v: unknown): string {
+  const t = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v ?? "");
+  return esc(t.slice(0, 18));
+}
+
+function _agEsc(s: unknown): string {
+  return String(s ?? "").replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+}
+
+let _ahDays: number = 5;
+let _ahSort: 0 | 1 | 2 = 1; // 0 = порядок universe, 1 = падение→взлёт, 2 = взлёт→падение
+let _ahMeta: boolean = true; // в ячейках показывать bias (сверху) и режим (снизу)
+let _ahColor: "win" | "hour" | "day" = "win"; // цвет ячейки: от начала окна / часа / дня
+let _ahBiasTf: "day" | "hour" = "day"; // bias сверху: дневной или часовой
+let _ahTrades: boolean = true; // показывать сделки на heatmap (обводка входа + путь до выхода)
+
+async function loadCompareList(): Promise<void> {
+  const list = $("stats-cmp-list");
+  if (!list) return;
+  list.innerHTML = `<span class="mini-hint">загрузка…</span>`;
+  try {
+    const tests = await fetchTests();
+    if (!tests.length) { list.innerHTML = `<span class="mini-hint">нет тестов</span>`; return; }
+    list.innerHTML = tests.map((t) => {
+      const dt = (t.replay_start || "").slice(0, 10);
+      const n = t.net ?? 0;
+      return `<label><input type="checkbox" value="${esc(t.name)}"> ${esc(t.name)} ` +
+        `<span style="color:var(--text-dim)">${dt} · ${t.trades} · ${n >= 0 ? "+" : ""}${n}₽</span></label>`;
+    }).join("");
+  } catch {
+    list.innerHTML = `<span class="mini-hint">ошибка загрузки</span>`;
+  }
+}
+
+async function runCompare(): Promise<void> {
+  const out = $("stats-cmp-result");
+  if (!out) return;
+  const names = Array.from(document.querySelectorAll("#stats-cmp-list input:checked"))
+    .map((x) => (x as HTMLInputElement).value);
+  if (!names.length) { out.innerHTML = `<div class="mini-hint">выбери тесты</div>`; return; }
+  out.innerHTML = `<div class="mini-hint">загрузка…</div>`;
+  let d: TestsCompare;
+  try { d = await fetchTestsCompare(names); }
+  catch { out.innerHTML = `<div class="mini-hint">ошибка</div>`; return; }
+  const ts = Object.keys(d.tests);
+  const netCell = (v: number) => `<td style="color:${v >= 0 ? "var(--up)" : "var(--down)"}">${v >= 0 ? "+" : ""}${v}</td>`;
+  const sec = (title: string, pick: (e: TestCompareEntry) => StatsRow[]) => {
+    const maps = ts.map((n) => {
+      const m: Record<string, StatsRow> = {};
+      for (const r of pick(d.tests[n])) m[r.key] = r;
+      return m;
+    });
+    const keys = Array.from(new Set(maps.flatMap((m) => Object.keys(m))));
+    if (!keys.length) return "";
+    const head = `<tr><th>${title}</th>${ts.map((n) => `<th>${esc(n)}</th>`).join("")}</tr>`;
+    const body = keys.map((k) => `<tr><td>${esc(k)}</td>${maps.map((m) => netCell(m[k]?.net ?? 0)).join("")}</tr>`).join("");
+    return `<div class="stats-cmp-h">${title}</div><table class="stats-cmp-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  };
+  const ohead = `<tr><th>Overall</th>${ts.map((n) => `<th>${esc(n)}</th>`).join("")}</tr>`;
+  const orows = (["trades", "wr", "net", "pf"] as const).map((k) =>
+    `<tr><td>${k}</td>${ts.map((n) => {
+      const v = (d.tests[n].overall as unknown as Record<string, number | null>)[k];
+      return `<td>${v ?? "—"}</td>`;
+    }).join("")}</tr>`).join("");
+  out.innerHTML = `<div class="stats-cmp-h">Overall</div><table class="stats-cmp-table"><thead>${ohead}</thead><tbody>${orows}</tbody></table>` +
+    sec("По режиму", (e) => e.by_regime) +
+    sec("По голосам", (e) => e.by_strategy) +
+    sec("По направлению", (e) => e.by_side) +
+    sec("По выходам", (e) => e.by_exit_reason);
+}
+
+async function renderHeatmap(): Promise<void> {
+  const el = $("an-heatmap");
+  if (!el) return;
+  try {
+    const days = typeof _ahDays === "number" ? _ahDays : 5;
+    const metaQ = _ahMeta ? "&meta=1" : "";
+    const d = await fetch(`${API}/api/v1/bot/heatmap?days=${days}${metaQ}`)
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null) as
+      { ok?: boolean; days?: number; count?: number; tickers?: Array<{ ticker?: string; figi?: string; bars?: Array<{ h: string; o?: number; c: number; b?: number; bh?: number; r?: string }> }> } | null;
+    const tks = (d && d.tickers) || [];
+    const trd = _ahTrades ? await fetch(`${API}/api/v1/sandbox/trades?limit=300`)
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null) : null;
+    interface HmTrade { inH: string; outH: string | null; side: string; pnl: number | null; open: boolean; qty: number; }
+    const tradesByTk = new Map<string, HmTrade[]>();
+    if (trd && Array.isArray(trd.trades)) {
+      for (const tr of trd.trades as Array<Record<string, unknown>>) {
+        const tk = String(tr.ticker || "");
+        if (!tk) continue;
+        const inISO = String(tr.entry_time || "");
+        if (!inISO) continue;
+        const inH = inISO.slice(0, 13);
+        const hasTs = !!tr.ts && String(tr.ts).length > 0;
+        const open = !hasTs || tr.exit_price == null;
+        const outH = hasTs ? String(tr.ts).slice(0, 13) : null;
+        if (!tradesByTk.has(tk)) tradesByTk.set(tk, []);
+        tradesByTk.get(tk)!.push({
+          inH, outH,
+          side: String(tr.side || "LONG").toUpperCase(),
+          pnl: tr.net_pnl != null ? Number(tr.net_pnl) : null,
+          open, qty: Number(tr.qty || 0),
+        });
+      }
+    }
+    if (!tks.length) {
+      el.innerHTML = `<div class="dim">нет данных heatmap</div>`;
+      return;
+    }
+    const hourSet = new Set<string>();
+    for (const t of tks) for (const b of (t.bars || [])) hourSet.add(b.h);
+    const hours = Array.from(hourSet).sort();
+    // --- Сделки на heatmap: обводка входа, путь до выхода (или до текущего часа у открытых) ---
+    const _winEnd = hours.length ? hours[hours.length - 1].slice(0, 13) : "";
+    const tradesSpan = new Map<string, Set<string>>(); // tk → часы, покрытые сделкой
+    const tradesIn = new Map<string, Set<string>>();    // tk → часы входа
+    const tradesOut = new Map<string, Set<string>>();   // tk → часы выхода
+    const tradesInfo = new Map<string, Map<string, HmTrade[]>>(); // tk → час(входа) → сделки (тултип)
+    if (_ahTrades) {
+      for (const [tk, arr] of tradesByTk) {
+        for (const tr of arr) {
+          const h0 = tr.inH;
+          const h1 = tr.open ? _winEnd : (tr.outH || tr.inH);
+          const inc = new Set<string>();
+          for (const h of hours) {
+            const hk = h.slice(0, 13);
+            if (hk >= h0 && hk <= h1) inc.add(hk);
+          }
+          if (!inc.size) continue;
+          if (!tradesSpan.has(tk)) { tradesSpan.set(tk, new Set()); tradesIn.set(tk, new Set()); tradesOut.set(tk, new Set()); tradesInfo.set(tk, new Map()); }
+          for (const hk of inc) tradesSpan.get(tk)!.add(hk);
+          if (inc.has(h0)) tradesIn.get(tk)!.add(h0);
+          if (tr.outH && tr.outH !== tr.inH && inc.has(tr.outH)) tradesOut.get(tk)!.add(tr.outH);
+          const im = tradesInfo.get(tk)!;
+          if (!im.has(h0)) im.set(h0, []);
+          im.get(h0)!.push({ ...tr });
+        }
+      }
+    }
+    const _f = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    const _day = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", weekday: "short", day: "2-digit", month: "2-digit" });
+    const pctByTk = new Map<string, Map<string, number>>();
+    const pctHByTk = new Map<string, Map<string, number>>();
+    const pctDByTk = new Map<string, Map<string, number>>();
+    const closeByTk = new Map<string, Map<string, number>>();
+    const openByTk = new Map<string, Map<string, number>>();
+    const metaByTk = new Map<string, Map<string, { b?: number; bh?: number; r?: string }>>();
+    let maxAbs = 0.01;
+    let maxAbsHour = 0.01;
+    let maxAbsDay = 0.01;
+    for (const t of tks) {
+      const tk = String(t.ticker || "?");
+      const pm = new Map<string, number>();
+      const ph = new Map<string, number>();
+      const pd = new Map<string, number>();
+      const cm = new Map<string, number>();
+      const om = new Map<string, number>();
+      const mm = new Map<string, { b?: number; bh?: number; r?: string }>();
+      const bars = t.bars || [];
+      const first = bars[0]?.c;
+      const dayBase = new Map<string, number>();
+      for (const b of bars) {
+        cm.set(b.h, b.c);
+        if (typeof b.o === "number") om.set(b.h, b.o);
+        if (typeof b.b === "number" || typeof b.bh === "number" || b.r) mm.set(b.h, { b: b.b, bh: b.bh, r: b.r });
+        if (first) {
+          const p = ((b.c / first) - 1) * 100;
+          pm.set(b.h, p);
+          if (Math.abs(p) > maxAbs) maxAbs = Math.abs(p);
+        }
+        if (typeof b.o === "number" && b.o > 0) {
+          const phh = ((b.c / b.o) - 1) * 100;
+          ph.set(b.h, phh);
+          if (Math.abs(phh) > maxAbsHour) maxAbsHour = Math.abs(phh);
+        }
+        const dk = _day.format(new Date(b.h));
+        if (!dayBase.has(dk)) dayBase.set(dk, b.c);
+      }
+      for (const b of bars) {
+        const base = dayBase.get(_day.format(new Date(b.h)));
+        if (base) {
+          const pdd = ((b.c / base) - 1) * 100;
+          pd.set(b.h, pdd);
+          if (Math.abs(pdd) > maxAbsDay) maxAbsDay = Math.abs(pdd);
+        }
+      }
+      closeByTk.set(tk, cm);
+      openByTk.set(tk, om);
+      pctByTk.set(tk, pm);
+      pctHByTk.set(tk, ph);
+      pctDByTk.set(tk, pd);
+      if (mm.size) metaByTk.set(tk, mm);
+    }
+    // Итог окна по каждой акции: % последнего доступного бара.
+    const totByTk = new Map<string, number>();
+    for (const t of tks) {
+      const tk = String(t.ticker || "?");
+      const pm = pctByTk.get(tk);
+      const bars = t.bars || [];
+      const lastH = bars[bars.length - 1]?.h;
+      if (pm && lastH) {
+        const v = pm.get(lastH);
+        if (v != null) totByTk.set(tk, v);
+      }
+    }
+    const sorted = tks.slice();
+    if (_ahSort !== 0) {
+      sorted.sort((a, b) => {
+        const ta = totByTk.get(String(a.ticker || "?")) ?? 0;
+        const tb = totByTk.get(String(b.ticker || "?")) ?? 0;
+        return _ahSort === 1 ? ta - tb : tb - ta;
+      });
+    }
+    const _col = (p: number, ma: number): string => {
+      const a = Math.min(1, Math.abs(p) / (ma * 0.6));
+      return p >= 0 ? `rgba(0,170,90,${(0.10 + 0.9 * a).toFixed(3)})` : `rgba(225,60,60,${(0.10 + 0.9 * a).toFixed(3)})`;
+    };
+    const _biasSym = (v?: number): { s: string; cls: string } =>
+      v === 1 ? { s: "BUY", cls: "up" } : v === -1 ? { s: "SELL", cls: "dn" } : { s: "·", cls: "z" };
+    const _regSym = (r?: string): { s: string; cls: string } => {
+      switch (r) {
+        case "HIGH_VOLATILITY": return { s: "VOL", cls: "vol" };
+        case "TREND_UP": return { s: "TRUP", cls: "tu" };
+        case "TREND_DOWN": return { s: "TRDN", cls: "td" };
+        case "RANGE": return { s: "RNG", cls: "rng" };
+        default: return { s: "NTR", cls: "nt" };
+      }
+    };
+    const _px = (v?: number): string => {
+      if (v == null) return "·";
+      return v >= 1000 ? String(Math.round(v)) : v.toFixed(2);
+    };
+    const rowsDesc = hours.slice().reverse();
+    const ma = _ahColor === "hour" ? maxAbsHour : _ahColor === "day" ? maxAbsDay : maxAbs;
+    const _colorLbl = _ahColor === "win" ? "окно" : _ahColor === "hour" ? "час" : "день";
+    let html = `<div class="an-ag-head">📉 Heatmap: ${tks.length} акций · шаг 1 час · окно ${days}д · цвет: от начала ${_colorLbl}${_ahMeta ? ` · bias ${_ahBiasTf === "hour" ? "часовой" : "дневной"}(верх)+режим(низ)` : ""}</div>`;
+    html += `<div class="ah-btns">${[1, 3, 5].map((x) => `<button class="btn-secondary btn-xs${x === days ? " active" : ""}" data-ah-days="${x}">${x}д</button>`).join("")}` +
+      `<button class="btn-secondary btn-xs${_ahSort !== 0 ? " active" : ""}" data-ah-sort title="сортировка колонок по итогу окна">${_ahSort === 2 ? "взлёт→падение" : _ahSort === 1 ? "падение→взлёт" : "порядок"}</button>` +
+      `<button class="btn-secondary btn-xs" data-ah-color title="цвет ячейки: % от начала окна / от начала часа / от начала дня">цвет: ${_colorLbl}</button>` +
+      `<button class="btn-secondary btn-xs${_ahMeta ? " active" : ""}" data-ah-meta title="в каждой ячейке: сверху bias, снизу режим">bias+режим</button>` +
+      `<button class="btn-secondary btn-xs${_ahBiasTf === "hour" ? " active" : ""}" data-ah-bias title="какой bias показывать сверху: дневной или часовой">bias: ${_ahBiasTf === "day" ? "день" : "час"}</button>` +
+      `<button class="btn-secondary btn-xs${_ahTrades ? " active" : ""}" data-ah-trades title="показывать сделки: обводка входа ● и путь ▍ до выхода">🫰 сделки</button></div>`;
+    html += `<div class="ah-scroll"><table class="ah${_ahMeta ? " ah-meta" : ""}"><thead><tr><th class="ah-corner">час</th>`;
+    for (const t of sorted) {
+      const tk = String(t.ticker || "?");
+      const tot = totByTk.get(tk);
+      const totS = tot == null ? "" : (tot >= 0 ? ` (+${tot.toFixed(1)}%)` : ` (${tot.toFixed(1)}%)`);
+      html += `<th class="ah-h" title="${_agEsc(`${tk} итог за ${days}д:${totS}`)}">${_agEsc(t.ticker)}</th>`;
+    }
+    html += `</tr></thead><tbody>`;
+    let curDay = "";
+    for (const h of rowsDesc) {
+      const day = _day.format(new Date(h));
+      if (day !== curDay) {
+        curDay = day;
+        html += `<tr class="ah-day"><td colspan="${sorted.length + 1}">${_agEsc(day)}</td></tr>`;
+      }
+      html += `<tr><td class="ah-hh">${_f.format(new Date(h))}</td>`;
+      for (const t of sorted) {
+        const tk = String(t.ticker || "?");
+        const c = closeByTk.get(tk)?.get(h);
+        const pWin = pctByTk.get(tk)?.get(h);
+        // Сделки могут заходить и в пустые ячейки (нет бара) — рисуем маркер и на них.
+        const hK = h.slice(0, 13);
+        const isSpan = _ahTrades && tradesSpan.get(tk)?.has(hK);
+        const isIn = _ahTrades && tradesIn.get(tk)?.has(hK);
+        const isOut = _ahTrades && tradesOut.get(tk)?.has(hK);
+        let trCls = "";
+        if (isSpan || isIn || isOut) {
+          trCls = " ah-tr";
+          if (isIn) trCls += " ah-tr-in";
+          if (isOut) trCls += " ah-tr-out";
+          if (isSpan && !isIn && !isOut) trCls += " ah-tr-path";
+          // Для открытых позиций путь пунктиром.
+          if (isSpan && !isOut) {
+            const im = tradesInfo.get(tk)?.get(hK);
+            if (im?.some((x) => x.open)) trCls += " ah-tr-open";
+          }
+        }
+        let trTtl = "";
+        if (isIn) {
+          const im = tradesInfo.get(tk)?.get(hK) || [];
+          if (im.length) {
+            trTtl = im.map((x) =>
+              `${x.side} ${x.qty}шт · вход ${hK}:59` +
+              (x.open ? " · ⭳ открыта" : ` → выход ${x.outH || "?"} · ${x.pnl != null ? (x.pnl >= 0 ? "+" : "") + Math.round(x.pnl) + "₽" : "?"}`)
+            ).join("\n");
+          }
+        }
+        if (c == null || pWin == null) {
+          const cls = `ah-e${trCls}`;
+          html += `<td class="${cls}"${trTtl ? ` title="${_agEsc(trTtl)}"` : ""}></td>`;
+          continue;
+        }
+        let pUse = pWin;
+        if (_ahColor === "hour") pUse = pctHByTk.get(tk)?.get(h) ?? pWin;
+        else if (_ahColor === "day") pUse = pctDByTk.get(tk)?.get(h) ?? pWin;
+        const m = metaByTk.get(tk)?.get(h);
+        let ttl = `${tk} · ${_f.format(new Date(h))} · ${c.toFixed(2)}₽ · окно ${pWin >= 0 ? "+" : ""}${pWin.toFixed(1)}%` +
+          (m ? ` · ${_colorLbl} ${pUse >= 0 ? "+" : ""}${pUse.toFixed(1)}% · bias-д ${m.b ?? 0}` +
+            ` · bias-ч ${m.bh ?? 0} · режим ${m.r ?? "—"}` : "");
+        if (trTtl) ttl += `\n— Сделка —\n${trTtl}`;
+        const cls = `ah-c${trCls}`;
+        if (_ahMeta && m) {
+          const bs = _biasSym(_ahBiasTf === "hour" ? m.bh : m.b);
+          const rs = _regSym(m.r);
+          html += `<td class="${cls}" style="background:${_col(pUse, ma)}" title="${_agEsc(ttl)}">` +
+            `<span class="ah-op">${_px(openByTk.get(tk)?.get(h))}</span>` +
+            `<span class="ah-bi ${bs.cls}">${bs.s}</span><span class="ah-re ${rs.cls}">${rs.s}</span></td>`;
+        } else {
+          html += `<td class="${cls}" style="background:${_col(pUse, ma)}" title="${_agEsc(ttl)}"></td>`;
+        }
+      }
+      html += `</tr>`;
+    }
+    html += `</tbody></table></div>`;
+    el.innerHTML = html;
+    el.querySelectorAll<HTMLButtonElement>("[data-ah-days]").forEach((b) => {
+      b.addEventListener("click", () => {
+        _ahDays = Number(b.dataset.ahDays) || 5;
+        void renderHeatmap();
+      });
+    });
+    el.querySelectorAll<HTMLButtonElement>("[data-ah-sort]").forEach((b) => {
+      b.addEventListener("click", () => {
+        _ahSort = (_ahSort + 1) % 3 as 0 | 1 | 2;
+        void renderHeatmap();
+      });
+    });
+    el.querySelectorAll<HTMLButtonElement>("[data-ah-meta]").forEach((b) => {
+      b.addEventListener("click", () => {
+        _ahMeta = !_ahMeta;
+        void renderHeatmap();
+      });
+    });
+    el.querySelectorAll<HTMLButtonElement>("[data-ah-color]").forEach((b) => {
+      b.addEventListener("click", () => {
+        _ahColor = _ahColor === "win" ? "hour" : _ahColor === "hour" ? "day" : "win";
+        void renderHeatmap();
+      });
+    });
+    el.querySelectorAll<HTMLButtonElement>("[data-ah-bias]").forEach((b) => {
+      b.addEventListener("click", () => {
+        _ahBiasTf = _ahBiasTf === "day" ? "hour" : "day";
+        void renderHeatmap();
+      });
+    });
+    el.querySelectorAll<HTMLButtonElement>("[data-ah-trades]").forEach((b) => {
+      b.addEventListener("click", () => {
+        _ahTrades = !_ahTrades;
+        void renderHeatmap();
+      });
+    });
+  } catch { /* ignore */ }
+}
+
+async function renderStats(): Promise<void> {
+  // Строка размера слота (pos_pct) — на странице «Анализ».
+  try {
+    const [rc, rs] = await Promise.all([
+      fetch(`${API}/api/v1/bot/config`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`${API}/api/v1/bot/status`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ]);
+    const el = $("an-sizing");
+    if (el && rc) {
+      const ls = (rs && rs.long_short) || {};
+      const rcc = rc as { pos_pct?: number; max_positions?: number | null; max_exposure_pct?: number };
+      el.textContent = `слот: ${Math.round((Number(rcc.pos_pct) || 0.4) * 100)}% от EQ` +
+        ` · макс позиций: ${rcc.max_positions ?? "—"}` +
+        ` · кап экспозиции: ${Math.round((Number(rcc.max_exposure_pct) || 1) * 100)}%` +
+        ` · L/S: ${(ls as { longs?: number | null; shorts?: number | null }).longs ?? "—"}/${(ls as { longs?: number | null; shorts?: number | null }).shorts ?? "—"}`;
+    }
+  } catch { /* ignore */ }
+  // Блок движений: срезы по горизонтам (1д/1н/1м/3м).
+  try {
+    const mvEl = $("an-movers");
+    if (mvEl) {
+      const mv = await fetch(`${API}/api/v1/screener/movers?top=4`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const mvD = mv as { ok?: boolean; horizons?: Record<string, { n?: number; up?: Array<{ ticker?: string; chg?: number; streak?: number }>; down?: Array<{ ticker?: string; chg?: number; streak?: number }>; counts?: Record<string, [number, number] | undefined> }> } | null;
+      if (mvD && mvD.ok && mvD.horizons) {
+        const fmt = (arr: Array<{ ticker?: string; chg?: number; streak?: number }> | undefined) => (arr || []).map((x) =>
+          `<span class="mv-tk">${_agEsc(x.ticker)}</span> <span class="${(x.chg ?? 0) >= 0 ? "mv-up" : "mv-dn"}">${(x.chg ?? 0) > 0 ? "+" : ""}${_agEsc(x.chg)}%</span>` +
+          ((x.streak ?? 0) ? ` <span class="dim">${x.streak}д</span>` : "")).join("<br>");
+        const rows = Object.entries(mvD.horizons).map(([lbl, h]) => {
+          const c = h.counts || {};
+          const cnt = `≥5%: ${c["5"]?.[0] ?? 0}/${c["5"]?.[1] ?? 0}<br>≥10%: ${c["10"]?.[0] ?? 0}/${c["10"]?.[1] ?? 0}<br>≥20%: ${c["20"]?.[0] ?? 0}/${c["20"]?.[1] ?? 0}`;
+          return `<tr><td class="mv-h">${_agEsc(lbl)}</td><td>${fmt(h.up) || "—"}</td>` +
+                 `<td>${fmt(h.down) || "—"}</td><td class="dim num">${cnt}</td></tr>`;
+        }).join("");
+        mvEl.innerHTML = `<div class="an-ag-head">📊 Движения · рост/падение по горизонтам (${mvD.horizons["1д"]?.n ?? 0} тикеров)</div>` +
+          `<table class="an-table"><thead><tr><th>Горизонт</th><th>▲ Рост</th><th>▼ Падение</th>` +
+          `<th class="num">шт (рост/пад)</th></tr></thead><tbody>${rows}</tbody></table>`;
+      }
+    }
+  } catch { /* ignore */ }
+
+  // Heatmap: все акции universe по X, время (час) по Y, цвет = накопленное падение/взлёт.
+  await renderHeatmap();
+
+  // Блок портфеля: экспозиции/сектора/маржа/стресс.
+  try {
+    const pfEl = $("an-portfolio");
+    if (pfEl) {
+      const pf = await fetch(`${API}/api/v1/bot/portfolio_summary`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const pfD = pf as {
+        equity?: number; sector_pct?: Record<string, number>; stress_pct?: Record<string, number>;
+        skip_counts?: Record<string, number>; regime?: { state?: string; pct_20m?: number | null };
+        queue?: Array<{ ticker?: string; score?: number; factors?: Record<string, unknown>; veto?: string[] }>;
+        rank?: { enabled?: boolean; top_n?: number; explore?: number; top?: string[] };
+        dd?: { peak?: number; dd_pct?: number }; long_exposure_pct?: number; short_exposure_pct?: number;
+        net_exposure_pct?: number; gross_leverage?: number; margin_use_pct?: number; margin_free?: number;
+      } | null;
+      if (pfD && pfD.equity != null) {
+        const sec = Object.entries(pfD.sector_pct || {}).sort((a, b) => b[1] - a[1]).slice(0, 4)
+          .map(([k, v]) => `${k} ${Math.round(Number(v) * 100)}%`).join(", ");
+        const st = pfD.stress_pct || {};
+        const RU: Record<string, string> = {
+          portfolio_limit: "портфель", max_positions: "слоты", max_exposure: "экспозиция",
+          ls_balance: "L/S", ai_reject: "AI-отказ", ai_reject_cooldown: "AI-кулдаун",
+          ai_already_pending: "AI-очередь", imoex_guard: "IMOEX", loss_streak_hold: "серия убытков",
+          already_held: "уже в позиции", cooldown: "кулдаун", session_filter: "сессия",
+          trend_alignment: "тренд", entries_paused: "пауза", long_disabled: "лонги off",
+          short_disabled: "шорты off", opposite_hold: "противоположная",
+        };
+        const skips = Object.entries(pfD.skip_counts || {})
+          .sort((a, b) => b[1] - a[1]).slice(0, 5)
+          .map(([k, v]) => `${RU[k] || k} ${v}`).join(" · ");
+        const rg = pfD.regime || {};
+        const _rgRu: Record<string, string> = { bear: "🐻 bear", bull: "🐂 bull",
+                                                reversal: "⚠ разворот", neutral: "→ нейтраль" };
+        const rgTxt = rg.state
+          ? ` · режим: ${_rgRu[rg.state] || rg.state}${rg.pct_20m != null ? ` (20м ${rg.pct_20m >= 0 ? "+" : ""}${Number(rg.pct_20m).toFixed(2)}%)` : ""}`
+          : "";
+        const qn = (pfD.queue || []).length;
+        const q0 = pfD.queue?.[0];
+        const qf = q0?.factors || {};
+        const qTop = qn
+          ? ` · очередь: ${qn} (топ ${q0?.ticker} ${Math.round(q0?.score || 0)}` +
+            ` · hist ${_agEsc(qf.hist)} rs ${_agEsc(qf.rs)} conf ${_agEsc(qf.conf)} liq ${_agEsc(qf.liq)} fit ${_agEsc(qf.fit)})` +
+            (q0?.veto?.length ? ` ⛔${q0.veto.join(",")}` : "")
+          : "";
+        const rk = pfD.rank || {};
+        const rkTxt = rk.enabled && rk.top
+          ? ` · рейтинг: топ-${rk.top_n} (разведка ${rk.explore}) — ${rk.top.slice(0, 5).join(", ")}`
+          : "";
+        const dd = pfD.dd || {};
+        const ddTxt = dd.peak ? ` · просадка ${Math.round((dd.dd_pct || 0) * 1000) / 10}% от пика` : "";
+        const cell = (v: string, cls = "") => `<td class="${cls}">${v}</td>`;
+        const row2 = (a: string, b: string, c2 = "", d = "") =>
+          `<tr>${cell(a, "mv-h")}${cell(b)}${cell(c2)}${cell(d, "dim")}</tr>`;
+        pfEl.innerHTML =
+          `<div class="an-ag-head">📦 Портфель · equity ${Math.round(pfD.equity || 0)}₽</div>` +
+          `<table class="an-table"><tbody>` +
+          row2("Экспозиция", `L ${Math.round((pfD.long_exposure_pct || 0) * 100)}% · ` +
+            `S ${Math.round((pfD.short_exposure_pct || 0) * 100)}% · net ${Math.round((pfD.net_exposure_pct || 0) * 100)}%`,
+            `gross ×${pfD.gross_leverage ?? "—"}`) +
+          row2("Маржа", `${Math.round((pfD.margin_use_pct || 0) * 100)}% · свободно ${Math.round(pfD.margin_free || 0)}₽`,
+            `стресс ±5%: ${Math.round((st["imoex_+5%"] || 0) * 100)}% / ${Math.round((st["imoex_-5%"] || 0) * 100)}%`) +
+          (rgTxt ? row2("Режим", rgTxt.replace(/^ · режим: /, "")) : "") +
+          (qTop ? row2("Очередь", qTop.replace(/^ · очередь: /, "")) : "") +
+          (rkTxt ? row2("Рейтинг", rkTxt.replace(/^ · рейтинг: /, "")) : "") +
+          (ddTxt ? row2("Просадка", ddTxt.replace(/^ · просадка /, "")) : "") +
+          (sec ? row2("Сектора", sec) : "") +
+          (skips ? row2("⛔ Пропуски входа", skips) : "") +
+          `</tbody></table>`;
+      }
+    }
+  } catch { /* ignore */ }
+
+  // Блок AI-гейта: «сэкономлено/упущено» по контрфакту (трекер).
+  try {
+    const ag = $("an-aigate");
+    if (ag) {
+      const st = await fetch(`${API}/api/v1/bot/ai_stats?days=7`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const stD = st as {
+        days?: number; totals?: { impact?: number; saved?: number; missed?: number; n?: number; approve?: number; reject?: number; skip?: number; agree?: number; disagree?: number };
+        by_provider?: Record<string, { n?: number; approve?: number; reject?: number; saved?: number; missed?: number; lat?: number }>;
+        top_missed?: Array<{ ticker?: string; missed?: number }>; top_saved?: Array<{ ticker?: string; saved?: number }>;
+      } | null;
+      if (stD && stD.totals) {
+        const t = stD.totals;
+        const provs = Object.entries(stD.by_provider || {}).map(([p, v]) =>
+          `<span class="an-ag-prov"><b>${_agEsc(p)}</b>: n=${v.n} · ✓${v.approve}/✕${v.reject} · saved ${money(v.saved || 0)}₽ / missed ${money(v.missed || 0)}₽ · ${Math.round(v.lat || 0)}мс</span>`).join("");
+        const tm = (stD.top_missed || []).map((x) => `${_agEsc(x.ticker)} −${money(x.missed || 0)}₽`).join(", ");
+        const tsv = (stD.top_saved || []).map((x) => `${_agEsc(x.ticker)} +${money(x.saved || 0)}₽`).join(", ");
+        ag.innerHTML =
+          `<div class="an-ag-head">🤖 AI-гейт (${stD.days ?? 7} дн): <b class="${(t.impact ?? 0) >= 0 ? "pos" : "neg"}">${(t.impact ?? 0) >= 0 ? "+" : ""}${money(t.impact || 0)}₽</b>` +
+          ` · сэкономлено ${money(t.saved || 0)}₽ · упущено ${money(t.missed || 0)}₽` +
+          ` · решений ${t.n ?? 0} (✓${t.approve ?? 0} ✕${t.reject ?? 0} …${t.skip ?? 0})` +
+          ` · согласие 🤝${t.agree ?? 0}/≠${t.disagree ?? 0}</div>` +
+          `<div class="an-ag-prov">${provs || "—"}</div>` +
+          (tm ? `<div class="an-ag-top">Больше всего упущено: ${tm}</div>` : "") +
+          (tsv ? `<div class="an-ag-top">Сэкономлено: ${tsv}</div>` : "");
+      } else {
+        ag.innerHTML = '<div class="an-ag-head">🤖 AI-гейт: нет данных (трекер ещё не набрал исходы)</div>';
+      }
+    }
+  } catch { /* ignore */ }
+  // Блок AI-отчёта: разбор рынка + предложения по механизму бота.
+  try {
+    const ar = $("an-aireport");
+    if (ar) {
+      const rp = await fetch(`${API}/api/v1/bot/ai_report`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const rpD = rp as {
+        model?: string; now_msk?: string; usage?: { total?: number; prompt?: number; completion?: number; estimated?: boolean };
+        analysis?: string; suggestions?: unknown[]; actions?: Array<{ action?: string; ticker?: string; side?: string }>;
+      } | null;
+      if (rpD && rpD.analysis) {
+        const sugg = (rpD.suggestions || []).map((x) => `<li>${_agEsc(String(x))}</li>`).join("");
+        const acts = (rpD.actions || []).map((a) =>
+          `<span class="ar-act">${_agEsc(a.action || "")} ${_agEsc(a.ticker || "")}` +
+          `${a.side ? " " + _agEsc(a.side) : ""}</span>`).join(" ");
+        const u = rpD.usage || {};
+        const uTxt = u.total ? ` · ~${(Number(u.total) / 1000).toFixed(1)}k токенов` +
+          ` (prompt ${(Number(u.prompt) / 1000).toFixed(1)}k + out ${(Number(u.completion) / 1000).toFixed(1)}k${u.estimated ? ", оценка" : ""})` : "";
+        ar.innerHTML = `<div class="an-ag-head">🧠 AI о рынке <span class="dim">${_agEsc(rpD.model || "")}` +
+          `${rpD.now_msk ? " · " + _agEsc(rpD.now_msk) : ""}${uTxt}</span></div>` +
+          `<div class="ar-text">${_agEsc(rpD.analysis)}</div>` +
+          (sugg ? `<div class="ar-sugg"><b>Предложения по механизму бота:</b><ul>${sugg}</ul></div>` : "") +
+          (acts ? `<div class="ar-acts">Действия: ${acts}</div>` : "");
+      } else {
+        ar.innerHTML = '<div class="an-ag-head">🧠 AI о рынке: отчёт ещё не получен (ai_trader не запущен)</div>';
+      }
+    }
+  } catch { /* ignore */ }
+  const body = $("stats-body");
+  if (!body) return;
+  body.innerHTML = `<div class="mini-hint">загрузка…</div>`;
+  const fromEl = $("stats-from") as HTMLInputElement | null;
+  const toEl = $("stats-to") as HTMLInputElement | null;
+  const modeEl = $("stats-mode") as HTMLSelectElement | null;
+  const from = fromEl?.value || "";
+  const to = toEl?.value || "";
+  const mode = modeEl?.value || "";
+  let st: TestStats;
+  try {
+    st = await fetchTestStats("", from, to, mode);
+  } catch {
+    body.innerHTML = `<div class="mini-hint">не удалось загрузить</div>`;
+    return;
+  }
+  const tn = $("stats-test");
+  if (tn) {
+    const src = st.mode === "paper" ? "тест" : st.mode;
+    const per = st.date_from || st.date_to ? ` · ${st.date_from ?? "…"}…${st.date_to ?? "…"}` : "";
+    tn.textContent = (st.test_name ? `${st.test_name} · ${src}` : src) + per;
+  }
+  const o = st.overall;
+  if (!o) {
+    body.innerHTML = `<div class="mini-hint">нет данных по прогону</div>`;
+    return;
+  }
+  const SEC_MAX = 12;
+  const sec = (title: string, rows: StatsRow[] | undefined) => {
+    if (!rows || !rows.length) return "";
+    const _rest = Math.max(0, rows.length - SEC_MAX);
+    const trs = rows.slice(0, SEC_MAX).map((r) =>
+      `<tr><td>${esc(r.key)}</td><td class="n">${r.trades}</td><td class="n">${r.wr}%</td>` +
+      `<td class="n" style="color:${r.net >= 0 ? "var(--up)" : "var(--down)"}">${r.net >= 0 ? "+" : ""}${r.net}</td>` +
+      `<td class="n">${r.pf ?? "—"}</td></tr>`).join("");
+    return `<div class="stats-sec"><div class="stats-title">${title}` +
+      ` <span class="dim">${rows.length}${_rest ? `, ещё ${_rest}` : ""}</span></div>` +
+      `<table class="stats-table"><thead><tr><th>Ключ</th><th>N</th><th>WR</th><th>Net</th><th>PF</th></tr></thead>` +
+      `<tbody>${trs}</tbody></table></div>`;
+  };
+  body.innerHTML =
+    `<div class="stats-overall">` +
+    `<div><span>Сделок</span><b>${o.trades}</b></div>` +
+    `<div><span>WR</span><b>${o.wr}%</b></div>` +
+    `<div><span>Net</span><b style="color:${o.net >= 0 ? "var(--up)" : "var(--down)"}">${o.net >= 0 ? "+" : ""}${o.net}₽</b></div>` +
+    `<div><span>PF</span><b>${o.pf ?? "—"}</b></div>` +
+    `<div><span>Gross+</span><b>+${o.gross_win}₽</b></div>` +
+    `<div><span>Gross−</span><b>${o.gross_loss}₽</b></div>` +
+    `<div><span>Avg win</span><b>+${o.avg_win}₽</b></div>` +
+    `<div><span>Avg loss</span><b>${o.avg_loss}₽</b></div>` +
+    `<div><span>Открыто</span><b>${st.open_positions}</b></div></div>` +
+    sec("По направлению", st.by_side) +
+    sec("По bias", st.by_bias) +
+    sec("По режиму", st.by_regime) +
+    sec("По сессии", st.by_session) +
+    sec("По акциям", st.by_ticker) +
+    sec("По входам", st.by_entry_reason) +
+    sec("По выходам", st.by_exit_reason) +
+    sec("По стратегиям (голоса)", st.by_strategy) +
+    sec("По кворуму", st.by_quorum);
+}
+
+let railInit = false;
+// ─── Правый сайдбар «Рынок · Голоса»: скринер + карусель (порт из оригинала) ───
+interface SrItem { figi: string; ticker: string; name: string; price: number | null; turnover: number | null; rng_pct: number | null; in_universe: boolean; lot?: number }
+interface SrUniInfo { atr_pct?: number }
+interface SrVoteInfo { votes: number; side: string; regime: string | null; buy: number; sell: number; vol_abs: number | null }
+interface SrRow extends SrItem { atr: number | null; votes: number; side: string; regime: string | null; buy: number; sell: number; vol_abs: number | null }
+interface CarouselStatus {
+  bot_running?: boolean;
+  eligible_count?: number;
+  active_count?: number;
+  pending?: Array<{ ticker: string; candle_count?: number; need_download?: boolean }>;
+  log?: Array<{ ts: string; action: string; msg: string }>;
+}
+
+let _srRows: SrItem[] = [];
+let _srUniverse = new Map<string, SrUniInfo>();
+let _srVotes = new Map<string, SrVoteInfo>();
+let _srSortKey = (localStorage.getItem("deeptrading_sr_sort") as string) || "turnover";
+let _srSortAsc = localStorage.getItem("deeptrading_sr_sort_asc") === "1";
+let _srUnivOnly = localStorage.getItem("deeptrading_sr_univ") === "1";
+let _srQuery = localStorage.getItem("deeptrading_sr_q") ?? "";
+let _srMinTurnoverM = Number(localStorage.getItem("deeptrading_sr_min_t") ?? 0) || 0;
+let _srLoading = false;
+const _srPrevPrice = new Map<string, number>();
+
+function _srCmpNum(v: number | null | undefined): number { return v == null ? -Infinity : v; }
+
+function fmtTimeOnly(iso?: string): string {
+  try { return new Date(iso || Date.now()).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Europe/Moscow" }); }
+  catch { return ""; }
+}
+
+const _SR_REG_RANK: Record<string, number> = { HIGH_VOLATILITY: 4, TREND_UP: 3, TREND_DOWN: 2, RANGE: 1, NEUTRAL: 0 };
+
+function _srCompare(a: SrRow, b: SrRow): number {
+  const k = _srSortKey;
+  if (k === "ticker") return _srSortAsc ? a.ticker.localeCompare(b.ticker, "ru") : b.ticker.localeCompare(a.ticker, "ru");
+  if (k === "name") return _srSortAsc ? a.name.localeCompare(b.name, "ru") : b.name.localeCompare(a.name, "ru");
+  if (k === "atr_pct") { const x = _srCmpNum(a.atr), y = _srCmpNum(b.atr); return _srSortAsc ? x - y : y - x; }
+  if (k === "votes") { const x = _srCmpNum(a.votes), y = _srCmpNum(b.votes); return _srSortAsc ? x - y : y - x; }
+  if (k === "regime") {
+    const x = a.regime ? (_SR_REG_RANK[a.regime] ?? -1) : -Infinity;
+    const y = b.regime ? (_SR_REG_RANK[b.regime] ?? -1) : -Infinity;
+    return _srSortAsc ? x - y : y - x;
+  }
+  const x = _srCmpNum(a[k as keyof SrItem] as number | null);
+  const y = _srCmpNum(b[k as keyof SrItem] as number | null);
+  return _srSortAsc ? x - y : y - x;
+}
+
+const _logoFail = new Set<string>();
+declare global {
+  interface Window { __logoFailed?: (safe: string) => void }
+}
+window.__logoFailed = (safe: string): void => { _logoFail.add(safe); };
+function tickerLogo(ticker: string, fullName?: string): string {
+  const safe = ticker.replace(/[^A-Za-z0-9._-]/g, "");
+  const img = `/icons/${safe}.png`;
+  const letter = (safe[0] || "").toUpperCase() || "?";
+  if (!fullName) {
+    const sr = _srRows.find((x) => x.ticker === ticker);
+    if (sr) fullName = sr.name;
+  }
+  const name = fullName ? ` title="${fullName.replace(/"/g, "&quot;")}"` : "";
+  if (_logoFail.has(safe)) return `<span class="tick-logo${name}"><i>${letter}</i></span>`;
+  return `<span class="tick-logo${name}"><img src="${img}" alt="" onload="this.style.opacity=1" onerror="this.style.display='none';this.nextElementSibling&&(this.nextElementSibling.style.display='flex');window.__logoFailed&&window.__logoFailed('${safe}')"><i>${letter}</i></span>`;
+}
+
+function renderSrTable(): void {
+  const tbody = $("sr-tbody");
+  if (!tbody) return;
+  const enriched: SrRow[] = _srRows.map((r) => {
+    const u = _srUniverse.get(r.figi);
+    const v = _srVotes.get(r.figi);
+    return {
+      ...r,
+      atr: u?.atr_pct ?? null,
+      votes: v?.votes ?? 0,
+      side: v?.side ?? "",
+      regime: v?.regime ?? null,
+      buy: v?.buy ?? 0,
+      sell: v?.sell ?? 0,
+      vol_abs: v?.vol_abs ?? null,
+    };
+  });
+  const q = _srQuery.trim().toLowerCase();
+  const minT = _srMinTurnoverM * 1e6;
+  const filtered = enriched.filter((r) => {
+    if (_srUnivOnly && !_srUniverse.has(r.figi)) return false;
+    if (minT > 0 && _srCmpNum(r.turnover) < minT) return false;
+    if (q && !r.ticker.toLowerCase().includes(q) && !r.name.toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const sorted = filtered.sort(_srCompare);
+  const regShort: Record<string, string> = { HIGH_VOLATILITY: "Волат", TREND_UP: "Тренд↑", TREND_DOWN: "Тренд↓", RANGE: "Флэт", NEUTRAL: "Нейтр" };
+  const fmtVol = (x: number | null | undefined) => (x == null ? "—" : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : `${Math.round(x)}`);
+  tbody.innerHTML = sorted
+    .map((r) => {
+      const prev = _srPrevPrice.get(r.ticker);
+      const flash = prev != null && r.price != null && prev > 0
+        ? (r.price > prev ? " sr-up" : r.price < prev ? " sr-down" : "")
+        : "";
+      const arrows = prev != null && r.price != null && prev > 0
+        ? (r.price > prev ? " ▲" : r.price < prev ? " ▼" : "")
+        : "";
+      const inU = _srUniverse.has(r.figi);
+      const rowCls = inU ? " sr-universe" : "";
+      const priceTxt = r.price != null ? money(r.price) + " ₽" : "—";
+      const turnTxt = r.turnover != null ? "₽" + money(r.turnover) : "—";
+      const volTxt = r.rng_pct != null ? r.rng_pct.toFixed(2) + "%" : "—";
+      const atrTxt = r.atr != null ? r.atr.toFixed(2) + "%" : "—";
+      const votesCell = r.votes > 0
+        ? `<span class="sv-chip sv-${Math.min(r.votes, 3)}" title="Голоса: BUY ${r.buy} / SELL ${r.sell} · Режим ${r.regime || "—"} · Объём ${fmtVol(r.vol_abs)}">${r.side === "BUY" ? "▲" : "▼"} ${r.votes}</span>`
+        : inU ? `<span class="sr-dim">·</span>`
+        : `<span class="sr-dim">—</span>`;
+      const reg = r.regime ? (regShort[r.regime] || r.regime) : null;
+      const regTxt = reg ?? "—";
+      const regCol = r.regime === "HIGH_VOLATILITY" ? "var(--gold)"
+        : r.regime === "TREND_UP" ? "var(--up)"
+        : r.regime === "TREND_DOWN" ? "var(--down)"
+        : "var(--text-dim)";
+      const rowTitle = inU
+        ? `${r.name} · Рынок бота${r.regime ? ` · режим ${r.regime}` : ""} — клик откроет график`
+        : `${r.name} — клик откроет график`;
+      return `<tr class="sr-row${rowCls}"${inU ? ` data-figi="${r.figi}" data-ticker="${r.ticker}"` : ""} title="${rowTitle}">` +
+        `<td class="ticker-cell">${tickerLogo(r.ticker, r.name)}<span class="ticker-txt">${r.ticker}</span></td>` +
+        `<td class="sr-num${flash}">${r.price != null ? priceTxt + arrows : `<span class="sr-dim">—</span>`}</td>` +
+        `<td class="sr-num">${r.turnover != null ? turnTxt : `<span class="sr-dim">—</span>`}</td>` +
+        `<td class="sr-num">${r.rng_pct != null ? `<span style="color:${(r.rng_pct ?? 0) >= 3 ? "var(--gold)" : "var(--text)"}">${volTxt}</span>` : `<span class="sr-dim">—</span>`}</td>` +
+        `<td class="sr-num">${r.atr != null ? `<span style="color:${r.atr >= 0.3 ? "var(--gold)" : "var(--text)"}">${atrTxt}</span>` : `<span class="sr-dim">—</span>`}</td>` +
+        `<td class="sr-num">${votesCell}</td>` +
+        `<td class="sr-num">${reg ? `<span class="sr-reg" style="color:${regCol}">${regTxt}</span>` : `<span class="sr-dim">${regTxt}</span>`}</td>` +
+        `<td class="sr-num sr-col-action"><button class="${r.in_universe ? "sr-toggle sr-toggle-active" : "sr-toggle"}" data-ticker="${r.ticker}" title="${r.in_universe ? "Убрать из карусели" : "Добавить в карусель"}">${r.in_universe ? "●" : "○"}</button></td>` +
+        `</tr>`;
+    })
+    .join("") || `<tr><td colspan="8" class="sr-empty">ничего не найдено</td></tr>`;
+  const countEl = $("sr-count");
+  if (countEl) countEl.textContent = `${sorted.length} / ${_srRows.length}`;
+  const tsEl = $("sr-ts");
+  if (tsEl) tsEl.textContent = `обнов. ${fmtTimeOnly()}`;
+  document.querySelectorAll<HTMLElement>("#sr-table thead th[data-sort]").forEach((el) => {
+    const key = el.dataset.sort;
+    el.classList.toggle("sorted", key === _srSortKey);
+    const arrow = el.querySelector(".sr-arrow");
+    if (arrow) arrow.textContent = key === _srSortKey ? (_srSortAsc ? "▲" : "▼") : "";
+  });
+  tbody.querySelectorAll<HTMLElement>("tr").forEach((row) => {
+    row.addEventListener("click", () => {
+      const figi = row.dataset.figi;
+      if (!figi) return;
+      try { localStorage.setItem("deeptrading_chart_figi", figi); } catch { }
+      // График открываем во вкладке «Бот» (iframe), как в оригинале, а не в отдельной page-chart.
+      sendEmbedFocus({ figi, ticker: row.dataset.ticker ?? "", trade: null, trades: [] });
+      showPage("bot");
+    });
+  });
+  tbody.querySelectorAll<HTMLButtonElement>(".sr-toggle").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const ticker = btn.dataset.ticker;
+      const r = _srRows.find((x) => x.ticker === ticker);
+      if (!ticker || !r) return;
+      btn.disabled = true;
+      try {
+        if (r.in_universe) {
+          await fetchJSON<{ ok: boolean }>(`/api/v1/screener/eligible/${encodeURIComponent(ticker)}`, { method: "DELETE" });
+        } else {
+          await fetchJSON<{ ok: boolean }>("/api/v1/screener/eligible", { method: "POST", body: JSON.stringify({ ticker }) });
+        }
+        void loadScreener(true);
+      } catch (err) { alert("Ошибка: " + err); }
+      finally { btn.disabled = false; }
+    });
+  });
+}
+
+const _SR_ACT_COLORS: Record<string, string> = {
+  add: "#7ed67e",
+  remove: "#ff6b6b",
+  ready: "#9dbdff",
+};
+
+function renderCarouselStatus(c: CarouselStatus | undefined): void {
+  const el = $("sr-carousel-panel");
+  if (!el || !c) return;
+  const active = c.active_count ?? 0;
+  const eligible = c.eligible_count ?? 0;
+  const pending = c.pending ?? [];
+  const awaiting = pending.filter((p) => p.need_download);
+  const readyWait = pending.filter((p) => !p.need_download);
+  const botState = c.bot_running
+    ? `<span class="sr-cs-dot sr-cs-dot-on"></span>бот запущен`
+    : `<span class="sr-cs-dot sr-cs-dot-off"></span>бот остановлен`;
+  const pendingHtml = pending.length
+    ? `<div class="sr-cs-pending">` +
+      pending.map((p) =>
+        `<span class="sr-cs-tag${p.need_download ? " sr-cs-tag-wait" : ""}" title="${p.candle_count ?? 0} свечей 1min">${p.ticker} <i>${p.candle_count ?? 0}</i></span>`
+      ).join("") +
+      `</div>`
+    : "";
+  const logHtml = (c.log ?? []).slice(0, 6).map((l) =>
+    `<div class="sr-cs-log-row"><span class="sr-cs-log-ts">${l.ts}</span> <span class="sr-cs-log-act" style="color:${_SR_ACT_COLORS[l.action] ?? "var(--text-dim)"}">${l.msg}</span></div>`
+  ).join("");
+  el.innerHTML =
+    `<div class="sr-cs-title">🎠 Карусель бота <span class="sr-cs-bot">${botState}</span></div>` +
+    `<div class="sr-cs-grid">` +
+    `<span class="sr-cs-k">active</span><b class="sr-cs-v sr-cs-v-ok">${active} ${active === eligible ? "" : `/ ${eligible} eligible`}</b>` +
+    (pending.length
+      ? `<span class="sr-cs-k">pending</span><b class="sr-cs-v">${pending.length} <span class="sr-cs-sub">(${awaiting.length} без свечей, ${readyWait.length} ждут бота)</span></b>`
+      : `<span class="sr-cs-k">pending</span><b class="sr-cs-v">0</b>`) +
+    `<span class="sr-cs-k">eligible</span><b class="sr-cs-v">${eligible}</b>` +
+    `</div>` +
+    pendingHtml +
+    (logHtml ? `<div class="sr-cs-log">${logHtml}</div>` : "");
+}
+
+async function loadScreener(silent = false): Promise<void> {
+  if (_srLoading) return;
+  _srLoading = true;
+  try {
+    const d = await fetchJSON<{ count: number; items: SrItem[]; carousel: CarouselStatus }>("/api/v1/screener");
+    _srRows = d.items || [];
+    renderSrTable();
+    renderCarouselStatus(d.carousel);
+    _srPrevPrice.clear();
+    for (const r of _srRows) if (r.price != null) _srPrevPrice.set(r.ticker, r.price);
+  } catch {
+    if (!silent && _srRows.length === 0) {
+      const tbody = $("sr-tbody");
+      if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="sr-empty">ошибка загрузки рынка</td></tr>`;
+    }
+    const tsEl = $("sr-ts");
+    if (tsEl) tsEl.textContent = `обнов. ${fmtTimeOnly()} (устарело)`;
+  } finally {
+    _srLoading = false;
+  }
+}
+
+function initRightRail(): void {
+  if (railInit) { loadScreener(); return; }
+  railInit = true;
+  document.querySelectorAll<HTMLElement>(".sr-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll<HTMLElement>(".sr-tab").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      document.querySelectorAll(".sr-tabpane").forEach(p => p.classList.add("hidden"));
+      const pane = $(`sr-pane-${btn.dataset.srtab}`);
+      pane?.classList.remove("hidden");
+      if (btn.dataset.srtab === "aigate") {
+        const ag = document.getElementById("ag-list");
+        if (ag) {
+          const saved = Number(localStorage.getItem("agListHeight"));
+          if (saved > 0) {
+            const maxH = (pane ? pane.clientHeight : window.innerHeight) - 220;
+            ag.style.height = `${Math.max(60, Math.min(saved, Math.max(80, maxH)))}px`;
+          }
+        }
+        void renderAiGate();
+      }
+    });
+  });
+  $("sr-refresh")?.addEventListener("click", () => void loadScreener());
+  $("votes-config-btn")?.addEventListener("click", () => $("votes-editor")?.classList.toggle("hidden"));
+  const q = $("sr-query") as HTMLInputElement | null;
+  if (q) {
+    q.value = _srQuery;
+    let tId: ReturnType<typeof setTimeout> | undefined;
+    q.addEventListener("input", () => {
+      clearTimeout(tId);
+      tId = setTimeout(() => { _srQuery = q.value; localStorage.setItem("deeptrading_sr_q", _srQuery); renderSrTable(); }, 250);
+    });
+  }
+  const minT = $("sr-min-t") as HTMLInputElement | null;
+  if (minT) {
+    minT.value = String(_srMinTurnoverM);
+    minT.addEventListener("change", () => { _srMinTurnoverM = Number(minT.value) || 0; localStorage.setItem("deeptrading_sr_min_t", String(_srMinTurnoverM)); renderSrTable(); });
+  }
+  const uni = $("sr-univ-only") as HTMLInputElement | null;
+  if (uni) {
+    uni.checked = _srUnivOnly;
+    uni.addEventListener("change", () => { _srUnivOnly = uni.checked; localStorage.setItem("deeptrading_sr_univ", _srUnivOnly ? "1" : "0"); renderSrTable(); });
+  }
+  document.querySelectorAll<HTMLElement>("#sr-table thead th[data-sort]").forEach(th => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.sort || "turnover";
+      if (_srSortKey === key) _srSortAsc = !_srSortAsc;
+      else { _srSortKey = key; _srSortAsc = key === "ticker" || key === "name"; }
+      localStorage.setItem("deeptrading_sr_sort", _srSortKey);
+      localStorage.setItem("deeptrading_sr_sort_asc", _srSortAsc ? "1" : "0");
+      renderSrTable();
+    });
+  });
+  loadScreener();
+}
+
+let aigateInit = false;
+let _aiPromptKind: "gate" | "watch" | "trader" = "gate";
+let _aiControlCache: { prompts?: Record<string, string>; note?: string; defaults?: Record<string, { system?: string }> } | null = null;
+
+function agEsc(s: unknown): string {
+  return String(s ?? "").replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+}
+
+function agOpenChart(ticker: string, opts?: { sl?: number; tp?: number }): void {
+  const sr = _srRows.find((x) => x.ticker === ticker);
+  const figi = sr?.figi;
+  if (!figi) { void agOpenChartLazy(ticker, opts); return; }
+  agOpenApplyChart(sr.figi, ticker, opts);
+}
+
+async function agOpenChartLazy(ticker: string, opts?: { sl?: number; tp?: number }): Promise<void> {
+  try {
+    const d = await fetch(`${API}/api/v1/instruments?search=${encodeURIComponent(ticker)}&limit=2`)
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const items: Array<{ ticker: string; figi: string }> = (d && d.items) || [];
+    const it = items.find((x) => x.ticker === ticker) ?? items[0];
+    if (it) agOpenApplyChart(it.figi, ticker, opts);
+  } catch { /* ignore */ }
+}
+
+function agOpenApplyChart(figi: string, ticker: string, opts?: { sl?: number; tp?: number }): void {
+  sendEmbedFocus({
+    figi,
+    ticker,
+    trade: opts && (opts.sl != null || opts.tp != null)
+      ? { entry_price: 0, stop_loss: opts.sl, take_profit: opts.tp }
+      : null,
+    trades: [],
+  });
+  // подсветить строку в таблицах основной части (позиции/сделки)
+  for (const sel of ["#bot-positions-table tbody", "#bot-trades-table tbody"]) {
+    document.querySelectorAll<HTMLTableRowElement>(`${sel} tr[data-figi]`).forEach((tr) => {
+      if (tr.dataset.figi !== figi) return;
+      tr.classList.remove("ag-highlight");
+      void tr.offsetWidth;
+      tr.classList.add("ag-highlight");
+      tr.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+  }
+}
+
+async function renderAiGate(): Promise<void> {
+  const list = $("ag-list");
+  const sub = $("ag-sub");
+  const summ = $("ag-summary");
+  if (!list) return;
+  let approvals: { enabled?: boolean; contour?: string; timeout_sec?: number; default?: string; pending?: Array<{ ticker: string; side: string }> } | null = null;
+  let decs: Array<Record<string, unknown>> = [];
+  let notes: Array<Record<string, unknown>> = [];
+  try {
+    const [a, d, n] = await Promise.all([
+      fetch(`${API}/api/v1/bot/approvals`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`${API}/api/v1/bot/ai_decisions?limit=30`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`${API}/api/v1/bot/ai_notes?limit=30`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ]);
+    approvals = a;
+    decs = (d && d.decisions) || [];
+    notes = (n && n.notes) || [];
+  } catch { /* сеть/бэкенд недоступны */ }
+  const shadow = decs.some((x) => !!x.shadow);
+  const _contour = approvals && approvals.contour ? ` · ${String(approvals.contour)}` : "";
+  if (sub) sub.textContent = (approvals && approvals.enabled ? (shadow ? "shadow (не применяет)" : "боевой") : "выключен") + _contour;
+  if (summ) {
+    if (!approvals) {
+      summ.textContent = "нет данных";
+    } else {
+      const pend = (approvals.pending || []) as Array<{ ticker: string; side: string }>;
+      summ.innerHTML = `таймаут ${Math.round(Number(approvals.timeout_sec) || 0)}с · default <b>${agEsc(approvals.default)}</b> · ожидают: <b>${pend.length}</b>` +
+        (pend.length ? " · " + pend.map((p) => `${agEsc(p.ticker)} ${agEsc(p.side)}`).join(", ") : "");
+    }
+  }
+  if (!decs.length) {
+    list.innerHTML = '<span class="ag-empty">нет решений</span>';
+  } else {
+    list.innerHTML = decs.slice().reverse().map((d) => {
+      const dec = String(d.decision || "").toLowerCase();
+      const cls = dec === "approve" ? "approve" : dec === "reject" ? "reject" : "skip";
+      const label = dec === "approve" ? "✓ одобрил" : dec === "reject" ? "✕ отклонил" : "… пропуск";
+      const t = d.ts ? new Date(String(d.ts)).toLocaleTimeString("ru-RU", { hour12: false }) : "";
+      const conf = d.confidence != null ? ` · conf ${Number(d.confidence).toFixed(2)}` : "";
+      const lat = d.latency_ms != null ? ` · ${Math.round(Number(d.latency_ms))}мс` : "";
+      const prov = d.provider ? ` · ${agEsc(d.provider)}` : "";
+      const agree = d.agreement === true ? " · 🤝" : (d.agreement === false ? " · ≠" : "");
+      const applied = d.applied ? " · применено" : (d.shadow ? " · shadow" : "");
+      const toks = d.usage && (d.usage as { total?: number }).total ? ` · ${(Number((d.usage as { total?: number }).total) / 1000).toFixed(1)}k tok` : "";
+      return `<div class="ag-row ${cls}${d.shadow ? " shadow" : ""}" data-ticker="${agEsc(d.ticker)}" title="${agEsc(d.reason)}">
+        <div class="ag-r1">
+          <span class="ag-t">${agEsc(t)}</span>
+          <span class="ag-tk">${agEsc(d.ticker)} ${agEsc(d.side)}${d.qty ? " ×" + agEsc(d.qty) : ""}</span>
+          <span class="ag-dec">${label}</span>
+        </div>
+        <div class="ag-r2">${agEsc(d.reason)}<span class="ag-meta">${agEsc(d.model || "")}${prov}${conf}${lat}${toks}${agree}${applied}</span></div>
+        ${d.advice ? `<div class="ag-advice" title="совет нейросети">💡 ${agEsc(d.advice)}</div>` : ""}
+      </div>`;
+    }).join("");
+  }
+  // 👉 клик по решению открывает график в основной части
+  list.querySelectorAll<HTMLElement>(".ag-row[data-ticker]").forEach((row) => {
+    row.addEventListener("click", () => agOpenChart(String(row.dataset.ticker || "")));
+  });
+  // Вахтёр позиций: заметки (hold/tighten/close) — словами, без управления.
+  const notesEl = $("ag-notes");
+  const notesSub = $("ag-watch-sub");
+  if (notesEl) {
+    if (notesSub) notesSub.textContent = notes.length ? `${notes.length} свежих` : "—";
+    if (!notes.length) {
+      notesEl.innerHTML = '<span class="ag-empty">нет заметок (позиции вне риска или вахтёр не запущен)</span>';
+    } else {
+      const actLabel: Record<string, string> = {
+        hold: "✋ держать", tighten: "🔧 подтянуть", close: "✕ закрыть", watch: "… наблюдать",
+      };
+      const tightLabel = (n: Record<string, unknown>): string => {
+        const apd = ((n.applied_levels as { applied?: { sl?: number; tp?: number } } | undefined)?.applied) || {};
+        const hasSl = apd.sl != null, hasTp = apd.tp != null;
+        if (hasSl && hasTp) return "🔧 SL+TP";
+        if (hasTp) return "🔧 TP";
+        if (hasSl) return "🔧 SL";
+        return "🔧 подтянуть";
+      };
+      notesEl.innerHTML = notes.slice().reverse().map((n) => {
+        const act = String(n.action || "watch").toLowerCase();
+        const t = n.ts ? new Date(String(n.ts)).toLocaleTimeString("ru-RU", { hour12: false }) : "";
+        const dsl = n.dist_sl_atr != null ? ` · ${Number(n.dist_sl_atr).toFixed(2)} ATR до SL` : "";
+        const dtp = n.dist_tp_atr != null ? ` · ${Number(n.dist_tp_atr).toFixed(2)} ATR до TP` : "";
+        const pnl = n.pnl != null ? ` · P&L ${Number(n.pnl) >= 0 ? "+" : ""}${Math.round(Number(n.pnl))}₽` : "";
+        return `<div class="ag-note ${act}" data-ticker="${agEsc(n.ticker)}" title="${agEsc(n.note)}">
+          <div class="ag-r1"><span class="ag-t">${agEsc(t)}</span><span class="ag-tk">${agEsc(n.ticker)} ${agEsc(n.side)}</span><span class="ag-dec">${act === "tighten" ? tightLabel(n) : (actLabel[act] || act)}</span></div>
+          <div class="ag-r2">${agEsc(n.note)}<span class="ag-meta">${agEsc(n.model || "")}${dsl}${dtp}${pnl}</span></div>
+          ${n.advice ? `<div class="ag-advice">💡 ${agEsc(n.advice)}</div>` : ""}
+        </div>`;
+      }).join("");
+      // 👉 клик по заметке открывает график тикера (со SL/TP, если позиция есть)
+      notesEl.querySelectorAll<HTMLElement>(".ag-note[data-ticker]").forEach((row) => {
+        row.addEventListener("click", () => agOpenChart(String(row.dataset.ticker || "")));
       });
     }
   }
-  r.sma.setData(smaPoints);
-  r.emaLine.setData(emaPoints);
-  r.bbUpper.setData(bbUpperPoints);
-  r.bbLower.setData(bbLowerPoints);
-  if (r.rsiLine) r.rsiLine.setData(rsiPoints);
-  if (r.macdLine) r.macdLine.setData(macdPoints);
-  if (r.signalLine) r.signalLine.setData(signalPoints);
-  if (r.macdHist) r.macdHist.setData(histPoints);
-
-  if (data.candles.length > 0) {
-    ensuredFrom = toUnix(data.candles[0].ts);
-    ensuredTo = toUnix(data.candles[n - 1].ts);
-  }
-  _renderedFigi = dataFigi;
-
-  if (!keepView) {
-    const want = WINDOW_BARS[currentTf.interval] ?? 60;
-    try {
-      const ps = r.chart.priceScale('right');
-      ps.applyOptions({ autoScale: false });
-      ps.applyOptions({ autoScale: true });
-    } catch { /* noop */ }
-    try {
-      r.chart.timeScale().applyOptions({ rightOffset: 0 });
-      const lastIdx = Math.max(0, candlePoints.length - 1);
-      const fromIdx = Math.max(0, lastIdx - want + 1);
-      cdbg("renderData-reset", "want=" + want, "lastIdx=" + lastIdx, "fromIdx=" + fromIdx);
-      r.chart.timeScale().setVisibleLogicalRange({
-        from: Math.min(fromIdx, lastIdx),
-        to: Math.max(fromIdx, lastIdx),
-      });
-    } catch { /* noop */ }
-  }
-  cdbgView("renderData-end keepView=" + keepView);
-
-  document.getElementById("symbol-ticker")!.textContent = data.ticker || FIGI;
-  document.getElementById("symbol-name")!.textContent = data.name || "";
 }
 
-const TZ = "Europe/Moscow";
-const _dtMSK = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-const _dtMSKFull = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
-
-function fmtDateTime(ts: string): string {
-  return _dtMSKFull.format(new Date(ts));
-}
-
-function fmtUTC(sec: number): string {
-  return _dtMSKFull.format(new Date(sec * 1000));
-}
-
-function axisTimeLabel(t: unknown): string {
+async function loadAiPrompt(): Promise<void> {
+  if (!$("ag-prompt")) return;
   try {
-    const num = typeof t === "number" ? t : Number(t);
-    return Number.isFinite(num) ? _dtMSK.format(new Date(num * 1000)) : String(t ?? "");
-  } catch { return String(t ?? ""); }
+    const d = await fetch(`${API}/api/v1/bot/ai_control`)
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    _aiControlCache = d || {};
+  } catch {
+    _aiControlCache = {};
+  }
+  renderAiPromptEditor();
 }
 
-const _dtMSKYear = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, year: "numeric" });
-const _dtMSKMonth = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, month: "short", year: "numeric" });
-const _dtMSKDay = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, day: "2-digit", month: "2-digit" });
-const _dtMSKSec = new Intl.DateTimeFormat("ru-RU", { timeZone: TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
-
-function _mskDateOf(t: Time): Date | null {
-  if (typeof t === "number") return new Date(t * 1000);
-  if (typeof t === "string") {
-    const ms = Date.parse(t);
-    return Number.isFinite(ms) ? new Date(ms) : null;
+function renderAiPromptEditor(): void {
+  const d = _aiControlCache || {};
+  const ed = $("ag-prompt-edit") as HTMLTextAreaElement | null;
+  if (!ed) return;
+  const ov = String(((d.prompts || {})[_aiPromptKind]) || "");
+  const def = String((((d.defaults || {})[_aiPromptKind]) || {}).system || "");
+  ed.value = ov.trim() ? ov : def;
+  const info = $("ag-prompt-info");
+  if (info) {
+    const who = { gate: "🚦 гейт", watch: "👁 вахтёр", trader: "🤖 трейдер" }[_aiPromptKind] || "";
+    info.textContent = `${who} · ${ov.trim() ? "переопределён (UI)" : "дефолт воркера"}` +
+      ` · ${ed.value.length} симв`;
   }
-  if (t && typeof t === "object" && "year" in t && "month" in t && "day" in t) {
+  const inp = $("ag-send-input") as HTMLTextAreaElement | null;
+  if (inp && document.activeElement !== inp) inp.value = String(d.note || "");
+  document.querySelectorAll<HTMLElement>("#ag-prompt .ag-ptab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.kind === _aiPromptKind);
+  });
+}
+
+async function saveAiPrompt(kind: string, value: string): Promise<void> {
+  const st = $("ag-prompt-status");
+  try {
+    const r = await fetch(`${API}/api/v1/bot/ai_control`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompts: { [kind]: value } }),
+    });
+    if (st) st.textContent = r.ok ? "✓ сохранено" : "ошибка сохранения";
+    if (r.ok && _aiControlCache) {
+      _aiControlCache.prompts = _aiControlCache.prompts || {};
+      _aiControlCache.prompts[kind] = value;
+    }
+  } catch {
+    if (st) st.textContent = "ошибка сети";
+  }
+  setTimeout(() => { if (st) st.textContent = ""; }, 2500);
+}
+
+async function saveAiNote(value: string): Promise<void> {
+  const st = $("ag-send-status");
+  try {
+    const r = await fetch(`${API}/api/v1/bot/ai_control`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: value }),
+    });
+    if (st) st.textContent = r.ok ? "✓ отправлено (AI увидит в следующем цикле)" : "ошибка";
+  } catch {
+    if (st) st.textContent = "ошибка сети";
+  }
+  setTimeout(() => { if (st) st.textContent = ""; }, 4000);
+}
+
+function initAgResizer(): void {
+  const list = document.getElementById("ag-list");
+  const resizer = document.getElementById("ag-resizer");
+  if (!list || !resizer) return;
+  const pane = document.getElementById("sr-pane-aigate");
+  const clamp = (h: number): number => {
+    const base = (pane && !pane.classList.contains("hidden")) ? pane.clientHeight : window.innerHeight;
+    const maxH = base - 220;
+    return Math.max(60, Math.min(h, Math.max(80, maxH)));
+  };
+  const saved = Number(localStorage.getItem("agListHeight"));
+  if (saved > 0) list.style.height = `${clamp(saved)}px`;
+  let startY = 0;
+  let startH = 0;
+  const onMove = (e: PointerEvent): void => {
+    list.style.height = `${clamp(startH + (e.clientY - startY))}px`;
+  };
+  const onUp = (): void => {
+    resizer.classList.remove("dragging");
+    localStorage.setItem("agListHeight", String(list.clientHeight));
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  };
+  resizer.addEventListener("pointerdown", (e: PointerEvent) => {
+    e.preventDefault();
+    resizer.classList.add("dragging");
+    startY = e.clientY;
+    startH = list.clientHeight;
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
+}
+
+function initAIgate(): void {
+  if (aigateInit) { void renderAiGate(); void loadAiPrompt(); return; }
+  aigateInit = true;
+  $("ag-refresh")?.addEventListener("click", () => { void renderAiGate(); void loadAiPrompt(); });
+  $("ag-prompt-btn")?.addEventListener("click", () => $("ag-prompt")?.classList.toggle("hidden"));
+  document.querySelectorAll<HTMLElement>("#ag-prompt .ag-ptab").forEach((b) => {
+    b.addEventListener("click", () => {
+      const kind = b.dataset.kind as "gate" | "watch" | "trader";
+      if (kind) { _aiPromptKind = kind; renderAiPromptEditor(); }
+    });
+  });
+  $("ag-prompt-save")?.addEventListener("click", () => {
+    const ed = $("ag-prompt-edit") as HTMLTextAreaElement | null;
+    if (ed) void saveAiPrompt(_aiPromptKind, ed.value);
+  });
+  $("ag-prompt-reset")?.addEventListener("click", () => {
+    const ed = $("ag-prompt-edit") as HTMLTextAreaElement | null;
+    if (ed) { ed.value = ""; void saveAiPrompt(_aiPromptKind, ""); }
+  });
+  $("ag-send-btn")?.addEventListener("click", () => {
+    const inp = $("ag-send-input") as HTMLTextAreaElement | null;
+    if (inp) void saveAiNote(inp.value);
+  });
+  $("ag-full")?.addEventListener("click", () => {
+    const pane = $("sr-pane-aigate");
+    pane?.classList.toggle("fullscreen");
+    document.body.style.overflow = pane?.classList.contains("fullscreen") ? "hidden" : "";
+  });
+  initAgResizer();
+  void renderAiGate();
+  void loadAiPrompt();
+  // Автообновление AI-гейта, пока вкладка открыта (решения/заметки приходят живьём).
+  window.setInterval(() => {
+    const pane = $("sr-pane-aigate");
+    if (pane && !pane.classList.contains("hidden")) {
+      void renderAiGate();
+      void loadAiPrompt();
+    }
+  }, 10000);
+}
+
+function initSidebarResize(): void { bindSidebarDrag("sidebar", 1, 190, 560, "deeptrading_sidebar_w"); }
+
+function initRightRailResize(): void { bindSidebarDrag("sidebar-right", -1, 240, 460, "deeptrading_rail_w"); }
+
+function bindSidebarDrag(elId: string, dir: number, min: number, max: number, key: string): void {
+  const sb = document.getElementById(elId);
+  if (!sb || sb.dataset.resizeInit) return;
+  sb.dataset.resizeInit = "1";
+  const ckey = elId === "sidebar" ? "deeptrading_sidebar_collapsed" : "deeptrading_rail_collapsed_v2";
+  try {
+    const saved = localStorage.getItem(key);
+    if (saved) {
+      const w = Math.max(min, Math.min(max, Number(saved)));
+      if (w > 0) { sb.style.width = w + "px"; sb.style.flexBasis = w + "px"; }
+    }
+  } catch { }
+  let dragging = false; let startX = 0; let startW = 0;
+  const onMove = (e: PointerEvent) => { if (!dragging) return; const w = Math.max(min, Math.min(max, startW + dir * (e.clientX - startX))); sb.style.width = `${w}px`; sb.style.flexBasis = `${w}px`; };
+  const onUp = () => { if (!dragging) return; dragging = false; document.body.classList.remove("sb-resizing"); window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); try { localStorage.setItem(key, String(Math.round(sb.getBoundingClientRect().width))); } catch { } };
+  sb.addEventListener("pointerdown", (e) => {
+    const t = e.target as HTMLElement;
+    if (t.closest(".sidebar-collapse")) return;
+    const collapsed = sb.classList.contains("collapsed");
+    if (!collapsed && !t.closest(".sidebar-grip")) return;
+    e.preventDefault();
+    sb.classList.remove("collapsed");
+    try { localStorage.setItem(ckey, "0"); } catch { }
+    dragging = true; startX = e.clientX; startW = sb.getBoundingClientRect().width;
+    document.body.classList.add("sb-resizing");
+    window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp);
+  });
+}
+
+function initSidebarCollapse(): void {
+  const binds: ReadonlyArray<readonly [string, string, string]> = [
+    ["sidebar", "sidebar-collapse", "deeptrading_sidebar_collapsed"],
+    ["sidebar-right", "rail-collapse", "deeptrading_rail_collapsed_v2"],
+  ];
+  for (const [elId, btnId, key] of binds) {
+    const el = document.getElementById(elId);
+    const btn = document.getElementById(btnId);
+    if (!el || !btn) continue;
+    const apply = (collapsed: boolean): void => {
+      el.classList.toggle("collapsed", collapsed);
+      try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch { }
+    };
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(key) === "1"; } catch { }
+    apply(collapsed);
+    btn.addEventListener("click", () => apply(!el.classList.contains("collapsed")));
+  }
+}
+
+function initBotChartResizer(): void {
+  const wrap = document.getElementById("bot-chart-wrap");
+  const resizer = document.getElementById("bot-resizer");
+  if (!wrap || !resizer) return;
+  if (resizer.dataset.init) return;
+  resizer.dataset.init = "1";
+  const KEY = "deeptrading_bot_chart_h";
+  try { const saved = localStorage.getItem(KEY); if (saved) { const h = Math.max(240, Math.min(window.innerHeight - 160, Number(saved))); wrap.style.height = `${h}px`; } } catch { }
+  let dragging = false; let startY = 0; let startH = 0;
+  const onMove = (e: PointerEvent) => { if (!dragging) return; const h = Math.max(240, Math.min(window.innerHeight - 160, startH + (startY - e.clientY))); wrap.style.height = `${h}px`; };
+  const onUp = () => { if (!dragging) return; dragging = false; resizer.classList.remove("dragging"); window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); try { localStorage.setItem(KEY, String(wrap.clientHeight)); } catch { } };
+  resizer.addEventListener("pointerdown", (e) => { e.preventDefault(); dragging = true; startY = e.clientY; startH = wrap.clientHeight; resizer.classList.add("dragging"); window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp); });
+}
+
+// ─── Embedded-режим (iframe ?embedded=1): только график, без шапки/сайдбаров ───
+
+interface EmbedTrade { side?: string; entry_time?: string; exit_time?: string; }
+interface FocusMsg {
+  type?: string;
+  figi?: string;
+  ticker?: string;
+  trade?: { entry_price?: number; exit_price?: number; stop_loss?: number; take_profit?: number } | null;
+  trades?: EmbedTrade[];
+  centerSec?: number;
+  halfBars?: number;
+}
+
+interface SandboxTrade {
+  figi: string; ticker: string; side: string; qty: number;
+  entry_price: number; exit_price: number | null;
+  entry_time: string; ts: string | null; stop_loss: number | null; take_profit: number | null;
+  net_pnl: number | null; commission: number; exit_reason: string; meta?: string | null;
+  leverage?: number | null; notional?: number | null; own_money?: number | null;
+}
+let _lastTrades: SandboxTrade[] = [];
+let _lastTradeHist = new Map<string, Array<Record<string, unknown>>>();
+const _openDetails = new Set<string>();
+
+let emChart: IChartApi | null = null;
+let emSeries: ISeriesApi<"Candlestick"> | null = null;
+let emMarkers: ISeriesMarkersPluginApi<Time> | null = null;
+let emLines: IPriceLine[] = [];
+let emMarkersSig: ISeriesMarkersPluginApi<Time> | null = null;
+let emVolume: ISeriesApi<"Histogram"> | null = null;
+let emSma: ISeriesApi<"Line"> | null = null;
+let emEma: ISeriesApi<"Line"> | null = null;
+let emBbU: ISeriesApi<"Line"> | null = null;
+let emBbL: ISeriesApi<"Line"> | null = null;
+let emMacdHist: ISeriesApi<"Histogram"> | null = null;
+let emMacdLine: ISeriesApi<"Line"> | null = null;
+let emSigLine: ISeriesApi<"Line"> | null = null;
+let emRsi: ISeriesApi<"Line"> | null = null;
+let emOscPane = false;
+let lastAnalysis: AnalysisDto | null = null;
+const _IV_SEC: Record<string, number> = { "1min": 60, "5min": 300, "15min": 900, hour: 3600, day: 86400 };
+let _plottedFigi = "";
+let _overlaySig = "";
+let chartToolbarInit = false;
+let indicators = loadIndicatorState();
+let chartInterval = "1min";
+let lastFocus: FocusMsg | null = null;
+let _lastFocusKey = "";
+
+// Логарифмическая шкала цен (включена по умолчанию — при смене акций с разной
+// ценой 200₽→2500₽ и картинка, и скачки визуально сглаживаются).
+let priceScaleLog = true;
+{
+  try { priceScaleLog = localStorage.getItem("deeptrading_price_scale_log") !== "0"; } catch { }
+}
+
+function loadIndicatorState(): { sma: boolean; ema: boolean; bb: boolean; rsi: boolean; macd: boolean } {
+  const fallback = { sma: true, ema: false, bb: false, rsi: false, macd: true };
+  try {
+    const raw = localStorage.getItem("deeptrading_indicators");
+    if (!raw) return fallback;
+    return { ...fallback, ...(JSON.parse(raw) as Partial<typeof fallback>) };
+  } catch { return fallback; }
+}
+
+function sendEmbedFocus(msg: Omit<FocusMsg, "type">): void {
+  const frame = document.getElementById("bot-chart-frame") as HTMLIFrameElement | null;
+  if (!frame?.contentWindow) return;
+  frame.contentWindow.postMessage({ type: "focus", ...msg }, "*");
+}
+
+function emTimeLabel(t: unknown): string {
+  let d: Date;
+  if (typeof t === "number") d = new Date(t * 1000);
+  else if (t && typeof t === "object") {
     const b = t as { year: number; month: number; day: number };
-    return new Date(Date.UTC(b.year, b.month - 1, b.day));
+    d = new Date(Date.UTC(b.year, b.month - 1, b.day));
+  } else return String(t);
+  return d.toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function emTickMark(t: unknown): string {
+  // Тики по шкале времени: lightweight-charts рисует их из UTC — конвертим в МСК.
+  if (t === " " || t === "," || t == null) return String(t ?? "");
+  if (typeof t === "number") {
+    return new Date(t * 1000).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit" });
   }
-  return null;
+  if (typeof t === "object") {
+    const b = t as { year: number; month: number; day: number };
+    return new Date(Date.UTC(b.year, b.month - 1, b.day))
+      .toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit" });
+  }
+  return String(t);
 }
 
-function axisTickLabel(t: Time, type: TickMarkType): string {
-  try {
-    const d = _mskDateOf(t);
-    if (!d) return String(t);
-    switch (type) {
-      case TickMarkType.Year: return _dtMSKYear.format(d);
-      case TickMarkType.Month: return _dtMSKMonth.format(d);
-      case TickMarkType.DayOfMonth: return _dtMSKDay.format(d);
-      case TickMarkType.TimeWithSeconds: return _dtMSKSec.format(d);
-      case TickMarkType.Time:
-      default: return _dtMSK.format(d);
+function emEpoch(iso?: string): number | null {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime();
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+function emCandleTimes(a: AnalysisDto): UTCTimestamp[] {
+  return a.candles.map((c) => Math.floor(new Date(c.ts).getTime() / 1000) as UTCTimestamp);
+}
+
+function currentViewState(): { centerSec?: number; halfBars?: number } {
+  if (!emChart) return {};
+  const vr = emChart.timeScale().getVisibleRange();
+  if (!vr) return {};
+  const from = typeof vr.from === "number" ? vr.from : null;
+  const to = typeof vr.to === "number" ? vr.to : null;
+  if (from == null || to == null) return {};
+  const lr = emChart.timeScale().getVisibleLogicalRange();
+  const halfBars = lr ? Math.max(20, Math.round(Math.max(1, lr.to - lr.from) / 2)) : 50;
+  return { centerSec: Math.floor((from + to) / 2), halfBars };
+}
+
+function _applyViewCenter(centerSec?: number, halfBars?: number, times?: number[]): void {
+  if (!emChart) return;
+  const tsArr = times ?? (lastAnalysis ? emCandleTimes(lastAnalysis) : []);
+  if (!tsArr.length) { emChart.timeScale().fitContent(); return; }
+  if (centerSec == null) { emChart.timeScale().fitContent(); return; }
+  let best = 0; let bd = Infinity;
+  for (let i = 0; i < tsArr.length; i++) {
+    const d = Math.abs(tsArr[i] - centerSec);
+    if (d < bd) { bd = d; best = i; }
+  }
+  const half = halfBars != null ? Math.max(1, halfBars) : 20;
+  const fromIdx = Math.max(0, best - half);
+  const toIdx = Math.min(tsArr.length - 1, best + half);
+  emChart.timeScale().setVisibleRange({ from: tsArr[fromIdx] as UTCTimestamp, to: tsArr[toIdx] as UTCTimestamp });
+}
+
+function _applySeriesData(a: AnalysisDto): void {
+  if (!emChart || !emSeries || !emVolume) return;
+  const times = emCandleTimes(a);
+  emSeries.setData(a.candles.map((c, i) => ({
+    time: times[i], open: c.open, high: c.high, low: c.low, close: c.close,
+  })));
+  emVolume.setData(a.candles.map((c, i) => ({
+    time: times[i], value: c.volume,
+    color: c.close >= c.open ? "rgba(38,166,154,0.45)" : "rgba(239,83,80,0.45)",
+  })));
+  const linePts = (arr: Array<number | null> | undefined): LineData[] => {
+    if (!arr) return [];
+    const out: LineData[] = [];
+    for (let i = 0; i < a.candles.length; i++) {
+      const v = arr[i];
+      if (v != null) out.push({ time: times[i], value: v });
     }
-  } catch { return String(t); }
+    return out;
+  };
+  emSma?.setData(linePts(a.sma20));
+  emEma?.setData(linePts(a.ema50));
+  emBbU?.setData(linePts(a.bb_upper));
+  emBbL?.setData(linePts(a.bb_lower));
+  const macdHist: HistogramData[] = [];
+  const macdLine: LineData[] = [];
+  const signalLine: LineData[] = [];
+  const rsiLine: LineData[] = [];
+  for (let i = 0; i < a.candles.length; i++) {
+    const m = a.macd.macd[i];
+    if (m != null) macdLine.push({ time: times[i], value: m });
+    const sg = a.macd.signal[i];
+    if (sg != null) signalLine.push({ time: times[i], value: sg });
+    const h = a.macd.hist[i];
+    if (h != null) {
+      macdHist.push({ time: times[i], value: h, color: h >= 0 ? "rgba(38,166,154,0.55)" : "rgba(239,83,80,0.55)" });
+    }
+    const rv = a.rsi?.[i];
+    if (rv != null) rsiLine.push({ time: times[i], value: rv });
+  }
+  emMacdLine?.setData(macdLine);
+  emSigLine?.setData(signalLine);
+  emMacdHist?.setData(macdHist);
+  emRsi?.setData(rsiLine);
 }
 
-function updateLegend(idx: number | null) {
-  if (!analysis || analysis.candles.length === 0) return;
-  const i = idx == null ? analysis.candles.length - 1 : Math.min(idx, analysis.candles.length - 1);
-  const c = analysis.candles[i];
-  const prevClose = i > 0 ? analysis.candles[i - 1].close : c.open;
-  const changePct = ((c.close - prevClose) / prevClose) * 100;
+function updateEmLegend(time: Time | null): void {
+  const el = $("ohlc-legend");
+  if (!el || !lastAnalysis || !lastAnalysis.candles.length) return;
+  let idx = lastAnalysis.candles.length - 1;
+  if (time != null) {
+    const t = Number(time) * 1000;
+    for (let i = 0; i < lastAnalysis.candles.length; i++) {
+      const ct = new Date(lastAnalysis.candles[i].ts).getTime();
+      if (ct === t) { idx = i; break; }
+      if (ct > t) { idx = Math.max(0, i - 1); break; }
+    }
+  }
+  const c = lastAnalysis.candles[idx];
+  const prevClose = idx > 0 ? lastAnalysis.candles[idx - 1].close : c.open;
+  const changePct = prevClose !== 0 ? ((c.close - prevClose) / prevClose) * 100 : 0;
   const dirClass = changePct >= 0 ? "up" : "down";
   const sign = changePct >= 0 ? "+" : "";
-
-  document.getElementById("ohlc-legend")!.innerHTML = [
+  const priceFmt = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const volFmt = new Intl.NumberFormat("ru-RU", { notation: "compact" });
+  el.innerHTML = [
     `<span class="lbl">O</span> <span class="val">${priceFmt.format(c.open)}</span>`,
     `<span class="lbl">H</span> <span class="val">${priceFmt.format(c.high)}</span>`,
     `<span class="lbl">L</span> <span class="val">${priceFmt.format(c.low)}</span>`,
@@ -620,53 +2857,861 @@ function updateLegend(idx: number | null) {
   ].join(" ");
 }
 
-function setupTooltip() {
-  if (!refs) return;
-  const tooltipEl = document.getElementById("tooltip")!;
-  const wrap = document.querySelector(".chart-wrap")!;
+function _applyOverlay(msg: FocusMsg): void {
+  if (!emSeries) return;
+  const trade = msg.trade ?? null;
+  const sig = JSON.stringify([msg.trades ?? [], trade]);
+  if (sig === _overlaySig) return; // ничего не изменилось — не дёргаем маркеры/линии
+  _overlaySig = sig;
+  const markers: SeriesMarker<Time>[] = [];
+  for (const t of msg.trades ?? []) {
+    const en = emEpoch(t.entry_time);
+    const ex = emEpoch(t.exit_time);
+    const up = t.side !== "SHORT";
+    if (en != null) {
+      markers.push({ time: en as UTCTimestamp, position: "belowBar", color: up ? "#00d9a0" : "#ff5d6c", shape: up ? "arrowUp" : "arrowDown", text: up ? "L" : "S" });
+    }
+    if (ex != null) {
+      markers.push({ time: ex as UTCTimestamp, position: "aboveBar", color: up ? "#ff5d6c" : "#00d9a0", shape: up ? "arrowDown" : "arrowUp", text: "X" });
+    }
+  }
+  emMarkers?.setMarkers(markers.slice(-300));
 
-  refs.chart.timeScale().subscribeVisibleLogicalRangeChange(onVisibleRangeChanged);
+  emLines.forEach((l) => emSeries!.removePriceLine(l));
+  emLines = [];
+  const tr = msg.trade;
+  const line = (price: number | undefined, color: string, title: string) => {
+    if (price == null || !Number.isFinite(price)) return;
+    emLines.push(emSeries!.createPriceLine({ price, color, lineWidth: 1, lineStyle: LineStyle.Dashed, title }));
+  };
+  line(tr?.entry_price, "#f4b942", `${msg.ticker ?? ""} Вход ${tr?.entry_price?.toFixed(2) ?? ""}`);
+  line(tr?.stop_loss, "#ff5d6c", `SL ${tr?.stop_loss?.toFixed(2) ?? ""}`);
+  line(tr?.take_profit, "#00d9a0", `TP ${tr?.take_profit?.toFixed(2) ?? ""}`);
+}
 
+function _clearSeries(): void {
+  emSeries?.setData([]);
+  emVolume?.setData([]);
+  emSma?.setData([]);
+  emEma?.setData([]);
+  emBbU?.setData([]);
+  emBbL?.setData([]);
+  emMacdLine?.setData([]);
+  emSigLine?.setData([]);
+  emMacdHist?.setData([]);
+  emRsi?.setData([]);
+}
+
+async function loadEmbedChart(msg: FocusMsg): Promise<void> {
+  const figi = msg.figi;
+  if (!figi || !emChart || !emSeries) return;
+  lastFocus = msg;
+  const firstShow = figi !== _plottedFigi;
+  _plottedFigi = figi;
+  if (firstShow) skladOnChartFigiChange(figi);
+  const focusKey = figi + "|" + (msg.centerSec ?? "");
+  const keepView = !firstShow && focusKey === _lastFocusKey;
+  _lastFocusKey = focusKey;
+  console.debug("[chart] focus", "figi=" + figi, "centerSec=" + (msg.centerSec ?? "-"), "halfBars=" + (msg.halfBars ?? "-"), "trades=" + (msg.trades?.length ?? 0), "firstShow=" + firstShow, "keepView=" + keepView);
+  const tickerEl = $("symbol-ticker");
+  if (tickerEl) tickerEl.textContent = msg.ticker || figi;
+  // Фокус на конкретной сделке/позиции: окно свечей должно ДОХОДИТЬ до нужной даты,
+  // иначе (лимит 2000 баров при 1м ≈ 2 дня) центр уезжает на самый старый бар.
+  const ivSec = _IV_SEC[chartInterval] ?? 60;
+  const focusBuffer = msg.centerSec != null
+    ? Math.max(12 * ivSec, (msg.halfBars ?? 100) * ivSec * 2)
+    : null;
+  let a: AnalysisDto | null = null;
+  try {
+    a = msg.centerSec != null && focusBuffer != null
+      ? await fetchAnalysis(figi, chartInterval, 5000, new Date((msg.centerSec + focusBuffer) * 1000).toISOString())
+      : await fetchAnalysis(figi, chartInterval, 2000);
+  } catch (err) {
+    console.warn("analysis error", err);
+    a = null;
+  }
+  if (!a || !a.candles || !a.candles.length) {
+    // Fallback: свечи без индикаторов.
+    _clearSeries();
+    try {
+      const res = await fetch(`${API}/api/candles/${encodeURIComponent(figi)}?interval_name=${encodeURIComponent(chartInterval)}&limit=5000`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      const candles: Array<{ ts: string; open: number; high: number; low: number; close: number }> = json.candles ?? [];
+      emSeries.setData(candles.map((c) => ({
+        time: Math.floor(new Date(c.ts).getTime() / 1000) as UTCTimestamp,
+        open: c.open, high: c.high, low: c.low, close: c.close,
+      })));
+      lastAnalysis = null;
+      const nm = $("symbol-name");
+      if (nm) nm.textContent = "";
+      updateEmLegend(null);
+      _resetPriceScale(firstShow);
+      _applyOverlay(msg);
+      if (!keepView) {
+        _applyViewCenter(msg.centerSec, msg.halfBars, candles.map((c) => Math.floor(new Date(c.ts).getTime() / 1000)));
+      }
+    } catch (err2) {
+      console.warn("embedded candles error", err2);
+      _resetPriceScale(firstShow);
+      _applyOverlay(msg);
+      if (!keepView) _applyViewCenter(msg.centerSec, msg.halfBars);
+    }
+    return;
+  }
+  lastAnalysis = a;
+  _applySeriesData(a);
+  if (tickerEl) tickerEl.textContent = a.ticker || msg.ticker || figi;
+  const nm = $("symbol-name");
+  if (nm) nm.textContent = a.name || "";
+  updateEmLegend(null);
+  _resetPriceScale(firstShow);
+  _applyOverlay(msg);
+  if (!keepView) _applyViewCenter(msg.centerSec, msg.halfBars);
+}
+
+// При смене ИНСТРУМЕНТА сбрасываем прайс-шкалу: цены другой акции (например 2500₽
+// вместо 200₽) иначе остаются за пределами экрана.
+function _resetPriceScale(firstShow: boolean): void {
+  if (!firstShow || !emChart || !emSeries) return;
+  emChart.timeScale().fitContent();
+  const ps = emSeries.priceScale();
+  ps.applyOptions({ autoScale: false });
+  ps.applyOptions({ autoScale: true });
+}
+
+function syncIndicatorVisibility(): void {
+  emSma?.applyOptions({ visible: indicators.sma });
+  emEma?.applyOptions({ visible: indicators.ema });
+  emBbU?.applyOptions({ visible: indicators.bb });
+  emBbL?.applyOptions({ visible: indicators.bb });
+}
+
+function applyIndicators(): void {
+  try { localStorage.setItem("deeptrading_indicators", JSON.stringify(indicators)); } catch { }
+  const wantPane = indicators.macd || indicators.rsi;
+  if (wantPane !== emOscPane) {
+    rebuildEmbedChart();
+  } else {
+    syncIndicatorVisibility();
+    if (wantPane && emChart) {
+      try {
+        const panes = emChart.panes();
+        if (panes[1]) {
+          panes[0].setStretchFactor(3);
+          panes[1].setStretchFactor(2);
+        }
+      } catch { /* panes API может отсутствовать */ }
+    }
+  }
+}
+
+function rebuildEmbedChart(): void {
+  if (!emChart) return;
+  const logical = emChart.timeScale().getVisibleLogicalRange();
+  const msg = lastFocus;
+  emChart.remove();
+  emChart = null;
+  emSeries = null;
+  emMarkers = null;
+  emVolume = null; emSma = null; emEma = null; emBbU = null; emBbL = null;
+  emMacdHist = null; emMacdLine = null; emSigLine = null; emRsi = null;
+  startChart();
+  if (lastAnalysis) {
+    _applySeriesData(lastAnalysis);
+    updateEmLegend(null);
+  }
+  if (msg?.figi) _applyOverlay(msg);
+  const ch = startChart();
+  if (logical && ch) ch.timeScale().setVisibleLogicalRange(logical);
+}
+
+function initChartToolbar(): void {
+  if (chartToolbarInit) return;
+  chartToolbarInit = true;
+  try { chartInterval = localStorage.getItem("deeptrading_chart_interval") || "1min"; } catch { }
+  document.querySelectorAll<HTMLButtonElement>("#ct-intervals .ct-int").forEach((b) => {
+    const v = b.dataset.int;
+    b.classList.toggle("active", v === chartInterval);
+    b.addEventListener("click", () => {
+      if (!v || v === chartInterval) return;
+      chartInterval = v;
+      try { localStorage.setItem("deeptrading_chart_interval", chartInterval); } catch { }
+      document.querySelectorAll<HTMLButtonElement>("#ct-intervals .ct-int").forEach((x) => x.classList.toggle("active", x.dataset.int === v));
+      if (lastFocus?.figi) void loadEmbedChart({ ...lastFocus, ...currentViewState() });
+    });
+  });
+  document.querySelectorAll<HTMLInputElement>("#indicators-menu input[data-ind]").forEach((box) => {
+    const k = box.dataset.ind as keyof typeof indicators;
+    box.checked = indicators[k] ?? false;
+    box.addEventListener("change", () => {
+      (indicators as Record<string, boolean>)[k] = box.checked;
+      applyIndicators();
+    });
+  });
+  const btnInd = $("btn-indicators");
+  const menu = $("indicators-menu");
+  if (btnInd && menu) {
+    btnInd.addEventListener("click", (e) => {
+      e.stopPropagation();
+      menu.classList.toggle("hidden");
+    });
+    document.addEventListener("click", (e) => {
+      if (!menu.contains(e.target as Node)) menu.classList.add("hidden");
+    });
+  }
+  $("btn-sync")?.addEventListener("click", () => { if (lastFocus?.figi) void loadEmbedChart({ ...lastFocus, ...currentViewState() }); });
+  const btnLog = $("btn-logscale") as HTMLButtonElement | null;
+  if (btnLog) {
+    const sync = (): void => {
+      btnLog.classList.toggle("active", priceScaleLog);
+      btnLog.textContent = priceScaleLog ? "лог" : "лин";
+      emSeries?.priceScale().applyOptions({ mode: priceScaleLog ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal });
+    };
+    btnLog.addEventListener("click", () => {
+      priceScaleLog = !priceScaleLog;
+      try { localStorage.setItem("deeptrading_price_scale_log", priceScaleLog ? "1" : "0"); } catch { }
+      sync();
+    });
+    sync();
+  }
+}
+
+function onEmbedMessage(e: MessageEvent): void {
+  const d = e.data as FocusMsg;
+  if (!d || d.type !== "focus") return;
+  void loadEmbedChart(d);
+}
+
+// ——————————————————————————————————————————————————————————————————————
+// Склад: каталог блоков + конструктор (перенос из оригинала Deeptrading).
+// Рендер плашек стратегий, назначение ролей, расчёт сигналов выбранных
+// стратегий на текущей акции/ТФ и отрисовка стрелок на графике.
+// ——————————————————————————————————————————————————————————————————————
+
+const SKLAD_TAG_BY_STRATEGY: Record<string, string> = {};
+let skladCards: StrategyCardDto[] = [];
+const skladActiveRuns = new Map<string, { runId: string; figi: string; signals: { ts: string; side: string }[]; params: Record<string, number> }>();
+
+let skladExitPolicies: Array<{ id: string; label: string; params_schema: Record<string, { default: number; min?: number; max?: number }> }> = [];
+let skladSelExit = { id: "fixed_sl_tp", params: { stop_pct: 1, target_pct: 2 } } as { id: string; params: Record<string, number> };
+let skladSelectedSlot: string | null = null;
+
+const SKLAD_ROLE_META: Record<string, { title: string; cls: string; hint: string }> = {
+  bias: { title: "BIAS · контекст", cls: "blk-blue", hint: "направление старшего ТФ" },
+  setup: { title: "SETUP · сетап", cls: "blk-purple", hint: "где ищем вход" },
+  entry: { title: "ENTRY · триггер", cls: "blk-green", hint: "точка входа" },
+};
+
+let skladInit = false;
+
+function skladStatus(text: string): void {
+  const el = document.getElementById("sklad-status");
+  if (el) el.textContent = text;
+}
+
+function skladFigi(): string {
+  return lastFocus?.figi ?? _plottedFigi ?? "";
+}
+
+function skladParamsOf(card: StrategyCardDto): Record<string, number> {
+  const params: Record<string, number> = {};
+  document.querySelectorAll<HTMLInputElement>(`#params-${CSS.escape(card.id)} input[data-key]`).forEach((inp) => {
+    params[inp.dataset.key!] = Number(inp.value);
+  });
+  return params;
+}
+
+function skladVisibleWindowSec(): { from: number; to: number } | null {
+  if (!emChart) return null;
+  const vr = emChart.timeScale().getVisibleRange();
+  if (!vr) return null;
+  const from = typeof vr.from === "number" ? vr.from : null;
+  const to = typeof vr.to === "number" ? vr.to : null;
+  if (from == null || to == null) return null;
+  return { from, to };
+}
+
+function skladDrawSignals(): void {
+  if (!emMarkersSig) return;
+  const show = (document.getElementById("cb-markers") as HTMLInputElement | null)?.checked ?? true;
+  if (!show) {
+    emMarkersSig.setMarkers([]);
+    return;
+  }
+  const figi = skladFigi();
+  const markers: SeriesMarker<Time>[] = [];
+  for (const [sid, run] of skladActiveRuns) {
+    if (run.figi !== figi) continue;
+    const tag = SKLAD_TAG_BY_STRATEGY[sid] ?? sid.slice(0, 3).toUpperCase();
+    for (const s of run.signals) {
+      const t = emEpoch(s.ts);
+      if (t == null) continue;
+      markers.push({
+        time: t as UTCTimestamp,
+        position: s.side === "BUY" ? "belowBar" : "aboveBar",
+        color: s.side === "BUY" ? "#00d9a0" : "#ff5d6c",
+        shape: s.side === "BUY" ? "arrowUp" : "arrowDown",
+        text: tag,
+      });
+    }
+  }
+  markers.sort((a, b) => Number(a.time) - Number(b.time));
+  emMarkersSig.setMarkers(markers.slice(-300));
+}
+
+function skladRenderConstructor(): void {
+  const holder = document.getElementById("pipe-holder");
+  if (!holder) return;
+  const slotsHtml = ["bias", "setup", "entry"].map((role) => {
+    const meta = SKLAD_ROLE_META[role];
+    const members = [...skladActiveRuns.entries()].filter(([sid]) =>
+      document.querySelector<HTMLSelectElement>(`#role-${CSS.escape(sid)}`)?.value === role);
+    const list = members.map(([sid]) => {
+      const card = skladCards.find((c) => c.id === sid);
+      return `<div class="ps-item" data-sid="${sid}" data-role="${role}">
+        <b>${card?.name ?? sid}</b>
+      </div>`;
+    }).join("");
+    return `<div class="pipe-slot ${meta.cls}${skladSelectedSlot === role ? " sel" : ""}" data-slot="${role}">
+      <div class="ps-title">${meta.title}<span class="badge">${members.length}</span></div>
+      <div class="ps-sub">${meta.hint}</div>
+      <div class="ps-items">${list || `<div class="mini-hint">пусто — отметьте стратегии в каталоге и назначьте роль</div>`}</div>
+    </div><div class="pipe-arrow">↓</div>`;
+  }).join("");
+
+  const exitSchema = skladExitPolicies.find((e) => e.id === skladSelExit.id)?.params_schema ?? {};
+  const exitParamsHtml = Object.entries(exitSchema).map(([k, spec]) =>
+    `<label class="mini-hint">${k} <input type="number" data-exit-key="${k}" value="${skladSelExit.params[k] ?? spec.default}" step="any" style="width:64px"></label>`
+  ).join(" ");
+  const pipe = `${slotsHtml}
+    <div class="pipe-slot blk-gray${skladSelectedSlot === "position" ? " sel" : ""}" data-slot="position">
+      <div class="ps-title">POSITION <span class="qmark" title="Риск-модуль и мультипозиционность в движке не реализованы">?</span></div>
+      <div class="ps-sub">qty=1 · одна позиция на FIGI · mode both</div>
+    </div>
+    <div class="pipe-slot blk-red${skladSelectedSlot === "exit" ? " sel" : ""}" data-slot="exit" style="margin-top:6px">
+      <div class="ps-title">EXIT
+        <select id="exit-sel">${skladExitPolicies.map((e) => `<option value="${e.id}"${e.id === skladSelExit.id ? " selected" : ""}>${e.label}</option>`).join("")}</select>
+      </div>
+      <div id="exit-params" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px">${exitParamsHtml}</div>
+    </div>
+    <div class="pipe-slot blk-orange" style="margin-top:6px">
+      <div class="ps-title">FILTERS <span class="qmark" title="Фильтры (VWAP side, ADX, ATR pct, volume ratio…) движком не исполняются">?</span></div>
+      <div class="mini-hint">session time / cooldown / min hold уже работают (сессия, кулдаун, min_hold_bars)</div>
+    </div>`;
+
+  holder.innerHTML = pipe;
+
+  holder.querySelectorAll<HTMLElement>(".pipe-slot").forEach((el) =>
+    el.addEventListener("click", () => { skladSelectedSlot = el.dataset.slot!; skladRenderConstructor(); }));
+
+  const exSel = holder.querySelector<HTMLSelectElement>("#exit-sel");
+  exSel?.addEventListener("change", () => {
+    const e = skladExitPolicies.find((x) => x.id === exSel.value);
+    skladSelExit = { id: exSel.value, params: Object.fromEntries(Object.entries(e?.params_schema ?? {}).map(([k, sp]) => [k, sp.default])) };
+    skladRenderConstructor();
+  });
+  holder.querySelectorAll<HTMLInputElement>("input[data-exit-key]").forEach((inp) =>
+    inp.addEventListener("change", () => { skladSelExit.params[inp.dataset.exitKey!] = Number(inp.value); }));
+}
+
+let _ensLiveCfg: EnsembleConfig | null = null;
+
+function skladRenderCatalog(cards: StrategyCardDto[], liveCfg: EnsembleConfig | null = null): void {
+  const wrap = document.getElementById("strategy-cards");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const live = liveCfg != null;
+  const orch = live && liveCfg._all_strategies ? new Set(liveCfg._all_strategies) : null;
+  const setups = live ? (liveCfg.setups ?? []) : [];
+  const setupOf = (id: string) => setups.find((s) => s.strategy_id === id);
+  const shown = live && orch ? cards.filter((c) => orch.has(c.id)) : cards;
+  for (const c of shown) {
+    SKLAD_TAG_BY_STRATEGY[c.id] = `${c.name.slice(0, 3).toUpperCase()}`;
+    const el = document.createElement("div");
+    el.className = "scard" + (live ? " scard-live" : "");
+    el.dataset.sid = c.id;
+    const setup = setupOf(c.id);
+    const paramsHtml = Object.entries(c.params_schema)
+      .map(([key, spec]) => {
+        const val = ((live && setup?.params?.[key] != null) ? setup.params[key] : spec.default);
+        const ro = live ? " readonly" : "";
+        return `<label>${key}<input type="number" data-key="${key}" value="${val}"` +
+          ` min="${spec.min ?? ""}" max="${spec.max ?? ""}" step="any"${ro} /></label>`;
+      })
+      .join("");
+    const roleHtml = live ? "" : `<label class="scard-role">Роль
+        <select id="role-${CSS.escape(c.id)}">
+          <option value="setup">SETUP</option>
+          <option value="bias">BIAS</option>
+          <option value="entry">ENTRY</option>
+        </select></label>`;
+    // live: галка = enabled в конфиге оркестра (без localStorage).
+    let checked = false;
+    if (live) {
+      checked = !!setup?.enabled;
+    } else {
+      try { checked = localStorage.getItem(`sklad_check:${c.id}`) !== "0"; } catch { }
+    }
+    el.innerHTML = `
+      <label class="scard-head">
+        <input type="checkbox" data-sid="${c.id}" ${checked ? "checked" : ""} />
+        <span class="scard-name">${c.name}</span>
+        <span class="badge fam-${c.family}">${c.family}</span>
+        <span class="wave-badge">W${c.wave}</span>
+        ${live ? `<span class="badge live-badge" title="Функция живого оркестра">live</span>` : `<button class="scard-reset" data-reset="${c.id}" title="Сбросить параметры к дефолту">↺</button>`}
+      </label>
+      <div class="scard-rules">▲ ${c.long_rule}<br />▼ ${c.short_rule}</div>
+      <div class="scard-params" id="params-${CSS.escape(c.id)}" data-figi="${skladFigi()}">${paramsHtml}</div>
+      ${roleHtml}
+    `;
+    if (!live) {
+      el.querySelectorAll<HTMLInputElement>(".scard-params input").forEach((inp) =>
+        inp.addEventListener("change", () => {
+          try { localStorage.setItem(`sklad_p:${c.id}:${inp.dataset.key!}`, inp.value); } catch { }
+        }));
+      el.querySelector<HTMLSelectElement>(`#role-${CSS.escape(c.id)}`)?.addEventListener("change", (ev) => {
+        try { localStorage.setItem(`sklad_role:${c.id}`, (ev.target as HTMLSelectElement).value); } catch { }
+        skladRenderConstructor();
+      });
+      el.querySelector<HTMLButtonElement>(".scard-reset")?.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        for (const key of Object.keys(c.params_schema)) {
+          try { localStorage.removeItem(`sklad_p:${c.id}:${key}`); } catch { }
+        }
+        el.querySelectorAll<HTMLInputElement>(".scard-params input").forEach((inp) => {
+          inp.value = String(c.params_schema[inp.dataset.key!]?.default ?? inp.value);
+        });
+      });
+    }
+    el.querySelector(".scard-head")?.addEventListener("click", (ev) => {
+      const target = ev.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "BUTTON") return;
+      const holder = document.getElementById("block-params");
+      if (holder) {
+        holder.innerHTML = `<b>${c.name}</b> <span class="badge fam-${c.family}">${c.family}</span> <span class="wave-badge">W${c.wave}</span>
+          <div class="mini-hint" style="margin:4px 0">▲ ${c.long_rule}<br />▼ ${c.short_rule}</div>
+          ${live ? `<div class="mini-hint" style="margin:4px 0">оркестр: ${setup?.enabled ? "включена" : "выключена"} · tf ${setup?.tf ?? "—"}</div>` : ""}`;
+      }
+    });
+    const cb = el.querySelector<HTMLInputElement>("input[type=checkbox]")!;
+    cb.addEventListener("change", (ev) => {
+      const on = (ev.target as HTMLInputElement).checked;
+      el.classList.toggle("checked", on);
+      if (live) {
+        void skladToggleLive(c.id, on);
+      } else {
+        try { localStorage.setItem(`sklad_check:${c.id}`, on ? "1" : "0"); } catch { }
+        if (!on) skladActiveRuns.delete(c.id);
+        skladDrawSignals();
+        skladRenderConstructor();
+      }
+    });
+    if (checked) el.classList.add("checked");
+    wrap.appendChild(el);
+  }
+}
+
+async function skladToggleLive(sid: string, on: boolean): Promise<void> {
+  const cfg = _ensLiveCfg;
+  if (!cfg) { skladStatus("Конфиг ансамбля ещё не загружен — подождите"); return; }
+  const card = skladCards.find((c) => c.id === sid);
+  let setups = (cfg.setups ?? []).map((s) => s.strategy_id === sid ? { ...s, enabled: on } : s);
+  if (!setups.some((s) => s.strategy_id === sid)) {
+    const params: Record<string, number> = {};
+    if (card) for (const [k, spec] of Object.entries(card.params_schema)) params[k] = Number(spec.default);
+    setups.push({ strategy_id: sid, enabled: on, tf: cfg.entry_tf || "10min", params });
+  }
+  try {
+    const r = await botEnsemblePatch({ setups });
+    _ensLiveCfg = r.config;
+    skladRenderCatalog(skladCards, r.config);
+    skladRenderConstructor();
+    skladStatus(`Оркестр: «${sid}» ${on ? "включена" : "выключена"} — применено стратегий: ${r.applied_strategies}`);
+  } catch (e) {
+    skladRenderCatalog(skladCards, cfg);
+    skladStatus("Оркестр: не применить — " + (e instanceof Error ? e.message : String(e)));
+  }
+}
+
+async function skladRunSelected(): Promise<void> {
+  const btn = document.getElementById("btn-run-strategies") as HTMLButtonElement | null;
+  const figi = skladFigi();
+  if (!figi) {
+    skladStatus("Нет акции на графике — откройте инструмент в каталоге");
+    return;
+  }
+  const checked = [...document.querySelectorAll<HTMLInputElement>("#strategy-cards input:checked")];
+  if (checked.length === 0) {
+    skladStatus("Не выбрано ни одной стратегии");
+    return;
+  }
+  if (btn) btn.classList.add("busy");
+  let ok = 0;
+  try {
+    for (const box of checked) {
+      const card = skladCards.find((c) => c.id === box.dataset.sid);
+      if (!card) continue;
+      const params = skladParamsOf(card);
+      skladStatus(`Расчёт ${card.name} (${chartInterval})…`);
+      const win = skladVisibleWindowSec();
+      const res = await computeSignals(figi, chartInterval, card.id, params, win?.from, win?.to);
+      skladActiveRuns.set(card.id, { runId: res.run_id, figi, signals: res.signals as { ts: string; side: string }[], params });
+      ok += 1;
+      skladStatus(`${card.name}: ${res.count} сигналов${res.cached ? " (из кеша)" : ""}`);
+    }
+    skladDrawSignals();
+    skladRenderConstructor();
+    if (ok > 0) skladStatus(`Готово: ${ok} стратегий рассчитано, стрелки на графике`);
+  } catch (e) {
+    skladStatus(e instanceof Error ? e.message : String(e));
+  } finally {
+    if (btn) btn.classList.remove("busy");
+  }
+}
+
+function skladInitPanel(): void {
+  if (skladInit) return;
+  skladInit = true;
+  document.getElementById("btn-run-strategies")?.addEventListener("click", () => void skladRunSelected());
+  document.getElementById("cb-markers")?.addEventListener("change", skladDrawSignals);
+  document.getElementById("btn-gates-refresh")?.addEventListener("click", () => void skladLoadGates());
+  document.getElementById("btn-logic-refresh")?.addEventListener("click", () => void skladLoadLogic());
+  document.getElementById("btn-sklad-clear")?.addEventListener("click", () => {
+    skladCards.forEach((c) => {
+      try { localStorage.setItem(`sklad_check:${c.id}`, "0"); } catch { }
+      const el = document.querySelector<HTMLElement>(`.scard[data-sid="${CSS.escape(c.id)}"]`);
+      const cb = el?.querySelector<HTMLInputElement>("input[type=checkbox]");
+      if (cb) cb.checked = false;
+      el?.classList.remove("checked");
+    });
+    skladActiveRuns.clear();
+    skladDrawSignals();
+    skladRenderConstructor();
+    skladStatus("Каталог очищен");
+  });
+  fetchCatalog()
+    .then((cat) => {
+      skladCards = cat.strategies;
+      return botEnsembleConfig().then((cfg) => {
+        _ensLiveCfg = cfg;
+        skladRenderCatalog(cat.strategies, cfg);
+        skladExitPolicies = ((cat as unknown as { exit_policies?: typeof skladExitPolicies }).exit_policies ?? skladExitPolicies);
+        skladRenderConstructor();
+        const on = (cfg.setups ?? []).filter((s) => s.enabled).length;
+        const total = (cfg._all_strategies ?? cfg.setups ?? []).length;
+        skladStatus(`Live-ансамбль: ${on} из ${total} функций включено — галка = живой оркестр, клик применяет сразу`);
+      });
+    })
+    .catch((e) => skladStatus(e instanceof Error ? e.message : String(e)));
+  void skladLoadGates();
+  void skladLoadLogic();
+}
+
+function skladOnChartFigiChange(figi: string): void {
+  for (const [sid, run] of skladActiveRuns) {
+    if (run.figi !== figi) skladActiveRuns.delete(sid);
+  }
+  skladDrawSignals();
+}
+
+// ===== Гейты входа (аудит конвейера бота) =====
+
+const GATE_STAGE_TITLES: Record<string, string> = {
+  signal: "Сигнал (внутри ансамбля)",
+  pre_order: "До заявки (свеча)",
+  time: "Время / сессии / риск дня",
+  trend: "Тренд / таймфреймы",
+  portfolio: "Портфель / позиции",
+  sizing: "Сайзинг",
+  approval: "AI-гейт",
+};
+
+function skladRenderGates(g: GatesReport): void {
+  const cont = document.getElementById("gates-container");
+  if (!cont) return;
+  const order = (g.order ?? []).length ? g.order : Object.keys(g.by_stage ?? {});
+  const stages = Object.keys(g.by_stage ?? {});
+  const shown = order.filter((s) => stages.includes(s));
+  for (const s of shown) {
+    const items = (g.categories ?? {})[s];
+    if (!items || !items.length) continue;
+    const meta = g.by_stage[s];
+    const chips = items.map((it) => {
+      const le = !!it.logical_enabled;
+      const okCls = le ? "ok" : "fail";
+      const stateCh = le ? "✓" : "✗";
+      const flag = it.flag_value !== null && it.flag_value !== undefined && it.flag_value !== ""
+        ? ` <span class="mini-hint">=${escFlag(it.flag_value)}</span>` : "";
+      const tools = it.toggleable
+        ? `<label class="gate-switch" title="${le ? "Выключить" : "Включить"}">
+            <input type="checkbox" class="g-toggle" data-key="${esc(it.key)}" ${le ? "checked" : ""}>
+            <span class="g-switch-slider"></span></label>`
+        : `<span class="g-fixed" title="Структурный — всегда на пути заявки">пост.</span>`;
+      return `<div class="gate-chip ${okCls}" title="${esc(it.desc || "")}">
+        <span class="g-state">${stateCh}</span>
+        <div><span class="g-title">${esc(it.title)}</span>${flag}
+        <div class="g-desc">${esc(it.key)}${it.rejects ? ` · отказов ${it.rejects}` : ""}</div></div>
+        <div class="g-tools">${tools}</div>
+      </div>`;
+    }).join("");
+    cont.insertAdjacentHTML("beforeend",
+      `<div class="gate-stage">
+        <div class="gate-stage-title">${esc(GATE_STAGE_TITLES[s] ?? s)}
+          <span class="stage-count">${meta.enabled}/${meta.gates} · ${meta.rejects} отказов</span></div>
+        <div class="gate-chips">${chips}</div>
+      </div>`);
+  }
+  if (!shown.length) cont.innerHTML = `<div class="mini-hint">Гейты пока не собраны (бот не запущен)</div>`;
+  cont.querySelectorAll<HTMLInputElement>("input[type=checkbox].g-toggle").forEach((cb) => {
+    if (cb.dataset.bound) return;
+    cb.dataset.bound = "1";
+    cb.addEventListener("change", () => void skladToggleGate(String(cb.dataset.key ?? ""), !!cb.checked, cb));
+  });
+}
+
+async function skladToggleGate(key: string, on: boolean, cb: HTMLInputElement): Promise<void> {
+  const st = document.getElementById("gates-status");
+  const cont = document.getElementById("gates-container");
+  cb.disabled = true;
+  try {
+    const g = await botGatesToggle(key, on);
+    if (cont) cont.innerHTML = "";
+    skladRenderGates(g);
+    if (st) st.textContent = `${g.count} гейтов${g.skip_counts && Object.keys(g.skip_counts).length
+      ? ` · ${Object.keys(g.skip_counts).length} ключей отказов` : ""}`;
+  } catch (e) {
+    cb.disabled = false;
+    cb.checked = !on;
+    if (st) st.textContent = "ошибка: " + (e instanceof Error ? e.message : String(e));
+  }
+}
+
+async function skladLoadGates(): Promise<void> {
+  const cont = document.getElementById("gates-container");
+  if (!cont) return;
+  const st = document.getElementById("gates-status");
+  if (st) st.textContent = "загрузка…";
+  try {
+    const g = await botGates();
+    cont.innerHTML = "";
+    skladRenderGates(g);
+    if (st) st.textContent = `${g.count} гейтов` + (g.skip_counts && Object.keys(g.skip_counts).length
+      ? ` · ${Object.keys(g.skip_counts).length} ключей отказов` : "");
+  } catch (e) {
+    cont.innerHTML = `<div class="mini-hint">Ошибка: ${esc(e instanceof Error ? e.message : String(e))}</div>`;
+    if (st) st.textContent = "ошибка";
+  }
+}
+
+// ===== Логика сигналов → ансамбль =====
+
+function skladRenderLogic(cfg: EnsembleConfig, funnel?: { stats: Record<string, number>; ring: { stage: string; action: string; reason: string; n: number }[] }): void {
+  const cont = document.getElementById("logic-container");
+  if (!cont) return;
+  const setups = (cfg.setups ?? []).filter((s) => s.enabled);
+  const setupTags = setups.map((s) => `<span class="ls-tag on">${esc(s.strategy_id.replace(/_/g, " "))} <em>${s.tf}</em></span>`).join("");
+  const offTags = (cfg.setups ?? []).filter((s) => !s.enabled).slice(0, 4)
+    .map((s) => `<span class="ls-tag off">${esc(s.strategy_id.replace(/_/g, " "))}</span>`).join("");
+  const bias = cfg.bias ?? { tf: "hour", period: 50 };
+  const quorumCls = (funnel && (funnel.stats["signal:quorum_passed"] || 0) > 0) ? "hit" : "";
+  const vol = Number(cfg.vol_thr ?? 0);
+  const volOn = vol > 0;
+  const biasMode = cfg.bias_mode ?? "info";
+  const biasOn = biasMode === "veto";
+  const reg = cfg.regime_setups_filter ?? {};
+  const regOn = reg && Object.keys(reg).length > 0;
+  const knobs = `<div class="ls-tags ens-knobs">
+    <span class="ls-tag ${volOn ? "on" : "off"}" title="Объёмный фильтр входа/выхода (ensemble_config.vol_thr)">vol_thr=${vol > 0 ? vol : "выкл"}</span>
+    <span class="ls-tag ${biasOn ? "on" : "off"}" title="Гейт «против bias»: veto — блокирует вход против направления">bias=${biasMode}${biasOn ? "" : " · выкл"}</span>
+    <span class="ls-tag ${regOn ? "on" : "off"}" title="Режимный фильтр сетапов (regime_setups_filter)">regime=${regOn ? `${Object.keys(reg).length} режим(а)` : "выкл"}</span>
+    <span class="ls-tag on">k=${cfg.quorum}</span>
+    <span class="ls-tag ${cfg.neutral_mode === "all" ? "off" : "on"}" title="Нейтральный режим: semi_flip — флипы допингуют сигналы">${cfg.neutral_mode ?? "semi_flip"}</span>
+  </div>`;
+  const row = `
+    <div class="logic-row">
+      <div class="logic-step blk-blue" title="Bias ансамбля — ориентир направления">
+        <div class="ls-title">BIAS</div>
+        <div class="ls-sub">${bias.tf} / E${bias.period}</div>
+        <div class="ls-tags"><span class="ls-tag on">MACD ${bias.tf}</span></div>
+      </div>
+      <div class="logic-arrow">→</div>
+      <div class="logic-step blk-purple" title="Сетапы ансамбля (5m): голосуют за BUY/SELL">
+        <div class="ls-title">SETUPS <span class="badge fam-momentum">${setups.length}</span></div>
+        <div class="ls-sub">каждый независимо сигналит на ${cfg.entry_tf || "5min"}</div>
+        <div class="ls-tags">${setupTags}${offTags ? `<span class="ls-tag off">…</span>` : ""}</div>
+      </div>
+      <div class="logic-arrow">→</div>
+      <div class="logic-step blk-green" title="Кворум: сколько голосов нужно для входа">
+        <div class="ls-title">QUORUM</div>
+        <div class="ls-sub">k=${cfg.quorum} · ${cfg.neutral_mode ?? "semi_flip"}</div>
+        <div class="ls-tags"><span class="ls-quorum ${quorumCls}">${funnel ? `⚑ входов ${(funnel.stats["signal:quorum_passed"] || 0)}` : "·"}</span></div>
+      </div>
+      <div class="logic-arrow">→</div>
+      <div class="logic-step blk-orange" title="Заявка: после всех гейтов">
+        <div class="ls-title">ORDER</div>
+        <div class="ls-sub">entry ${cfg.entry_tf || "5min"} · горизонт сделки ~1 ч</div>
+        <div class="ls-tags"><span class="ls-tag on">SL/TP</span><span class="ls-tag on">1 lot</span></div>
+      </div>
+    </div>`;
+  let funnelHtml = "";
+  if (funnel && funnel.stats && Object.keys(funnel.stats).length) {
+    const names: Record<string, string> = {
+      "signal:no_signal": "нет сигнала",
+      "signal:quorum_passed": "кворум набран",
+      "signal:rejected": "отклонено сигналом",
+      "gate:rejected": "гейт отклонил",
+      "order:submitted": "заявка выставлена",
+      "order:filled": "исполнена",
+      "exit:closed": "закрыта",
+    };
+    const total = Object.values(funnel.stats).reduce((a, b) => a + b, 0) || 1;
+    const rows = Object.entries(funnel.stats).slice(0, 10).map(([k, v]) => {
+      const nm = names[k] ?? k;
+      const pct = (v / total) * 100;
+      return `<div class="logic-funnel-row">
+        <div class="lf-name" title="${esc(k)}">${esc(nm)}</div>
+        <div class="lf-bar"><div class="lf-fill" style="width:${Math.max(2, Math.min(100, pct))}%"></div></div>
+        <div class="lf-n">${v}</div>
+      </div>`;
+    }).join("");
+    funnelHtml = `<div class="logic-funnel">${rows}</div>`;
+  } else if (funnel) {
+    funnelHtml = `<div class="mini-hint" style="margin-top:6px">Воронка пуста (бот не запущен или не видел сигналов)</div>`;
+  }
+  cont.innerHTML = knobs + row + funnelHtml;
+}
+
+async function skladLoadLogic(): Promise<void> {
+  const cont = document.getElementById("logic-container");
+  if (!cont) return;
+  const st = document.getElementById("logic-status");
+  if (st) st.textContent = "загрузка…";
+  try {
+    const [cfg, funnel] = await Promise.all([
+      botEnsembleConfig(),
+      botFunnel(undefined, undefined, 60).catch(() => null),
+    ]);
+    const figi = skladFigi();
+    void figi;
+    cont.innerHTML = "";
+    skladRenderLogic(cfg, funnel ?? undefined);
+    if (st) st.textContent = `${(cfg.setups ?? []).filter((s) => s.enabled).length} сетапов · k=${cfg.quorum} · фаннел ${funnel?.total ?? 0}`;
+  } catch (e) {
+    cont.innerHTML = `<div class="mini-hint">Ошибка: ${esc(e instanceof Error ? e.message : String(e))}</div>`;
+    if (st) st.textContent = "ошибка";
+  }
+}
+
+function startChart(): IChartApi | null {
+  const host = document.getElementById("embedded-chart");
+  if (!host || emChart) return emChart;
+  host.classList.remove("hidden");
+  emChart = createChart(host, {
+    autoSize: true,
+    layout: { background: { color: "#0a0e14" }, textColor: "#7e8999", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11 },
+    grid: { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.04)" } },
+    rightPriceScale: { borderColor: "#202939" },
+    timeScale: { borderColor: "#202939", timeVisible: true, secondsVisible: false, tickMarkFormatter: emTickMark },
+    crosshair: { mode: 0 },
+    localization: { timeFormatter: emTimeLabel },
+  });
+  emSeries = emChart.addSeries(CandlestickSeries, {
+    upColor: "#00d9a0", downColor: "#ff5d6c",
+    borderVisible: false, wickUpColor: "#00d9a0", wickDownColor: "#ff5d6c",
+  });
+  emSeries.priceScale().applyOptions({ mode: priceScaleLog ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal });
+  emVolume = emChart.addSeries(HistogramSeries, {
+    priceScaleId: "", priceLineVisible: false, lastValueVisible: false,
+    priceFormat: { type: "volume" },
+  }, 0);
+  emVolume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+  emSma = emChart.addSeries(LineSeries, {
+    color: "#4a90e2", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+  }, 0);
+  emEma = emChart.addSeries(LineSeries, {
+    color: "#e6a23c", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+    visible: indicators.ema,
+  }, 0);
+  emBbU = emChart.addSeries(LineSeries, {
+    color: "rgba(155,89,182,0.8)", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+    visible: indicators.bb,
+  }, 0);
+  emBbL = emChart.addSeries(LineSeries, {
+    color: "rgba(155,89,182,0.8)", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+    visible: indicators.bb,
+  }, 0);
+  emOscPane = indicators.macd || indicators.rsi;
+  if (indicators.macd) {
+    emMacdHist = emChart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, 1);
+    emMacdLine = emChart.addSeries(LineSeries, {
+      color: "#2962ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
+    }, 1);
+    emSigLine = emChart.addSeries(LineSeries, {
+      color: "#e6a23c", lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
+    }, 1);
+  }
+  if (indicators.rsi) {
+    emRsi = emChart.addSeries(LineSeries, {
+      color: "#c39bd3", lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
+    }, 1);
+  }
+  try {
+    if (emOscPane) {
+      const panes = emChart.panes();
+      if (panes[1]) {
+        panes[0].setStretchFactor(3);
+        panes[1].setStretchFactor(2);
+      }
+    }
+  } catch { /* panes API может отсутствовать в старых версиях */ }
+  emMarkers = createSeriesMarkers(emSeries);
+  emMarkersSig = createSeriesMarkers(emSeries);
+  setupEmTooltip(host);
+  initChartToolbar();
+  return emChart;
+}
+
+function setupEmTooltip(host: HTMLElement): void {
+  if (!emChart) return;
+  const area = host.parentElement;
+  const tooltipEl = document.getElementById("tooltip");
+  if (!area || !tooltipEl) return;
   const resetView = () => {
     try {
-      cdbg("resetView", "dblclick");
-      refs!.chart.timeScale().resetTimeScale();
-      refs!.chart.timeScale().scrollToRealTime();
-      cdbgView("resetView-done");
+      emChart!.timeScale().resetTimeScale();
+      emChart!.timeScale().scrollToRealTime();
     } catch { /* noop */ }
   };
-  wrap.addEventListener("dblclick", resetView);
-
-  refs.chart.subscribeCrosshairMove((param) => {
-    if (!param.point || !param.time || !analysis) {
+  area.addEventListener("dblclick", resetView);
+  const priceFmt = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const volFmt = new Intl.NumberFormat("ru-RU", { notation: "compact" });
+  emChart.subscribeCrosshairMove((param) => {
+    if (!param.point || !param.time || !lastAnalysis || !lastAnalysis.candles.length) {
       tooltipEl.classList.add("hidden");
-      updateLegend(null);
+      updateEmLegend(null);
       return;
     }
-    const candle = param.seriesData.get(refs!.candles) as CandlestickData | undefined;
-    const vol = param.seriesData.get(refs!.volume) as HistogramData | undefined;
+    const candle = param.seriesData.get(emSeries!) as CandlestickData | undefined;
+    const vol = param.seriesData.get(emVolume!) as HistogramData | undefined;
     if (!candle) {
       tooltipEl.classList.add("hidden");
-      updateLegend(null);
+      updateEmLegend(null);
       return;
     }
-
-    let idx: number | null = analysis.candles.findIndex((c) => toUnix(c.ts) === param.time);
+    let idx: number | null = lastAnalysis.candles.findIndex((c) => Math.floor(new Date(c.ts).getTime() / 1000) === param.time);
     if (idx === -1) idx = null;
-    updateLegend(idx);
-
-    const m = idx != null ? analysis.macd.macd[idx] : null;
-    const s = idx != null ? analysis.macd.signal[idx] : null;
-    const h = idx != null ? analysis.macd.hist[idx] : null;
-    const ts = idx != null ? analysis.candles[idx].ts : "";
-
+    updateEmLegend(param.time);
+    const m = idx != null ? lastAnalysis.macd.macd[idx] : null;
+    const s = idx != null ? lastAnalysis.macd.signal[idx] : null;
+    const h = idx != null ? lastAnalysis.macd.hist[idx] : null;
+    const ts = idx != null ? lastAnalysis.candles[idx].ts : "";
     const change =
       idx != null && idx > 0
-        ? ((candle.close - analysis.candles[idx - 1].close) / analysis.candles[idx - 1].close) * 100
+        ? ((candle.close - lastAnalysis.candles[idx - 1].close) / lastAnalysis.candles[idx - 1].close) * 100
         : 0;
-
     tooltipEl.innerHTML = `
-      <div class="t-date">${ts ? fmtDateTime(ts) : ""}</div>
+      <div class="t-date">${ts ? fmtEmDateTime(ts) : ""}</div>
       <div class="row"><span class="k">Откр.</span><span>${priceFmt.format(candle.open)} ₽</span></div>
       <div class="row"><span class="k">Макс.</span><span>${priceFmt.format(candle.high)} ₽</span></div>
       <div class="row"><span class="k">Мин.</span><span>${priceFmt.format(candle.low)} ₽</span></div>
@@ -682,1124 +3727,122 @@ function setupTooltip() {
           : ""
       }
     `;
-
-    const wrapRect = wrap.getBoundingClientRect();
+    const areaRect = area.getBoundingClientRect();
     let x = param.point.x + 18;
     let y = param.point.y + 14;
     const tw = tooltipEl.offsetWidth;
     const th = tooltipEl.offsetHeight;
-    if (x + tw > wrapRect.width - 8) x = param.point.x - tw - 18;
-    if (y + th > wrapRect.height - 8) y = param.point.y - th - 14;
+    if (x + tw > areaRect.width - 8) x = Math.max(0, param.point.x - tw - 18);
+    if (y + th > areaRect.height - 8) y = Math.max(0, param.point.y - th - 14);
     tooltipEl.style.left = `${x}px`;
     tooltipEl.style.top = `${y}px`;
     tooltipEl.classList.remove("hidden");
   });
 }
 
-function showBlockParams(c: StrategyCardDto) {
-  document.querySelectorAll(".scard").forEach((el) => el.classList.remove("selected"));
-  document.querySelector(`.scard[data-sid="${c.id}"]`)?.classList.add("selected");
-  const holder = document.getElementById("block-params");
-  if (!holder) return;
-  const srcVals: Record<string, number> = {};
-  document.querySelectorAll<HTMLInputElement>(`#params-${c.id} input`).forEach((inp) => {
-    srcVals[inp.dataset.key!] = Number(inp.value);
-  });
-  const rows = Object.entries(c.params_schema).map(([key, spec]) => `
-    <div class="bp-row">
-      <span style="min-width:110px">${key}</span>
-      <input type="number" data-bp-key="${key}" value="${srcVals[key] ?? spec.default}"
-        min="${spec.min ?? ""}" max="${spec.max ?? ""}" step="any" />
-      <span class="mini-hint">${spec.min ?? "−∞"}…${spec.max ?? "∞"}</span>
-    </div>`).join("");
-  const roleSel = document.querySelector<HTMLSelectElement>(`#role-${c.id}`);
-  holder.innerHTML = `
-    <b>${c.name}</b> <span class="badge fam-${c.family}">${c.family}</span> <span class="wave-badge">W${c.wave}</span>
-    <div class="mini-hint" style="margin:4px 0">▲ ${c.long_rule}<br />▼ ${c.short_rule}</div>
-    ${rows || `<span class="mini-hint">параметров нет</span>`}
-    <label class="bp-row">Роль
-      <select id="bp-role">
-        <option value="setup"${roleSel?.value === "setup" ? " selected" : ""}>SETUP</option>
-        <option value="bias"${roleSel?.value === "bias" ? " selected" : ""}>BIAS</option>
-        <option value="entry"${roleSel?.value === "entry" ? " selected" : ""}>ENTRY</option>
-      </select>
-    </label>`;
-  holder.querySelectorAll<HTMLInputElement>("input[data-bp-key]").forEach((inp) =>
-    inp.addEventListener("input", () => {
-      const key = inp.dataset.bpKey!;
-      const orig = document.querySelector<HTMLInputElement>(`#params-${c.id} input[data-key="${key}"]`);
-      if (orig) orig.value = inp.value;
-      localStorage.setItem(`sklad_p:${c.id}:${key}`, inp.value);
-    }));
-  holder.querySelector<HTMLSelectElement>("#bp-role")?.addEventListener("change", (ev) => {
-    const v = (ev.target as HTMLSelectElement).value;
-    const rs = document.querySelector<HTMLSelectElement>(`#role-${c.id}`);
-    if (rs) rs.value = v;
-    renderConstructor();
-  });
-}
-
-async function runPreview() {
-  const btn = document.getElementById("btn-preview")!;
-  const members = [...activeRuns.entries()]
-    .filter(([, r]) => r.params)
-    .map(([sid, r]) => ({
-      strategy_id: sid,
-      params: r.params!,
-      role: document.querySelector<HTMLSelectElement>(`#role-${CSS.escape(sid)}`)?.value ?? "setup",
-    }));
-  if (members.length === 0) {
-    setStatus("Для превью рассчитайте хотя бы одну стратегию");
+// Тихий авто-рефреш (раз в 8с): обновляет данные/маркеры, но НЕ трогает
+// видимый диапазон и НЕ перезагружает всё с нуля (это и было причиной
+// «скачущего» графика). Копия поведения оригинала: keepView + прилипание
+// к правой кромке только когда юзер там и данные свежие.
+async function refreshEmbedChart(): Promise<void> {
+  const lf = lastFocus;
+  if (!lf?.figi || !emChart) return;
+  if (document.hidden) return;
+  let nd: AnalysisDto | null = null;
+  try {
+    nd = await fetchAnalysis(lf.figi, chartInterval, 2000);
+  } catch (err) {
+    console.debug("[chart] refresh error", err);
     return;
   }
-  const kInput = document.getElementById("quorum-k") as HTMLInputElement;
-  const quorum = Math.max(1, Math.min(Number(kInput.value) || 1, members.length));
-  const tabs = document.querySelectorAll<HTMLButtonElement>(".ptab");
-  tabs.forEach((x) => x.classList.remove("active"));
-  document.querySelector<HTMLButtonElement>('.ptab[data-tab="preview"]')?.classList.add("active");
-  document.getElementById("tab-strategies")!.classList.add("hidden");
-  document.getElementById("tab-reports")!.classList.add("hidden");
-  document.getElementById("tab-preview")!.classList.remove("hidden");
-  btn.classList.add("busy");
+  if (!nd || !nd.candles || !nd.candles.length) return;
+  if (nd.figi !== lf.figi) return;
+  // Окно истории / тест: последний бар старый — живой привязки нет, не трогаем.
+  const lastTs = new Date(nd.candles[nd.candles.length - 1].ts).getTime() / 1000;
+  if (Date.now() / 1000 - lastTs > 1800) return;
+  const prev = lastAnalysis;
+  const changed =
+    !prev || prev.candles.length !== nd.candles.length ||
+    prev.candles[prev.candles.length - 1].ts !== nd.candles[nd.candles.length - 1].ts;
+  if (!changed) return;
+  lastAnalysis = nd;
+  _applySeriesData(nd);
+  updateEmLegend(null);
+  _applyOverlay(lf);
   try {
-    setStatus("Превью: сохраняю конфигурацию…");
-    const mod = await import("./lab");
-    const cfgId = await mod.createFromActiveRuns(members, quorum, selExit);
-    setStatus("Превью: считаю сигналы и сделки…");
-    const pv = await previewConfiguration(cfgId, FIGI, 120);
-    const trades = (pv.summary.trades_preview ?? []) as Array<Record<string, unknown>>;
-    const sum = (pv.summary.summary ?? {}) as Record<string, unknown>;
-    const net = Number(sum.net ?? 0);
-    $("pv-summary")!.innerHTML = `
-      <span>Сигналов после кворума: <b>${pv.merged_signals_count}</b></span>
-      <span>Сделок: <b>${trades.length}</b></span>
-      <span class="${net >= 0 ? "pos" : "neg"}">Net: <b>${money(net)} ₽</b></span>
-      <span class="mini-hint">${pv.interval_name} · ${daysLabel(120)}</span>`;
-    if (trades.length === 0) {
-      const f = pv.funnel as Record<string, { BUY?: number; SELL?: number }>;
-      const rawTotal = Object.entries(f).filter(([k]) => k !== "quorum")
-        .reduce((acc, [, v]) => acc + (v.BUY ?? 0) + (v.SELL ?? 0), 0);
-      $("pv-why")!.innerHTML = rawTotal === 0
-        ? `<div class="empty-note">Why no entry? Стратегии не дали ни одного сигнала на этой акции/периоде — ослабьте параметры или смените ТФ.</div>`
-        : `<div class="empty-note">Why no entry? Сырых сигналов ${rawTotal}, но кворум ${quorum} из ${members.length} не сходится (${pv.merged_signals_count} прошло). Понизьте кворум или добавьте согласованные стратегии.</div>`;
-    } else {
-      $("pv-why")!.innerHTML = "";
-    }
-    const fr = Object.entries(pv.funnel as Record<string, { BUY?: number; SELL?: number }>)
-      .filter(([k]) => k !== "quorum")
-      .map(([k, v]) => `<tr><td>${k.replace(":raw", "")}</td><td class="num">${v.BUY ?? 0}</td><td class="num">${v.SELL ?? 0}</td></tr>`).join("");
-    const qRaw = (pv.funnel as Record<string, unknown>).quorum as { signals?: number } | undefined;
-    $("pv-funnel")!.innerHTML = `<h3 class="pg-h3">Воронка</h3>
-      <table class="runs-table"><thead><tr><th>Стратегия</th><th>BUY</th><th>SELL</th></tr></thead><tbody>${fr}</tbody></table>
-      <div class="totals-line"><span>Кворум-сигналов: <b>${qRaw?.signals ?? pv.merged_signals_count}</b></span>
-      <span class="mini-hint">Фильтры: каталог фильтров пока не реализован (backend поле filters готово)</span></div>`;
-    redrawMarkers();
-    for (const t of [...trades].slice(-40)) window.__chartOverlay?.(t);
-    setStatus(`Превью готово: сделок ${trades.length}, net ${money(net)} ₽`);
-  } catch (e) {
-    setStatus(e instanceof Error ? e.message : String(e));
-  } finally {
-    btn.classList.remove("busy");
-  }
-}
-
-function daysLabel(d: number): string { return `${d} дней`; }
-
-async function sendActiveToLab() {
-  const members = [...activeRuns.entries()]
-    .filter(([, r]) => r.params)
-    .map(([sid, r]) => ({
-      strategy_id: sid,
-      params: r.params!,
-      role: document.querySelector<HTMLSelectElement>(`#role-${CSS.escape(sid)}`)?.value ?? "setup",
-    }));
-  const roleCounts = { bias: 0, setup: 0, entry: 0 } as Record<string, number>;
-  for (const m of members) roleCounts[m.role] = (roleCounts[m.role] ?? 0) + 1;
-  if (members.length === 0) {
-    setStatus("Сначала рассчитайте стратегии кнопкой «Рассчитать выбранные»");
-    return;
-  }
-  const kInput = document.getElementById("quorum-k") as HTMLInputElement;
-  const quorum = Math.max(1, Math.min(Number(kInput.value) || 1, members.length));
-  try {
-    $("btn-send-lab").classList.add("busy");
-    setStatus("Собираю конфигурацию и отправляю в Lab…");
-    const mod = await import("./lab");
-    await mod.createFromActiveRuns(members, quorum, selExit);
-    setStatus(`Конфигурация создана (${members.length} стр.: bias ${roleCounts.bias ?? 0} / setup ${roleCounts.setup ?? 0} / entry ${roleCounts.entry ?? 0}, кворум ${quorum}) и готова в Lab`);
-    document.querySelector<HTMLButtonElement>('.nav-btn[data-page="lab"]')?.click();
-  } catch (e) {
-    setStatus(e instanceof Error ? e.message : String(e));
-  } finally {
-    $("btn-send-lab").classList.remove("busy");
-  }
-}
-
-function consumeTradeFocus() {
-  const focus = window.__tradeFocus;
-  if (!focus || !refs || !analysis) return;
-  window.__chartOverlay?.(focus);
-}
-
-function setStatus(text: string) {
-  document.getElementById("status-text")!.textContent = text;
-}
-
-let latestLogical: { from: number; to: number } | null = null;
-
-function onVisibleRangeChanged(range: { from: number; to: number } | null) {
-  if (!refs || !analysis || panBusy || !range) return;
-  latestLogical = range;
-  cdbg("visrange", "from=" + range.from.toFixed(1), "to=" + range.to.toFixed(1), "bars=" + analysis.candles.length, "lastDel=" + (analysis.candles.length - 1 - range.to).toFixed(1));
-  if (panTimer) clearTimeout(panTimer);
-  panTimer = setTimeout(() => {
-    void ensureForViewport();
-    void loadOracle();
-  }, 600);
-}
-
-function visibleWindowSec(): { from: number; to: number } | null {
-  if (!refs) return null;
-  const r = refs.chart.timeScale().getVisibleRange();
-  if (!r) return null;
-  const from = Math.floor(Number(r.from));
-  const to = Math.ceil(Number(r.to));
-  const pad = Math.max((to - from) * 0.05, 2);
-  return { from: from - Math.ceil(pad), to: to + Math.ceil(pad) };
-}
-
-async function recalcActiveSignalsSilently() {
-  if (activeRuns.size === 0 || !refs) return;
-  const win = visibleWindowSec();
-  if (!win) return;
-  let updated = 0;
-  for (const [sid, run] of activeRuns) {
-    if (!run.params) continue;
-    try {
-      const res = await computeSignals(FIGI, currentTf.interval, sid, run.params, win.from, win.to);
-      activeRuns.set(sid, { ...run, runId: res.run_id, signals: res.signals as { ts: string; side: string }[] });
-      updated += 1;
-    } catch {
-      /* тихо */
-    }
-  }
-  if (updated > 0) redrawMarkers();
-}
-
-function makeOraclePrim() {
-  if (!refs) return null;
-  const holder = { zones: [] as Array<{ from: number; to: number }> };
-  const prim = {
-    holder,
-    paneViews: () => [new OracleZones(refs!.chart, holder.zones)],
-    updateAllViews: () => {},
-  };
-  refs!.candles.attachPrimitive(prim);
-  return prim;
-}
-
-async function loadOracle() {
-  if (!refs || !analysis || oracleBusy) return;
-  const active = (document.getElementById("cb-oracle") as HTMLInputElement)?.checked;
-  if (!active) {
-    if (oraclePrim) {
-      refs.candles.detachPrimitive(oraclePrim);
-      oraclePrim = null;
-    }
-    return;
-  }
-  const win = visibleWindowSec();
-  if (!win) return;
-  oracleBusy = true;
-  try {
-    const t0 = performance.now();
-    const res = await fetchMaxProfit({
-      figi: FIGI,
-      interval_name: currentTf.interval,
-      limit: 20000,
-      threshold_pct: 0.5,
-      fee_rate_pct: Number(localStorage.getItem(lk("oracle-fee")) || 0.05),
-      capital: 100_000,
-      from_ts: new Date(win.from * 1000).toISOString(),
-      to_ts: new Date(win.to * 1000).toISOString(),
-    });
-    if (!refs) return;
-    const zones = (res.trades ?? [])
-      .map((t) => ({ from: toUnix(t.entry_ts), to: toUnix(t.exit_ts) }))
-      .filter((z) => z.to != null);
-    if (oraclePrim) {
-      refs.candles.detachPrimitive(oraclePrim);
-      oraclePrim = null;
-    }
-    oraclePrim = makeOraclePrim();
-    if (oraclePrim) {
-      oraclePrim.holder.zones = zones;
-      refs.chart.timeScale().applyOptions({}); // триггер перерисовки примитива
-    }
-    setStatus(`Оракул: ${res.trades?.length ?? 0} сделок по видимому периоду (${((performance.now() - t0) / 1000).toFixed(1)}с)`);
-  } catch (e) {
-    setStatus(`Оракул: ${e instanceof Error ? e.message : String(e)}`);
-  } finally {
-    oracleBusy = false;
-  }
-}
-
-async function ensureForViewport() {
-  if (!refs || !analysis || panBusy) return;
-  const logical = latestLogical;
-  if (!logical) return;
-  const bars = analysis.candles.length;
-  if (bars === 0) return;
-  cdbg("ensure", "logical=" + logical.from.toFixed(1) + ".." + logical.to.toFixed(1), "bars=" + bars, "ensured=" + String(ensuredFrom) + ".." + String(ensuredTo));
-
-  const stepSec = STEP_SEC[currentTf.interval] ?? 300;
-  let wantFromSec: number | null = null;
-  let wantToSec: number | null = null;
-  if (ensuredFrom !== null && logical.from < -2) {
-    wantFromSec = Number(ensuredFrom) + Math.floor(logical.from) * stepSec;
-  }
-  if (ensuredTo !== null && logical.to > bars - 1) {
-    wantToSec = Number(ensuredTo) + Math.ceil(logical.to - (bars - 1)) * stepSec;
-  }
-  if (wantFromSec === null && wantToSec === null) return;
-
-  const marginBars = Math.ceil((logical.to - logical.from) * 0.5);
-  const fromSec = (wantFromSec ?? Number(ensuredFrom)) - marginBars * stepSec;
-  const toSec = (wantToSec ?? Number(ensuredTo)) + marginBars * stepSec;
-
-  panBusy = true;
-  const prevFirst = ensuredFrom;
-  try {
-    setStatus("Докачиваю свечи под видимую область…");
-    await syncCandles(FIGI, currentTf.interval, currentTf.days, fromSec, toSec);
-    analysis = await fetchAnalysis(FIGI, currentTf.interval);
-    renderData(analysis, true);
-    const addedLeft =
-      prevFirst !== null && ensuredFrom !== null
-        ? Math.round((Number(ensuredFrom) - Number(prevFirst)) / stepSec)
-        : 0;
-    if (addedLeft !== 0 && latestLogical) {
-      const nf = latestLogical.from + addedLeft;
-      const nt = latestLogical.to + addedLeft;
-      refs!.chart.timeScale().setVisibleLogicalRange({
-        from: Math.min(nf, nt),
-        to: Math.max(nf, nt),
-      });
-    }
-    redrawMarkers();
-    updateLegend(null);
-    setStatus(`${analysis.ticker} ${currentTf.label}: ${analysis.candles.length} свечей — диапазон расширен`);
-    if (activeRuns.size > 0) await recalcActiveSignalsSilently();
-  } catch (e) {
-    setStatus(e instanceof Error ? e.message : String(e));
-  } finally {
-    panBusy = false;
-  }
-}
-
-async function load(showLoader: boolean) {
-  const loader = document.getElementById("loader");
-  const btn = document.getElementById("btn-sync");
-  try {
-    if (showLoader) loader!.classList.remove("hidden");
-    btn?.classList.add("busy");
-
-    let report: SyncReport | null = null;
-    analysis = await fetchAnalysis(FIGI, currentTf.interval, windowLimit(currentTf.interval));
-    if (analysis.candles.length === 0) {
-      setStatus(`Докачиваю свежие ${currentTf.label}…`);
-      report = await syncCandles(FIGI, currentTf.interval, currentTf.days);
-      analysis = await fetchAnalysis(FIGI, currentTf.interval, windowLimit(currentTf.interval));
-    }
-    if (analysis.candles.length === 0) {
-      setStatus(`${currentTf.label}: данных нет ни в базе, ни на бирже`);
-    }
-    renderData(analysis);
-    syncIndicatorVisibility();
-    consumeTradeFocus();
-    updateLegend(null);
-    if (analysis.candles.length > 0) {
-      setStatus(
-        `${analysis.ticker} ${currentTf.label}: ${analysis.candles.length} свечей` +
-          (report?.downloaded ? ` (докачано ${report.downloaded})` : " (из кеша)"),
-      );
-    }
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
-      setStatus("Нет связи с бэкендом — проверьте, что он запущен и BACKEND_URL указан верно");
-    } else {
-      setStatus(msg);
-    }
-  } finally {
-    loader!.classList.add("hidden");
-    btn?.classList.remove("busy");
-  }
-  void loadOracle();
-}
-
-function syncIndicatorVisibility() {
-  if (!refs) return;
-  refs.sma.applyOptions({ visible: indicators.sma });
-  refs.emaLine.applyOptions({ visible: indicators.ema });
-  refs.bbUpper.applyOptions({ visible: indicators.bb });
-  refs.bbLower.applyOptions({ visible: indicators.bb });
-}
-
-function rebuildChartPreservingView() {
-  if (!refs || !analysis) return;
-  const logical = refs.chart.timeScale().getVisibleLogicalRange();
-  const container = document.getElementById("chart")!;
-  refs.chart.remove();
-  refs = null;
-  chartFlags = { oscPane: indicators.macd || indicators.rsi };
-  renderData(analysis, true);
-  redrawMarkers();
-  updateLegend(null);
-  if (logical) {
-    refs!.chart.timeScale().setVisibleLogicalRange(logical);
-  }
-  void container;
-}
-
-function applyIndicators() {
-  localStorage.setItem(lk("indicators"), JSON.stringify(indicators));
-  const wantPane = indicators.macd || indicators.rsi;
-  if (wantPane !== chartFlags.oscPane) {
-    rebuildChartPreservingView();
-  } else {
-    syncIndicatorVisibility();
-    if (chartFlags.oscPane && refs) {
-      const panes = refs.chart.panes();
-      if (panes[1]) {
-        const on = indicators.macd || indicators.rsi;
-        panes[1].setStretchFactor(on ? 2 : 0);
-        panes[0].setStretchFactor(3);
-      }
-    }
-  }
-}
-
-function _voteText(metaRaw: unknown): string {
-  try {
-    const m = typeof metaRaw === "string" ? JSON.parse(metaRaw) : metaRaw;
-    const q = m && m.quorum_event;
-    if (q && Array.isArray(q.members_for) && q.members_for.length) {
-      return (q.members_for as string[]).join("+");
-    }
-    if (q && q.reason) return String(q.reason);
+    const lg = emChart.timeScale().getVisibleLogicalRange();
+    const bars = nd.candles.length;
+    const pinned = lg != null && lg.to >= bars - 5 && lg.to >= 0;
+    console.debug("[chart] refresh", "bars=" + bars, "pinned=" + pinned);
+    if (pinned) emChart.timeScale().scrollToRealTime();
   } catch { /* noop */ }
-  return "";
 }
 
-function showVoteNote(text: string) {
-  let el = document.getElementById("embed-note");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "embed-note";
-    const wrap = document.querySelector(".chart-wrap");
-    if (wrap) wrap.appendChild(el);
-  }
-  if (!el) return;
-  el.textContent = text;
-  (el as HTMLElement).style.display = text ? "block" : "none";
-}
-
-window.__setTradeLines = (trade: Record<string, unknown>) => {
-  if (!refs) return;
-  try {
-    for (const l of _overlayLines) { try { refs.candles.removePriceLine(l); } catch { /* noop */ } }
-    _overlayLines = [];
-    const mkLine = (price: number, color: string, title: string, dashed: boolean) => {
-      const line = refs!.candles.createPriceLine({ price, color, lineWidth: 1, lineStyle: dashed ? 2 : 0, axisLabelVisible: true, title });
-      _overlayLines.push(line);
-    };
-    if (Number(trade.entry_price) > 0) mkLine(Number(trade.entry_price), "#e6a23c", "Вход", false);
-    const stop = trade.initial_stop ?? trade.stop_loss ?? null;
-    if (stop != null && Number(stop) > 0) mkLine(Number(stop), COLORS.down, "SL", true);
-    const tp = trade.take_profit ?? null;
-    if (tp != null && Number(tp) > 0) mkLine(Number(tp), COLORS.up, "TP", true);
-    const parts: string[] = [];
-    const vin = _voteText(trade.meta);
-    const vout = _voteText(trade.exit_meta);
-    if (vin) parts.push("ВХОД: " + vin);
-    if (vout) parts.push("ВЫХОД: " + vout);
-    showVoteNote(parts.join("   |   "));
-  } catch { /* noop */ }
-};
-
-window.__chartOverlay = (trade: Record<string, unknown>) => {
-  if (!refs) return;
-  try {
-    const entryTime = Math.floor(new Date(String(trade.entry_time)).getTime() / 1000) as UTCTimestamp;
-    const rawExit = trade.exit_time;
-    const exitTime = rawExit ? (Math.floor(new Date(String(rawExit)).getTime() / 1000) as UTCTimestamp) : null;
-    const side = String(trade.side);
-    const pnl = trade.net_pnl != null ? Number(trade.net_pnl) : null;
-    const isLong = side === "LONG" || side === "BUY";
-    const color = isLong ? COLORS.up : COLORS.down;
-    const markers: SeriesMarker<Time>[] = [
-      { time: entryTime, position: isLong ? "belowBar" : "aboveBar", color, shape: isLong ? "arrowUp" : "arrowDown", text: `Вход` },
-    ];
-    if (exitTime != null) {
-      markers.push({ time: exitTime, position: isLong ? "aboveBar" : "belowBar", color: pnl != null && pnl >= 0 ? COLORS.up : COLORS.down, shape: "circle", text: pnl != null ? `Выход ${money(pnl)} ₽` : "Выход" });
-    }
-    window.__setTradeLines?.(trade);
-    refs.markers.setMarkers(markers);
-    cdbg("chartOverlay", "entry=" + fmtUTC(entryTime), "exit=" + (exitTime != null ? fmtUTC(exitTime) : "-"), "side=" + side);
-    if (exitTime != null) {
-      const ef = Number(entryTime), et = Number(exitTime);
-      try {
-        const all = refs.chart.timeScale().getVisibleRange();
-        cdbg("chartOverlay-range", "before=" + (all ? `${Math.floor(Number(all.from))}..${Math.floor(Number(all.to))}` : "null"));
-      } catch { /* noop */ }
-      refs.chart.timeScale().setVisibleRange({ from: ef as UTCTimestamp, to: et as UTCTimestamp });
-      cdbgView("chartOverlay-range after");
-    }
-    setStatus(`Сделка ${side}${pnl != null ? " " + money(pnl) + " ₽" : ""} — отмечена на графике`);
-  } catch (e) {
-    console.warn("overlay error", e);
-  }
-};
-
-function initToolbar() {
-  const nav = document.getElementById("timeframes")!;
-  for (const tf of TIMEFRAMES) {
-    const b = document.createElement("button");
-    b.className = "tf-btn" + (tf.interval === currentTf.interval ? " active" : "");
-    b.textContent = tf.label;
-    b.addEventListener("click", () => {
-      if (tf.interval === currentTf.interval) return;
-      nav.querySelectorAll(".tf-btn").forEach((el) => el.classList.remove("active"));
-      b.classList.add("active");
-      currentTf = tf;
-      localStorage.setItem(lk("sklad_tf"), tf.interval);
-      window.LAB_INTERVAL = tf.interval;
-      activeRuns.clear();
-      quorumState = null;
-      document.getElementById("quorum-m")!.textContent = "0";
-      if (refs) refs.markers.setMarkers([]);
-      load(true);
-    });
-    nav.appendChild(b);
-  }
-
-  const cbm = document.getElementById("cb-markers") as HTMLInputElement;
-  cbm.checked = localStorage.getItem(lk("sklad_markers")) !== "0";
-  cbm.addEventListener("change", () => localStorage.setItem(lk("sklad_markers"), cbm.checked ? "1" : "0"));
-  const qk = document.getElementById("quorum-k") as HTMLInputElement;
-  const savedQ = Number(localStorage.getItem(lk("sklad_quorum")));
-  if (savedQ >= 1) qk.value = String(savedQ);
-  qk.addEventListener("change", () => localStorage.setItem(lk("sklad_quorum"), qk.value));
-
-  document.querySelectorAll<HTMLInputElement>("#indicators-menu input[data-ind]").forEach((box) => {
-    box.checked = (indicators as unknown as Record<string, boolean>)[box.dataset.ind!] ?? false;
-    box.addEventListener("change", () => {
-      (indicators as unknown as Record<string, boolean>)[box.dataset.ind!] = box.checked;
-      applyIndicators();
-    });
-  });
-
-  const btnInd = document.getElementById("btn-indicators")!;
-  const menu = document.getElementById("indicators-menu")!;
-  btnInd.addEventListener("click", (e) => {
-    e.stopPropagation();
-    menu.classList.toggle("hidden");
-  });
-  document.addEventListener("click", (e) => {
-    if (!menu.contains(e.target as Node)) menu.classList.add("hidden");
-  });
-
-  document.getElementById("btn-sync")!.addEventListener("click", () => load(true));
-  document.getElementById("cb-oracle")?.addEventListener("change", () => void loadOracle());
-}
-
-function initResizer() {
-  const wrap = document.getElementById("chart-wrap")!;
-  const resizer = document.getElementById("resizer")!;
-
-  const saved = Number(localStorage.getItem(lk("chartHeight")));
-  const initial =
-    saved > 0 ? saved : Math.round(window.innerHeight * 0.5);
-  wrap.style.height = `${clampHeight(initial)}px`;
-
-  let startY = 0;
-  let startH = 0;
-
-  const onMove = (e: PointerEvent) => {
-    const h = clampHeight(startH + (e.clientY - startY));
-    wrap.style.height = `${h}px`;
-  };
-  const onUp = () => {
-    resizer.classList.remove("dragging");
-    localStorage.setItem(lk("chartHeight"), String(wrap.clientHeight));
-    window.removeEventListener("pointermove", onMove);
-    window.removeEventListener("pointerup", onUp);
-  };
-
-  resizer.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    startY = e.clientY;
-    startH = wrap.clientHeight;
-    resizer.classList.add("dragging");
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  });
-}
-
-function clampHeight(h: number): number {
-  return Math.max(240, Math.min(h, window.innerHeight - 160));
-}
-
-function redrawMarkers() {
-  if (!refs) return;
-  const show = (document.getElementById("cb-markers") as HTMLInputElement).checked;
-  if (!show) {
-    refs.markers.setMarkers([]);
-    return;
-  }
-  const markers: SeriesMarker<Time>[] = [];
-  for (const [sid, run] of activeRuns) {
-    const tag = TAG_BY_STRATEGY[sid] ?? sid.slice(0, 3).toUpperCase();
-    for (const s of run.signals) {
-      markers.push({
-        time: toUnix(s.ts),
-        position: s.side === "BUY" ? "belowBar" : "aboveBar",
-        color: s.side === "BUY" ? COLORS.up : COLORS.down,
-        shape: s.side === "BUY" ? "arrowUp" : "arrowDown",
-        text: tag,
-      });
-    }
-  }
-  if (quorumState) {
-    for (const s of quorumState.signals) {
-      const votes = Number(s.features.votes ?? quorumState.k);
-      markers.push({
-        time: toUnix(s.ts),
-        position: s.side === "BUY" ? "belowBar" : "aboveBar",
-        color: "#b388ff",
-        shape: s.side === "BUY" ? "arrowUp" : "arrowDown",
-        text: `Q${votes}/${quorumState.m}`,
-      });
-    }
-  }
-  markers.sort((a, b) => Number(a.time) - Number(b.time));
-  refs.markers.setMarkers(markers);
-}
-
-async function runQuorum() {
-  const btn = document.getElementById("btn-quorum")!;
-  const members = [...activeRuns.entries()];
-  if (members.length < 2) {
-    setStatus("Кворуму нужно минимум 2 рассчитанные стратегии");
-    return;
-  }
-  const kInput = document.getElementById("quorum-k") as HTMLInputElement;
-  let k = Math.max(1, Math.min(Number(kInput.value) || 2, members.length));
-  kInput.value = String(k);
-  btn.classList.add("busy");
-  try {
-    setStatus(`Кворум ${k}-of-${members.length}…`);
-    const res = await computeQuorum(
-      members.map(([, r]) => r.runId),
-      k,
-    );
-    quorumState = { runId: res.run_id, k, m: members.length, signals: res.signals };
-    redrawMarkers();
-    setStatus(`Кворум ${k}/${members.length}: ${res.count} сигналов${res.cached ? " (из кеша)" : ""}`);
-  } catch (e) {
-    setStatus(e instanceof Error ? e.message : String(e));
-  } finally {
-    btn.classList.remove("busy");
-  }
-}
-
-async function runSelectedStrategies() {
-  const btn = document.getElementById("btn-run-strategies")!;
-  const checked = [...document.querySelectorAll<HTMLInputElement>("#strategy-cards input:checked")];
-  if (checked.length === 0) {
-    setStatus("Не выбрано ни одной стратегии");
-    return;
-  }
-  btn.classList.add("busy");
-  let ok = 0;
-  try {
-    for (const box of checked) {
-      const card = catalogCards.find((c) => c.id === box.dataset.sid);
-      if (!card) continue;
-      const params: Record<string, number> = {};
-      document
-        .querySelectorAll<HTMLInputElement>(`#params-${card.id} input`)
-        .forEach((inp) => {
-          params[inp.dataset.key!] = Number(inp.value);
-        });
-      setStatus(`Расчёт ${card.name} (${currentTf.label})…`);
-      const win = visibleWindowSec();
-      const res = await computeSignals(FIGI, currentTf.interval, card.id, params, win?.from, win?.to);
-      activeRuns.set(card.id, { runId: res.run_id, signals: res.signals as { ts: string; side: string }[], params });
-      ok += 1;
-      setStatus(
-        `${card.name}: ${res.count} сигналов${res.cached ? " (из кеша)" : ""}`,
-      );
-    }
-    redrawMarkers();
-      setStatus(`Готово: ${ok} стратегий рассчитано, всего маркеров на графике`);
-      document.getElementById("quorum-m")!.textContent = String(activeRuns.size);
-      renderConstructor();
-      await refreshRunsTable();
-  } catch (e) {
-    setStatus(e instanceof Error ? e.message : String(e));
-  } finally {
-    btn.classList.remove("busy");
-  }
-}
-
-let exitPolicies: Array<{ id: string; label: string; params_schema: Record<string, { default: number; min?: number; max?: number }> }> = [];
-let selExit = { id: "fixed_sl_tp", params: { stop_pct: 1, target_pct: 2 } } as { id: string; params: Record<string, number> };
-let selectedSlot: string | null = null;
-
-const ROLE_META: Record<string, { title: string; cls: string; hint: string }> = {
-  bias: { title: "BIAS · контекст", cls: "blk-blue", hint: "направление старшего ТФ" },
-  setup: { title: "SETUP · сетап", cls: "blk-purple", hint: "где ищем вход" },
-  entry: { title: "ENTRY · триггер", cls: "blk-green", hint: "точка входа" },
-};
-
-function renderConstructor() {
-  const holder = document.getElementById("pipe-holder");
-  if (!holder) return;
-  const slotsHtml = ["bias", "setup", "entry"].map((role) => {
-    const meta = ROLE_META[role];
-    const members = [...activeRuns.entries()].filter(([sid]) =>
-      document.querySelector<HTMLSelectElement>(`#role-${CSS.escape(sid)}`)?.value === role);
-    const list = members.map(([sid, r]) => {
-      const card = catalogCards.find((c) => c.id === sid);
-      return `<div class="ps-item" data-sid="${sid}" data-role="${role}">
-        <b>${card?.name ?? sid}</b>
-        <span class="mini-hint">${Object.entries(r.params ?? {}).map(([k, v]) => `${k}=${v}`).join(", ")}</span>
-      </div>`;
-    }).join("");
-    return `<div class="pipe-slot ${meta.cls}${selectedSlot === role ? " sel" : ""}" data-slot="${role}">
-      <div class="ps-title">${meta.title}<span class="badge">${members.length}</span></div>
-      <div class="ps-sub">${meta.hint}</div>
-      ${list || `<div class="mini-hint">пусто — отметьте стратегии в каталоге и назначьте роль</div>`}
-    </div><div class="pipe-arrow">↓</div>`;
-  }).join("");
-
-  const exitSchema = exitPolicies.find((e) => e.id === selExit.id)?.params_schema ?? {};
-  const exitParamsHtml = Object.entries(exitSchema).map(([k, spec]) =>
-    `<label class="mini-hint">${k} <input type="number" data-exit-key="${k}" value="${selExit.params[k] ?? spec.default}" step="any" style="width:64px"></label>`
-  ).join(" ");
-  const pipe = `${slotsHtml}
-    <div class="pipe-slot blk-gray${selectedSlot === "position" ? " sel" : ""}" data-slot="position">
-      <div class="ps-title">POSITION <span class="qmark" title="Риск-модуль и мультипозиционность в движке не реализованы — параметры не применяются">?</span></div>
-      <div class="ps-sub">qty=1 · одна позиция на FIGI · mode both</div>
-    </div>
-    <div class="pipe-side">
-      <div class="pipe-slot blk-red${selectedSlot === "exit" ? " sel" : ""}" data-slot="exit" style="flex:1">
-        <div class="ps-title">EXIT
-          <select id="exit-sel">${exitPolicies.map((e) => `<option value="${e.id}"${e.id === selExit.id ? " selected" : ""}>${e.label}</option>`).join("")}</select>
-        </div>
-        <div id="exit-params" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px">${exitParamsHtml}</div>
-      </div>
-      <div class="pipe-slot blk-gray" style="flex:1">
-        <div class="ps-title">RISK <span class="qmark" title="Модуль Risk в движке не реализован">?</span></div>
-        <div class="mini-hint">fixed qty=1 · max daily loss — ?</div>
-      </div>
-    </div>
-    <div class="pipe-slot blk-orange" style="margin-top:6px">
-      <div class="ps-title">FILTERS <span class="qmark" title="Фильтры (VWAP side, ADX, ATR pct, volume ratio…) движком не исполняются">?</span></div>
-      <div class="mini-hint">session time / cooldown / min hold уже работают (сессия, кулдаун, min_hold_bars)</div>
-    </div>`;
-
-  holder.innerHTML = pipe;
-
-  holder.querySelectorAll<HTMLElement>(".pipe-slot").forEach((el) =>
-    el.addEventListener("click", () => { selectedSlot = el.dataset.slot!; renderConstructor(); }));
-
-  const exSel = holder.querySelector<HTMLSelectElement>("#exit-sel");
-  exSel?.addEventListener("change", () => {
-    const e = exitPolicies.find((x) => x.id === exSel.value);
-    selExit = { id: exSel.value, params: Object.fromEntries(Object.entries(e?.params_schema ?? {}).map(([k, sp]) => [k, sp.default])) };
-    renderConstructor();
-  });
-  holder.querySelectorAll<HTMLInputElement>("input[data-exit-key]").forEach((inp) =>
-    inp.addEventListener("change", () => { selExit.params[inp.dataset.exitKey!] = Number(inp.value); }));
-}
-
-function renderCatalog(cards: StrategyCardDto[]) {
-  const wrap = document.getElementById("strategy-cards")!;
-  wrap.innerHTML = "";
-  for (const c of cards) {
-    const el = document.createElement("div");
-    el.className = "scard";
-    el.dataset.sid = c.id;
-    const paramsHtml = Object.entries(c.params_schema)
-      .map(
-        ([key, spec]) => {
-          const saved = Number(localStorage.getItem(`sklad_p:${c.id}:${key}`));
-          const val = Number.isFinite(saved) && localStorage.getItem(`sklad_p:${c.id}:${key}`) !== null ? saved : spec.default;
-          return `<label>${key}<input type="number" data-key="${key}" value="${val}"` +
-            ` min="${spec.min ?? ""}" max="${spec.max ?? ""}" step="any" /></label>`;
-        },
-      )
-      .join("");
-    el.innerHTML = `
-      <label class="scard-head">
-        <input type="checkbox" data-sid="${c.id}" />
-        <span class="scard-name">${c.name}</span>
-        <span class="badge fam-${c.family}">${c.family}</span>
-        <span class="wave-badge">W${c.wave}</span>
-        <button class="scard-reset" data-reset="${c.id}" title="Сбросить параметры к дефолту">↺</button>
-      </label>
-      <div class="scard-rules">▲ ${c.long_rule}<br />▼ ${c.short_rule}</div>
-      <div class="scard-params" id="params-${c.id}">${paramsHtml}</div>
-      <label class="scard-role">Роль
-        <select id="role-${c.id}">
-          <option value="setup"${localStorage.getItem(`sklad_role:${c.id}`) === "bias" ? "" : " selected"}>SETUP</option>
-          <option value="bias"${localStorage.getItem(`sklad_role:${c.id}`) === "bias" ? " selected" : ""}>BIAS</option>
-          <option value="entry"${localStorage.getItem(`sklad_role:${c.id}`) === "entry" ? " selected" : ""}>ENTRY</option>
-        </select>
-      </label>
-    `;
-    const cb = el.querySelector<HTMLInputElement>("input[type=checkbox]")!;
-    cb.checked = localStorage.getItem(`sklad_check:${c.id}`) !== "0";
-    el.addEventListener("click", (ev) => {
-      const target = ev.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "SELECT") return;
-      if ((target as HTMLElement).classList.contains("scard-reset")) return;
-      showBlockParams(c);
-    });
-    el.querySelector<HTMLButtonElement>(".scard-reset")!.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      for (const key of Object.keys(c.params_schema)) localStorage.removeItem(`sklad_p:${c.id}:${key}`);
-      el.querySelectorAll<HTMLInputElement>(".scard-params input").forEach((inp) => {
-        inp.value = String(c.params_schema[inp.dataset.key!]?.default ?? inp.value);
-      });
-      showBlockParams(c);
-    });
-    el.querySelectorAll<HTMLInputElement>(".scard-params input").forEach((inp) =>
-      inp.addEventListener("change", () =>
-        localStorage.setItem(`sklad_p:${c.id}:${inp.dataset.key!}`, inp.value)));
-    el.querySelector("input[type=checkbox]")!.addEventListener("change", (ev) => {
-      const on = (ev.target as HTMLInputElement).checked;
-      localStorage.setItem(`sklad_check:${c.id}`, on ? "1" : "0");
-      el.classList.toggle("checked", on);
-      if (!on) {
-        activeRuns.delete(c.id);
-        redrawMarkers();
-      }
-      renderConstructor();
-    });
-    el.querySelector<HTMLSelectElement>(`#role-${c.id}`)!.addEventListener("change", (ev) => {
-      localStorage.setItem(`sklad_role:${c.id}`, (ev.target as HTMLSelectElement).value);
-      renderConstructor();
-    });
-    wrap.appendChild(el);
-  }
-}
-
-async function refreshRunsTable() {
-  try {
-    const runs = await fetchRuns(FIGI);
-    const tbody = document.getElementById("runs-tbody")!;
-    tbody.innerHTML = "";
-    for (const r of runs) {
-      const tr = document.createElement("tr");
-      const created = r.created_at ? new Date(r.created_at).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "—";
-      const paramsStr = Object.entries(r.params)
-        .map(([k, v]) => `${k}=${v}`)
-        .join(", ");
-      tr.innerHTML = `
-        <td>${TAG_BY_STRATEGY[r.strategy_id] ?? r.strategy_id}</td>
-        <td>${r.interval_name}</td>
-        <td class="num">${activeRuns.get(r.strategy_id)?.runId === r.run_id ? activeRuns.get(r.strategy_id)!.signals.length : "—"}</td>
-        <td class="num">${r.bars}</td>
-        <td>${paramsStr}</td>
-        <td>${created}</td>
-      `;
-      tbody.appendChild(tr);
-    }
-  } catch (e) {
-    setStatus(e instanceof Error ? e.message : String(e));
-  }
-}
-
-function initPanel() {
-  const tabs = document.querySelectorAll<HTMLButtonElement>(".ptab");
-  tabs.forEach((t) =>
-    t.addEventListener("click", () => {
-      tabs.forEach((x) => x.classList.remove("active"));
-      t.classList.add("active");
-      document.getElementById("tab-strategies")!.classList.toggle("hidden", t.dataset.tab !== "strategies");
-      document.getElementById("tab-reports")!.classList.toggle("hidden", t.dataset.tab !== "reports");
-      document.getElementById("tab-preview")!.classList.toggle("hidden", t.dataset.tab !== "preview");
-      document.getElementById("tab-diag")?.classList.toggle("hidden", t.dataset.tab !== "diag");
-      if (t.dataset.tab === "reports") void refreshRunsTable();
-    }),
-  );
-
-  document.getElementById("btn-run-strategies")!.addEventListener("click", () => void runSelectedStrategies());
-  $("btn-send-lab")!.addEventListener("click", () => void sendActiveToLab());
-  document.getElementById("btn-preview")!.addEventListener("click", () => void runPreview());
-  document.getElementById("btn-quorum")!.addEventListener("click", () => void runQuorum());
-  document.getElementById("cb-markers")!.addEventListener("change", redrawMarkers);
-
-  fetchCatalog()
-    .then((cat) => {
-      catalogCards = cat.strategies;
-      renderCatalog(cat.strategies);
-      exitPolicies = ((cat as any).exit_policies ?? []) as typeof exitPolicies;
-      renderConstructor();
-    })
-    .catch((e) => setStatus(e instanceof Error ? e.message : String(e)));
-}
-
-initToolbar();
-initResizer();
-initPanel();
-load(true);
-setupTooltipAfterFirstRender();
-
-function setupTooltipAfterFirstRender() {
-  const observer = new MutationObserver(() => {
-    if (refs) {
-      setupTooltip();
-      observer.disconnect();
-    }
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
-}
-
-
-function initSidebarResize() {
-  const sb = document.getElementById("sidebar");
-  if (!sb) return;
-  const KEY = "deeptrading_sidebar_w";
-  try {
-    const saved = localStorage.getItem(KEY);
-    if (saved) {
-      const w = Math.max(190, Math.min(560, Number(saved)));
-      if (w > 0) sb.style.width = w + "px";
-    }
-  } catch { /* noop */ }
-
-  let dragging = false;
-  let startX = 0;
-  let startW = 0;
-
-  const onMove = (e: PointerEvent) => {
-    if (!dragging) return;
-    const w = Math.max(190, Math.min(560, startW + (e.clientX - startX)));
-    sb.style.width = `${w}px`;
-    sb.style.flexBasis = `${w}px`;
-  };
-  const onUp = () => {
-    if (!dragging) return;
-    dragging = false;
-    document.body.classList.remove("sb-resizing");
-    window.removeEventListener("pointermove", onMove);
-    window.removeEventListener("pointerup", onUp);
-    try {
-      localStorage.setItem(KEY, String(Math.round(sb.getBoundingClientRect().width)));
-    } catch { /* noop */ }
-  };
-  const grip = document.querySelector(".sidebar-grip") as HTMLElement | null;
-  const target = grip ?? sb;
-  target.addEventListener("pointerdown", (e) => {
-    const rect = sb.getBoundingClientRect();
-    if (!grip && e.clientX < rect.right - 8) return;
-    e.preventDefault();
-    dragging = true;
-    startX = e.clientX;
-    startW = rect.width;
-    document.body.classList.add("sb-resizing");
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  });
-}
-
-initSidebarResize();
-if (IS_EMBEDDED) {
-  try {
-    const ov = document.createElement("div");
-    ov.id = "cdbg-ov";
-    ov.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:99999;background:rgba(10,12,20,0.82);color:#7fd1a5;font:10px/1.35 'Menlo',monospace;padding:4px 6px;border-radius:4px;max-width:46vw;pointer-events:none;white-space:pre-wrap;";
-    document.body.appendChild(ov);
-    const upd = () => {
-      ov.textContent = "#" + _cdbgCount + " • " + (__CDBG.length ? __CDBG.slice(-4).join("\n") : "(пусто)");
-    };
-    if ((window as any).__CDBG) {
-      const iv = setInterval(upd, 1000);
-      (window as any).__cdbgUpd = upd;
-      void iv;
-    }
-  } catch { /* noop */ }
-  let curFigi = FIGI;
-  let _liveFigi = "";
-  let _lastFocusMks: SeriesMarker<Time>[] = [];
-  let _lastFocusTrade: Record<string, unknown> | null = null;
-  let _lastTradeSig = "";
-  const _tradeSigOf = (t: Record<string, unknown>) => `${String(t.entry_time ?? "")}|${String(t.entry_price ?? "")}|${String(t.stop_loss ?? "")}|${String(t.take_profit ?? "")}`;
-  const syncBtn = document.getElementById("btn-sync");
-  if (syncBtn) {
-    syncBtn.addEventListener("click", () => {
-      void (async () => {
-        try {
-          syncBtn.classList.add("busy");
-          syncBtn.textContent = "⟳ Докачка…";
-          const r = await fetch(`${API}/api/candles/${encodeURIComponent(FIGI)}/backfill?days=35&workers=4`, { method: "POST" });
-          const rep = r.ok ? await r.json() : null;
-          const nd = await fetchAnalysis(FIGI, currentTf.interval, 2000);
-          if (nd && nd.candles && nd.candles.length) renderData(nd, true);
-          setStatus(rep ? `докачка: +${rep.total_added ?? 0} свечей` : "докачка: ошибка");
-        } catch { /* noop */ } finally {
-          syncBtn.classList.remove("busy");
-          syncBtn.textContent = "⟳ Данные";
-        }
-      })();
-    });
-  }
-
-  // auto-refresh: свежие свечи каждые 8с, правая кромка прилипает к now
+function initEmbedded(): void {
+  document.body.classList.add("embedded");
+  document.getElementById("page-chart")?.classList.add("active");
+  startChart();
+  window.addEventListener("message", onEmbedMessage);
+  // Без focus-сообщения график был пустым всю страницу — грузим дефолт сразу
+  // и авто-обновляем раз в 8с (как оригинал) либо последний показанный инструмент.
+  void loadDefaultEmbedChart();
   window.setInterval(() => {
-    void (async () => {
-      // Обновляем всегда: текущий инструмент (_liveFigi из focus, иначе curFigi).
-      const wantFigi = _liveFigi || curFigi;
-      if (!wantFigi) return;
-      try {
-        const nd = await fetchAnalysis(wantFigi, currentTf.interval, windowLimit(currentTf.interval));
-        if (!nd || nd.figi !== wantFigi) {
-          cdbg("auto", "figi mismatch — SKIP (" + (nd?.figi ?? "none") + ")");
-          return;
-        }
-        if (nd && nd.candles && nd.candles.length) {
-          analysis = nd;
-          renderData(nd, true);
-          if (_lastFocusMks.length) refs?.markers.setMarkers(_lastFocusMks);
-          if (_lastFocusTrade && _lastTradeSig !== _tradeSigOf(_lastFocusTrade)) {
-            _lastTradeSig = _tradeSigOf(_lastFocusTrade);
-            window.__setTradeLines?.(_lastFocusTrade);
-          }
-          try {
-            const lastT = nd.candles[nd.candles.length - 1].ts;
-            const lastSec = new Date(lastT).getTime() / 1000;
-            const age = Date.now() / 1000 - lastSec;
-            const lg = refs?.chart.timeScale().getVisibleLogicalRange();
-            const bars = nd.candles.length;
-            const pinned = lg != null && lg.to >= bars - 5 && lg.to >= 0;
-            const broken = lg == null || lg.from < -2 || lg.to < -2 || lg.to >= bars + 50 || lg.from >= bars + 50;
-            cdbg("auto", "age=" + Math.round(age) + "s", "pinned=" + pinned, "lg.to=" + (lg ? lg.to.toFixed(1) : "null"), "bars=" + bars, "broken=" + broken);
-            if (broken) {
-              cdbg("auto", "broken view — reset к последним " + (WINDOW_BARS[currentTf.interval] ?? 60) + " барам");
-              const want = WINDOW_BARS[currentTf.interval] ?? 60;
-              const lastIdx = Math.max(0, bars - 1);
-              const fromIdx = Math.max(0, lastIdx - want + 1);
-              refs?.chart.timeScale().setVisibleLogicalRange({ from: fromIdx, to: lastIdx });
-              cdbgView("auto-broken-reset");
-            } else if (age < 180 && pinned) {
-              const before = refs?.chart.timeScale().getVisibleLogicalRange();
-              refs?.chart.timeScale().scrollToRealTime();
-              const after = refs?.chart.timeScale().getVisibleLogicalRange();
-              cdbg("auto", "scrollToRealTime", "before=" + (before ? `${before.from.toFixed(1)}..${before.to.toFixed(1)}` : "null"), "after=" + (after ? `${after.from.toFixed(1)}..${after.to.toFixed(1)}` : "null"));
-            }
-          } catch { /* noop */ }
-          cdbgView("auto-end");
-        } else {
-          cdbg("auto", "пустые данные — НЕ перерисовываю (сохраняю текущий график)");
-        }
-      } catch { /* noop */ }
-    })();
+    void refreshEmbedChart();
   }, 8000);
-  window.addEventListener("message", (ev) => {
-    const d = ev.data as { type?: string; figi?: string; ticker?: string; trade?: Record<string, unknown> };
-    if (!d || d.type !== "focus") return;
+}
+
+async function loadDefaultEmbedChart(): Promise<void> {
+  let figi = "";
+  try { figi = localStorage.getItem("deeptrading_chart_figi") || ""; } catch { }
+  if (!figi) figi = DEFAULT_CHART_FIGI;
+  await loadEmbedChart({ figi, ticker: "", trade: null, trades: [] });
+}
+
+const DEFAULT_CHART_FIGI = "BBG004730N88";
+
+function initAiModeSelect(): void {
+  const sel = $("ai-mode-select") as HTMLSelectElement;
+  if (!sel || sel.dataset.aiBound) return;
+  sel.dataset.aiBound = "1";
+  sel.addEventListener("change", () => {
+    sel.dataset.aiUser = "1"; // не даём поллу перезаписать пока сохраняем
     void (async () => {
+      const st = $("topbar-status");
+      const before = st ? st.textContent : "";
       try {
-        const f = String(d.figi || "");
-        if (f && f !== curFigi) {
-          curFigi = f;
-          FIGI = f;
-          window.FIGI = f;
-          _liveFigi = f;
-          let data = await fetchAnalysis(f, currentTf.interval, windowLimit(currentTf.interval));
-          if (!(data && data.candles && data.candles.length)) {
-            try {
-              await syncCandles(f, currentTf.interval, currentTf.days);
-            } catch { /* noop */ }
-            data = await fetchAnalysis(f, currentTf.interval, windowLimit(currentTf.interval));
-          }
-          if (data && data.candles && data.candles.length) {
-            renderData(data);
-            setStatus(`${data.ticker ?? d.ticker ?? f} — ${data.candles.length} свечей`);
-          } else {
-            setStatus("нет свечей в базе для " + (d.ticker || f));
-          }
-        } else if (f === curFigi) {
-          // тот же инструмент — тихо обновляем свечи, не трогая масштаб
-          try {
-            const nd = await fetchAnalysis(f, currentTf.interval, windowLimit(currentTf.interval));
-            if (nd && nd.candles && nd.candles.length) {
-              analysis = nd;
-              renderData(nd, true);
-            }
-          } catch { /* noop */ }
-        }
-        if (refs) {
-          const hist = ((d as { trades?: unknown[] }).trades || []) as Record<string, unknown>[];
-          const mks: SeriesMarker<Time>[] = [];
-          for (const tr of hist) {
-            const et = tr.entry_time ? toUnix(String(tr.entry_time)) : null;
-            const xt = tr.ts ? toUnix(String(tr.ts)) : null;
-            const isL = String(tr.side) === "LONG";
-            if (et != null && !isNaN(Number(et))) mks.push({ time: et, position: isL ? "belowBar" : "aboveBar", color: COLORS.up, shape: "arrowUp", text: String(tr.qty ?? "") });
-            if (xt != null && tr.exit_price != null && !isNaN(Number(xt))) mks.push({ time: xt, position: isL ? "aboveBar" : "belowBar", color: COLORS.down, shape: "arrowDown", text: "" });
-          }
-          _lastFocusMks = mks;
-          refs.markers.setMarkers(mks);
-          const fHist = (d as unknown as { trades?: unknown[] }).trades ?? [];
-          cdbg("focus", "figi=" + f, "curFigi=" + curFigi, "trades=" + fHist.length, "mks=" + mks.length, "hasTrade=" + (d.trade ? "yes" : "no"));
-          if (d.trade) {
-            _lastFocusTrade = d.trade as Record<string, unknown>;
-            _lastTradeSig = _tradeSigOf(_lastFocusTrade);
-            window.__setTradeLines?.(d.trade);
-            cdbgView("focus-trade");
-          }
-        }
+        await botAiControlPut({ mode: sel.value });
+        if (st) st.textContent = `AI-режим: ${sel.value || "не задан"} — сохранён`;
+        window.setTimeout(() => { if (st && st.textContent && st.textContent.startsWith("AI-режим:")) st.textContent = before; }, 4000);
       } catch (e) {
-        console.warn("embed focus error", e);
+        if (st) st.textContent = "AI: не сохранить — " + (e instanceof Error ? e.message : String(e));
+      } finally {
+        delete sel.dataset.aiUser;
       }
     })();
   });
-  const autof = new URLSearchParams(window.location.search).get("autofocus");
-  if (autof) {
-    cdbg("AUTOFOCUS", autof);
-    const send = (msg: Record<string, unknown>) => window.dispatchEvent(new MessageEvent("message", { data: msg }));
-    send({ type: "focus", figi: autof, ticker: autof, trade: { side: "LONG", entry_time: "2026-09-08T03:00:00+00:00", entry_price: 100, stop_loss: 98, take_profit: 104 }, trades: [
-      { side: "LONG", entry_time: "2026-09-08T03:00:00+00:00", ts: "2026-09-08T03:30:00+00:00", entry_price: 100, exit_price: 103 },
-    ] });
-    setTimeout(() => send({ type: "focus", figi: "BBG004730RP0", ticker: "GAZP", trade: null, trades: [] }), 6000);
-    setTimeout(() => send({ type: "focus", figi: "BBG004730N88", ticker: "SBER", trade: { side: "SHORT", entry_time: "2026-09-08T03:10:00+00:00", entry_price: 250, stop_loss: 255, take_profit: 240 }, trades: [
-      { side: "SHORT", entry_time: "2026-09-08T03:10:00+00:00", ts: "2026-09-08T03:40:00+00:00", entry_price: 250, exit_price: 244 },
-    ] }), 12000);
-    let snap = 0;
-    const iv = setInterval(() => {
-      snap += 1;
-      try {
-        const lg = refs?.chart.timeScale().getVisibleLogicalRange();
-        const vr = refs?.chart.timeScale().getVisibleRange();
-        const pr = refs?.chart.priceScale?.(COLORS.down ? "right" : "right")?.getVisibleRange?.();
-        cdbg("SNAP", `#${snap}`, "lg=" + (lg ? `${lg.from.toFixed(1)}..${lg.to.toFixed(1)}` : "null"),
-          "vr=" + (vr ? fmtUTC(Math.floor(vr.from as number)) + ".." + fmtUTC(Math.floor(vr.to as number)) : "null"),
-          "pr=" + (pr ? pr.from.toFixed(2) + ".." + pr.to.toFixed(2) : "null"),
-          "bars=" + (refs?.chart.timeScale().getVisibleLogicalRange() ? analysis?.candles?.length ?? 0 : 0));
-      } catch { cdbg("SNAP", `#${snap}`, "err"); }
-    }, 3000);
-    setTimeout(() => clearInterval(iv), 45000);
-  }
 }
 
-initNav();
-void initLab();
-if (!IS_EMBEDDED) void initBot();
-void initTest();
-void initEnsLab();
+async function initMainChart(): Promise<void> {
+  startChart();
+  if (!emChart) return;
+  skladInitPanel();
+  let figi = "";
+  try { figi = localStorage.getItem("deeptrading_chart_figi") || ""; } catch { }
+  if (!figi) { figi = DEFAULT_CHART_FIGI; try { localStorage.setItem("deeptrading_chart_figi", figi); } catch { } }
+  await loadEmbedChart({ figi, ticker: "", trade: null, trades: [] });
+}
+
+if (IS_EMBEDDED) {
+  initEmbedded();
+} else {
+  initNav();
+  initSidebarResize();
+  initRightRailResize();
+  initSidebarCollapse();
+  initRightRail();
+  initAIgate();
+  initAiModeSelect();
+  initBotChartResizer();
+  startPolling();
+  void initMainChart();
+}
