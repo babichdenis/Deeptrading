@@ -665,10 +665,78 @@ async def _test_portfolio_digest(test_name: str, rows: list) -> dict:
 def _test_trade_row(r) -> dict:
     """Одна сделка теста в формате /sandbox/trades (закрытая или открытая)."""
     is_open = r.exit_time is None
+    _side = str(r.side or "LONG").upper()
+    _is_long = _side in ("LONG", "BUY")
+    _entry = float(r.entry_price) if r.entry_price else 0.0
+    _qty = abs(int(r.qty))
+    _lev = max(1.0, float(getattr(r, "leverage", None) or 1.0))
+    _notional = _entry * _qty
+    _own = _notional / _lev
+    # Пик PnL + время + ATR из exit_meta (пишется в runtime._st_close).
+    _peak = {"pnl": None, "time": None, "price": None, "atr_pct": None, "atr": None, "r": None, "roi_pct": None, "mae_atr": None}
+    _trail_info = None
+    try:
+        _em = json.loads(r.exit_meta) if r.exit_meta else {}
+        # Инфо-трейлинг: где бы сработал трейл (виртуальный след).
+        if _em.get("trail_info"):
+            _t = _em["trail_info"]
+            _tpx = float(_t.get("hit_price") or 0.0)
+            _trisk = abs(_entry - float(r.stop_loss)) * _qty if (r.stop_loss is not None and float(r.stop_loss) != _entry) else 0.0
+            _trail_info = {
+                "activated": bool(_t.get("activated")),
+                "trail_stop": round(float(_t.get("trail_stop") or 0.0), 6),
+                "trail_dist_atr": _t.get("trail_dist_atr"),
+                "hit_time": str(_t.get("hit_ts") or ""),
+                "hit_price": round(_tpx, 6),
+                "hit_reason": str(_t.get("hit_reason") or ""),
+                "hit_pnl": round(((_tpx - _entry) if _is_long else (_entry - _tpx)) * _qty, 2),
+                "hit_r": round(((_tpx - _entry) * _qty) / _trisk, 2) if (_trisk and _is_long) else (round(((_entry - _tpx) * _qty) / _trisk, 2) if _trisk else None),
+                "hit_roi_pct": round(((_tpx - _entry) * _qty) / _own * 100, 1) if (_own and _is_long) else (round(((_entry - _tpx) * _qty) / _own * 100, 1) if _own else None),
+            }
+        if _em.get("max_pnl") is not None:
+            _mp = float(_em["max_pnl"])
+            _slv = float(r.stop_loss) if r.stop_loss is not None else None
+            _risk = abs(_entry - _slv) * _qty if (_slv is not None and _slv != _entry) else 0.0
+            _peak = {
+                "pnl": round(_mp, 2),
+                "time": str(_em.get("max_pnl_time") or ""),
+                "price": round(float(_em.get("max_pnl_price") or 0.0), 6),
+                "atr_pct": round(float(_em.get("max_pnl_atr_pct") or 0.0), 2),
+                "atr": (round(float(_em["max_pnl_atr"]), 4) if _em.get("max_pnl_atr") is not None else None),
+                "r": round(_mp / _risk, 2) if _risk else None,
+                "roi_pct": round(_mp / _own * 100, 1) if _own else None,
+                # MAE до пика: макс. просадка ниже входа (в ATR) на пути к пику прибыли.
+                "mae_atr": (round(float(_em["max_pnl_mae_atr"]), 2) if _em.get("max_pnl_mae_atr") is not None else None),
+            }
+    except Exception:
+        pass
+    # Начальный SL/TP в ATR, R и ROI — из meta (atr_entry пишется при входе).
+    _init = {"sl_atr": None, "tp_atr": None, "rr_initial": None,
+             "roi_sl_pct": None, "roi_tp_pct": None}
+    try:
+        _m = json.loads(r.meta) if r.meta else {}
+        _atr_e = float(_m.get("atr_entry") or 0.0)
+        _sl0 = float(_m.get("sl_initial") or r.stop_loss) if (_m.get("sl_initial") is not None or r.stop_loss is not None) else None
+        _tp0 = float(r.take_profit) if r.take_profit is not None else None
+        if _atr_e > 0:
+            if _sl0 is not None and _sl0 != _entry:
+                _dsl = abs(_entry - _sl0)
+                _init["sl_atr"] = round(_dsl / _atr_e, 2)
+                _init["roi_sl_pct"] = round(-_dsl * _qty / _own * 100, 1) if _own else None
+            if _tp0 is not None and _tp0 != _entry:
+                _dtp = abs(_tp0 - _entry)
+                _init["tp_atr"] = round(_dtp / _atr_e, 2)
+                _init["roi_tp_pct"] = round(_dtp * _qty / _own * 100, 1) if _own else None
+            if _sl0 is not None and _tp0 is not None:
+                _dsl = abs(_entry - _sl0)
+                if _dsl > 0:
+                    _init["rr_initial"] = round(abs(_tp0 - _entry) / _dsl, 2)
+    except Exception:
+        pass
     return {
         "figi": r.figi, "ticker": r.ticker, "side": r.side,
         "qty": int(r.qty),
-        "entry_price": round(float(r.entry_price), 6),
+        "entry_price": round(_entry, 6),
         "exit_price": round(float(r.exit_price), 6) if r.exit_price is not None else None,
         "entry_time": str(r.entry_time),
         "ts": str(r.exit_time) if r.exit_time else None,
@@ -679,7 +747,50 @@ def _test_trade_row(r) -> dict:
         "exit_reason": "на торгах" if is_open else (r.exit_reason or ""),
         "entry_reason": r.entry_reason, "meta": r.meta, "exit_meta": r.exit_meta,
         "strategy_id": "v4_enhanced",
+        "notional": round(_notional, 2), "leverage": round(_lev, 2),
+        "own_money": round(_own, 2),
+        "max_pnl": _peak["pnl"], "max_pnl_time": _peak["time"],
+        "max_pnl_price": _peak["price"], "max_pnl_atr_pct": _peak["atr_pct"],
+        "max_pnl_r": _peak["r"], "max_pnl_roi_pct": _peak["roi_pct"],
+        "max_pnl_mae_atr": _peak["mae_atr"],
+        "max_pnl_atr": _peak["atr"],
+        "trail_info": _trail_info,
+        "sl_atr": _init["sl_atr"], "tp_atr": _init["tp_atr"],
+        "rr_initial": _init["rr_initial"],
+        "roi_sl_pct": _init["roi_sl_pct"], "roi_tp_pct": _init["roi_tp_pct"],
     }
+
+
+def _test_entry_regime(r) -> str:
+    """regime на входе тестовой позиции = entry_regime из meta сделки (или текущий детектор)."""
+    try:
+        import json as _j
+        m = getattr(r, "meta", None)
+        if m:
+            mm = _j.loads(m) if isinstance(m, str) else (m or {})
+            er = mm.get("entry_regime") or mm.get("regime")
+            if er:
+                # Нормализация: если в meta случайно попал dict (timeline стратегии) —
+                # извлекаем state, иначе в UI уходит сырой dict.
+                if isinstance(er, dict):
+                    er = er.get("state")
+                return str(er or "")
+    except Exception:
+        pass
+    try:
+        from app.bot.runtime import runtime as _rt
+        _fr = getattr(_rt, "_entry_regime", None) or {}
+        v = _fr.get(getattr(r, "figi", ""))
+        if v:
+            return str(v)
+        _regs = getattr(_rt, "_regimes", None) or {}
+        cur = _regs.get(getattr(r, "figi", "")) or {}
+        st = cur.get("state") if isinstance(cur, dict) else cur
+        if isinstance(st, dict):
+            st = st.get("state")
+        return str(st or "")
+    except Exception:
+        return ""
 
 
 def _test_position_row(r, cur: float | None) -> dict:
@@ -729,7 +840,7 @@ def _test_position_row(r, cur: float | None) -> dict:
         "atr": round(_atr, 6) if _atr else None,
         "dist_sl_atr": (round(abs(cur - _sl) / _atr, 2) if (_atr and _sl) else None),
         "dist_tp_atr": (round(abs(_tp - cur) / _atr, 2) if (_atr and _tp) else None),
-        "regime": "", "regime_reason": "", "regime_atr_pct": None, "regime_adx": None, "vol": None,
+        "regime": _test_entry_regime(r), "regime_reason": "", "regime_atr_pct": None, "regime_adx": None, "vol": None,
     }
 
 

@@ -121,6 +121,7 @@ class EnsembleRequest(BaseModel):
     use_all_setups: bool = False
     drop_useless: bool = False
     bias: dict = Field(default_factory=lambda: {"tf": "hour", "period": 50})
+    bias_by_state: dict = Field(default_factory=dict)  # per-regime bias (combo): {state: {"tf","period"}}
     setups: list[dict] = Field(default_factory=lambda: [
         {"strategy_id": "rsi_reversal", "tf": "5min", "params": {}},
         {"strategy_id": "bollinger_reclaim", "tf": "5min", "params": {}},

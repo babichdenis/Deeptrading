@@ -36,6 +36,10 @@ _refresh_task: asyncio.Task | None = None
 # журнал последних действий с eligible (add/remove) — показывается в сайдбаре
 _carousel_log: deque[dict] = deque(maxlen=40)
 
+# сильные ссылки на фоновые докачки свечей: create_task без ссылки может быть
+# собран GC до завершения («non-checked-in connection» в логах uvicorn)
+_BG_DOWNLOADS: set[asyncio.Task] = set()
+
 
 def _carousel_log_add(action: str, ticker: str, msg: str) -> None:
     _carousel_log.appendleft({
@@ -427,7 +431,9 @@ async def add_eligible(req: _EligibleReq, db: AsyncSession = Depends(get_db)) ->
         _carousel_log_add("add", req.ticker, "уже был в eligible")
     else:
         _carousel_log_add("add", req.ticker, "добавлен, скачиваются свечи за 3 дня…")
-    asyncio.create_task(_download_candles(figi, req.ticker))
+    _t = asyncio.create_task(_download_candles(figi, req.ticker))
+    _BG_DOWNLOADS.add(_t)
+    _t.add_done_callback(_BG_DOWNLOADS.discard)
     return {"ok": True, "figi": figi, "ticker": req.ticker}
 
 

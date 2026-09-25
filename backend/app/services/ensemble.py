@@ -52,7 +52,7 @@ ALL_STRATEGY_IDS = ["rsi_reversal", "bollinger_reclaim", "pullback_ema", "vwap_r
 # а не reversal-сигналы. `drop_useless` оценивает совпадение с oracle-разворотами и
 # ошибочно удаляет их, поэтому они исключены из отсева.
 VOLUME_STRATEGY_IDS = {"volume_drop", "volume_climax", "volume_divergence"}
-TF_SECONDS = {"1min": 60, "5min": 300, "10min": 600, "15min": 900, "hour": 3600}
+TF_SECONDS = {"1min": 60, "5min": 300, "10min": 600, "15min": 900, "30min": 1800, "hour": 3600}
 
 
 def request_hash(payload: dict) -> str:
@@ -719,6 +719,38 @@ def _stoch_map(bars, k_period: int, d_period: int) -> dict:
     return {bars[i].ts: (ks[i], ds[i]) for i in range(len(bars))}
 
 
+def _rsi_map(bars, period: int = 14) -> dict:
+    """RSI (Wilder, past-only) по барам → {ts: rsi}."""
+    closes = [b.close for b in bars]
+    n = len(closes)
+    if n <= period:
+        return {}
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        d = closes[i] - closes[i - 1]
+        gains += d if d > 0 else 0.0
+        losses -= d if d < 0 else 0.0
+    avg_g = gains / period
+    avg_l = losses / period
+    out: dict = {}
+
+    def _val(g: float, l: float) -> float:
+        if l <= 0:
+            return 100.0 if g > 0 else 50.0
+        rs = g / l
+        return 100.0 - 100.0 / (1.0 + rs)
+
+    out[bars[period].ts] = _val(avg_g, avg_l)
+    for i in range(period + 1, n):
+        d = closes[i] - closes[i - 1]
+        g = d if d > 0 else 0.0
+        l = -d if d < 0 else 0.0
+        avg_g = (avg_g * (period - 1) + g) / period
+        avg_l = (avg_l * (period - 1) + l) / period
+        out[bars[i].ts] = _val(avg_g, avg_l)
+    return out
+
+
 def _ml_vote_signals(candles_1m: list[EngineCandle], model, tcode: int,
                      threshold: float) -> list[dict]:
     """ML-голос на 5m-гриде: для каждого 5m бара (ts кратно 300) считаем p на 1m
@@ -790,6 +822,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   capital: float, label: str,
                   oracle_swings_detail: list[dict] | None = None,
                   bias_tf_sec: int = 3600,
+                  bias_by_state: dict[str, dict] | None = None,
                   ml_filter_obj=None, ml_vote_obj=None) -> dict:
     """Один прогон (static или adaptive) через единый конвейер."""
     setup_runs: list[tuple[str, list[dict]]] = []
@@ -868,6 +901,32 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     else:
         entries_raw = micro_breakout(entry_candles, entry_lookback)
 
+    # regime_entry_policy {"trend": "breakout"}: в трендовых режимах ансамбль выключен —
+    # сетап-входы отбрасываются, вместо них входят micro_breakout-кандидаты того же ТФ
+    # (направление дальше валидирует COMBO-блок по bias). Не-трендовые режимы — обычный
+    # кворум-конвейер без изменений.
+    _rep = req.get("regime_entry_policy") or {}
+    if str(_rep.get("trend", "") or "") == "breakout" and regime_bars:
+        _trend_states = {"TREND_UP", "TREND_DOWN"}
+        _kept = []
+        for _e in entries_raw:
+            _ets = _e.get("ts")
+            if isinstance(_ets, str):
+                try:
+                    _ets = datetime.fromisoformat(_ets)
+                except Exception:
+                    _ets = None
+            _est = (regime_at(regime_bars, _ets) or {}).get("state") if _ets else None
+            if _est in _trend_states:
+                continue  # тренд: вход только по breakout, сетапы (ансамбль) off
+            _kept.append(_e)
+        for _b in micro_breakout(entry_candles, entry_lookback):
+            _bst = (regime_at(regime_bars, _b.get("ts")) or {}).get("state")
+            if _bst in _trend_states:
+                _kept.append({**_b, "reason": f"breakout:{_b.get('reason', '')}",
+                              "trend_breakout": True})
+        entries_raw = sorted(_kept, key=lambda x: x["ts"])
+
     # --- Тройное подтверждение входа на 1м свечах (monotonic closes) ---
     # req["entry_confirm_closes"] = N: для сторон из entry_confirm_closes_sides требуем,
     # чтобы последние N ЗАКРЫТИЙ 1м были строго по направлению входа:
@@ -932,6 +991,14 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         _scfg = req["stoch_filter"] or {}
         _cse = cached_resample(candles, TF_SECONDS.get(str(req.get("entry_tf", "5min")), 300))
         stoch_map = _stoch_map(_cse, int(_scfg.get("k_period", 14)), int(_scfg.get("d_period", 3)))
+
+    # RSI-фильтр (gate): вход только в нейтральной зоне RSI (BUY: не покупаем перекупленность
+    # и слабый импульс; по умолчанию коридор 40–60, задаётся rsi_filter.min/max).
+    rsi_map: dict | None = None
+    if req.get("rsi_filter"):
+        _rcfg = req["rsi_filter"] or {}
+        _cre = cached_resample(candles, TF_SECONDS.get(str(req.get("entry_tf", "5min")), 300))
+        rsi_map = _rsi_map(_cre, int(_rcfg.get("period", 14)))
 
     accepted: list[dict] = []
     rejected: list[dict] = []
@@ -1072,14 +1139,56 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
 
     for e in entries_raw:
         ts, side = e["ts"], e["side"]
+        # Состояние режима на входе: нужно и для per-regime bias ниже, и для
+        # gating базового bias-veto (в не-трендовых режимах базовый bias off).
+        _state = None
+        if bias_by_state is not None:
+            _st = regime_at(regime_bars, ts) if regime_bars else None
+            _state = _st["state"] if _st else "NEUTRAL"
+        _trend_state = _state in ("TREND_UP", "TREND_DOWN")
         bucket = int(ts.timestamp()) // bias_tf_sec
         bias_ok = (side == "BUY" and bias.get(bucket, 0) >= 0) or (side == "SELL" and bias.get(bucket, 0) <= 0)
-        if not bias_ok:
+        if not bias_ok and (_state is None or _trend_state):
+            # per-regime policy: базовый bias-veto действует только в трендовых
+            # режимах (или глобально, если per-regime конфиг не задан вовсе).
             if bias_mode == "veto":
                 rejected.append({**e, "ts": ts.isoformat(), "reason": "AGAINST_BIAS"})
                 continue
             # info/strict_ct: пропускаем против bias дальше, но строже по кворуму
             e = {**e, "against_bias": True}
+        # COMBO: per-regime bias — направление входа задаётся режимом (heatmap-логика).
+        #   TREND_UP  → BUY  только при bias 30m = +1
+        #   TREND_DOWN→ SELL только при bias 30m = -1
+        #   HIGH_VOLATILITY → направление от bias 10m (+1=BUY, -1=SELL)
+        #   Политика по умолчанию: трендовые режимы (TREND_UP/TREND_DOWN) — veto
+        #   (направление строго по bias); не-трендовые (HV/NEUTRAL/RANGE) — off:
+        #   bias НЕ применяется, вход в обе стороны (полное отключение режима —
+        #   через UI, trade_regimes). Явный "mode" в конфиге состояния перекрывает
+        #   дефолт. Трендовый режим без конфига в bias_by_state → REGIME_OFF.
+        if bias_by_state is not None:
+            _bcfg = bias_by_state.get(_state)
+            _bmode = str((_bcfg or {}).get("mode")
+                         or ("veto" if _state in ("TREND_UP", "TREND_DOWN") else "off"))
+            if _bcfg is None and _bmode == "veto":
+                rejected.append({**e, "ts": ts.isoformat(),
+                                 "reason": f"REGIME_OFF:{_state}"})
+                continue
+            if _bcfg is not None and _bmode != "off":
+                _bm = _bcfg["map"]
+                _btf = _bcfg["tf_sec"]
+                _bv = _bm.get(int(ts.timestamp()) // _btf, 0)
+                _want_side = None
+                if _state == "TREND_UP" and _bv == 1:
+                    _want_side = "BUY"
+                elif _state == "TREND_DOWN" and _bv == -1:
+                    _want_side = "SELL"
+                elif _state == "HIGH_VOLATILITY":
+                    _want_side = "BUY" if _bv == 1 else "SELL" if _bv == -1 else None
+                if _want_side is None or side != _want_side:
+                    _dir = ("BUY" if _bv == 1 else "SELL" if _bv == -1 else "нет(bias=0)")
+                    rejected.append({**e, "ts": ts.isoformat(),
+                                     "reason": f"COMBO_BIAS:{side}->{_want_side or 'запрет'}:{_state}:bias={_dir}({_bv})"})
+                    continue
         # EXP-002: vol gate (rolling_atr_high_only) — блокирует входы в low-vol/WARMUP
         if vol_gate == "rolling_atr_high_only":
             _ok, _why = _gate_pass(ts)
@@ -1095,12 +1204,16 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         # адаптивный режим: своя конфигурация (setups/quorum/mode/exit) для состояния
         mode = "both"
         quorum_pool = quorum_sigs
-        state = None
+        # Режим на момент входа: ВСЕГДА из timeline (не только для adaptive-ветки).
+        # Без этого regime_by_ts не заполнялся и все сделки получали NO_REGIME.
+        _r_now = regime_at(regime_bars, ts) if regime_bars else None
+        state = _r_now["state"] if _r_now else "NEUTRAL"
         # Per-regime quorum: filter strategies by regime
         per_rq = req.get("per_regime_quorum")
         if per_rq is not None:
-            _pr_state = regime_at(regime_bars, ts)
-            _pr_name = _pr_state["state"] if _pr_state else "NEUTRAL"
+            if _r_now is None:
+                _r_now = regime_at(regime_bars, ts)
+            _pr_name = _r_now["state"] if _r_now else "NEUTRAL"
             _pr_allowed = per_rq.get(_pr_name)
             if _pr_allowed is not None:
                 _pr_member_runs = [(sid, sigs) for sid, sigs in setup_runs if sid in _pr_allowed]
@@ -1111,8 +1224,6 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                             _pq["event_id"] = f"PR_{_pr_name}_{_pi}"
                     quorum_pool = _pr_quorum
         if adaptive is not None:
-            r = regime_at(regime_bars, ts)
-            state = r["state"] if r else "NEUTRAL"
             cfg = adaptive.get(state)
             if cfg is None or cfg.get("no_trade"):
                 rejected.append({**e, "ts": ts.isoformat(),
@@ -1125,10 +1236,18 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         need_votes = quorum_k
         if e.get("against_bias") and bias_mode == "strict_ct":
             need_votes = quorum_full  # counter-trend только при полном согласии
-        quorum_ev = _find_quorum(quorum_pool, side, window_from, ts, need_votes)
-        if quorum_ev is None:
-            rejected.append({**e, "ts": ts.isoformat(), "reason": "SETUP_MISSING"})
-            continue
+        # Breakout-only вход в тренде (regime_entry_policy {"trend": "breakout"}):
+        # ансамбль в трендовых режимах отключён — голосов стратегий нет, ставим
+        # синтетическое кворум-событие (направление уже проверено bias-veto выше).
+        if e.get("trend_breakout"):
+            quorum_ev = {"event_id": f"brk:{side}:{ts.isoformat()}", "ts": ts,
+                         "side": side,
+                         "features": {"votes": quorum_full, "breakout_only": True}}
+        else:
+            quorum_ev = _find_quorum(quorum_pool, side, window_from, ts, need_votes)
+            if quorum_ev is None:
+                rejected.append({**e, "ts": ts.isoformat(), "reason": "SETUP_MISSING"})
+                continue
         # IMOEX-veto: при HV индекса вход разрешён только по его направлению.
         if _imoex_veto and _imoex_hv:
             _tis = ts.isoformat()
@@ -1145,6 +1264,25 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                 if (side == "BUY" and _sk > float(_sc.get("overbought", 80))) or \
                    (side == "SELL" and _sk < float(_sc.get("oversold", 20))):
                     rejected.append({**e, "ts": ts.isoformat(), "reason": "STOCH_FILTER"})
+                    continue
+        # RSI-фильтр (ИНВЕРСНЫЙ): лонг — только при RSI < min («лонги ниже 40»),
+        # шорт — только при RSI > max («шорты выше 60»).
+        # Зона min..max ВКЛЮЧИТЕЛЬНО — «мёртвая»: входов нет ни в одну сторону
+        # (RSI = 40 лонг не пускает, RSI = 60 шорт не пускает).
+        # Явные ключи buy_max/sell_min перекрывают min/max.
+        if rsi_map is not None:
+            _rv = rsi_map.get(ts)
+            if _rv is not None:
+                e["rsi"] = round(_rv, 2)  # RSI на баре входа → уедет в meta сделки
+                _rc = req.get("rsi_filter") or {}
+                if side == "BUY":
+                    _rthr = _rc.get("buy_max", _rc.get("min", 40.0))
+                    _blocked = (_rthr is not None and _rv >= float(_rthr))
+                else:
+                    _rthr = _rc.get("sell_min", _rc.get("max", 60.0))
+                    _blocked = (_rthr is not None and _rv <= float(_rthr))
+                if _blocked:
+                    rejected.append({**e, "ts": ts.isoformat(), "reason": "RSI_FILTER"})
                     continue
         # Volume-flow фильтр: вход только при подтверждении объёмом.
         if _vflow is not None and vol_series is not None:
@@ -1359,7 +1497,9 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         gross += t.gross_pnl
         commission += t.commission
         slippage += t.slippage
-        state = regime_by_ts.get(t.entry_time, "NO_REGIME")
+        state = (regime_at(regime_bars, t.entry_time) or {}).get("state") if regime_bars else None
+        if state is None:
+            state = regime_by_ts.get(t.entry_time, "NO_REGIME") or "NO_REGIME"
         bucket = per_regime.setdefault(state, {"trades": 0, "gross": 0.0, "net": 0.0, "wins": 0})
         bucket["trades"] += 1
         bucket["gross"] += t.gross_pnl
@@ -1707,6 +1847,21 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
     bias_bars = cached_resample(candles, bias_tf_sec)
     bias = compute_bias(bias_bars, int(bias_cfg.get("period", 50)), tf_seconds=bias_tf_sec)
 
+    # --- per-regime bias (heatmap combo): направление входа по режиму и его bias-TF ---
+    #   req["bias_by_state"] = {"TREND_UP": {"tf": "30min", "period": 100},
+    #                           "TREND_DOWN": {"tf": "30min", "period": 100},
+    #                           "HIGH_VOLATILITY": {"tf": "10min", "period": 300}}
+    bias_by_state: dict[str, dict] | None = None
+    _bbs_cfg = req.get("bias_by_state")
+    if _bbs_cfg:
+        bias_by_state = {}
+        for _st, _bc in _bbs_cfg.items():
+            _btf = TF_SECONDS.get(str(_bc.get("tf", "30min")), 1800)
+            _bpd = int(_bc.get("period", max(2, round(50 * 3600 / _btf))))
+            _bm = compute_bias(cached_resample(candles, _btf), _bpd, tf_seconds=_btf)
+            bias_by_state[_st] = {"map": _bm, "tf_sec": _btf, "period": _bpd,
+                                  "mode": _bc.get("mode")}
+
     # --- regime timeline (на режимном ТФ) ---
     regime_tf_sec = TF_SECONDS.get(regime_cfg.get("tf", "5min"), 300)
     regime_bars = cached_resample(candles, regime_tf_sec)
@@ -1726,12 +1881,10 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
         regime_row = regime_bars
         _regime_gated = True
     else:
-        detector = RegimeDetector(**{k: v for k, v in regime_cfg.items()
-                                     if k in ("slope_threshold", "adx_threshold",
-                                              "atr_percentile_threshold", "range_mult")})
-        regime_row = detector.compute(regime_bars)
-        from app.services.regime import regime_timeline
-        timeline = regime_timeline(regime_row)
+        from app.services.regime import detect_regime
+        regime_row, timeline, _ = detect_regime(regime_bars, **{k: v for k, v in regime_cfg.items()
+                                                                if k in ("slope_threshold", "adx_threshold",
+                                                                         "atr_percentile_threshold", "range_mult")})
         _regime_gated = False
 
     # --- размер позиции и оракул ---
@@ -1864,6 +2017,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
                            adaptive_map if req.get("regime_gate") else None,
                            oracle, o_points, lot, capital, "static",
                            o_swings_detail, bias_tf_sec=bias_tf_sec,
+                           bias_by_state=bias_by_state,
                            ml_filter_obj=ml_filter_obj,
                            ml_vote_obj=ml_vote_obj if not adaptive_map else None)
 
@@ -1872,6 +2026,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
                                  int(entry_cfg.get("lookback", 1)), static_exit, qty_shares,
                                  regime_row, adaptive_map, oracle, o_points, lot, capital,
                                  "adaptive", bias_tf_sec=bias_tf_sec,
+                                 bias_by_state=bias_by_state,
                                  ml_filter_obj=ml_filter_obj)
     else:
         adaptive = None
@@ -1884,7 +2039,8 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict) -> dict:
             "bars": len(candles),
             "from": candles[0].ts.isoformat(), "to": candles[-1].ts.isoformat(),
             "lot": lot, "capital": capital, "qty_shares": qty_shares,
-            "params": {"bias": bias_cfg, "setups": setups_cfg, "quorum": quorum_k,
+            "params": {"bias": bias_cfg, "bias_by_state": dict(_bbs_cfg or {}),
+                       "setups": setups_cfg, "quorum": quorum_k,
                        "entry": entry_cfg, "entry_window_min": entry_window_min,
                        "exit_policy": exit_cfg, "oracle": oracle_cfg,
                        "regime": regime_cfg, "adaptive": adaptive_cfg,

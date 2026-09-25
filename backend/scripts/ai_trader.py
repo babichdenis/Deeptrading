@@ -159,8 +159,31 @@ def _ask_deepseek(system: str, user: dict, model: str = "deepseek-chat") -> tupl
                 pass
             return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
 
+    def _retryable(e: Exception) -> bool:
+        if isinstance(e, (httpx.TimeoutException, httpx.ConnectError, httpx.ConnectTimeout,
+                          httpx.ReadTimeout, httpx.NetworkError)):
+            return True
+        if isinstance(e, httpx.HTTPStatusError):
+            return e.response.status_code >= 500
+        return "timed out" in str(e) or "connection refused" in str(e).lower() or \
+            "connection reset" in str(e).lower()
+
     msgs = list(body["messages"])
-    txt = _call(msgs)
+    _last_e: Exception | None = None
+    txt: str = ""
+    for _attempt in range(3):
+        if _attempt:
+            time.sleep(2.0 * _attempt)  # backoff: 2с, 4с
+        try:
+            txt = _call(msgs)
+            break
+        except Exception as e:
+            _last_e = e
+            if _retryable(e):
+                continue
+            raise
+    else:
+        raise _last_e
     out = _parse_reply(txt)
     if not out[1]:
         if not out[0]:

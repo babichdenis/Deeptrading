@@ -29,6 +29,8 @@ class PaperBroker:
         # Кэш позиций: get_position зовётся на КАЖДЫЙ бар (hot-path) — без кэша это
         # 500k+ SQL-запросов за тест. Инвалидируется при open/close/reset.
         self._pos_cache: dict[str, PaperPosition | None] = {}
+        # Последние цены (close свечей от runtime): equity/маржа/intrabar в replay
+        self._last_prices: dict[str, float] = {}
 
     async def ensure_account(self, initial_cash: float = 10_000.0) -> PaperAccount:
         async with self.sessions() as db:
@@ -47,6 +49,7 @@ class PaperBroker:
                 await db.delete(acc)
                 await db.commit()
         self._pos_cache.clear()
+        self._last_prices.clear()
         await self.ensure_account(initial_cash)
 
     async def positions(self) -> list[PaperPosition]:
@@ -192,6 +195,98 @@ class PaperBroker:
             pos.take_profit = Decimal(str(target)) if target is not None else None
             await db.commit()
         self._pos_cache.pop(figi, None)
+
+    # --- Portfolio API (паритет с LiveBroker): runtime зовёт эти методы в
+    # guard-loop, снапшотах, бюджетировании ордеров и intrabar-выходах.
+    # В replay «истина» — кэш последних цен, который runtime обновляет
+    # через update_price() на каждой валидной свече. ---
+
+    def update_price(self, figi: str, price: float) -> None:
+        """Последняя цена (close свечи) — источник equity/маржи в replay."""
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            return
+        if price > 0:
+            self._last_prices[figi] = price
+
+    async def last_prices(self, figis: list[str]) -> dict[str, float]:
+        want = set(figis or [])
+        return {f: p for f, p in self._last_prices.items() if f in want}
+
+    async def cash(self) -> float:
+        async with self.sessions() as db:
+            acc = await db.scalar(select(PaperAccount).where(PaperAccount.name == DEFAULT_ACCOUNT))
+            return float(acc.cash) if acc else 0.0
+
+    async def _unrealized_pnl(self) -> float:
+        total = 0.0
+        for p in await self.positions():
+            px = self._last_prices.get(p.figi, float(p.entry_price or 0.0))
+            direction = 1 if p.side in ("LONG", "BUY") else -1
+            total += (px - float(p.entry_price)) * int(p.qty) * direction
+        return total
+
+    async def equity(self) -> float:
+        """Ликвидный портфель: cash + плавающий PnL открытых позиций."""
+        return (await self.cash()) + (await self._unrealized_pnl())
+
+
+    async def market_value(self) -> float:
+        """Номинал открытых позиций по последним ценам (exposure/eff-lev кап)."""
+        total = 0.0
+        for p in await self.positions():
+            px = self._last_prices.get(p.figi, float(p.entry_price or 0.0))
+            total += px * int(p.qty)
+        return total
+
+    async def margin_attributes(self) -> dict:
+        """Паритет с LiveBroker: starting_margin = замороженное обеспечение под позиции.
+
+        LiveBroker берёт true starting_margin у T-Invest (маржу по риск-ставкам dlong/dshort).
+        PaperBroker считает то же по своим позициям: сумма(номинал / плечо тикера).
+        Плечо берём из instruments.long_lev/short_lev (теоритический максимум) — те же
+        данные, что у LiveBroker.get_max_lots и бэктестов.
+        """
+        import asyncio
+        from sqlalchemy import select as _sel
+        from app.models.instrument import Instrument
+
+        async def _starting_margin() -> float:
+            pos_list = await self.positions()
+            if not pos_list:
+                return 0.0
+            lev_map = {}
+            figis = [p.figi for p in pos_list]
+            async with self.sessions() as db:
+                rows = await db.execute(_sel(Instrument).where(Instrument.figi.in_(figis)))
+                for row in rows.scalars():
+                    lev_map[row.figi] = ((getattr(row, "long_lev", 0.0) or 0.0),
+                                         (getattr(row, "short_lev", 0.0) or 0.0),
+                                         int(getattr(row, "lot", 1) or 1))
+            total = 0.0
+            for p in pos_list:
+                px = self._last_prices.get(p.figi, float(p.entry_price or 0.0))
+                long_lev, short_lev, lot = lev_map.get(p.figi, (1.0, 1.0, 1))
+                notional = px * int(p.qty) * int(lot)
+                lev = long_lev if p.side in ("LONG", "BUY") else short_lev
+                if not lev or lev < 1.0:
+                    lev = 1.0
+                total += notional / float(lev)
+            return total
+
+        cash = await self.cash()
+        unreal = await self._unrealized_pnl()
+        start = await _starting_margin()
+        return {"liquid": cash + unreal, "starting_margin": start, "unrealized": unreal}
+
+    async def free_funds(self) -> float:
+        """Паритет с LiveBroker: свободные = ликвидный портфель − начальная маржа."""
+        ma = await self.margin_attributes()
+        return max(0.0, float(ma.get("liquid") or 0.0) - float(ma.get("starting_margin") or 0.0))
+
+    async def flush_portfolio(self) -> None:
+        self._pos_cache.clear()
 
     async def trades_history(self, limit: int = 100) -> list[PaperTrade]:
         async with self.sessions() as db:

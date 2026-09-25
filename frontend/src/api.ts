@@ -402,9 +402,29 @@ export interface BotTradeRow {
   ts?: string;
   price?: number;
   net_pnl: number; commission: number; exit_reason: string;
+  regime?: string | null;
   stop_loss?: number | null; take_profit?: number | null;
   exit_meta?: string | null;
   meta?: string | null;
+  leverage?: number | null; notional?: number | null; own_money?: number | null;
+  max_pnl?: number | null; max_pnl_time?: string | null;
+  max_pnl_price?: number | null; max_pnl_atr_pct?: number | null;
+  max_pnl_r?: number | null; max_pnl_roi_pct?: number | null;
+  max_pnl_atr?: number | null;
+  max_pnl_mae_atr?: number | null;
+  trail_info?: TrailInfo | null;
+}
+
+export interface TrailInfo {
+  activated?: boolean;
+  trail_stop?: number | null;
+  trail_dist_atr?: number | null;
+  hit_time?: string | null;
+  hit_price?: number | null;
+  hit_reason?: string | null;
+  hit_pnl?: number | null;
+  hit_r?: number | null;
+  hit_roi_pct?: number | null;
 }
 
 export async function botTrades(limit = 50): Promise<BotTradeRow[]> {

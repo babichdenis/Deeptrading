@@ -56,7 +56,10 @@ async def lifespan(app: FastAPI):
     # Auto-start paper bot on backend startup
     try:
         from app.bot.runtime import runtime, BotConfig
-        from app.config import get_settings
+        # NB: get_settings НЕ импортируем локально — модульный импорт сверху
+        # уже есть; локальный import затенял его до присваивания и ломал
+        # get_settings() в блоке RUN_MIGRATIONS_ON_START выше (UnboundLocalError):
+        # «alembic upgrade head failed: cannot access local variable...».
         _s = get_settings()
         _mode = _s.bot_mode if _s.bot_mode in ("sandbox", "live", "test") else "sandbox"
         if not runtime.running:
@@ -107,7 +110,10 @@ async def lifespan(app: FastAPI):
                 cfg.replay_end = _s.bot_test_end or os.environ.get("BOT_TEST_END", "")
                 cfg.replay_pace = _s.bot_test_pace or os.environ.get("BOT_TEST_PACE", "fast")
                 cfg.test_variant = _s.bot_test_variant or os.environ.get("TEST_VARIANT", "")
-            asyncio.create_task(runtime.start(cfg))
+                cfg.replay_log_persist = bool(_s.bot_test_log_persist) or os.environ.get("BOT_TEST_LOG_PERSIST", "0") == "1"
+            # Сильная ссылка на задачу старта: create_task без ссылки может
+            # быть собран GC до завершения старта (рвутся asyncpg-коннекты).
+            _bot_start_task = asyncio.create_task(runtime.start(cfg))
     except Exception as e:
         import logging
         logging.getLogger("uvicorn").warning("Auto-start bot failed: %s", e)

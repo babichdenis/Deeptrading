@@ -1,5 +1,6 @@
 import logging
 import os
+from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -13,13 +14,15 @@ logger = logging.getLogger("bot_api")
 
 
 async def _cfg_from_saved(mode: str = "sandbox", test_name: str = "", replay_start: str = "",
-                         replay_end: str = "", replay_pace: str = "fast") -> BotConfig:
+                          replay_end: str = "", replay_pace: str = "fast",
+                          replay_log_persist: bool = False) -> BotConfig:
     """Конфиг = хардкод-база режима + сохранённые настройки пользователя (PATCH/UI).
 
     Режим/фид/реплей/имя теста берём из аргументов, чтобы сохранёнки их не перетёрли.
     """
     cfg = _build_autostart_cfg(mode, test_name=test_name, replay_start=replay_start,
-                               replay_end=replay_end, replay_pace=replay_pace)
+                               replay_end=replay_end, replay_pace=replay_pace,
+                                   replay_log_persist=replay_log_persist)
     saved = await load_bot_settings()
     for f in BOT_PERSIST_FIELDS:
         if f in saved:
@@ -34,6 +37,7 @@ async def _cfg_from_saved(mode: str = "sandbox", test_name: str = "", replay_sta
         cfg.replay_start = replay_start
         cfg.replay_end = replay_end
         cfg.replay_pace = replay_pace
+        cfg.replay_log_persist = replay_log_persist
         # Вариант теста (ensemble_config.test.<variant>.json): сетапы/выходы —
         # из файл-варианта; оверрайды BotConfig (секция "bot") применяет
         # runtime.start() — единственное место, последними по приоритету.
@@ -84,6 +88,7 @@ def _config_payload(cfg: BotConfig) -> dict:
         "queue_min_turnover": float(getattr(cfg, "queue_min_turnover", 300000) or 0.0),
         "queue_adv_multiple": float(getattr(cfg, "queue_adv_multiple", 200.0) or 0.0),
         "eod_close_min_before": int(getattr(cfg, "eod_close_min_before", 10) or 10),
+        "bias_exit_enabled": bool(getattr(cfg, "bias_exit_enabled", False)),
         "ensemble_require_member": str(getattr(cfg, "ensemble_require_member", "") or ""),
         "momentum_short": bool(getattr(cfg, "momentum_short", False)),
         "momentum_n": int(getattr(cfg, "momentum_n", 63) or 63),
@@ -199,6 +204,7 @@ class StartRequest(BaseModel):
     replay_start: str = ""    # ISO UTC datetime начала окна реплея
     replay_end: str = ""      # ISO UTC datetime конца окна (пусто = до конца данных)
     replay_pace: str = "fast" # fast | wall
+    replay_log_persist: bool = False  # тест: писать логи реплея в bot_logs
 
 
 @router.post("/start")
@@ -248,6 +254,7 @@ async def bot_start(req: StartRequest) -> dict:
         replay_start=req.replay_start,
         replay_end=req.replay_end,
         replay_pace=req.replay_pace if req.replay_pace in ("fast", "wall") else "fast",
+        replay_log_persist=bool(req.replay_log_persist),
     )
     try:
         result = await runtime.start(cfg)
@@ -292,6 +299,7 @@ class BotConfigPatch(BaseModel):
     queue_adv_multiple: float | None = None    # слот ≤ 1/N дневного оборота
     rank_enabled: bool | None = None           # ранжирование тикеров (разведка → топ-N)
     eod_close_min_before: int | None = None    # за N минут до конца сессии закрывать (overnight=False)
+    bias_exit_enabled: bool | None = None      # закрывать позицию при смене знака bias_eff против позиции
     daily_bias: bool | None = None             # дневной MACD-bias (veto входов против направления)
     mtf_align: bool | None = None              # H1 MACD подтверждает дневной bias
     ensemble_require_member: str | None = None  # обязательный голос кворума (macd_cross)
@@ -548,6 +556,11 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.eod_close_min_before is not None:
         cfg.eod_close_min_before = max(0, min(60, int(req.eod_close_min_before)))
         changes.append(f"EOD-закрытие за {cfg.eod_close_min_before} мин до конца сессии")
+    if req.bias_exit_enabled is not None:
+        new_be = bool(req.bias_exit_enabled)
+        if new_be != bool(getattr(cfg, "bias_exit_enabled", False)):
+            changes.append(f"bias-выход: {'вкл' if new_be else 'выкл'}")
+        cfg.bias_exit_enabled = new_be
     if req.top_sizing is not None and req.top_sizing in ("divide", "multiply"):
         if req.top_sizing != cfg.top_sizing:
             changes.append(f"размер топ-1: {cfg.top_sizing} → {req.top_sizing}")
@@ -782,7 +795,7 @@ async def bot_ensemble_get() -> dict:
 async def bot_ensemble_patch(payload: dict) -> dict:
     """Обновить состав кворума/параметры и применить к запущенному боту."""
     cfg = await load_ensemble_config()
-    for key in ("quorum", "neutral_mode", "vol_thr", "bias", "entry_tf"):
+    for key in ("quorum", "neutral_mode", "vol_thr", "bias", "entry_tf", "sl_mult", "rr", "sl_source", "sl_override", "rr_override"):
         if key in payload:
             cfg[key] = payload[key]
     if "setups" in payload and isinstance(payload["setups"], list):
@@ -810,6 +823,91 @@ async def bot_ensemble_reset() -> dict:
     return {"ok": True, "config": cfg}
 
 
+class SettingsRequest(BaseModel):
+    sl_mode: str = ""
+    atr_period: int = 0
+    atr_mult: float = 0.0
+    atr_rr: float = 0.0
+    fixed_sl: float = 0.0
+    fixed_tp: float = 0.0
+    top_n: int = 0
+    commission: float = 0.0
+    reentry_cooldown: int = 0
+    confirm_flip: int = 0
+    quorum: int = 0
+    sl_source: str = ""
+    sl_override: float = 0.0
+    rr_override: float = 0.0
+
+
+@router.post("/settings")
+async def bot_settings(body: SettingsRequest) -> dict:
+    """Сохранить настройки бота.
+
+    atr_mult/atr_rr/quorum → ensemble_config (применяются сразу к запущенным
+    стратегиям через reload); остальное — на лету в runtime.config.
+    """
+    changed: list[str] = []
+
+    _ec_dirty = False
+    ec = await load_ensemble_config()
+    if body.atr_mult > 0:
+        ec["sl_mult"] = round(body.atr_mult, 2)
+        changed.append("sl_mult")
+        _ec_dirty = True
+    if body.atr_rr > 0:
+        ec["rr"] = round(body.atr_rr, 2)
+        changed.append("rr")
+        _ec_dirty = True
+    if body.quorum > 0:
+        ec["quorum"] = int(body.quorum)
+        changed.append("quorum")
+        _ec_dirty = True
+    if body.sl_source in ("optuna", "manual"):
+        ec["sl_source"] = body.sl_source
+        changed.append("sl_source")
+        _ec_dirty = True
+    if body.sl_override > 0:
+        ec["sl_override"] = round(body.sl_override, 2)
+        changed.append("sl_override")
+        _ec_dirty = True
+    if body.rr_override > 0:
+        ec["rr_override"] = round(body.rr_override, 2)
+        changed.append("rr_override")
+        _ec_dirty = True
+    if _ec_dirty:
+        await save_ensemble_config(ec)
+
+    _map = {
+        "sl_mode": body.sl_mode if body.sl_mode in ("atr", "fixed") else "",
+        "atr_period": body.atr_period,
+        "atr_multiplier": body.atr_mult,
+        "atr_risk_reward": body.atr_rr,
+        "stop_pct": body.fixed_sl / 100.0 if body.fixed_sl > 0 else 0.0,
+        "target_pct": body.fixed_tp / 100.0 if body.fixed_tp > 0 else 0.0,
+        "top_n": body.top_n,
+        "commission_rate": body.commission / 100.0 if body.commission > 0 else 0.0,
+        "reentry_cooldown_bars": body.reentry_cooldown,
+        "confirm_flip": body.confirm_flip,
+    }
+    for _k, _v in _map.items():
+        if not _v:
+            continue
+        try:
+            setattr(runtime.config, _k, int(_v) if isinstance(_v, bool) else _v)
+            changed.append(_k)
+        except Exception:
+            pass
+
+    applied = 0
+    if _ec_dirty:
+        try:
+            applied = await runtime.reload_ensemble()
+        except Exception:
+            applied = 0
+    return {"ok": True, "applied_strategies": applied, "changed": changed}
+
+
 @router.post("/stop")
 async def bot_stop() -> dict:
     return await runtime.stop()
@@ -821,17 +919,19 @@ class ModeRequest(BaseModel):
     replay_start: str = ""  # ISO UTC (обязателен для mode=test)
     replay_end: str = ""
     replay_pace: str = "fast"
+    replay_log_persist: bool = False  # писать логи теста в bot_logs
 
 
 def _write_env_mode(mode: str, test_name: str = "", replay_start: str = "", replay_end: str = "",
-                    replay_pace: str = "fast") -> None:
+                    replay_pace: str = "fast", replay_log_persist: bool = False) -> None:
     """Обновить BOT_MODE (и параметры теста) в backend/.env — переживают рестарт uvicorn."""
     import os
     from pathlib import Path
     env_path = Path(__file__).resolve().parents[3] / ".env"
     pairs = {"BOT_MODE": mode, "BOT_TEST_NAME": test_name,
              "BOT_TEST_START": replay_start, "BOT_TEST_END": replay_end,
-             "BOT_TEST_PACE": replay_pace}
+             "BOT_TEST_PACE": replay_pace,
+                 "BOT_TEST_LOG_PERSIST": "1" if replay_log_persist else "0"}
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
         out, have = [], set()
@@ -851,12 +951,14 @@ def _write_env_mode(mode: str, test_name: str = "", replay_start: str = "", repl
         os.environ["BOT_TEST_START"] = replay_start
         os.environ["BOT_TEST_END"] = replay_end
         os.environ["BOT_TEST_PACE"] = replay_pace
+        os.environ["BOT_TEST_LOG_PERSIST"] = "1" if replay_log_persist else "0"
     except Exception:
         pass
 
 
 def _build_autostart_cfg(mode: str, test_name: str = "", replay_start: str = "",
-                         replay_end: str = "", replay_pace: str = "fast") -> BotConfig:
+                         replay_end: str = "", replay_pace: str = "fast",
+                         replay_log_persist: bool = False) -> BotConfig:
     if mode == "test":
         # Тест: тот же движок, но исторические свечи из БД (feed=replay) + paper-выход.
         return BotConfig(
@@ -869,6 +971,7 @@ def _build_autostart_cfg(mode: str, test_name: str = "", replay_start: str = "",
             replay_start=replay_start,
             replay_end=replay_end,
             replay_pace=replay_pace,
+            replay_log_persist=replay_log_persist,
             test_name=test_name,
             sessions=["morning", "day", "evening"],
             long_allowed=True,
@@ -929,7 +1032,8 @@ async def bot_set_mode(req: ModeRequest) -> dict:
         name = req.test_name
     pace = req.replay_pace if req.replay_pace in ("fast", "wall") else "fast"
     _write_env_mode(mode, test_name=name, replay_start=req.replay_start.strip(),
-                    replay_end=req.replay_end.strip(), replay_pace=pace)
+                    replay_end=req.replay_end.strip(), replay_pace=pace,
+                    replay_log_persist=bool(req.replay_log_persist))
     try:
         from app.config import get_settings
         get_settings.cache_clear()
@@ -947,10 +1051,12 @@ async def bot_set_mode(req: ModeRequest) -> dict:
             mode, test_name=name,
             replay_start=req.replay_start.strip(),
             replay_end=req.replay_end.strip(),
-            replay_pace=pace))
+            replay_pace=pace,
+            replay_log_persist=bool(req.replay_log_persist)))
     except Exception as e:
         raise HTTPException(500, f"restart failed: {e}")
-    return {"mode": mode, "test_name": name or None, "restarted": was_running, "replay_pace": pace}
+    return {"mode": mode, "test_name": name or None, "restarted": was_running, "replay_pace": pace,
+            "replay_log_persist": bool(req.replay_log_persist)}
 
 
 class PauseRequest(BaseModel):
@@ -1167,6 +1273,154 @@ async def bot_bars(figi: str, tf: str = "5min", limit: int = 20) -> dict:
            for c in out_bars[-int(limit):]]
     return {"figi": bb, "ticker": runtime.tickers.get(bb, ""), "tf": tf,
             "count": len(out), "bars": out}
+
+
+_HM_CACHE: dict = {}
+_MSC = ZoneInfo("Europe/Moscow")
+
+
+def _tz_utc():
+    from datetime import timezone
+    return timezone.utc
+
+
+def _dt_now_utc():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
+def _bias_from_daily(closes_by_date: dict[str, float]) -> dict[str, int]:
+    """Направление по EMA(50) дневных закрытий (ключ — МСК-дата), как compute_bias."""
+    items = sorted(closes_by_date.items())
+    dates = [d for d, _ in items]
+    closes = [c for _, c in items]
+    if len(closes) < 3:
+        return {}
+    _alpha = 2 / (50 + 1)
+    emas = [closes[0]]
+    for v in closes[1:]:
+        emas.append(_alpha * v + (1 - _alpha) * emas[-1])
+    out: dict[str, int] = {}
+    for i in range(1, len(closes)):
+        out[dates[i]] = 1 if closes[i - 1] >= emas[i - 1] else -1
+    return out
+
+
+async def _hm_compute_meta(db, bb: str, frm) -> (dict[str, dict], float, int):
+    """bias (daily по МСК-датам) + regime (H1) для тикера.
+
+    Берём 1м за ~32 кал. дня — для прогрева EMA(50) bias и warmup (64+) H1 regime.
+    Возвращает (by_hour, last_close, days_ok): by_hour — {iso час: {b, r}}.
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from sqlalchemy import text as _t
+    from app.engine.models import Candle as _EC
+    from app.services.regime import compute_regime as _CR
+    _cut = _dt.now(_tz.utc) - _td(minutes=1)
+    _frm36 = _cut - _td(days=32)
+    _rows1 = (await db.execute(_t(
+        "SELECT ts, open, high, low, close, volume FROM candles "
+        "WHERE figi = :f AND interval = '1' AND ts >= :frm ORDER BY ts"
+    ), {"f": bb, "frm": _frm36})).all()
+    if len(_rows1) < 400:
+        return {}, 0.0, 0
+    _c1m = [_EC(ts=r[0], open=float(r[1]), high=float(r[2]), low=float(r[3]),
+                close=float(r[4]), volume=float(r[5] or 0.0)) for r in _rows1]
+    _st, _tl, _h1 = _CR(_c1m, 3600)  # (states, timeline, bars=EngineCandle)
+    _tl = _tl or []
+    from app.services.ensemble import compute_bias as _cb
+    _bh = _cb(_h1, 50, 3600)  # bias часового ТФ: {bucket: 1|-1}
+    _rmap: dict[int, str] = {}
+    for _rr in (_st or []):
+        _rrts = _rr["ts"]
+        if getattr(_rrts, "tzinfo", None) is None:
+            _rrts = _rrts.replace(tzinfo=_tz_utc())
+        _rmap[int(_rrts.timestamp()) // 3600] = _rr["state"]
+    # дневные закрытия из 1м по МСК-датам (маппинг без гэпов смещения дня)
+    _daily: dict[str, float] = {}
+    _last_close = 0.0
+    for _c in _c1m:
+        _ct = _c.ts if getattr(_c.ts, "tzinfo", None) else _c.ts.replace(tzinfo=_tz_utc())
+        _d = _ct.astimezone(_MSC).date().isoformat()
+        _daily[_d] = float(_c.close)
+    _biasd = _bias_from_daily(_daily)
+    out: dict[str, dict] = {}
+    _days_ok = 0
+    for _hb in _h1:
+        _hbt = _hb.ts
+        if getattr(_hbt, "tzinfo", None) is None:
+            _hbt = _hbt.replace(tzinfo=_tz_utc())
+        _d = _hbt.astimezone(_MSC).date().isoformat()
+        _hk = int(_hbt.timestamp()) // 3600
+        if _hbt >= frm:
+            out[_hbt.isoformat()] = {"b": _biasd.get(_d, 0),
+                                     "bh": _bh.get(_hk, 0),
+                                     "r": _rmap.get(_hk, "NEUTRAL")}
+            _days_ok += 1
+        _last_close = float(_hb.close)
+    return out, _last_close, _days_ok
+
+
+@router.get("/heatmap")
+async def bot_heatmap(days: int = 5, meta: int = 0, figi: str | None = None) -> dict:
+    """Часовые бары ВСЕХ акций universe за N дней — для heatmap на вкладке «Анализ».
+
+    Берём 1м-свечи из БД (candles, interval='1') и ресемплим в часы (date_trunc).
+    Возвращаем по каждому тикеру только закрытые часовые бары (ts, close).
+    При meta=1 в каждый бар добавляем b (bias дневного ТФ: +1/-1/0) и r (режим H1).
+    figi=X — ограничить одним тикером (принимает и tcs-figi, и bbg-код) — для карточки сделки.
+    """
+    days = max(1, min(int(days), 10))
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from sqlalchemy import text as _t
+    from app.database import SessionLocal as _DB
+    univ = list(runtime.universe or [])
+    _frm = _dt.now(_tz.utc) - _td(days=days)
+    _map = runtime.tcs_to_bbg or {}
+    if figi:
+        _want_bb = _map.get(figi, figi)
+        univ = [u for u in univ if str(u.get("figi") or "") in (figi, _want_bb)]
+    _want_meta = bool(meta)
+    _replay = str(getattr(runtime.config, "feed", "")) == "replay"
+
+    _now = _dt.now(_tz.utc)
+    _ck = ("hm", days, _want_meta, figi or "")
+    _cached = _HM_CACHE.get(_ck)
+    if not _replay and _cached and (_now - _cached[0]).total_seconds() < 60:
+        return _cached[1]
+
+    out = []
+    async with _DB() as db:
+        for u in univ:
+            f0 = str(u.get("figi") or "")
+            if not f0:
+                continue
+            bb = _map.get(f0, f0)
+            rows = (await db.execute(_t(
+                """SELECT date_trunc('hour', ts) AS h,
+                          (array_agg(open ORDER BY ts ASC))[1] AS o,
+                          (array_agg(close ORDER BY ts DESC))[1] AS close
+                   FROM candles WHERE figi = :f AND interval = '1' AND ts >= :frm
+                   GROUP BY 1 ORDER BY 1"""
+            ), {"f": bb, "frm": _frm})).all()
+            bars = [{"h": r.h.isoformat(), "o": float(r.o), "c": float(r.close)}
+                    for r in rows if r.h is not None]
+            if _want_meta and bars:
+                _meta, _lc, _dok = await _hm_compute_meta(db, bb, _frm)
+                for b in bars:
+                    _m = _meta.get(b["h"])
+                    if _m:
+                        b["b"], b["bh"], b["r"] = _m["b"], _m["bh"], _m["r"]
+            if bars:
+                out.append({"figi": bb,
+                            "ticker": str(u.get("ticker") or "").upper(),
+                            "lot": int(u.get("lot") or 1),
+                            "bars": bars})
+    _res = {"ok": True, "days": days, "count": len(out), "all": len(univ),
+            "tickers": out}
+    if not _replay:
+        _HM_CACHE[_ck] = (_now, _res)
+    return _res
 
 
 @router.get("/portfolio_summary")
@@ -1563,6 +1817,7 @@ async def bot_status() -> dict:
         _breadth = {}
     return {
         **status,
+        "ai_mode": str(runtime.get_ai_control().get("mode") or ""),
         "breadth": _breadth,
         "portfolio": {
             "cash": portfolio.get("cash", 0),
@@ -1599,6 +1854,16 @@ async def bot_positions(db: AsyncSession = Depends(get_db)) -> dict:
         for p in res.scalars()
     ]
     return {"count": len(items), "positions": items}
+
+
+def _trade_regime(t) -> str:
+    """regime закрытой сделки = entry_regime из meta (движок фиксирует на входе)."""
+    import json as _j
+    try:
+        m = getattr(t, "meta", None)
+        return ( _j.loads(m) if isinstance(m, str) else (m or {}) ).get("entry_regime") or "NO_REGIME"
+    except Exception:
+        return "NO_REGIME"
 
 
 @router.get("/trades")
@@ -1641,6 +1906,7 @@ async def bot_trades(limit: int = 50) -> dict:
                     "commission": float(t.commission or 0),
                     "exit_reason": t.exit_reason or "",
                     "strategy_id": "v4_enhanced",
+                    "regime": _trade_regime(t),
                 }
                 for t in rows
             ],
@@ -1663,6 +1929,7 @@ async def bot_trades(limit: int = 50) -> dict:
                 "commission": float(t.commission),
                 "exit_reason": t.exit_reason,
                 "strategy_id": t.strategy_id,
+                "regime": _trade_regime(t),
             }
             for t in trades
         ],

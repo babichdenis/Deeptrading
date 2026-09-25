@@ -226,12 +226,16 @@ class AtrStopPolicy(ExitPolicy):
         bars: Sequence[Candle],
         qty: int | None = None,
         commission: float | None = None,
+        peak_price: float | None = None,
     ) -> float | None:
         """Трейлинг-стоп. Два режима активации:
         - комиссионный (trail_activation_comm_mult): активация при PnL >= комиссия×mult,
           дальше стоп следует за ценой (дистанция trail_distance_r × risk);
         - ATR-режим (trail_activation_r/trail_distance_r): активация по move >= ATR-порога.
-        Движение только в сторону прибыли (ratchet), никогда назад."""
+        Движение только в сторону прибыли (ratchet), никогда назад.
+        peak_price: экстремум с момента входа (running max high LONG / min low SHORT —
+        тот же, что трекает пик-PnL в боте). Если задан, стоп считается ОТ ПИКА,
+        а не от окна period баров (окно может содержать бары ДО входа)."""
         if not bars:
             return current_stop
         if len(bars) < 2:

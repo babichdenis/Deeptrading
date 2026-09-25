@@ -461,8 +461,31 @@ def _ask_deepseek(order: dict, ctx: dict, model: str, base: str, key: str,
             pass
         return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or "{}"
 
+    def _retryable(e: Exception) -> bool:
+        if isinstance(e, (httpx.TimeoutException, httpx.ConnectError, httpx.ConnectTimeout,
+                          httpx.ReadTimeout, httpx.NetworkError)):
+            return True
+        if isinstance(e, httpx.HTTPStatusError):
+            return e.response.status_code >= 500
+        return "timed out" in str(e) or "connection refused" in str(e).lower() or \
+            "connection reset" in str(e).lower()
+
     msgs = list(payload["messages"])
-    txt = _call(msgs)
+    _last_e: Exception | None = None
+    txt: str = "{}"
+    for _attempt in range(3):
+        if _attempt:
+            time.sleep(2.0 * _attempt)  # backoff: 2с, 4с
+        try:
+            txt = _call(msgs)
+            break
+        except Exception as e:
+            _last_e = e
+            if _retryable(e):
+                continue
+            raise
+    else:
+        raise _last_e
     out = _prs(txt)
     try:
         out["_usage"] = dict(_usage)
@@ -1042,6 +1065,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--api", default=os.environ.get("BOT_API_URL", "http://127.0.0.1:8000"))
     ap.add_argument("--interval", type=float, default=5.0)
+    ap.add_argument("--retry-cooldown", type=float, default=60.0,
+                    help="мин. пауза между повторными вызовами LLM по одной заявке при ошибке (503/сеть)")
     ap.add_argument("--dry-run", action="store_true",
                     help="shadow: решения НЕ применяются, только логируются и уходят в UI")
     ap.add_argument("--provider", default="opencode", choices=("opencode", "deepseek", "ollama"))
@@ -1148,7 +1173,13 @@ def main() -> None:
         run_watch(args, _provs, _models)
         return
 
-    def _process_order(order: dict, tmo: float) -> None:
+    # Throttle повторных вызовов LLM по одной заявке при ошибке (503/сеть):
+    # иначе каждый цикл (5с) бежит к модели заново → пачки skip/error в журнале
+    # и лишняя нагрузка на LLM-прокси, пока тот недоступен/в WAF-блоке.
+    _order_tried: dict[str, float] = {}
+    _retry_cd = max(30.0, float(getattr(args, "retry_cooldown", 60.0) or 60.0))
+
+    def _process_order(order: dict, tmo: float, default: str) -> None:
         """Одна заявка: контекст → вердикты провайдеров → применение → запись решений."""
         oid = order.get("id")
         _sys = _eff_system(args.api, "gate", SYSTEM)
@@ -1169,6 +1200,46 @@ def main() -> None:
                 futs = {p: ex.submit(_timed, p) for p in _provs}
                 out = {p: f.result() for p, f in futs.items()}
             decs = {p: out[p][0] for p in _provs}
+            # При ошибке LLM (503/сеть/таймаут) помечаем заявку: не дергаем модель
+            # повторно ближайшие _retry_cd секунд (иначе — пачки записей каждый цикл).
+            _llm_error = bool(
+                all(str(decs[p].get("decision")) == "skip" for p in _provs)
+                and any("error" in str(decs[p].get("reason") or "") for p in _provs))
+            if _llm_error:
+                _order_tried[oid] = time.monotonic()
+                # Модель не ответила (503/сеть/таймаут). Заявку снимаем default'ом
+                # СРАЗУ (очередь не копится), но результат ВСЕГДА пишем в журнал —
+                # иначе создаётся иллюзия, что заявка «зависла в AI-гейте» без рассмотрения.
+                _res = None
+                if not args.dry_run:
+                    try:
+                        _res = _http(
+                            "POST",
+                            f"{args.api}/api/v1/bot/approvals/{oid}/{default}",
+                            {"reason": f"AI недоступен: {str(decs[_apply].get('reason') or '')[:120]} → default={default}"})
+                    except Exception as e:
+                        _res = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:100]}"}
+                _d0 = decs.get(_apply) or {}
+                rec = {"ts": datetime.now(timezone.utc).isoformat(), "order_id": oid,
+                       "ticker": order.get("ticker"), "side": order.get("side"),
+                       "qty": order.get("qty"), "figi": order.get("figi"),
+                       "news_ticker": ctx.get("news_ticker") or [], "usage": {},
+                       "provider": _apply, "model": _models.get(_apply, ""),
+                       "decision": default,  # честный исход: reject по недоступности LLM
+                       "reason": f"{default} [LLM недоступен: {str(_d0.get('reason') or '')[:120]}]",
+                       "advice": "", "confidence": 0.0, "latency_ms": 0,
+                       "agreement": False, "applied": bool(_res and not args.dry_run),
+                       "dry_run": args.dry_run, "shadow": args.dry_run}
+                if _res is not None:
+                    rec["apply_result"] = _res
+                try:
+                    _http("POST", f"{args.api}/api/v1/bot/ai_decisions", rec)
+                except Exception as e:
+                    rec["ui_post_error"] = f"{type(e).__name__}: {str(e)[:80]}"
+                _log(rec)
+                return
+            else:
+                _order_tried.pop(oid, None)
             agree = len({str(decs[p].get("decision")) for p in _provs}) == 1
             applied_dec = decs.get(_apply, {})
             applied_res = None
@@ -1227,12 +1298,15 @@ def main() -> None:
                 tmo = float(d.get("timeout_sec") or 45.0)
                 if wait > tmo * 0.75:
                     continue  # поздно решать — пусть сработает таймаут/default
-                todo.append((order, tmo))
+                _last = _order_tried.get(str(order.get("id") or ""), 0.0)
+                if time.monotonic() - _last < _retry_cd:
+                    continue  # недавно уже пробовали (LLM 503) — не молотим
+                todo.append((order, tmo, d.get("default") or "reject"))
             if todo:
                 # Параллельно: раньше заявки обрабатывались по очереди и вердикты
                 # опаздывали (4 сигнала × ~30с = 2 мин > таймаут 55с → default approve).
                 with ThreadPoolExecutor(max_workers=min(3, len(todo))) as ex:
-                    futs = [ex.submit(_process_order, o, t) for o, t in todo]
+                    futs = [ex.submit(_process_order, o, t, dl) for o, t, dl in todo]
                     for f in futs:
                         try:
                             f.result()

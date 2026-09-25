@@ -32,8 +32,6 @@ GATES: tuple[GateSpec, ...] = (
              "engine", "Сетапы ансамбля не дали вход (funnel_raw); quorum в ensemble_config"),
     GateSpec("no_fresh", "Нет свежего сигнала", "signal", "signal", "",
              "engine", "Входы есть, но старее FRESH_MIN минут — не торгуем"),
-    GateSpec("vol_thr", "Объёмный фильтр", "signal", "signal", "vol_thr",
-             "engine", "volume/mean50 < порога — вход/выход отклонён (ensemble_config.vol_thr)"),
     GateSpec("AGAINST_BIAS", "Против bias", "signal", "signal", "bias",
              "engine", "Вход против дневного/часового bias ансамбля (ensemble_config.bias)"),
     GateSpec("REGIME_MODE", "Режим сетапов", "signal", "signal", "regime_setups_filter",
@@ -42,14 +40,12 @@ GATES: tuple[GateSpec, ...] = (
              "engine", "Всплеск индекса против стороны входа на этапе сигнала"),
     GateSpec("STOCH_FILTER", "Стохастик-фильтр", "signal", "signal", "",
              "engine", "Stochastic-фильтр сетапа"),
+    GateSpec("RSI_FILTER", "RSI-фильтр", "signal", "signal", "",
+             "engine", "RSI-гейт: BUY не входит вне нейтральной зоны (по умолч. RSI 40–60)"),
     GateSpec("VOL_FLOW", "Поток объёма", "signal", "signal", "",
              "engine", "volume flow против входа"),
     GateSpec("SETUP_MISSING", "Сетап не сработал", "signal", "signal", "",
              "engine", "Нет подтверждения конкретного сетапа"),
-    GateSpec("entry_confirm", "Подтверждение 1м-закрытиями", "signal", "signal",
-             "entry_confirm_closes", "engine", "N 1м-закрытий строго по направлению"),
-    GateSpec("entry_macd_1m", "MACD 1м триггер", "signal", "signal", "",
-             "engine", "1м MACD должен подтверждать сторону (entry_macd_1m)"),
 
     GateSpec("orderbook", "Стакан против входа", "signal", "signal",
              "entry_ob_imbalance_max", "engine",
@@ -79,16 +75,12 @@ GATES: tuple[GateSpec, ...] = (
              "long_allowed", "engine", "Направление long выключено в конфиге"),
     GateSpec("short_disabled", "Шорты запрещены", "session", "time",
              "short_allowed", "engine", "Направление short выключено в конфиге"),
-    GateSpec("regime_off", "Режим рынка запрещён", "trend", "trend",
-             "trade_regimes", "engine", "Режим (TREND_UP/…/RANGE) не в trade_regimes"),
     GateSpec("trend_alignment", "Против тренда", "trend", "trend",
              "trend_alignment", "engine", "В TREND_UP только BUY, в TREND_DOWN только SELL"),
     GateSpec("loss_streak_hold", "HOLD после убытков", "risk", "time",
              "loss_streak_hold", "engine", "N убытков подряд → пауза по тикеру/глобально"),
     GateSpec("imoex_guard", "IMOEX guard", "risk", "time",
              "imoex_guard", "engine", "Запрет входов против всплеска индекса MOEX"),
-    GateSpec("risk_limit", "Лимит дня", "risk", "time",
-             "daily_loss_limit", "engine", "risk.state != NORMAL (дневной лимит убытка/пауза)"),
 
     # ---------- 3. ORDER: _submit_order ----------
     GateSpec("daily_bias", "Дневной MACD-bias", "trend", "trend",
@@ -103,6 +95,10 @@ GATES: tuple[GateSpec, ...] = (
              "mtf_align", "engine", "Старый комбинированный MTF-фильтр (H1 vs bias)"),
     GateSpec("mtf_m5_trigger", "M5 триггер (legacy)", "trend", "trend",
              "mtf_trigger", "engine", "M5 MACD должен разворачиваться в сторону входа"),
+    GateSpec("hm_veto", "Veto накопл. движения", "trend", "trend",
+             "entry_hm_veto", "engine",
+             "Вход против накопленного движения за окно (часовые бары из 1м): "
+             "BUY при падении ≤ -thr%, SELL при росте ≥ +thr%"),
     GateSpec("require_member", "Якорь кворума", "signal", "trend",
              "ensemble_require_member", "engine", "Обязательный голос кворума (напр. macd_cross)"),
     GateSpec("rank_filter", "Рейтинг тикеров", "signal", "trend",
@@ -129,24 +125,16 @@ GATES: tuple[GateSpec, ...] = (
              "max_short_share", "engine", "Доля шортов среди позиций ≤ max_short_share"),
     GateSpec("budget", "Сайзинг: бюджет", "sizing", "sizing",
              "pos_pct", "engine", "Цена/лот/бюджет не позволяют взять даже лот"),
-    GateSpec("margin_limit", "Сайзинг: маржа", "sizing", "sizing",
-             "max_margin_pct", "engine", "Лимит брокера/маржи: max lots = 0"),
-    GateSpec("queue", "Очередь кандидатов", "signal", "portfolio",
-             "queue_enabled", "engine", "Слабый вход отложен в очередь (top-1 входит с бустом)"),
     GateSpec("policy_reject", "Политика сигналов", "signal", "signal", "",
              "engine", "SignalPolicy.decide() отклонил сигнал"),
 
     # ---------- 4. APPROVAL: AI ----------
-    GateSpec("ai_approval", "AI-гейт (approve/reject)", "ai", "approval",
-             "ai_approval", "engine", "Заявка ждёт решения модели; таймаут → ai_approval_default"),
     GateSpec("ai_reject_cooldown", "Пауза после AI-reject", "ai", "approval",
              "ai_reject_cooldown_min", "engine", "Повторные входы по тикеру после отказа AI"),
     GateSpec("ai_already_pending", "Заявка уже в гейте", "ai", "approval", "",
              "engine", "Не дублируем заявку, пока предыдущая ждёт решения"),
     GateSpec("ai_chase", "AI: чейзинг", "ai", "approval",
              "ai_chase_pct", "ai", "Запрет AI-входа после хода >X% за день без отката"),
-    GateSpec("ai_sl_tp", "AI: потолки SL/TP", "ai", "approval",
-             "ai_sl_max_pct", "ai", "SL ≤ ai_sl_max_pct, TP ≤ ai_tp_max_pct для AI-ордеров"),
     GateSpec("ai_watch", "AI-вахтёр позиций", "ai", "approval",
              "ai_approval", "ai", "Вахтёр: close/tighten по позициям (Бот+++)"),
 
@@ -191,7 +179,6 @@ _ALL_REGIMES = ("NEUTRAL", "TREND_UP", "TREND_DOWN", "HIGH_VOLATILITY", "RANGE")
 
 GATE_TOGGLE: dict[str, dict] = {
     # ---------- signal ----------
-    "entry_confirm":      {"field": "entry_confirm_closes", "kind": "threshold", "default_on": 3},
     "orderbook":          {"field": "entry_ob_imbalance_max", "kind": "threshold", "default_on": 0.3},
     "liquidity_check":    {"field": "entry_min_turnover", "kind": "threshold", "default_on": 500_000.0},
     "volatility_check":   {"field": "entry_volatility_max_mult", "kind": "threshold", "default_on": 3.0},
@@ -200,12 +187,9 @@ GATE_TOGGLE: dict[str, dict] = {
     "cooldown":           {"field": "reentry_cooldown_bars", "kind": "threshold", "default_on": 30},
     "long_disabled":      {"field": "long_allowed", "kind": "inv_bool"},
     "short_disabled":     {"field": "short_allowed", "kind": "inv_bool"},
-    "regime_off":         {"field": "trade_regimes", "kind": "list",
-                           "default_on": ["NEUTRAL", "TREND_UP", "TREND_DOWN", "HIGH_VOLATILITY", "RANGE"]},
     "trend_alignment":    {"field": "trend_alignment", "kind": "bool"},
     "loss_streak_hold":   {"field": "loss_streak_hold", "kind": "bool"},
     "imoex_guard":        {"field": "imoex_guard", "kind": "bool"},
-    "risk_limit":         {"field": "daily_loss_limit", "kind": "threshold", "default_on": 1000.0},
     # ---------- order ----------
     "daily_bias":         {"field": "daily_bias", "kind": "bool"},
     "last_hour":          {"field": "entry_last_hour_block", "kind": "bool"},
@@ -213,6 +197,7 @@ GATE_TOGGLE: dict[str, dict] = {
     "tf_conflict":        {"field": "entry_tf_conflict", "kind": "bool"},
     "mtf_h1_align":       {"field": "mtf_align", "kind": "bool"},
     "mtf_m5_trigger":     {"field": "mtf_trigger", "kind": "bool"},
+    "hm_veto":            {"field": "entry_hm_veto", "kind": "bool"},
     "rank_filter":        {"field": "rank_enabled", "kind": "bool"},
     "max_exposure":       {"field": "max_exposure_pct", "kind": "threshold", "default_on": 1.0},
     "portfolio_limit":    {"field": "max_net_exposure_pct", "kind": "threshold", "default_on": 0.5},
@@ -221,15 +206,10 @@ GATE_TOGGLE: dict[str, dict] = {
     "beta_filter":        {"field": "beta_filter_enabled", "kind": "bool"},
     "confirmed_cluster":  {"field": "confirmed_cluster_enabled", "kind": "bool"},
     "ls_balance":         {"field": "max_short_share", "kind": "threshold", "default_on": 0.7},
-    "margin_limit":       {"field": "max_margin_pct", "kind": "threshold", "default_on": 80.0},
-    "queue":              {"field": "queue_enabled", "kind": "bool"},
     # ---------- approval / AI ----------
-    "ai_approval":        {"field": "ai_approval", "kind": "bool"},
     "ai_reject_cooldown": {"field": "ai_reject_cooldown_min", "kind": "threshold", "default_on": 15.0},
     "ai_chase":           {"field": "ai_chase_pct", "kind": "threshold", "default_on": 3.0},
-    "ai_sl_tp":           {"fields": [("ai_sl_max_pct", 0.03), ("ai_tp_max_pct", 0.08)], "kind": "threshold"},
     # ---------- ensemble (data/ensemble_config.json) ----------
-    "vol_thr":            {"field": "vol_thr", "kind": "threshold", "ensemble": True, "default_on": 0.5},
     "AGAINST_BIAS":       {"field": "bias_mode", "kind": "enum", "ensemble": True,
                            "on_value": "veto", "off_value": "info"},
     "REGIME_MODE":        {"field": "regime_setups_filter", "kind": "dict", "ensemble": True},
@@ -563,6 +543,10 @@ GATE_CONFIG_FIELDS: tuple[str, ...] = (
     # trend
     "entry_h1_align",
     "entry_tf_conflict",
+    "entry_hm_veto",
+    "hm_veto_window_h",
+    "hm_veto_thr_pct",
+    "hm_veto_mode",
     # portfolio
     "max_sector_positions",
     # approval / AI
@@ -582,6 +566,10 @@ GATE_CONFIG_DEFAULTS: dict = {
     "entry_news_blackout_min": 60,
     "entry_h1_align": True,
     "entry_tf_conflict": True,
+    "entry_hm_veto": False,
+    "hm_veto_window_h": 24,
+    "hm_veto_thr_pct": 3.0,
+    "hm_veto_mode": "veto",
     "max_sector_positions": 0,
     "ai_chase_pct": 3.0,
     "ai_sl_max_pct": 0.03,
@@ -651,6 +639,8 @@ class TrendContext:
     votes: int = 0
     quorum: int = 2
     rank_why: str = ""
+    hm_pct: float | None = None
+    hm_dur: int = 0
 
 
 def gate_daily_bias(ctx: TrendContext) -> GateResult:
@@ -684,6 +674,29 @@ def gate_tf_conflict(ctx: TrendContext) -> GateResult:
             return GateResult(False, "tf_conflict",
                               f"daily bias {ctx.daily_bias} против H1 {ctx.h1_side} "
                               f"(противоречие ТФ)")
+    return GateResult(True)
+
+
+def gate_hm_veto(ctx: TrendContext) -> GateResult:
+    if not bool(getattr(ctx.cfg, "entry_hm_veto", False)):
+        return GateResult(True)
+    thr = float(getattr(ctx.cfg, "hm_veto_thr_pct", 3.0) or 3.0)
+    p = ctx.hm_pct
+    d = max(0, int(ctx.hm_dur or 0))
+    if p is None:
+        return GateResult(True)
+    # Чем дольше тренд (часы подряд в одну сторону), тем ниже эффективный порог:
+    # длинный тренд считается более «убедительным» — вход против него жёстче режем.
+    _factor = 1.0 + min(d, 48) / 24.0
+    thr_eff = thr / _factor
+    _against = (ctx.side == "BUY" and p <= -thr_eff) or (ctx.side == "SELL" and p >= thr_eff)
+    if not _against:
+        return GateResult(True)
+    mode = str(getattr(ctx.cfg, "hm_veto_mode", "veto")).lower()
+    detail = (f"накоплен {p:+.2f}% за окно, тренд {d}ч против {ctx.side} "
+              f"(порог ±{thr_eff:.2f}% на базе {thr}%)")
+    if mode == "veto":
+        return GateResult(False, "hm_veto", detail)
     return GateResult(True)
 
 
@@ -734,7 +747,7 @@ def gate_rank(ctx: TrendContext) -> GateResult:
 
 
 TREND_GATES = (gate_daily_bias, gate_h1_align, gate_tf_conflict, gate_mtf_h1, gate_mtf_m5,
-               gate_require_member, gate_rank)
+               gate_require_member, gate_rank, gate_hm_veto)
 
 
 @dataclass

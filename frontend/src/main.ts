@@ -101,6 +101,7 @@ async function pollBotStatus(): Promise<void> {
     _srUniverse = new Map((status.universe ?? []).map((u) => [u.figi, { atr_pct: u.atr_pct }]));
     _srVotes = new Map((status.votes ?? []).map((v) => [v.figi, { votes: v.votes ?? 0, side: v.side ?? "", regime: v.regime ?? null, buy: v.buy ?? 0, sell: v.sell ?? 0, vol_abs: v.vol_abs ?? null }]));
     if (_srRows.length) renderSrTable();
+    renderReplayBar(status);
     botRunning = status.running;
     // Шапка: цифры по-режимно из /api/v1/sandbox/status (test→тест, live→брокер,
     // sandbox→sandbox) — как в оригинале. /api/v1/bot/status остаётся источником режима.
@@ -205,6 +206,35 @@ async function pollBotStatus(): Promise<void> {
   } catch (e) {
     console.warn("bot status poll error", e);
   }
+}
+
+const _mskFmtTimeR = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit", hour12: false });
+const _mskFmtDateR = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit" });
+function renderReplayBar(status: any): void {
+  const bar = document.getElementById("bot-replay-bar");
+  if (!bar) return;
+  const rp = status?.replay;
+  const active = !!(rp && rp.active);
+  bar.style.display = active ? "flex" : "none";
+  if (!active) return;
+  const fmt = (iso: unknown): string => {
+    if (!iso) return "—";
+    try {
+      const d = new Date(String(iso));
+      if (isNaN(d.getTime())) return "—";
+      return _mskFmtDateR.format(d) + " " + _mskFmtTimeR.format(d);
+    } catch { return "—"; }
+  };
+  const win = fmt(rp.start) + " → " + fmt(rp.end);
+  const pct = Math.max(0, Math.min(100, Number(rp.pct ?? 0)));
+  const winEl = document.getElementById("bot-replay-window");
+  const timeEl = document.getElementById("bot-replay-time");
+  const pctEl = document.getElementById("bot-replay-pct");
+  const fill = document.getElementById("bot-replay-fill");
+  if (winEl) winEl.textContent = "окно " + win;
+  if (timeEl) timeEl.textContent = "свеча " + fmt(rp.now_msk || rp.now);
+  if (pctEl) pctEl.textContent = pct.toFixed(1) + "%" + (rp.pace ? " · " + rp.pace : "");
+  if (fill) fill.style.width = pct.toFixed(1) + "%";
 }
 
 async function pollPositions(): Promise<void> {
@@ -383,6 +413,7 @@ function bindTradesClicks(): void {
 function renderTrades(): void {
   const tbody = document.querySelector<HTMLTableSectionElement>("#bot-trades-table tbody");
   if (!tbody) return;
+  bindHmToggle();
   tbody.innerHTML = "";
   const trades = _lastTrades;
   for (let i = 0; i < trades.length; i++) {
@@ -468,7 +499,8 @@ function renderTrades(): void {
   }
 }
 
-// Детали сделки: состав ансамбля, голоса кворума, bias и entry при входе.
+// Детали сделки: двухколоночная карточка — вход слева, выход справа, цифры в таблицах,
+// чипы в едином стиле (.td-chip). Внизу на всю ширину — тепловая карта дня.
 function tradeDetailsHtml(t: SandboxTrade): string {
   let m: Record<string, unknown> | null = null;
   try { m = t.meta ? JSON.parse(t.meta) : null; } catch { m = null; }
@@ -478,13 +510,31 @@ function tradeDetailsHtml(t: SandboxTrade): string {
   const vol = (m?.volume as Record<string, number>) || {};
   const regNow = m?.regime as string | undefined;
   const ab = entry.against_bias;
-  const chip = (txt: string, col: string) =>
-    `<span style="display:inline-block;padding:1px 7px;margin:2px;border-radius:6px;border:1px solid ${col};color:${col};font-size:10px;font-weight:700">${txt}</span>`;
+  const chip = (txt: string, c: string) => `<span class="td-chip" style="color:${c};border-color:${c}">${txt}</span>`;
   const fnum = (x: number | undefined) => (x == null ? "—" : new Intl.NumberFormat("ru-RU").format(Math.round(x)));
-  const rows: string[] = [];
-  rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Вход:</b> ${String(t.side)} · ${String(entry.reason ?? "—")}` +
-    (ab === true ? ` ${chip("ПРОТИВ bias", "#e74c3c")}` : ab === false ? ` ${chip("по bias", "#2ecc71")}` : "") +
-    (entry.features ? ` · level ${(entry.features as Record<string, unknown>).breakout_level ?? "—"}` : "") + `</div>`);
+  const kv = (k: string, v: string) => `<tr><td class="td-k">${k}</td><td class="td-v">${v}</td></tr>`;
+  const colHtml = (title: string, rows: string[]) =>
+    `<div class="td-col"><div class="td-title">${title}</div><table class="td-tbl">${rows.join("")}</table></div>`;
+
+  // Левая колонка: ВХОД.
+  const L: string[] = [];
+  L.push(kv("Вход", `${String(t.side)} · ${String(entry.reason ?? "—")}` +
+    (ab === true ? " " + chip("ПРОТИВ bias", "#e74c3c") : ab === false ? " " + chip("по bias", "#2ecc71") : "")));
+  if (entry.features) L.push(kv("Level", String((entry.features as Record<string, unknown>).breakout_level ?? "—")));
+  // RSI на баре входа (rsi_filter-гейт 40–60): вне коридора — предупреждение.
+  if (entry.rsi != null) {
+    const rsi = Number(entry.rsi);
+    const out = rsi > 60 || rsi < 40;
+    L.push(kv("RSI (вход)", `<span style="color:${out ? "var(--warn)" : "var(--text)"};font-weight:${out ? 700 : 400}">${rsi.toFixed(1)}</span> <span class="td-dim">(гейт 40–60)</span>`));
+  }
+  // Начальный SL/TP в ATR, R и ROI (из sandbox/trades: sl_atr/tp_atr/rr_initial/roi_*).
+  if (t.sl_atr != null || t.tp_atr != null || t.rr_initial != null) {
+    const up = (x: string) => `<span style="color:var(--up)">${x}</span>`;
+    const dn = (x: string) => `<span style="color:var(--down)">${x}</span>`;
+    L.push(kv("SL (вход)", `${t.stop_loss != null ? money(t.stop_loss) : "—"} [${t.sl_atr != null ? dn(`${t.sl_atr.toFixed(2)} ATR`) : "—"} / ROI ${t.roi_sl_pct != null ? dn(`${t.roi_sl_pct.toFixed(1)}%`) : "—"}]`));
+    L.push(kv("TP (вход)", `${t.take_profit != null ? money(t.take_profit) : "—"} [${t.tp_atr != null ? up(`${t.tp_atr.toFixed(2)} ATR`) : "—"} / ROI ${t.roi_tp_pct != null ? up(`+${t.roi_tp_pct.toFixed(1)}%`) : "—"}]`));
+    if (t.rr_initial != null) L.push(kv("R план", `1:${t.rr_initial.toFixed(2)}`));
+  }
   try {
     const f = (entry.features as Record<string, unknown>) || {};
     const up: string[] = [];
@@ -497,34 +547,211 @@ function tradeDetailsHtml(t: SandboxTrade): string {
       }
     }
     if (up.length || dn.length) {
-      rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Голоса:</b> ` +
-        `<span style="color:var(--up)">↑ ${up.join(", ") || "—"}</span> &nbsp;` +
-        `<span style="color:var(--down)">↓ ${dn.join(", ") || "—"}</span></div>`);
+      L.push(kv("Голоса", `<span style="color:var(--up)">↑ ${up.join(", ") || "—"}</span> · <span style="color:var(--down)">↓ ${dn.join(", ") || "—"}</span>`));
     }
   } catch { /* noop */ }
   if (vol.v != null) {
-    rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Объём (вход):</b> ` +
-      `${fnum(vol.v)} <span style="color:var(--text-dim)">(max ${fnum(vol.max)}, min ${fnum(vol.min)})</span>` +
-      ` · <b style="color:var(--text-dim)">Режим:</b> ${regNow || "—"}</div>`);
+    L.push(kv("Объём (вход)", `${fnum(vol.v)} <span class="td-dim">(max ${fnum(vol.max)}, min ${fnum(vol.min)})</span>${regNow ? ` · Режим ${regNow}` : ""}`));
   }
   if (Object.keys(qe).length) {
-    rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Кворум:</b> ${String(qe.side ?? "")} · голосов ${String(qe.votes ?? "?")}/${String(qe.total_members ?? "?")} (k=${String(qe.quorum_k ?? "?")}) · BUY ${String(qe.buy_votes ?? 0)} / SELL ${String(qe.sell_votes ?? 0)}</div>`);
+    L.push(kv("Кворум", `${String(qe.side ?? "")} · голосов ${String(qe.votes ?? "?")}/${String(qe.total_members ?? "?")} (k=${String(qe.quorum_k ?? "?")}) · BUY ${String(qe.buy_votes ?? 0)} / SELL ${String(qe.sell_votes ?? 0)}`));
     const mf = (qe.members_for as string[]) || [];
     const op = (qe.opposition as string[]) || [];
-    if (mf.length) rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">За:</b> ${mf.map((x) => chip(x, "#2ecc71")).join("")}</div>`);
-    if (op.length) rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Против:</b> ${op.map((x) => chip(x, "#e74c3c")).join("")}</div>`);
+    if (mf.length) L.push(kv("За", mf.map((x) => chip(x, "#2ecc71")).join(" ")));
+    if (op.length) L.push(kv("Против", op.map((x) => chip(x, "#e74c3c")).join(" ")));
   }
   const sk = Object.keys(setups);
   if (sk.length) {
-    rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Стратегии (5m):</b> ${sk.map((k) => {
+    // ТФ в подписи — из данных конфига (сетапы могут быть на 5m или 10m). Счётчики —
+    // НАКОПЛЕННЫЕ сигналы каждой стратегии за всю сессию, а не голоса момента входа:
+    // в кворуме голосуют только участники события (чипы «За»/«Против» выше).
+    const tfSet = new Set(sk.map((k) => String((setups[k] as Record<string, unknown>).tf || "5min")));
+    const tfLabel = ([...tfSet].join("+") || "5min").replace("min", "m");
+    L.push(kv(`Сигналы стратегий (${tfLabel})`, sk.map((k) => {
       const s = setups[k];
-      const b = Number(s.BUY ?? 0), sl = Number(s.SELL ?? 0);
-      const col = b > sl ? "#2ecc71" : sl > b ? "#e74c3c" : "var(--text-dim)";
-      return chip(`${k}: ↑${b}/↓${sl}`, col);
-    }).join("")}</div>`);
+      const b = Number(s.BUY ?? 0), sv = Number(s.SELL ?? 0);
+      const c = b > sv ? "#2ecc71" : sv > b ? "#e74c3c" : "var(--text-dim)";
+      return chip(`${k}: ↑${b}/↓${sv}`, c);
+    }).join(" ")) + `<div class="td-dim" style="margin-top:3px">накопленные сигналы за сессию (все стратегии); в кворуме на входе голосовали только чипы «За»/«Против»</div>`);
   }
-  if (!rows.length) rows.push(`<div style="color:var(--text-dim)">нет данных meta</div>`);
-  return `<td colspan="11" style="background:var(--bg-soft);padding:8px 12px;font-size:11px;line-height:1.6">${rows.join("")}</td>`;
+  if (!L.length) L.push(kv("Вход", "—"));
+
+  // Правая колонка: ВЫХОД.
+  const R: string[] = [];
+  // Max P&L: пик прибыли + время + цена + ATR на пике + R + ROI (из runtime._st_close / API).
+  if (t.max_pnl != null && !(t.ts == null || t.exit_price == null)) {
+    const mp = t.max_pnl;
+    let mpTime = "—";
+    try {
+      const d = new Date(String(t.max_pnl_time));
+      if (!isNaN(d.getTime())) mpTime = fmtShortDT(String(t.max_pnl_time));
+    } catch { /* noop */ }
+    R.push(kv("Max P&L", `<b class="${mp >= 0 ? "pos" : "neg"}">${mp >= 0 ? "+" : ""}${money(mp)}</b> · в ${mpTime}` +
+      (t.max_pnl_price != null ? ` · цена ${money(t.max_pnl_price)}` : "")));
+    // ATR на пике — в абсолютных единицах цены (как на входе); % только как запасной вариант для старых сделок.
+    if (t.max_pnl_atr != null) R.push(kv("ATR (пик)", `${money(t.max_pnl_atr)} ₽`));
+    else if (t.max_pnl_atr_pct != null) R.push(kv("ATR (пик)", `${t.max_pnl_atr_pct}%`));
+    if (t.max_pnl_mae_atr != null) R.push(kv("MAE до пика", `${t.max_pnl_mae_atr.toFixed(2)} ATR`));
+    // R в том же формате, что «R план» на входе (1:X.XX).
+    if (t.max_pnl_r != null) R.push(kv("R (пик)", `<span class="${t.max_pnl_r >= 0 ? "pos" : "neg"}">1:${t.max_pnl_r.toFixed(2)}</span>`));
+    if (t.max_pnl_roi_pct != null) R.push(kv("ROI (пик)", `<span class="${t.max_pnl_roi_pct >= 0 ? "pos" : "neg"}">${t.max_pnl_roi_pct >= 0 ? "+" : ""}${t.max_pnl_roi_pct.toFixed(1)}%</span>`));
+  }
+  // Инфо-трейлинг: где бы сработал трейл (виртуальный след, SL/TP не трогали).
+  if (t.trail_info && t.exit_price != null) {
+    const ti = t.trail_info;
+    let hitTime = "—";
+    try {
+      const d = new Date(String(ti.hit_time));
+      if (!isNaN(d.getTime())) hitTime = fmtShortDT(String(ti.hit_time));
+    } catch { /* noop */ }
+    R.push(kv("Трейл (инфо)", ti.activated ? "вкл" : "не активировался"));
+    R.push(kv("Закрыл бы (вирт. трейл)", ti.hit_price != null ? `<b style="color:var(--warn)">${money(ti.hit_price)}</b> в ${hitTime}` : "не сработал"));
+    if (ti.hit_pnl != null) R.push(kv("Забрал бы прибыль", `<span class="${ti.hit_pnl >= 0 ? "pos" : "neg"}">${ti.hit_pnl >= 0 ? "+" : ""}${money(ti.hit_pnl)} ₽</span>`));
+    R.push(kv("Стоп / дист", `${ti.trail_stop != null ? money(ti.trail_stop) : "—"} · ${ti.trail_dist_atr != null ? `${ti.trail_dist_atr.toFixed(2)}×ATR` : "—"}`));
+    if (ti.hit_price != null && ti.hit_r != null) R.push(kv("R (трейл)", `<span class="${ti.hit_r >= 0 ? "pos" : "neg"}">1:${ti.hit_r.toFixed(2)}</span>`));
+    if (ti.hit_price != null && ti.hit_roi_pct != null) R.push(kv("ROI (трейл)", `<span class="${ti.hit_roi_pct >= 0 ? "pos" : "neg"}">${ti.hit_roi_pct >= 0 ? "+" : ""}${ti.hit_roi_pct.toFixed(1)}%</span>`));
+  }
+  if (!R.length) R.push(kv("Выход", "—"));
+
+  // Тепловая карта торгового дня: по кнопке вкл/выкл (считается только по запросу — дорогая).
+  // Состояние хранится в localStorage ("hmDay"), по умолчанию выключена.
+  let hm = "";
+  try {
+    const hmKey = `hm-${t.ticker}-${String(t.entry_time).replace(/[^0-9]/g, "")}`;
+    const hmOn = (() => { try { return localStorage.getItem("hmDay") === "1"; } catch { return false; } })();
+    // Как на вкладке «Анализ»: готовый HTML из кэша вживляется сразу — без «загрузка…»,
+    // без пересчёта на каждом опросе (пересчёт только если кэша нет или он устарел).
+    const cached = hmOn ? _hmDayGet(t.figi, String(t.entry_time).slice(0, 10)) : null;
+    hm = `<div style="margin:8px 0 2px"><b style="color:var(--text-dim)">Тепловая карта дня (МСК 06:00–24:00, шаг 30 мин):</b> ` +
+      `<button data-hm-toggle="1" title="Показать/скрыть тепловую карту (считается по запросу)" style="font-size:10px;padding:1px 10px;border-radius:6px;border:1px solid var(--text-dim);background:transparent;color:var(--text);cursor:pointer">${hmOn ? "выкл" : "вкл"}</button>` +
+      (cached ? cached.html : hmOn ? ` <span data-hm="${esc(hmKey)}" style="color:var(--text-dim)">загрузка…</span>` : ` <span style="color:var(--text-dim)">выключена</span>`) +
+      `</div>`;
+    if (hmOn && (!cached || !cached.fresh)) queueMicrotask(() => { void renderTradeDayHeatmap(hmKey, t.figi, String(t.entry_time)); });
+  } catch { /* noop */ }
+
+  const body = `<div class="td-grid">${colHtml("ВХОД", L)}${colHtml("ВЫХОД", R)}</div>`;
+  return `<td colspan="13" style="background:var(--bg-soft);padding:8px 12px;font-size:11px;line-height:1.5">` + body + hm + `</td>`;
+}
+
+// Тепловая карта торгового дня в карточке сделки: фиксированная сетка 30-мин слотов
+// 06:00–24:00 МСК (свечи в БД в UTC → срез 03:00–21:00 UTC того же дня), в ячейке
+// % слота + bias (часовой ТФ) и режим H1 из /api/v1/bot/heatmap?meta=1.
+// Не пересчитывается на каждом опросе: готовый HTML вживляется из кэша;
+// прошедшие дни кэшируются навсегда (данные дня не меняются), текущий — 60 сек.
+const _hmDayCache = new Map<string, { html: string; at: number }>();
+const _hmMetaCache = new Map<string, { m: Map<string, { b?: number; bh?: number; r?: string }>; at: number }>();
+
+function _hmDayGet(figi: string, day: string): { html: string; fresh: boolean } | null {
+  const hit = _hmDayCache.get(`${figi}|${day}`);
+  if (!hit) return null;
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const fresh = day < todayUtc || Date.now() - hit.at < 60_000;
+  return { html: hit.html, fresh };
+}
+
+async function _hmFetchMeta(figi: string): Promise<Map<string, { b?: number; bh?: number; r?: string }>> {
+  const hit = _hmMetaCache.get(figi);
+  if (hit && Date.now() - hit.at < 300_000) return hit.m; // мета (bias/режим) меняется медленно — 5 мин
+  const m = new Map<string, { b?: number; bh?: number; r?: string }>();
+  try {
+    const resp = await fetch(`${API}/api/v1/bot/heatmap?days=10&meta=1&figi=${encodeURIComponent(figi)}`);
+    const d = await resp.json() as { tickers?: Array<{ bars?: Array<{ h: string; b?: number; bh?: number; r?: string }> }> };
+    for (const b of (d.tickers?.[0]?.bars ?? [])) m.set(String(b.h).slice(0, 13), { b: b.b, bh: b.bh, r: b.r });
+    _hmMetaCache.set(figi, { m, at: Date.now() });
+  } catch { /* без меты — только % слотов */ }
+  return m;
+}
+
+async function renderTradeDayHeatmap(key: string, figi: string, entryTime: string): Promise<void> {
+  const day = entryTime.slice(0, 10);
+  const ck = `${figi}|${day}`;
+  const cached = _hmDayGet(figi, day);
+  let html = cached?.html ?? "";
+  if (!html) {
+    try {
+      const meta = await _hmFetchMeta(figi);
+      // Свечи приходят в UTC: торговой сессии 06:00–24:00 МСК соответствует 03:00–21:00 UTC.
+      const loadCandles = async (iv: string, lim: number): Promise<Map<number, { o: number; c: number; h: number; l: number }>> => {
+        const r2 = await fetch(`${API}/api/candles/${encodeURIComponent(figi)}?interval_name=${iv}&limit=${lim}`);
+        const d2 = await r2.json() as { candles?: Array<{ ts: string; open: number; close: number; high: number; low: number }> };
+        const m2 = new Map<number, { o: number; c: number; h: number; l: number }>();
+        for (const c of (d2.candles ?? [])) {
+          const ts = String(c.ts);
+          if (ts.slice(0, 10) !== day) continue;
+          const um = Number(ts.slice(11, 13)) * 60 + Number(ts.slice(14, 16));
+          if (um < 180 || um >= 1260) continue;
+          const s2 = Math.floor((um - 180) / 30);
+          const w = m2.get(s2);
+          if (!w) m2.set(s2, { o: c.open, c: c.close, h: c.high, l: c.low });
+          else { w.c = c.close; w.h = Math.max(w.h, c.high); w.l = Math.min(w.l, c.low); }
+        }
+        return m2;
+      };
+      // 5-мин свечи; если за этот день в БД их мало (утро не скачано) — добираем 1-мин.
+      let byS = await loadCandles("5min", 3000);
+      if (byS.size < 8) byS = await loadCandles("1min", 8000);
+      const slotLabel = (s: number) => `${String(6 + Math.floor(s / 2)).padStart(2, "0")}:${s % 2 ? "30" : "00"}`;
+      // Направление — треугольники: зелёный ▲ = лонг, красный ▼ = шорт, · = нет данных.
+      const _bs = (x?: number): { s: string; c: string } => x === 1 ? { s: "▲", c: "var(--up)" } : x === -1 ? { s: "▼", c: "var(--down)" } : { s: "·", c: "var(--text-dim)" };
+      const _rs = (r?: string): { s: string; c: string } => {
+        switch (r) {
+          case "HIGH_VOLATILITY": return { s: "VOL", c: "#ffb020" };
+          case "TREND_UP": return { s: "TRUP", c: "var(--up)" };
+          case "TREND_DOWN": return { s: "TRDN", c: "var(--down)" };
+          case "RANGE": return { s: "RNG", c: "#4da3ff" };
+          default: return { s: "NTR", c: "var(--text-dim)" };
+        }
+      };
+      const cells: string[] = [];
+      for (let s = 0; s < 36; s++) {
+        const lab = slotLabel(s);
+        const v = byS.get(s);
+        // Мета ключуется по часу UTC старта слота (МСК = UTC+3): слот 06:00 МСК → 03:00 UTC.
+        const m = meta.get(`${day}T${String(3 + Math.floor(s / 2)).padStart(2, "0")}`);
+        const mtxt = m ? ` · bias-д ${m.b ?? 0} · bias-ч ${m.bh ?? 0} · режим ${m.r ?? "—"}` : "";
+        let bg = "var(--bg-soft)";
+        let pctHtml = `<div style="font-size:10px;color:var(--text-dim)">·</div>`;
+        let ttip = `${lab}–${slotLabel(s + 1)} МСК${mtxt}`;
+        if (v) {
+          const pct = ((v.c - v.o) / v.o) * 100;
+          const inten = Math.min(1, Math.abs(pct) / 0.8);
+          bg = pct >= 0 ? `rgba(46,204,113,${(0.12 + inten * 0.6).toFixed(2)})` : `rgba(231,76,60,${(0.12 + inten * 0.6).toFixed(2)})`;
+          pctHtml = `<div style="font-size:10px;font-weight:700;${pct >= 0 ? "color:var(--up)" : "color:var(--down)"}">${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%</div>` +
+            `<div style="font-size:9px;color:var(--text)">${money(v.c)}</div>`;
+          ttip = `${lab}–${slotLabel(s + 1)} МСК · ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · o ${money(v.o)} · h ${money(v.h)} · l ${money(v.l)} · c ${money(v.c)}${mtxt}`;
+        }
+        const bs = _bs(m?.bh ?? m?.b);
+        const rs = _rs(m?.r);
+        cells.push(`<div title="${esc(ttip)}" style="background:${bg};border:1px solid transparent;border-radius:4px;min-width:38px;padding:2px 3px;text-align:center;line-height:1.2">` +
+          `<div style="font-size:9px;color:var(--text-dim)">${lab}</div>${pctHtml}` +
+          `<div style="font-size:8px;white-space:nowrap"><span style="color:${bs.c};font-weight:700">${bs.s}</span> <span style="color:${rs.c}">${rs.s}</span></div>` +
+          `</div>`);
+      }
+      html = `<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:3px">${cells.join("")}</div>`;
+      _hmDayCache.set(ck, { html, at: Date.now() });
+    } catch {
+      html = `<span style="color:var(--text-dim)">ошибка загрузки свечей</span>`;
+    }
+  }
+  for (const el of document.querySelectorAll<HTMLElement>(`[data-hm="${key}"]`)) el.outerHTML = html;
+}
+
+// Кнопка «вкл/выкл» тепловой карты дня: клик делегирован на document, состояние в localStorage.
+let _hmToggleBound = false;
+function bindHmToggle(): void {
+  if (_hmToggleBound) return;
+  _hmToggleBound = true;
+  document.addEventListener("click", (ev) => {
+    const el = ev.target as HTMLElement | null;
+    const btn = el && typeof el.closest === "function" ? el.closest<HTMLButtonElement>("button[data-hm-toggle]") : null;
+    if (!btn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    let on = false;
+    try { on = localStorage.getItem("hmDay") === "1"; } catch { /* noop */ }
+    try { localStorage.setItem("hmDay", on ? "0" : "1"); } catch { /* noop */ }
+    renderTrades();
+  });
 }
 
 async function pollTests(): Promise<void> {
@@ -549,8 +776,8 @@ async function pollTests(): Promise<void> {
         <td class="pos">+${money(t.gross_win)}</td>
         <td class="neg">-${money(t.gross_loss)}</td>
         <td class="${netCls}">${t.net >= 0 ? "+" : ""}${money(t.net)}</td>
-        <td>${t.pf.toFixed(2)}</td>
-        <td>${t.wr.toFixed(1)}%</td>
+        <td>${(t.pf ?? 0).toFixed(2)}</td>
+        <td>${(t.wr ?? 0).toFixed(1)}%</td>
         <td><button class="btn-sm" data-action="replay" data-test-id="${t.id}">▶ Реплей</button></td>
       `;
       tbody.appendChild(tr);
@@ -619,7 +846,7 @@ interface LogItem { id: number; ts: string; level: string; source: string; msg: 
 function _loadLGF(): Record<string, boolean> {
   const saved = localStorage.getItem("log_lgf");
   if (saved) { try { const p = JSON.parse(saved); if (p && typeof p === "object") return p; } catch { /* ignore */ } }
-  return { candles: true, signals: true, trades: true, events: true, tech: true };
+  return { candles: true, signals: true, trades: true, events: true, tech: true, gates: true };
 }
 const LGF: Record<string, boolean> = _loadLGF();
 let _logDateFilter = localStorage.getItem("log_date_filter") ?? new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10);
@@ -656,6 +883,7 @@ const _LOG_KW: Record<string, RegExp> = {
   candles: /новые свеч|свеч|candle/i,
   signals: /сигнал|свитч|флип/i,
   trades: /сделк|вход|выход|закрыт|открыт|игнор выхода|трейлинг/i,
+  gates: /^ГЕЙТ |ПРОПУСК ВХОДА/i,
 };
 function logCategory(it: LogItem): string {
   const src = it.source || "";
@@ -664,6 +892,7 @@ function logCategory(it: LogItem): string {
   if (src.startsWith("portfolio_reconc")) return "trades";
   const m = msg.toLocaleLowerCase();
   if (m.includes("techinfo") || m.includes("flush")) return "tech";
+  if (src.startsWith("gate") || _LOG_KW.gates.test(msg)) return "gates";
   if (_LOG_KW.candles.test(msg)) return "candles";
   if (_LOG_KW.signals.test(msg)) return "signals";
   if (_LOG_KW.trades.test(msg)) return "trades";
@@ -861,7 +1090,7 @@ async function copyVisibleLogs(): Promise<void> {
 
 function setupLogFilters(): void {
   const resetLogs = () => { _logSeq = 0; _logHasMore = true; void pollLogs(); };
-  const chipDefs: Array<[string, string]> = [["lg-candles", "candles"], ["lg-signals", "signals"], ["lg-trades", "trades"], ["lg-events", "events"], ["lg-tech", "tech"]];
+  const chipDefs: Array<[string, string]> = [["lg-candles", "candles"], ["lg-signals", "signals"], ["lg-trades", "trades"], ["lg-events", "events"], ["lg-tech", "tech"], ["lg-gates", "gates"]];
   for (const [id, key] of chipDefs) {
     const cb = $(id) as HTMLInputElement | null;
     if (!cb) continue;
@@ -1034,11 +1263,12 @@ function initBotTab(): void {
     const name = ($("ts-name") as HTMLInputElement)?.value?.trim();
     const start = ($("ts-start") as HTMLInputElement)?.value;
     const end = ($("ts-end") as HTMLInputElement)?.value;
+    const logdb = ($("ts-logdb") as HTMLInputElement)?.checked ?? false;
     if (!name || !start) { alert("Укажите название теста и начало периода"); return; }
     const btn = $("ts-run") as HTMLButtonElement;
     btn.disabled = true; btn.textContent = "Запускаю…";
     try {
-      await fetchJSON("/api/v1/bot/mode", { method: "POST", body: JSON.stringify({ mode: "test", test_name: name, replay_start: toUTCISO(start), replay_end: end ? toUTCISO(end) : "" }) });
+      await fetchJSON("/api/v1/bot/mode", { method: "POST", body: JSON.stringify({ mode: "test", test_name: name, replay_start: toUTCISO(start), replay_end: end ? toUTCISO(end) : "", replay_log_persist: logdb }) });
       _setActiveModeBtn("test");
       hideModal("test-modal-overlay");
       await pollBotStatus();
@@ -2669,6 +2899,24 @@ interface SandboxTrade {
   entry_time: string; ts: string | null; stop_loss: number | null; take_profit: number | null;
   net_pnl: number | null; commission: number; exit_reason: string; meta?: string | null;
   leverage?: number | null; notional?: number | null; own_money?: number | null;
+  max_pnl?: number | null; max_pnl_time?: string | null; max_pnl_price?: number | null;
+  max_pnl_atr_pct?: number | null; max_pnl_atr?: number | null; max_pnl_r?: number | null; max_pnl_roi_pct?: number | null;
+  max_pnl_mae_atr?: number | null;
+  trail_info?: TrailInfo | null;
+  sl_atr?: number | null; tp_atr?: number | null; rr_initial?: number | null;
+  roi_sl_pct?: number | null; roi_tp_pct?: number | null;
+}
+
+interface TrailInfo {
+  activated?: boolean;
+  trail_stop?: number | null;
+  trail_dist_atr?: number | null;
+  hit_time?: string | null;
+  hit_price?: number | null;
+  hit_reason?: string | null;
+  hit_pnl?: number | null;
+  hit_r?: number | null;
+  hit_roi_pct?: number | null;
 }
 let _lastTrades: SandboxTrade[] = [];
 let _lastTradeHist = new Map<string, Array<Record<string, unknown>>>();

@@ -28,9 +28,11 @@ def merge_quorum(
         buys = votes[ts]["BUY"]
         sells = votes[ts]["SELL"]
         buy_n, sell_n = len(buys), len(sells)
-        if buy_n >= quorum and buy_n > sell_n:
+        # Строгое правило (clean baseline): сторона с quota>=k, у оппонента <k.
+        # BUY 2 / SELL 0 -> BUY; BUY 3 / SELL 2 -> NONE (раздробленное голосование).
+        if buy_n >= quorum and sell_n < quorum:
             side, n_votes, members_for, opposition = "BUY", buy_n, buys, sells
-        elif sell_n >= quorum and sell_n > buy_n:
+        elif sell_n >= quorum and buy_n < quorum:
             side, n_votes, members_for, opposition = "SELL", sell_n, sells, buys
         else:
             continue
