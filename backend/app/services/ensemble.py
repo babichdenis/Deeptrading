@@ -826,7 +826,8 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   bias_by_state: dict[str, dict] | None = None,
                   ml_filter_obj=None, ml_vote_obj=None,
                   regime_tf_sec: int = 1800,
-                  ctx: EnsembleContext | None = None) -> dict:
+                  ctx: EnsembleContext | None = None,
+                  final: bool = False) -> dict:
     """Один прогон (static или adaptive) через единый конвейер."""
     from app.services.replay_pipeline import ReplayState as _ReplayState
     # Режим берём только по ЗАКРЫТЫМ барам детектора: бар с ts0 закрыт в ts0+tf.
@@ -1458,13 +1459,21 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             else:
                 _ef_pass.append(_ef_e)
         filtered_exits = _ef_pass
-    runner = EngineRunner(strategy=ReplayStrategy(
-        [(a["ts"], a["side"]) for a in accepted],
-        exits=[(e["ts"], e["side"]) for e in filtered_exits],
-    ),
-        exit_policy=exit_obj, config=cfg_engine)
-    ledger = runner.run(candles)
-    exit_coverage = dict(runner.exit_coverage)
+    if isinstance(ctx, _ReplayState):
+        # L2.7: replay продолжает персистентного IncrementalRunner вместо
+        # batch-прогона с нуля; unseen accepted/exits докармливаются с дедупом.
+        # final=True только на последнем баре (синтетический END_OF_DATA как batch).
+        ledger, exit_coverage = ctx.run_step(
+            label, exit_obj, cfg_engine, accepted, filtered_exits,
+            candles, final=final)
+    else:
+        runner = EngineRunner(strategy=ReplayStrategy(
+            [(a["ts"], a["side"]) for a in accepted],
+            exits=[(e["ts"], e["side"]) for e in filtered_exits],
+        ),
+            exit_policy=exit_obj, config=cfg_engine)
+        ledger = runner.run(candles)
+        exit_coverage = dict(runner.exit_coverage)
     reentry_rejected: list[dict] = []
     for e in ledger.audit:
         if e.kind == "DECISION" and "REJECT_REENTRY" in e.detail:
@@ -2073,7 +2082,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict,
                            ml_filter_obj=ml_filter_obj,
                             ml_vote_obj=ml_vote_obj if not adaptive_map else None,
                             regime_tf_sec=regime_tf_sec,
-                            ctx=ctx)
+                            ctx=ctx, final=_replay_final)
 
     if adaptive_map is not None:
         adaptive = _run_pipeline(candles, req, bias, setups_cfg, quorum_k, entry_window_min,
@@ -2083,7 +2092,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict,
                                  bias_by_state=bias_by_state,
                                  ml_filter_obj=ml_filter_obj,
                                  regime_tf_sec=regime_tf_sec,
-                                 ctx=ctx)
+                                 ctx=ctx, final=_replay_final)
     else:
         adaptive = None
 

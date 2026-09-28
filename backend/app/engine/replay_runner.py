@@ -35,6 +35,11 @@ class IncrementalRunner:
         self._poll_done = -1
         self._tf_final = False
 
+    @property
+    def strategy(self):
+        """Стратегия раннера (для ReplayState.run_step: extend сигналами)."""
+        return self.runner.strategy
+
     # ------------------------------------------------------------------ feed
     def extend(self, candles_prefix, progress_cb=None) -> None:
         """Принять историю целиком (растущий список), обработать новые бары."""

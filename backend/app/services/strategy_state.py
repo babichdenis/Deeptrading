@@ -62,10 +62,12 @@ def _to_dict(sig) -> dict:
 class StrategyState:
     """Персистентное состояние одного сетапа на одном ТФ."""
 
-    def __init__(self, sid: str, params: dict | None = None, window: int = 400):
+    def __init__(self, sid: str, params: dict | None = None,
+                 tf_sec: int | None = None, window: int = 400):
         self.sid = sid
         self.strat = build_strategy(sid, params)
         self.warmup = self.strat.warmup_bars()
+        self.tf_sec = tf_sec
         self.window = window
         self.sigs: list[dict] = []  # только закрытые бары, append-only
         self.n = 0                  # скормленных закрытых баров

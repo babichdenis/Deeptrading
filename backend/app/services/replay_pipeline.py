@@ -50,6 +50,13 @@ def _tf_sec(name: str, default: int) -> int:
     return int(_TF.get(str(name), default))
 
 
+def _ts_dt(ts):
+    """ts как datetime (accepted хранит ISO-строки, exits — datetime)."""
+    if isinstance(ts, datetime):
+        return ts
+    return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+
+
 class MicroTracker:
     """Инкрементальный micro_breakout: решение по бару зависит только от
     lookback предыдущих (high/low) — тот же перебор, что batch, по частям.
@@ -134,7 +141,7 @@ class ReplayState(EnsembleContext):
         def _reg(sid, params, tf):
             key = (sid, json.dumps(params or {}, sort_keys=True), tf)
             if key not in self.strategies:
-                self.strategies[key] = StrategyState(sid, params, tf)
+                self.strategies[key] = StrategyState(sid, params, tf_sec=tf)
 
         for s in req.get("setups", []):
             _reg(s["strategy_id"], s.get("params"),
@@ -162,6 +169,8 @@ class ReplayState(EnsembleContext):
         self._micro = MicroTracker(_elb)
         self.runners: dict = {}
         self._fed_sigs: set = set()
+        self.fed_late = 0
+        self.fed_late_samples = []  # первые 20 late (ts, side, kind) для отчета
 
     def reset(self):
         """Полный сброс (retro-drop битого дня) + refeed из буфера."""
@@ -213,8 +222,10 @@ class ReplayState(EnsembleContext):
             rc = self._rsi.get(tf)
             if rc is not None:
                 rc["st"].update(new_bar)
-                rc["map"][new_bar.ts] = (rc["st"].value, rc["st"].prev_value)
-                rc["keys"].append(new_bar.ts)
+                # batch-карта начинается с сид-бара: None-значения не храним
+                if rc["st"].value is not None:
+                    rc["map"][new_bar.ts] = (rc["st"].value, rc["st"].prev_value)
+                    rc["keys"].append(new_bar.ts)
             if tf == self._micro_tf:
                 self._micro.update(new_bar)
 
@@ -228,7 +239,9 @@ class ReplayState(EnsembleContext):
             raise RuntimeError(f"replay: неизвестный сетап {(sid, tf_sec)} "
                                f"(набор фиксирован req/adaptive)")
         closed = self.dctx.closed(tf_sec)
-        out = list(st.sigs)
+        # КОПИИ: гейты ниже мутируют записи (e["rsi"]=...); batch каждый вызов
+        # работает со свежими dict из generate_signals — parity требует того же
+        out = [dict(s) for s in st.sigs]
         forming = self.dctx.forming(tf_sec)
         if forming is not None:
             probe = st.evaluate(closed, forming)
@@ -268,16 +281,19 @@ class ReplayState(EnsembleContext):
         for tf, rc in self._rsi.items():
             forming = self.dctx.forming(tf)
             if forming is not None:
-                rc["map"][forming.ts] = (rc["st"].evaluate(forming),
-                                         rc["st"].value)
-                out[tf] = (rc["map"], rc["keys"] + [forming.ts])
+                fv = rc["st"].evaluate(forming)
+                if fv is not None:
+                    rc["map"][forming.ts] = (fv, rc["st"].value)
+                    out[tf] = (rc["map"], rc["keys"] + [forming.ts])
+                else:
+                    out[tf] = (rc["map"], list(rc["keys"]))
             else:
                 out[tf] = (rc["map"], list(rc["keys"]))
         return out
 
     def micro_entries(self):
-        """Все micro-записи == batch: закрытые + зонд forming."""
-        out = list(self._micro.entries)
+        """Все micro-записи == batch: закрытые + зонд forming (копии)."""
+        out = [dict(e) for e in self._micro.entries]
         forming = self.dctx.forming(self._micro_tf)
         if forming is not None:
             probe = self._micro.probe(forming)
@@ -297,18 +313,29 @@ class ReplayState(EnsembleContext):
             r = IncrementalRunner(strategy=ReplayStrategy([]),
                                   exit_policy=exit_obj, config=cfg_engine)
             self.runners[label] = r
+        cur_ts = r.history[-1].ts if r.history else None
         new_e = []
         for a in accepted:
             k = (str(a.get("ts")), str(a.get("side")), "entry")
             if k not in self._fed_sigs:
                 self._fed_sigs.add(k)
                 new_e.append((a.get("ts"), a.get("side")))
+                if cur_ts is not None and _ts_dt(a.get("ts")) < cur_ts:
+                    self.fed_late += 1
+                    if len(self.fed_late_samples) < 20:
+                        self.fed_late_samples.append(
+                            (str(a.get("ts")), str(a.get("side")), "entry"))
         new_x = []
         for e in exits:
             k = (str(e.get("ts")), str(e.get("side")), "exit")
             if k not in self._fed_sigs:
                 self._fed_sigs.add(k)
                 new_x.append((e.get("ts"), e.get("side")))
+                if cur_ts is not None and _ts_dt(e.get("ts")) < cur_ts:
+                    self.fed_late += 1
+                    if len(self.fed_late_samples) < 20:
+                        self.fed_late_samples.append(
+                            (str(e.get("ts")), str(e.get("side")), "exit"))
         if new_e or new_x:
             r.strategy.extend(new_e, new_x)
         r.extend(candles_prefix)
