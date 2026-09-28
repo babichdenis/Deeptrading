@@ -2,7 +2,7 @@ declare global {
   interface Window { lucide?: { createIcons: (o?: unknown) => void } }
 }
 
-const API = window.location.port === "5173" ? `http://${window.location.hostname}:8000` : "";
+const API = ["5173", "5174"].includes(window.location.port) ? `http://${window.location.hostname}:8000` : "";
 
 import {
   botCancelPending,
@@ -561,7 +561,7 @@ export async function initBot(onStateChange?: (running: boolean) => void) {
 function _loadLGF() {
   const saved = localStorage.getItem("log_lgf");
   if (saved) { try { return JSON.parse(saved); } catch {} }
-  return { candles: true, signals: true, trades: true, events: true, tech: true };
+  return { candles: true, signals: true, trades: true, events: true, tech: true, gates: true };
 }
 const LGF: Record<string, boolean> = _loadLGF();
 let _logDateFilter = localStorage.getItem("log_date_filter") ?? new Date().toLocaleDateString("sv-SE");
@@ -601,6 +601,7 @@ const _LOG_KW: Record<string, RegExp> = {
   candles: /новые свеч|свеч|candle/i,
   signals: /сигнал|свитч|флип/i,
   trades: /сделк|вход|выход|закрыт|открыт|игнор выхода|трейлинг/i,
+  gates: /^ГЕЙТ |ПРОПУСК ВХОДА/i,
 };
 function logCategory(it: LogItem | string): string {
   const src = typeof it === "string" ? "" : (it.source || "");
@@ -609,6 +610,7 @@ function logCategory(it: LogItem | string): string {
   if (src.startsWith("portfolio_reconc")) return "trades";
   const m = msg.toLocaleLowerCase();
   if (m.includes("techinfo") || m.includes("flush")) return "tech";
+  if (src.startsWith("gate") || _LOG_KW.gates.test(msg)) return "gates";
   if (_LOG_KW.candles.test(msg)) return "candles";
   if (_LOG_KW.signals.test(msg)) return "signals";
   if (_LOG_KW.trades.test(msg)) return "trades";
@@ -636,7 +638,13 @@ function lgRowEl(it: LogItem): HTMLElement {
   // Шапка: время · уровень · источник · счётчик ×N · копия (разделители-пробелы,
   // чтобы при выделении/копировании элементы не склеивались в одно слово).
   const hd = document.createElement("div"); hd.className = "lg-hd";
-  const t = document.createElement("span"); t.className = "lg-t"; t.textContent = it.ts.slice(11) + "  ";
+  const t = document.createElement("span"); t.className = "lg-t";
+  const _d = it.ts.slice(0, 10), _tm = it.ts.slice(11, 19);
+  let _todayMsk = "";
+  try {
+    _todayMsk = new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10);
+  } catch { /* noop */ }
+  t.textContent = (_d && _d !== _todayMsk ? `${it.ts.slice(5, 10)} ${_tm}` : _tm) + "  ";
   t.title = it.ts;
   const badge = document.createElement("span"); badge.className = "lg-lv"; badge.textContent = lv.toUpperCase().slice(0, 5) + " ";
   badge.title = `уровень: ${lv}`;
@@ -842,7 +850,7 @@ function setupLogFilters() {
       reRenderVisible();
     });
   };
-  for (const [id, key] of [["lg-candles", "candles"], ["lg-signals", "signals"], ["lg-trades", "trades"], ["lg-events", "events"], ["lg-tech", "tech"]]) {
+  for (const [id, key] of [["lg-candles", "candles"], ["lg-signals", "signals"], ["lg-trades", "trades"], ["lg-events", "events"], ["lg-tech", "tech"], ["lg-gates", "gates"]]) {
     setLG(id, key as keyof typeof LGF);
   }
   const level = $("lg-level") as HTMLSelectElement | null;
@@ -1328,6 +1336,8 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     }
   })();
 
+  _renderReplayBar(bst);
+
   const backendAlive = !!bst;
   const engineRunning = bst ? !!bst.running : false;
   const botErr = bst && bst.error ? bst.error : null;
@@ -1413,9 +1423,14 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   // AI-гейт (4-я вкладка правого сайдбара): обновляем, если открыта.
   if (!$("sr-pane-aigate")?.classList.contains("hidden")) void renderAiGate();
 
-  $("btn-bot-start").classList.toggle("hidden", engineRunning);
-  $("btn-bot-stop").classList.toggle("hidden", !engineRunning);
-  $("btn-bot-pause").classList.toggle("hidden", !engineRunning);
+  $("btn-bot-start")?.classList.toggle("hidden", engineRunning);
+  $("btn-bot-stop")?.classList.toggle("hidden", !engineRunning);
+  const toggleBtn = $("btn-bot-toggle") as HTMLButtonElement | null;
+  if (toggleBtn) {
+    toggleBtn.textContent = engineRunning ? "■ Остановить" : "▶ Запустить бота";
+    toggleBtn.classList.toggle("stop", !!engineRunning);
+  }
+  $("btn-bot-pause")?.classList.toggle("hidden", !engineRunning);
   updatePauseButton();
 
   const modeChip = $("bot-mode");
@@ -1445,6 +1460,13 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
     _embedReplayEnd = newEnd;
     _setActiveModeBtn(_curMode);
     if (modeOrWindowChanged) sendEmbedMode();
+    // Активный тест: помечаем строку в таблице тестов, чтобы клик по ней
+    // не перезапускал прогон заново (в т.ч. после перезагрузки страницы).
+    _runningTest = mm === "test" ? String(tn || "") : "";
+    if (_runningTest && _selectedTest !== _runningTest) {
+      _selectedTest = _runningTest;
+      renderTests();
+    }
     const testChip = $("bot-mode-test");
     if (testChip && mm === "test") {
       testChip.textContent = tn ? `Тест: ${tn}` : "Тест";
@@ -1652,6 +1674,49 @@ export async function pollOnce(onStateChange?: (running: boolean) => void) {
   hideEmptyTables();
 }
 
+// Прогресс-бар теста над графиком: replay {start, end, now, pct} из /bot/status.
+const _mskFmtTime = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit", hour12: false });
+const _mskFmtDate = new Intl.DateTimeFormat("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit" });
+function _renderReplayBar(bst: any) {
+  const bar = $("bot-replay-bar");
+  if (!bar) return;
+  const rp = bst?.replay;
+  const active = !!(rp && rp.active);
+  bar.style.display = active ? "flex" : "none";
+  if (!active) return;
+  const fmt = (iso: unknown): string => {
+    if (!iso) return "—";
+    try {
+      const d = new Date(String(iso));
+      if (isNaN(d.getTime())) return "—";
+      return _mskFmtDate.format(d) + " " + _mskFmtTime.format(d);
+    } catch { return "—"; }
+  };
+  const win = fmt(rp.start) + " → " + fmt(rp.end);
+  const pct = Math.max(0, Math.min(100, Number(rp.pct ?? 0)));
+  const winEl = $("bot-replay-window");
+  const timeEl = $("bot-replay-time");
+  const pctEl = $("bot-replay-pct");
+  const fill = $("bot-replay-fill");
+  if (winEl) winEl.textContent = "окно " + win;
+  if (timeEl) timeEl.textContent = "свеча " + fmt(rp.now_msk || rp.now);
+  if (pctEl) pctEl.textContent = pct.toFixed(1) + "%" + (rp.pace ? " · " + rp.pace : "");
+  if (fill) fill.style.width = pct.toFixed(1) + "%";
+}
+
+// Независимый от pollOnce цикл: бар должен наполняться сразу при загрузке страницы,
+// даже если pollOnce упадёт до вызова _renderReplayBar.
+async function _bootstrapReplayBar() {
+  for (;;) {
+    try {
+      const r = await fetch(`${API}/api/v1/bot/status`);
+      if (r.ok) _renderReplayBar(await r.json());
+    } catch { /* backend недоступен — попробуем на следующем тике */ }
+    await new Promise((res) => setTimeout(res, 5000));
+  }
+}
+void _bootstrapReplayBar();
+
 async function pollEvents() {
   if (!$("page-bot").classList.contains("active")) return;
   let evs: BotEventRow[];
@@ -1676,7 +1741,7 @@ async function pollEvents() {
           : e.type === "ORDER_FILLED"
             ? side === "SELL" || e.payload?.action === "close" ? "ev-sell" : "ev-buy"
             : e.type === "POSITION_OPENED"
-              ? String(e.payload?.side) === "SHORT" ? "ev-sell" : "ev-buy"
+              ? ["SELL", "SHORT"].includes(String(e.payload?.side)) ? "ev-sell" : "ev-buy"
               : e.type.startsWith("PAUSE") || e.type.includes("CANCEL") ? "ev-warn" : "ev-info";
       const pnlTxt = pnl != null ? ` · P&L ${pnl >= 0 ? "+" : ""}${pnl}` : "";
       return `<div class="ev-line ${cls}"><span class="ev-ts">${t}</span>` +
@@ -1744,7 +1809,7 @@ function renderTrades(trades: BotTradeRow[]) {
           let regimeBadge = "";
           try {
             const m = t.meta ? JSON.parse(t.meta) : null;
-            const rg = String(m?.regime ?? "").replace("HIGH_VOLATILITY", "HV");
+            const rg = String(t.regime ?? m?.entry_regime ?? m?.regime ?? "").replace("HIGH_VOLATILITY", "HV");
             if (rg) regimeBadge = ` <span class="rg-badge">${rg}</span>`;
           } catch { /* noop */ }
           // R-множитель = net_pnl / риск (|entry−SL|×qty).
@@ -1757,6 +1822,12 @@ function renderTrades(trades: BotTradeRow[]) {
               rCls = r >= 0 ? "pos" : "neg";
             }
           }
+          // Сумма (свои) и Плечо — как в таблице открытых позиций (own = обеспечение).
+          const _lev = t.leverage ?? 1;
+          const _notional = t.notional ?? (t.entry_price ?? 0) * t.qty;
+          const _own = t.own_money ?? (t.notional === null || t.notional === undefined
+            ? (_lev > 0 ? _notional / _lev : _notional)
+            : (_lev > 0 ? t.notional / _lev : t.notional));
           // Вход (голоса ансамбля) из meta.entry.reason/features.
           let entryCell = "";
           try {
@@ -1790,6 +1861,8 @@ function renderTrades(trades: BotTradeRow[]) {
             `<td>${tickerLogo(t.ticker)}<b>${t.ticker}</b>${regimeBadge}${biasTag}</td>` +
             `<td>${sideIcon(t.side)}</td>` +
             `<td class="num">${t.qty}</td>` +
+            `<td class="num dim">${money(_notional)}₽ <span class="dim">(${money(_own)}₽)</span></td>` +
+            `<td class="num">×${_lev.toFixed(1)}</td>` +
             `<td class="num td-px">${pxCell}</td>` +
             `<td class="num">${pnlCell}</td>` +
             `<td class="num" style="color:var(--text-dim)">${!isOpen && t.commission != null ? money(t.commission) : "—"}</td>` +
@@ -1800,7 +1873,7 @@ function renderTrades(trades: BotTradeRow[]) {
             `</tr>` + (selected ? tradeDetailsHtml(t) : "");
         }
       )
-      .join("") || `<tr><td colspan=11 style="color:var(--text-dim)">пока нет сделок</td></tr>`;
+      .join("") || `<tr><td colspan=13 style="color:var(--text-dim)">пока нет сделок</td></tr>`;
 }
 
 // Раскрытие деталей сделки: состав ансамбля, голоса кворума, bias и entry при входе.
@@ -1821,6 +1894,25 @@ function tradeDetailsHtml(t: BotTradeRow): string {
   rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Вход:</b> ${String(t.side)} · ${String(entry.reason ?? "—")}` +
     (ab === true ? ` ${chip("ПРОТИВ bias", "#e74c3c")}` : ab === false ? ` ${chip("по bias", "#2ecc71")}` : "") +
     (entry.features ? ` · level ${(entry.features as Record<string, unknown>).breakout_level ?? "—"}` : "") + `</div>`);
+  // Max PnL: пик прибыли + время + цена + ATR на пике + R + ROI (из runtime._st_close / API).
+  if (t.max_pnl != null && !(t.ts == null || t.exit_price == null)) {
+    const mp = t.max_pnl;
+    const mpCls = mp >= 0 ? "pos" : "neg";
+    let mpTime = "—";
+    try {
+      const d = new Date(String(t.max_pnl_time));
+      if (!isNaN(d.getTime())) mpTime = _mskFmtDate.format(d) + " " + _mskFmtTime.format(d);
+    } catch { /* noop */ }
+    const atrTxt = t.max_pnl_atr_pct != null ? `${t.max_pnl_atr_pct}%` : "—";
+    const rTxt = t.max_pnl_r != null ? (t.max_pnl_r >= 0 ? "+" : "") + t.max_pnl_r.toFixed(2) : "—";
+    const roiTxt = t.max_pnl_roi_pct != null ? (t.max_pnl_roi_pct >= 0 ? "+" : "") + t.max_pnl_roi_pct.toFixed(1) + "%" : "—";
+    rows.push(`<div style="margin:2px 0"><b style="color:var(--text-dim)">Max P&L:</b> ` +
+      `<b class="${mpCls}">${mp >= 0 ? "+" : ""}${money(mp)}</b> · в ${mpTime}` +
+      (t.max_pnl_price != null ? ` · цена ${price(t.max_pnl_price)}` : "") +
+      ` &nbsp; <b style="color:var(--text-dim)">ATR(пик):</b> ${atrTxt}` +
+      ` &nbsp; <b style="color:var(--text-dim)">R:</b> <span class="${t.max_pnl_r != null && t.max_pnl_r >= 0 ? "pos" : "neg"}">${rTxt}</span>` +
+      ` &nbsp; <b style="color:var(--text-dim)">ROI:</b> <span class="${t.max_pnl_roi_pct != null && t.max_pnl_roi_pct >= 0 ? "pos" : "neg"}">${roiTxt}</span></div>`);
+  }
   // Голоса функций (ensemble_vote): кто ↑ / кто ↓
   try {
     const f = (entry.features as Record<string, unknown>) || {};
@@ -1864,7 +1956,7 @@ function tradeDetailsHtml(t: BotTradeRow): string {
     }).join("")}</div>`);
   }
   if (!rows.length) rows.push(`<div style="color:var(--text-dim)">нет данных meta</div>`);
-  return `<tr class="trade-details-row"><td colspan="10" style="background:var(--bg-soft);padding:8px 12px;font-size:11px;line-height:1.6">${rows.join("")}</td></tr>`;
+  return `<tr class="trade-details-row"><td colspan="11" style="background:var(--bg-soft);padding:8px 12px;font-size:11px;line-height:1.6">${rows.join("")}</td></tr>`;
 }
 
 // ===== правый сайдбар: рынок TQBR (скринер) =====
@@ -2124,13 +2216,14 @@ async function renderAiGate() {
     const prov = d.provider ? ` · ${_agEsc(d.provider)}` : "";
     const agree = d.agreement === true ? " · 🤝" : (d.agreement === false ? " · ≠" : "");
     const applied = d.applied ? " · применено" : (d.shadow ? " · shadow" : "");
+    const toks = d.usage && d.usage.total ? ` · ${(Number(d.usage.total) / 1000).toFixed(1)}k tok` : "";
     return `<div class="ag-row ${cls}${d.shadow ? " shadow" : ""}" title="${_agEsc(d.reason)}">
       <div class="ag-r1">
         <span class="ag-t">${_agEsc(t)}</span>
         <span class="ag-tk">${_agEsc(d.ticker)} ${_agEsc(d.side)}${d.qty ? " ×" + _agEsc(d.qty) : ""}</span>
         <span class="ag-dec">${label}</span>
       </div>
-      <div class="ag-r2">${_agEsc(d.reason)}<span class="ag-meta">${_agEsc(d.model || "")}${prov}${conf}${lat}${agree}${applied}</span></div>
+      <div class="ag-r2">${_agEsc(d.reason)}<span class="ag-meta">${_agEsc(d.model || "")}${prov}${conf}${lat}${toks}${agree}${applied}</span></div>
       ${d.advice ? `<div class="ag-advice" title="совет нейросети">💡 ${_agEsc(d.advice)}</div>` : ""}
     </div>`;
     }).join("");
@@ -2673,8 +2766,11 @@ export async function renderStats() {
         const acts = (rp.actions || []).map((a: any) =>
           `<span class="ar-act">${_agEsc(a.action || "")} ${_agEsc(a.ticker || "")}` +
           `${a.side ? " " + _agEsc(a.side) : ""}</span>`).join(" ");
+        const u = rp.usage || {};
+        const uTxt = u.total ? ` · ~${(Number(u.total) / 1000).toFixed(1)}k токенов` +
+          ` (prompt ${(Number(u.prompt) / 1000).toFixed(1)}k + out ${(Number(u.completion) / 1000).toFixed(1)}k${u.estimated ? ", оценка" : ""})` : "";
         ar.innerHTML = `<div class="an-ag-head">🧠 AI о рынке <span class="dim">${_agEsc(rp.model || "")}` +
-          `${rp.now_msk ? " · " + _agEsc(rp.now_msk) : ""}</span></div>` +
+          `${rp.now_msk ? " · " + _agEsc(rp.now_msk) : ""}${uTxt}</span></div>` +
           `<div class="ar-text">${_agEsc(rp.analysis)}</div>` +
           (sugg ? `<div class="ar-sugg"><b>Предложения по механизму бота:</b><ul>${sugg}</ul></div>` : "") +
           (acts ? `<div class="ar-acts">Действия: ${acts}</div>` : "");
@@ -2710,13 +2806,16 @@ export async function renderStats() {
     body.innerHTML = `<div class="mini-hint">нет данных по прогону</div>`;
     return;
   }
+  const SEC_MAX = 12;
   const sec = (title: string, rows: StatsRow[] | undefined) => {
     if (!rows || !rows.length) return "";
-    const trs = rows.map((r) =>
+    const _rest = Math.max(0, rows.length - SEC_MAX);
+    const trs = rows.slice(0, SEC_MAX).map((r) =>
       `<tr><td>${esc(r.key)}</td><td class="n">${r.trades}</td><td class="n">${r.wr}%</td>` +
       `<td class="n" style="color:${r.net >= 0 ? "var(--up)" : "var(--down)"}">${r.net >= 0 ? "+" : ""}${r.net}</td>` +
       `<td class="n">${r.pf ?? "—"}</td></tr>`).join("");
-    return `<div class="stats-sec"><div class="stats-title">${title}</div>` +
+    return `<div class="stats-sec"><div class="stats-title">${title}` +
+      ` <span class="dim">${rows.length}${_rest ? `, ещё ${_rest}` : ""}</span></div>` +
       `<table class="stats-table"><thead><tr><th>Ключ</th><th>N</th><th>WR</th><th>Net</th><th>PF</th></tr></thead>` +
       `<tbody>${trs}</tbody></table></div>`;
   };
@@ -2791,6 +2890,7 @@ function initSidebarRightResize() {
 let _testResults: TestRunRow[] = [];
 let _selectedTest: string | null = null;
 let _lastRunTest: string | null = null;
+let _runningTest: string = "";   // имя теста, который прямо сейчас крутится на бэке
 
 function initTestResults() {
   $("btn-test-new")?.addEventListener("click", openTestModal);
@@ -2865,6 +2965,9 @@ async function _rerunTest(name: string) {
   const t = _testResults.find((x) => x.name === name);
   if (!t || !t.replay_start) { alert("Нет периода для перезапуска"); return; }
   if (_selectedTest !== name) _selectedTest = name;
+  // Этот тест уже идёт на бэке — просто открываем его, НЕ перезапускаем
+  // (иначе реплей стартует с начала и сделки обнуляются).
+  if (_curMode === "test" && _runningTest === name) { renderTests(); return; }
   if (t.replay_start === _lastRunTest) { renderTests(); return; }
   _lastRunTest = t.replay_start;
   try {
