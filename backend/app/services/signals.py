@@ -52,9 +52,12 @@ _SIG_CACHE_MAX = 256
 def generate_signals(strategy_id: str, params: dict | None, candles: list[EngineCandle]) -> list[dict]:
     # Кэш по (стратегия, параметры, окно данных): drop_useless и основной прогон
     # вызывают одну и ту же генерацию — второй вызов берёт готовое.
+    # Ключ ОБЯЗАН включать контентный отпечаток (_data_version): без него разные
+    # наборы с тем же (len, first, last) — разные тикеры одной сессии, тесты —
+    # отдавали бы чужие сигналы (поймано L2.6: отравление кэша между тестами).
     try:
-        _key = (strategy_id, json.dumps(params or {}, sort_keys=True), len(candles),
-                candles[0].ts if candles else None, candles[-1].ts if candles else None)
+        _key = (strategy_id, json.dumps(params or {}, sort_keys=True),
+                _data_version(candles))
     except Exception:
         _key = None
     if _key is not None and _key in _SIG_CACHE:

@@ -226,12 +226,16 @@ class AtrStopPolicy(ExitPolicy):
         bars: Sequence[Candle],
         qty: int | None = None,
         commission: float | None = None,
+        peak_price: float | None = None,
     ) -> float | None:
         """Трейлинг-стоп. Два режима активации:
         - комиссионный (trail_activation_comm_mult): активация при PnL >= комиссия×mult,
           дальше стоп следует за ценой (дистанция trail_distance_r × risk);
         - ATR-режим (trail_activation_r/trail_distance_r): активация по move >= ATR-порога.
-        Движение только в сторону прибыли (ratchet), никогда назад."""
+        Движение только в сторону прибыли (ratchet), никогда назад.
+        peak_price: экстремум с момента входа (running max high LONG / min low SHORT —
+        тот же, что трекает пик-PnL в боте). Если задан, стоп считается ОТ ПИКА,
+        а не от окна period баров (окно может содержать бары ДО входа)."""
         if not bars:
             return current_stop
         if len(bars) < 2:
@@ -300,6 +304,7 @@ def intrabar_exit(
     stop_loss: float | None,
     take_profit: float | None,
     close_based: bool = False,
+    wick_tol: float = 0.0,
 ) -> tuple[float | None, str]:
     """Выход по стопу/TP на баре.
 
@@ -312,6 +317,13 @@ def intrabar_exit(
     гэп через стоп). Хвост, который коснулся стопа и вернулся, НЕ закрывает
     позицию. Используется для трейлинг-стопа, чтобы не выбивать из сделки
     ложными пробоями.
+
+    wick_tol (шаг 2 плана выходов, 2026-09-26): «прощение хвоста» для
+    НАЧАЛЬНОГО стопа (не трейлинга). Хвост, проколовший стоп не глубже
+    wick_tol и закрывшийся обратно за стопом, НЕ закрывает позицию.
+    Закрытие за стопом, гэп открытия через стоп или прокол глубже допуска
+    закрывают позицию как раньше. wick_tol=0 (по умолчанию) — поведение
+    байт-в-байт прежнее (обратная совместимость с бэктестами/golden).
     """
     if state is PositionState.LONG:
         if stop_loss is not None:
@@ -324,7 +336,14 @@ def intrabar_exit(
                 if bar.open <= stop_loss:
                     return bar.open, ExitReason.STOP_LOSS.value
                 if bar.low <= stop_loss:
-                    return stop_loss, ExitReason.STOP_LOSS.value
+                    if (
+                        wick_tol > 0.0
+                        and (stop_loss - bar.low) <= wick_tol
+                        and bar.close > stop_loss
+                    ):
+                        pass  # прощённый хвост: мелкий прокол, бар закрылся выше стопа
+                    else:
+                        return stop_loss, ExitReason.STOP_LOSS.value
         if take_profit is not None and bar.high >= take_profit:
             if bar.open >= take_profit:
                 return bar.open, ExitReason.TARGET.value
@@ -341,10 +360,126 @@ def intrabar_exit(
                 if bar.open >= stop_loss:
                     return bar.open, ExitReason.STOP_LOSS.value
                 if bar.high >= stop_loss:
-                    return stop_loss, ExitReason.STOP_LOSS.value
+                    if (
+                        wick_tol > 0.0
+                        and (bar.high - stop_loss) <= wick_tol
+                        and bar.close < stop_loss
+                    ):
+                        pass  # прощённый хвост: мелкий прокол, бар закрылся ниже стопа
+                    else:
+                        return stop_loss, ExitReason.STOP_LOSS.value
         if take_profit is not None and bar.low <= take_profit:
             if bar.open <= take_profit:
                 return bar.open, ExitReason.TARGET.value
             return take_profit, ExitReason.TARGET.value
         return None, ""
     return None, ""
+
+
+def breakeven_stop(
+    side: Side,
+    entry_price: float,
+    current_stop: float | None,
+    bars: Sequence[Candle],
+    risk: float,
+    trigger_r: float = 1.0,
+    offset_pct: float = 0.0,
+) -> float | None:
+    """Безубыток (шаг 2 плана выходов, 2026-09-26).
+
+    При прибыли >= trigger_r × risk (по close последнего бара) стоп
+    переносится на уровень входа; offset_pct сдвигает чуть дальше входа
+    (компенсация комиссии/проскальзывания).
+
+    Ratchet-инвариант: стоп двигается ТОЛЬКО в сторону прибыли. Если
+    кандидат хуже текущего стопа (ниже для LONG / выше для SHORT) —
+    остаётся текущий, назад никогда.
+
+    risk — исходное расстояние до стопа в единицах цены
+    (|entry - initial_stop| на момент входа).
+    """
+    if risk <= 0 or trigger_r <= 0 or not bars:
+        return current_stop
+    close = bars[-1].close
+    if side is Side.BUY:
+        if close - entry_price < trigger_r * risk:
+            return current_stop
+        candidate = entry_price * (1.0 + offset_pct)
+        if current_stop is not None and candidate <= current_stop:
+            return current_stop
+        return candidate
+    if entry_price - close < trigger_r * risk:
+        return current_stop
+    candidate = entry_price * (1.0 - offset_pct)
+    if current_stop is not None and candidate >= current_stop:
+        return current_stop
+    return candidate
+
+
+def early_abort_exit(
+    bar: Candle,
+    side: Side,
+    entry_price: float,
+    risk: float,
+    bars_held: int,
+    max_bars: int,
+    abort_r: float = 0.5,
+) -> tuple[float | None, str]:
+    """Ранний аборт свежей позиции (шаг 2 плана выходов, 2026-09-26).
+
+    В первые max_bars баров после входа провал глубже abort_r × risk против
+    позиции закрывает её раньше полного стопа (обычно 2×ATR): свежая сделка,
+    сразу идущая против, не должна утаскивать на полный R. После max_bars
+    баров функция молчит — дальше работают обычный SL/TP/трейлинг.
+
+    Заполнение согласовано с intrabar_exit: гэп открытия за уровнем — по
+    open, иначе по уровню на касание. Причина выхода — EARLY_ABORT (аддитивный код в ExitReason, 2026-09-26).
+    """
+    if risk <= 0 or max_bars <= 0 or bars_held >= max_bars:
+        return None, ""
+    if side is Side.BUY:
+        level = entry_price - abort_r * risk
+        if bar.open <= level:
+            return bar.open, ExitReason.EARLY_ABORT.value
+        if bar.low <= level:
+            return level, ExitReason.EARLY_ABORT.value
+        return None, ""
+    level = entry_price + abort_r * risk
+    if bar.open >= level:
+        return bar.open, ExitReason.EARLY_ABORT.value
+    if bar.high >= level:
+        return level, ExitReason.EARLY_ABORT.value
+    return None, ""
+
+
+def partial_take_exit(
+    bar: Candle,
+    side: Side,
+    entry_price: float,
+    risk: float,
+    partial_r: float = 1.0,
+) -> float | None:
+    """Частичный тейк по R-уровню (шаг 5 плана выходов, 2026-09-26).
+
+    Прибыль достигла partial_r × risk против входа — вернуть цену частичного
+    закрытия (touch-семантика: LONG — bar.high >= level, SHORT — bar.low <= level;
+    гэп открытия за уровнем — заполнение по open, как в intrabar_exit и
+    early_abort_exit). Стоп/TP на этом баре не проверяются: их проверяет
+    intrabar_exit, и правило SAME_BAR_CONFLICT_RULE (стоп первым) соблюдается
+    в runner — частичный тейк вызывается только если полного выхода не было.
+    """
+    if risk <= 0 or partial_r <= 0:
+        return None
+    if side is Side.BUY:
+        level = entry_price + partial_r * risk
+        if bar.open >= level:
+            return bar.open
+        if bar.high >= level:
+            return level
+        return None
+    level = entry_price - partial_r * risk
+    if bar.open <= level:
+        return bar.open
+    if bar.low <= level:
+        return level
+    return None

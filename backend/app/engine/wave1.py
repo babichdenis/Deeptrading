@@ -41,6 +41,40 @@ class ReplayStrategy:
     def warmup_bars(self) -> int:
         return self.warmup
 
+    @staticmethod
+    def _rank(kind: str) -> int:
+        # тот же порядок, что в __init__: entry (0) раньше exit (1) на одном ts
+        return 1 if kind == "exit" else 0
+
+    def extend(self, signals=(), exits=()) -> None:
+        """L2.6: добавить сигналы в хвост очереди с сохранением порядка pop.
+
+        Новые сигналы предполагаются не старее уже лежащих (append-only по ts);
+        вставка — insort-right по (ts, kind-rank): порядок выдачи совпадает
+        с batch-конструкцией на объединённом списке для общего случая
+        (одиночные сигналы на ts; множественные одного ts+kind идут порядком
+        прибытия — в L2.7 интеграции кормим entries раньше exits за бар).
+        """
+        from bisect import bisect_right
+        new = []
+        for ts, side in signals:
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            new.append((ts, Side(side), "entry"))
+        for ts, side in (exits or []):
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            new.append((ts, Side(side), "exit"))
+        if not new:
+            return
+        keys = [(p[0], self._rank(p[2])) for p in self._pending]
+        for item in new:
+            k = (item[0], self._rank(item[2]))
+            pos = bisect_right(keys, k)
+            keys.insert(pos, k)
+            self._pending.insert(pos, item)
+        self.total += len(new)
+
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if not self._pending:
             return None

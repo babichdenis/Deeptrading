@@ -32,6 +32,8 @@ class ExitReason(str, Enum):
     SIGNAL_EXIT = "signal_exit"
     SESSION_CLOSE = "session_close"
     END_OF_DATA = "end_of_data"
+    EARLY_ABORT = "early_abort"
+    PARTIAL = "partial_take"
 
 
 @dataclass(frozen=True)
