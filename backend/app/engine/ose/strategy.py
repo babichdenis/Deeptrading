@@ -30,6 +30,7 @@ from .robots import (
     EnvelopTrend,
     PriceChannelTrade,
     RsiContrtrend,
+    RsiTrade,
     Side as RobotSide,
     SmaStochastic,
     StrategyBollinger,
@@ -45,6 +46,7 @@ __all__ = [
     "OseSmaStochStrategy",
     "OseEnvelopTrendStrategy",
     "OseRsiContrtrendStrategy",
+    "OseRsiTradeStrategy",
     "OseBollingerStrategy",
 ]
 
@@ -75,6 +77,8 @@ def _build_robot(name: str) -> tuple[TesterTab, object]:
         return tab, EnvelopTrend(tab)
     if name == "rsi_contrtrend":
         return tab, RsiContrtrend(tab)
+    if name == "rsi_trade":
+        return tab, RsiTrade(tab)
     if name == "bollinger":
         return tab, StrategyBollinger(tab)
     raise ValueError(f"unknown ose robot: {name}")
@@ -130,9 +134,12 @@ _WARMUP = {
     "sma_stoch": 22,          # стохастик 5/3/3, пара K[-2]/K[-1]
     "envelop_trend": 12,      # конверты 10
     "rsi_contrtrend": 52,     # SMA 50 + пара
+    "rsi_trade": 25,          # RSI 20 + гейт оригинала Values.Count < length+5
     "bollinger": 23,          # BB 21 + пара
 }
 
+# OseAll голосует пятью роботами пилота. RsiTrade (Волна B) — отдельная
+# стратегия ose_rsi_trade, в кворум не входит.
 _ROBOT_ORDER = ("price_channel", "sma_stoch", "envelop_trend",
                 "rsi_contrtrend", "bollinger")
 
@@ -325,6 +332,16 @@ class OseEnvelopTrendStrategy(_OseSingleRobot):
 class OseRsiContrtrendStrategy(_OseSingleRobot):
     strategy_id = "ose_rsi_contrtrend"
     robot_name = "rsi_contrtrend"
+
+    def __init__(self, params: OseRobotParams | None = None):
+        super().__init__(params)
+
+
+class OseRsiTradeStrategy(_OseSingleRobot):
+    """Волна B: RsiTrade (OnScriptIndicators) — кроссовер RSI с реверсом."""
+
+    strategy_id = "ose_rsi_trade"
+    robot_name = "rsi_trade"
 
     def __init__(self, params: OseRobotParams | None = None):
         super().__init__(params)

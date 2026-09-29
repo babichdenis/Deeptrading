@@ -2850,11 +2850,3 @@ Alligator slow-line cross
 И тогда **один и тот же движок** сможет автоматически проверить десятки комбинаций на `1m / 5m / 10m / 15m / 30m / 1h`, а не требовать отдельного Python-класса на каждый вариант.
 
 Если идти дальше, я бы следующим сообщением собрал **конкретный “OsEngine → Deeptrading Porting Map”**: взять весь наш `ROBOTS_REGISTRY.md`, пройти по каждому классу и каждому роботу и сделать таблицу **«робот → какие primitives нужны → Entry → Exit → TF → параметры → приоритет теста»**. Это уже будет практически ТЗ для нейронки на реализацию Robot Lab.
-
-[1]: https://github.com/AlexWan/OsEngine?utm_source=chatgpt.com "GitHub - AlexWan/OsEngine: Open Source algo trading platform · GitHub"
-[2]: https://github.com/AlexWan/OsEngine/blob/master/project/OsEngine/bin/Debug/Custom/Robots/StrategyEmaADX.cs?utm_source=chatgpt.com "OsEngine/project/OsEngine/bin/Debug/Custom/Robots/StrategyEmaADX.cs at master · AlexWan/OsEngine · GitHub"
-[3]: https://github.com/AlexWan/OsEngine/blob/master/project/OsEngine/bin/Debug/Custom/Robots/StrategyOnAOAndStoh.cs?utm_source=chatgpt.com "OsEngine/project/OsEngine/bin/Debug/Custom/Robots/StrategyOnAOAndStoh.cs at master · AlexWan/OsEngine · GitHub"
-[4]: https://github.com/AlexWan/OsEngine/blob/master/project/OsEngine/bin/Debug/Custom/Robots/StrategyDpoAndAlligator.cs?utm_source=chatgpt.com "OsEngine/project/OsEngine/bin/Debug/Custom/Robots/StrategyDpoAndAlligator.cs at master · AlexWan/OsEngine · GitHub"
-[5]: https://github.com/AlexWan/OsEngine "GitHub - AlexWan/OsEngine: Open Source algo trading platform · GitHub"
-[6]: https://github.com/AlexWan/OsEngine/blob/master/project/OsEngine/bin/Debug/Custom/Robots/StrategyRsiAndADX.cs?utm_source=chatgpt.com "OsEngine/project/OsEngine/bin/Debug/Custom/Robots/StrategyRsiAndADX.cs at master · AlexWan/OsEngine · GitHub"
-[7]: https://github.com/AlexWan/OsEngine/blob/master/project/OsEngine/bin/Debug/Custom/Robots/DevergenceMomentum.cs?utm_source=chatgpt.com "OsEngine/project/OsEngine/bin/Debug/Custom/Robots/DevergenceMomentum.cs at master · AlexWan/OsEngine · GitHub"

@@ -353,6 +353,12 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
         short_rule="Sma>Close & RSI>upline (контртренд)",
         timeframes=("1min", "5min"), status="AVAILABLE",
     ),
+    "ose_rsi_trade": StrategyCard(
+        id="ose_rsi_trade", name="OSEngine RSI Trade", family="ose", wave=5,
+        long_rule="RSI пересёк downline снизу вверх",
+        short_rule="RSI пересёк upline сверху вниз",
+        timeframes=("1min", "5min"), status="AVAILABLE",
+    ),
     "ose_bollinger": StrategyCard(
         id="ose_bollinger", name="OSEngine Bollinger", family="ose", wave=5,
         long_rule="close < нижней полосы BB (контртренд)",

@@ -179,6 +179,7 @@ OSE_IDS = (
     "ose_sma_stoch",
     "ose_envelop_trend",
     "ose_rsi_contrtrend",
+    "ose_rsi_trade",
     "ose_bollinger",
 )
 

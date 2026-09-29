@@ -34,7 +34,15 @@ Robots/CounterTrend/*.cs (только чтение; лицензия OsEngine �
   заявки исполняются немедленно по цене заявки (каркас для тестов
   сигнальной логики); стоп-заявки на вход и слоты выхода позиции
   (стоп/тейк с OCO, трейлинг = перезаряжаемый стоп-слот) живут между
-  барами и срабатывают по касанию диапазоном следующего бара.
+  барами и срабатывают по касанию диапазоном следующего бара. Филл
+  стоп-заявок — по цене активации: так делает тестер OsEngine
+  (BuyAtStop для не-OsTrader ставит PriceOrder = priceRedLine,
+  TryReloadStop перезаписывает priceOrder = priceActivate), поэтому
+  slippage в этих заявках на результат не влияет. Трейлинг хранит
+  ratchet (уровень не откатывается), fills помечают причину закрытия
+  (Position.exit_reason). Входные заявки живут expires_bars баров
+  (0 — бессрочно, NoLifeTime), stop-market входы — алиасы
+  buy/sell_at_stop_market (в бар-реплее филл тот же — по активации).
 """
 
 from __future__ import annotations
@@ -97,16 +105,24 @@ class Position:
     state: str = "Open"
     stop: tuple[float, float] | None = None    # (activation, order_price)
     profit: tuple[float, float] | None = None  # (activation, order_price)
+    exit_reason: str | None = None  # close / stop_close / profit_close / trail_close
+    stop_is_trail: bool = False     # стоп-слот заряжен трейлингом (CloseAtTrailingStop*)
 
 
 @dataclass
 class StopOrder:
-    """Отложенная стоп-заявка (BotTabSimple.BuyAtStop/SellAtStop)."""
+    """Отложенная стоп-заявка (BotTabSimple.BuyAtStop/SellAtStop).
+
+    expires_bars — срок жизни (CancelStopOpenerByNewCandle в оригинале):
+    0 = бессрочная (NoLifeTime), k > 0 = заявка живёт k баров после бара
+    размещения и снимается в конце k-го, после шанса активации."""
 
     side: Side
     volume: float
     activation_price: float
     order_price: float
+    expires_bars: int = 0
+    created_bar: int = 0
 
 
 @dataclass
@@ -116,14 +132,24 @@ class TesterTab:
     Лимитные заявки (buy/sell_at_limit, close_at_limit) исполняются
     немедленно по цене заявки. Отложенное живёт до следующего бара:
     process_intrabar(candle) вызывается каркасом перед событием закрытия
-    бара и срабатывает, когда диапазон бара касается activation;
-    исполнение — по order_price (маркет). Порядок обработки: слоты
-    выхода открытых позиций (стоп, затем тейк; при касании обеих
-    активаций в одном баре приоритет у стопа — CheckStop проверяется
-    раньше CheckProfit в BotTabSimple), затем стоп-заявки на вход,
-    пока позиций нет. Заполнение стопа на вход снимает остальные стопы
-    и вызывает on_position_opened (аналог PositionOpeningSuccesEvent).
-    fills — журнал исполнений.
+    бара и срабатывает, когда диапазон бара касается activation.
+
+    Цена исполнения стоп-заявок — как в тестере OsEngine: BuyAtStop для
+    не-OsTrader ставит PriceOrder = priceRedLine, TryReloadStop в тестере
+    перезаписывает priceOrder = priceActivate, CloseAtTrailingStopMarket
+    выставляет обе цены в activation. Поэтому и вход стоп-заявкой, и слоты
+    выхода заполняются по цене активации, а переданный order_price на филл
+    не влияет (хранится ради TryReload no-op и будущего реального режима).
+    Трейлинг держит ratchet: CloseAtTrailingStop не опускает стоп лонга и
+    не поднимает стоп шорта.
+
+    Порядок обработки: слоты выхода открытых позиций (стоп, затем тейк;
+    при касании обеих активаций в одном баре приоритет у стопа — CheckStop
+    проверяется раньше CheckProfit в BotTabSimple), затем стоп-заявки на
+    вход, пока позиций нет. Заполнение стопа на вход снимает остальные
+    стопы и вызывает on_position_opened (аналог
+    PositionOpeningSuccesEvent). fills — журнал исполнений; причина
+    закрытия пишется в Position.exit_reason.
     """
 
     __test__ = False  # pytest: имя Test* не должно попадать в коллекцию
@@ -132,6 +158,7 @@ class TesterTab:
     pending_stops: list[StopOrder] = field(default_factory=list)
     fills: list[tuple[str, float]] = field(default_factory=list)
     on_position_opened: Callable[[Position], None] | None = None
+    _bar_index: int = field(default=0, init=False, repr=False)
 
     @property
     def positions_open_all(self) -> list[Position]:
@@ -148,37 +175,80 @@ class TesterTab:
         self.positions.append(Position(Side.SELL, volume, price))
         self.fills.append(("open_short", price))
 
-    def close_at_limit(self, position: Position, price: float, volume: float) -> None:
+    def buy_at_market(self, volume: float, price: float) -> None:
+        """BuyAtMarket: в бар-реплее маркет исполняется по переданной
+        цене — каркас не моделирует очередь и проскальзывание."""
+        self.buy_at_limit(volume, price)
+
+    def sell_at_market(self, volume: float, price: float) -> None:
+        """SellAtMarket: см. buy_at_market."""
+        self.sell_at_limit(volume, price)
+
+    def close_at_limit(self, position: Position, price: float, volume: float,
+                       reason: str = "close") -> None:
         if position.state != "Open":
             return
         position.state = "Closed"
         position.stop = None
         position.profit = None
+        position.exit_reason = reason
         self.fills.append(("close", price))
 
     # -- стоп-заявки и трейлинг: исполнение на следующем баре --
 
     def buy_at_stop(self, volume: float, price: float, activation_price: float,
-                    activate_type: str = "HigherOrEqual") -> None:
-        self.pending_stops.append(StopOrder(Side.BUY, volume, activation_price, price))
+                    activate_type: str = "HigherOrEqual",
+                    expires_bars: int = 0) -> None:
+        self.pending_stops.append(StopOrder(
+            Side.BUY, volume, activation_price, price,
+            expires_bars=expires_bars, created_bar=self._bar_index))
 
     def sell_at_stop(self, volume: float, price: float, activation_price: float,
-                     activate_type: str = "LowerOrEqual") -> None:
-        self.pending_stops.append(StopOrder(Side.SELL, volume, activation_price, price))
+                     activate_type: str = "LowerOrEqual",
+                     expires_bars: int = 0) -> None:
+        self.pending_stops.append(StopOrder(
+            Side.SELL, volume, activation_price, price,
+            expires_bars=expires_bars, created_bar=self._bar_index))
 
-    def cancel_stop_orders(self) -> None:
-        self.pending_stops.clear()
+    def buy_at_stop_market(self, volume: float, activation_price: float,
+                           expires_bars: int = 0) -> None:
+        """BuyAtStopMarket: в бар-реплее исполняется как обычный стоп —
+        по цене активации (тестерная семантика для обоих вариантов)."""
+        self.buy_at_stop(volume, activation_price, activation_price,
+                         expires_bars=expires_bars)
+
+    def sell_at_stop_market(self, volume: float, activation_price: float,
+                            expires_bars: int = 0) -> None:
+        """SellAtStopMarket: см. buy_at_stop_market."""
+        self.sell_at_stop(volume, activation_price, activation_price,
+                          expires_bars=expires_bars)
+
+    def cancel_stop_orders(self, side: Side | None = None) -> None:
+        """CancelStopOrders: side=None — все заявки, иначе только заявки
+        указанной стороны (BuyAtStopCancel/SellAtStopCancel в оригинале)."""
+        if side is None:
+            self.pending_stops.clear()
+        else:
+            self.pending_stops = [o for o in self.pending_stops if o.side is not side]
 
     # -- слоты выхода позиции (TryReloadStop / TryReloadProfit) --
 
     def close_at_stop_market(self, position: Position, activation_price: float,
                              order_price: float) -> None:
         """CloseAtStopMarket → TryReloadStop: пара цен уже активна —
-        no-op, иначе перезапись стоп-слота."""
+        no-op, иначе перезапись стоп-слота. Филл слота — по activation
+        (тестерная семантика), order_price хранится для no-op-сравнения."""
         new = (activation_price, order_price)
         if position.stop == new:
             return
         position.stop = new
+        position.stop_is_trail = False
+
+    def close_at_stop(self, position: Position, activation_price: float,
+                      order_price: float) -> None:
+        """CloseAtStop (лимитный стоп): в тестере OsEngine филл тот же —
+        по activation (TryReloadStop перезаписывает priceOrder)."""
+        self.close_at_stop_market(position, activation_price, order_price)
 
     def close_at_profit_market(self, position: Position, activation_price: float,
                                order_price: float) -> None:
@@ -189,11 +259,34 @@ class TesterTab:
             return
         position.profit = new
 
+    def close_at_profit(self, position: Position, activation_price: float,
+                        order_price: float) -> None:
+        """CloseAtProfit (лимитный тейк): филл по activation, см. close_at_stop."""
+        self.close_at_profit_market(position, activation_price, order_price)
+
+    def close_at_stop_cancel(self, position: Position) -> None:
+        """CloseAtStopCancel: снять стоп-слот, позицию не закрывать."""
+        position.stop = None
+        position.stop_is_trail = False
+
+    def close_at_profit_cancel(self, position: Position) -> None:
+        """CloseAtProfitCancel: снять тейк-слот, позицию не закрывать."""
+        position.profit = None
+
     def close_at_trailing_stop(self, position: Position, activation_price: float,
                                order_price: float) -> None:
-        """Трейлинг — тот же стоп-слот: робот перезаряжает его каждым
-        баром (CloseAtTrailingStopMarket в оригинале)."""
+        """CloseAtTrailingStop: трейлинг с ratchet — стоп лонга двигается
+        только вверх, стоп шорта только вниз. Гварды оригинала: при
+        RedLine > activation (Buy) или RedLine < activation (Sell) новый
+        уровень не применяется, остаётся лучший из уже стоящих."""
+        current = position.stop
+        if current is not None:
+            if position.side is Side.BUY and current[0] > activation_price:
+                return
+            if position.side is Side.SELL and current[0] < activation_price:
+                return
         self.close_at_stop_market(position, activation_price, order_price)
+        position.stop_is_trail = True
 
     def _exit_slot_hits(self, pos: Position, candle: Candle) -> tuple[bool, bool]:
         """Касания стоп- и тейк-слотов диапазоном бара. Порядок проверки —
@@ -220,14 +313,21 @@ class TesterTab:
     def process_intrabar(self, candle: Candle) -> None:
         """Отложенные заявки против диапазона закрывшегося бара: сначала
         слоты выхода открытых позиций (исполнение одного снимает второй —
-        OCO), затем стоп-заявки на вход, пока позиций нет."""
+        OCO), затем стоп-заявки на вход, пока позиций нет, затем — срок
+        жизни входных заявок (0 = бессрочная). Филлы — по цене активации
+        (тестер OsEngine: PriceOrder := priceRedLine / priceActivate),
+        причина закрытия пишется в Position.exit_reason."""
+        self._bar_index += 1
         for pos in list(self.positions_open_all):
             hit_stop, hit_profit = self._exit_slot_hits(pos, candle)
             if not (hit_stop or hit_profit):
                 continue
-            slot = pos.stop if hit_stop else pos.profit
-            order_price = slot[1]
-            self.close_at_limit(pos, order_price, pos.volume)
+            if hit_stop:
+                reason = "trail_close" if pos.stop_is_trail else "stop_close"
+                self.close_at_limit(pos, pos.stop[0], pos.volume, reason=reason)
+            else:
+                self.close_at_limit(pos, pos.profit[0], pos.volume,
+                                    reason="profit_close")
         if not self.positions_open_all:
             for order in list(self.pending_stops):
                 if order.side is Side.BUY:
@@ -237,13 +337,23 @@ class TesterTab:
                 if not hit:
                     continue
                 self.pending_stops.clear()
+                # BuyAtStop в тестере ставит PriceOrder = priceRedLine.
+                fill_price = order.activation_price
                 if order.side is Side.BUY:
-                    self.buy_at_limit(order.volume, order.order_price)
+                    self.buy_at_limit(order.volume, fill_price)
                 else:
-                    self.sell_at_limit(order.volume, order.order_price)
+                    self.sell_at_limit(order.volume, fill_price)
                 if self.on_position_opened is not None:
                     self.on_position_opened(self.positions[-1])
                 break
+        # CancelStopOpenerByNewCandle: заявка живёт expires_bars баров и
+        # снимается в конце k-го — после шанса активации на этом баре.
+        if self.pending_stops:
+            self.pending_stops = [
+                o for o in self.pending_stops
+                if o.expires_bars == 0
+                or (self._bar_index - o.created_bar) < o.expires_bars
+            ]
 
 
 class _Robot:

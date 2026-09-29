@@ -28,6 +28,7 @@ from app.engine.ose.strategy import (
     OsePriceChannelStrategy,
     OseRobotParams,
     OseRsiContrtrendStrategy,
+    OseRsiTradeStrategy,
     OseSmaStochParams,
     OseSmaStochStrategy,
 )
@@ -519,6 +520,7 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "ose_sma_stoch": OseSmaStochStrategy,
     "ose_envelop_trend": OseEnvelopTrendStrategy,
     "ose_rsi_contrtrend": OseRsiContrtrendStrategy,
+    "ose_rsi_trade": OseRsiTradeStrategy,
     "ose_bollinger": OseBollingerStrategy,
 }
 
@@ -549,6 +551,7 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "ose_sma_stoch": OseSmaStochParams,
     "ose_envelop_trend": OseRobotParams,
     "ose_rsi_contrtrend": OseRobotParams,
+    "ose_rsi_trade": OseRobotParams,
     "ose_bollinger": OseRobotParams,
 }
 

@@ -1,6 +1,9 @@
 # PORT_NOTES_EXITS — механика выходов (стоп/тейк/трейлинг) в OsEngine и план порта
 
 Дата: 2026-09-28.
+**Обновлено 2026-09-29:** разделы 6–8 приведены в соответствие с кодом после
+аудита — филлы слотов по цене активации (тестерная семантика), ratchet
+трейлинга, теги причин через `Position.exit_reason`.
 Источник: `~/OsEngine/project/OsEngine` — `OsTrader/Panels/Tab/BotTabSimple.cs`,
 `Entity/Position.cs`, `Entity/PositionOpenerToStop.cs`.
 Суть в одном абзаце: **стоп и тейк — это два слота на самой позиции (OCO-пара),
@@ -117,18 +120,32 @@ IsActive = false; -> новые RedLine/Price -> IsActive = true;
 (у нас — `TesterTab.pending_stops`). Позиционные стопы — только про ВЫХОД.
 Два разных механизма, в OsEngine никак не пересекаются.
 
-## 6. Что у нас сейчас (app/engine/ose/robots.py) — где «шатко»
+## 6. Что у нас сейчас (app/engine/ose/robots.py) — статус на 29.09
 
-- Входы (`StopOrder` + `pending_stops`) — ок, соответствует п.5.
-- Выход — один слот на весь таб: `trail: tuple[Position, activation, order_price] | None`:
-  - тейк ставить **нечем** — profита в каркасе нет вообще;
-  - нет OCO — стоп и тейк существовали бы независимо;
-  - `close_at_trailing_stop` хранит статичную пару, сам «не трейлит» (это
-    нормально — в OsEngine тоже), но нет reload-проверки «цены не изменились»
-    и различия market/limit;
-  - исполнение всегда по `order_price`, гэп открытия за активацией не учтён;
-  - порядок в `process_intrabar` — выход до входов: это совпадает с духом OsEngine,
-    оставляем.
+- Входы: `StopOrder` + `pending_stops` — соответствует п.5; в тестере вход
+  стоп-заявкой филится по **цене активации** (BuyAtStop: PriceOrder =
+  priceRedLine для не-OsTrader), `order_price` хранится в заявке.
+- Выход: **два слота на позиции** — `Position.stop` / `Position.profit`
+  (пары activation/order_price); OCO в `process_intrabar`: исполнение одного
+  слота снимает второй, при касании обоих в баре приоритет у стопа.
+- `close_at_trailing_stop` — **ratchet**: стоп лонга двигается только вверх,
+  шорта только вниз (гварды CloseAtTrailingStop: RedLine > activation для Buy,
+  RedLine < activation для Sell — уровень сохраняется); слот помечается
+  `stop_is_trail`.
+- Reload: `close_at_stop_market` / `close_at_profit_market` — no-op при той же
+  паре цен, иначе перезапись (TryReload); есть лимитные алиасы
+  `close_at_stop` / `close_at_profit` (в тестере филл тот же — по активации).
+- Филлы слотов — по **цене активации** (тестер OsEngine: TryReloadStop
+  перезаписывает priceOrder = priceActivate; CloseAtTrailingStopMarket ставит
+  обе цены в activation). `order_price` на филл не влияет.
+- Снятие слота без закрытия — `close_at_stop_cancel` / `close_at_profit_cancel`;
+  отмена входных стопов — `cancel_stop_orders(side=None)` (per-side).
+- Причина закрытия — `Position.exit_reason`: `close` / `stop_close` /
+  `profit_close` / `trail_close` (fills остаются `("close", price)` — голоса
+  и метрики не ломаются).
+- Ещё не портировано: iceberg и OnServer-варианты, частичные закрытия и
+  перевыставление слотов на остаток, expiry входных заявок (OpenerToStop),
+  market-вариант стоп-входа.
 
 ## 7. План порта (бар-реплей)
 
@@ -159,23 +176,36 @@ IsActive = false; -> новые RedLine/Price -> IsActive = true;
    Если в баре коснулись оба — считать сработавшим **стоп** (консервативно:
    диапазон не даёт порядка тиков).
 
-5. **Исполнение:** limit — по `order_price`; market — по `activation_price`,
-   но если бар **открылся за активацией** (гэп) — по `open` (хуже для нас).
-   Это стандартная бар-реплей аппроксимация тикового «market по факту».
+5. **Исполнение (решение 29.09, сверено с оригиналом):** и limit-, и market-
+   слоты в тестере OsEngine филятся по **цене активации**: TryReloadStop для
+   тестера перезаписывает `priceOrder = priceActivate`, CloseAtTrailingStopMarket
+   ставит `StopOrderPrice = StopOrderRedLine = activation`. Гэпа «по open» нет —
+   тестер исполняет по цене слота (активации). Входные стоп-заявки — так же
+   (BuyAtStop: `PriceOrder = priceRedLine` для не-OsTrader).
 
-6. **Журнал:** в `fills` писать тег — `("stop_close", price)` /
-   `("profit_close", price)` вместо общего `"close"` (аналог
-   SignalTypeStop→SignalTypeClose). Слой голосов (`ose/strategy.py`) смотрит
-   на открытие/закрытие — общий `close` оставить как fallback, голоса не меняются.
+6. **Журнал (решение 29.09):** формат `fills` оставлен `("close", price)` —
+   голоса (ose/strategy.py) и метрики не ломаются; причина закрытия пишется в
+   `Position.exit_reason` (`close` / `stop_close` / `profit_close` /
+   `trail_close`) как аналог SignalTypeStop→SignalTypeClose.
 
-## 8. Тесты (добавить в tests/test_ose_robots.py)
+## 8. Тесты (tests/test_ose_robots.py) — добавлено/уточнено 29.09
 
 - OCO: сработал стоп → тейк снят (и наоборот); после активации оба слота None.
-- Reload: повторный `close_at_stop` с теми же ценами — no-op (fills не растут);
-  с новыми — красная линия переехала (сценарий трейлинга на двух барах).
-- Гэп: `open` хуже активации → исполнение по `open`.
-- Приоритет: в баре, где касание стопа и стоп-заявка на вход — исполняется только выход.
-- limit vs market цена исполнения; short — зеркальные условия.
+- Reload: повторный `close_at_stop` с теми же ценами — no-op; с новыми —
+  красная линия переехала (сценарий трейлинга на двух барах).
+- Гэп сквозь активацию: исполнение по **цене активации** (слот), не по open
+  и не по order_price — «по open» из черновика 28.09 тестером OsEngine
+  не подтвердилось.
+- Ratchet трейлинга: попытка откатить стоп (лонг вниз / шорт вверх) —
+  уровень сохраняется.
+- Филл входа стоп-заявкой — по активации (BuyAtStop: priceRedLine).
+- Причина закрытия: `Position.exit_reason` для stop/profit/trail/сигнального.
+- Market-входы, per-side cancel входных стопов, снятие слота без закрытия,
+  лимитные алиасы `close_at_stop`/`close_at_profit`.
+
+Прогон 29.09: целевой OSE-набор — 182 passed; полный `pytest tests` —
+644 passed, 1 failed + 16 errors только в `test_research_pack.py`
+(им нужна БД — средовое, не связано с портом).
 
 ## 9. Ссылки на код OsEngine
 

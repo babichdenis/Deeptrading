@@ -450,10 +450,10 @@ def test_exit_slot_stop_hits_and_clears_profit_oco():
     tab.close_at_stop_market(pos, 100.0, 99.9)
     tab.close_at_profit_market(pos, 120.0, 119.9)
     # Бар задел обе активации (low 99.5 <= 100, high 121 >= 120):
-    # приоритет у стопа (CheckStop раньше CheckProfit), закрытие по 99.9
+    # приоритет у стопа (CheckStop раньше CheckProfit), филл по activation
     tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 101.0, 121.0, 99.5, 110.0))
     assert [a for a, _ in tab.fills] == ["open_long", "close"]
-    assert tab.fills[-1][1] == pytest.approx(99.9)
+    assert tab.fills[-1][1] == pytest.approx(100.0)
     assert pos.stop is None  # OCO: исполнение стопа сняло тейк
     assert pos.profit is None
 
@@ -466,10 +466,11 @@ def test_exit_slot_reload_overrides_prices():
     tab.close_at_stop_market(pos, 100.0, 99.9)  # та же пара — TryReload no-op
     tab.close_at_stop_market(pos, 105.0, 104.9)  # новая пара — перезапись слота
     assert pos.stop == (105.0, 104.9)
-    # low 104 не задел бы старую активацию 100, но задел новую 105
+    # low 104 не задел бы старую активацию 100, но задел новую 105;
+    # филл — по activation (тестер OsEngine игнорирует order_price)
     tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 106.0, 107.0, 104.0, 105.0))
     assert [a for a, _ in tab.fills] == ["open_long", "close"]
-    assert tab.fills[-1][1] == pytest.approx(104.9)
+    assert tab.fills[-1][1] == pytest.approx(105.0)
 
 
 def test_exit_slot_short_stop_hits_on_high():
@@ -479,7 +480,7 @@ def test_exit_slot_short_stop_hits_on_high():
     tab.close_at_stop_market(pos, 105.0, 105.1)
     tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 104.0, 105.5, 103.0, 104.0))
     assert [a for a, _ in tab.fills] == ["open_short", "close"]
-    assert tab.fills[-1][1] == pytest.approx(105.1)
+    assert tab.fills[-1][1] == pytest.approx(105.0)
 
 
 def test_exit_slot_profit_hits_without_stop_touch():
@@ -487,10 +488,10 @@ def test_exit_slot_profit_hits_without_stop_touch():
     tab.sell_at_limit(1.0, 110.0)
     pos = tab.positions[-1]
     tab.close_at_profit_market(pos, 100.0, 100.1)
-    # low 99.5 <= активация 100.0 — тейк шорта исполнен, стоп-слота нет
+    # low 99.5 <= активация 100.0 — тейк шорта исполнен по activation
     tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 105.0, 105.0, 99.5, 101.0))
     assert [a for a, _ in tab.fills] == ["open_short", "close"]
-    assert tab.fills[-1][1] == pytest.approx(100.1)
+    assert tab.fills[-1][1] == pytest.approx(100.0)
     assert pos.stop is None and pos.profit is None  # OCO симметричен
 
 
@@ -499,23 +500,24 @@ def test_exit_slot_long_profit_hits_on_high():
     tab.buy_at_limit(1.0, 90.0)
     pos = tab.positions[-1]
     tab.close_at_profit_market(pos, 120.0, 119.9)
-    # high 120.5 >= активация 120.0 — тейк лонга исполнен по order_price
+    # high 120.5 >= активация 120.0 — тейк лонга исполнен по activation
     tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 115.0, 120.5, 114.0, 119.0))
     assert [a for a, _ in tab.fills] == ["open_long", "close"]
-    assert tab.fills[-1][1] == pytest.approx(119.9)
+    assert tab.fills[-1][1] == pytest.approx(120.0)
     assert pos.stop is None and pos.profit is None
 
 
-def test_exit_slot_gap_through_stop_fills_at_order_price():
+def test_exit_slot_gap_through_stop_fills_at_activation():
     tab = TesterTab()
     tab.sell_at_limit(1.0, 110.0)
     pos = tab.positions[-1]
     tab.close_at_stop_market(pos, 105.0, 105.1)
-    # Гэп вверх сквозь активацию (open 106 > 105): исполнение — маркет,
-    # по order_price 105.1, а не по open/activation
+    # Гэп вверх сквозь активацию (open 106 > 105): тестер OsEngine
+    # исполняет стоп-слот по цене активации (priceOrder := priceActivate
+    # в TryReloadStop), а не по open и не по order_price.
     tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 106.0, 106.5, 105.2, 106.0))
     assert [a for a, _ in tab.fills] == ["open_short", "close"]
-    assert tab.fills[-1][1] == pytest.approx(105.1)
+    assert tab.fills[-1][1] == pytest.approx(105.0)
 
 
 def test_exit_slot_trailing_migrates_stop_each_bar():
@@ -529,7 +531,7 @@ def test_exit_slot_trailing_migrates_stop_each_bar():
     tab.close_at_trailing_stop(pos, 98.0, 97.9)  # перезарядка новым баром
     tab.process_intrabar(_candle(_T0 + timedelta(minutes=10), 98.5, 99.0, 97.5, 98.0))
     assert [a for a, _ in tab.fills] == ["open_long", "close"]
-    assert tab.fills[-1][1] == pytest.approx(97.9)
+    assert tab.fills[-1][1] == pytest.approx(98.0)
 
 
 def test_exit_slot_entry_stops_wait_while_position_open():
@@ -555,4 +557,165 @@ def test_exit_slot_entry_stop_fires_callback_with_position():
     assert len(seen) == 1
     assert seen[0] is tab.positions[-1]
     assert seen[0].side is Side.BUY
-    assert seen[0].entry_price == pytest.approx(100.0)
+    # Вход стоп-заявкой филится по цене активации (в тестере OsEngine
+    # BuyAtStop ставит PriceOrder = priceRedLine), а не по priceLimit.
+    assert seen[0].entry_price == pytest.approx(99.0)
+
+
+def test_exit_slot_entry_stop_fills_at_activation():
+    # В тестере OsEngine вход стоп-заявкой исполняется по priceRedLine
+    # (BuyAtStop: PriceOrder = priceRedLine для не-OsTrader), не по priceLimit.
+    tab = TesterTab()
+    tab.buy_at_stop(1.0, 100.5, activation_price=100.0)
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 99.5, 100.2, 99.0, 100.2))
+    assert tab.fills == [("open_long", 100.0)]
+
+
+def test_exit_slot_trailing_ratchet_keeps_better_stop():
+    # Long: стоп двигается только вверх (CloseAtTrailingStop guard:
+    # RedLine > activation → старый уровень сохраняется).
+    tab = TesterTab()
+    tab.buy_at_limit(1.0, 90.0)
+    pos = tab.positions[-1]
+    tab.close_at_trailing_stop(pos, 95.0, 94.9)
+    tab.close_at_trailing_stop(pos, 94.0, 93.9)  # назад нельзя — ratchet
+    assert pos.stop == (95.0, 94.9)
+    tab.close_at_trailing_stop(pos, 98.0, 97.9)  # вверх можно
+    assert pos.stop == (98.0, 97.9)
+
+    # Short: стоп двигается только вниз.
+    tab2 = TesterTab()
+    tab2.sell_at_limit(1.0, 110.0)
+    pos2 = tab2.positions[-1]
+    tab2.close_at_trailing_stop(pos2, 105.0, 105.1)
+    tab2.close_at_trailing_stop(pos2, 106.0, 106.1)  # назад нельзя
+    assert pos2.stop == (105.0, 105.1)
+    tab2.close_at_trailing_stop(pos2, 103.0, 103.1)  # вниз можно
+    assert pos2.stop == (103.0, 103.1)
+
+
+def test_exit_slot_exit_reasons_tagged():
+    tab = TesterTab()
+
+    tab.buy_at_limit(1.0, 90.0)
+    stop_pos = tab.positions[-1]
+    tab.close_at_stop_market(stop_pos, 100.0, 99.9)
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 101.0, 101.0, 99.5, 100.0))
+    assert stop_pos.exit_reason == "stop_close"
+
+    tab.buy_at_limit(1.0, 90.0)
+    profit_pos = tab.positions[-1]
+    tab.close_at_profit_market(profit_pos, 120.0, 119.9)
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=10), 115.0, 121.0, 114.0, 120.0))
+    assert profit_pos.exit_reason == "profit_close"
+
+    tab.buy_at_limit(1.0, 90.0)
+    trail_pos = tab.positions[-1]
+    tab.close_at_trailing_stop(trail_pos, 95.0, 94.9)
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=11), 96.0, 96.0, 94.5, 95.0))
+    assert trail_pos.exit_reason == "trail_close"
+
+    tab.buy_at_limit(1.0, 90.0)
+    signal_pos = tab.positions[-1]
+    tab.close_at_limit(signal_pos, 91.0, signal_pos.volume)
+    assert signal_pos.exit_reason == "close"
+
+
+def test_tester_tab_market_entries_open_at_price():
+    tab = TesterTab()
+    tab.buy_at_market(1.0, 100.0)
+    tab.sell_at_market(1.0, 110.0)
+    assert [a for a, _ in tab.fills] == ["open_long", "open_short"]
+    assert tab.fills[0][1] == pytest.approx(100.0)
+    assert tab.fills[1][1] == pytest.approx(110.0)
+    assert [p.side for p in tab.positions_open_all] == [Side.BUY, Side.SELL]
+
+
+def test_cancel_stop_orders_by_side():
+    tab = TesterTab()
+    tab.buy_at_stop(1.0, 100.0, activation_price=100.0)
+    tab.sell_at_stop(1.0, 90.0, activation_price=90.0)
+    tab.cancel_stop_orders(Side.BUY)
+    assert [o.side for o in tab.pending_stops] == [Side.SELL]
+    tab.cancel_stop_orders()
+    assert tab.pending_stops == []
+
+
+def test_close_at_stop_cancel_removes_slot_without_closing():
+    tab = TesterTab()
+    tab.buy_at_limit(1.0, 90.0)
+    pos = tab.positions[-1]
+    tab.close_at_stop_market(pos, 100.0, 99.9)
+    tab.close_at_stop_cancel(pos)
+    assert pos.stop is None
+    assert pos.state == "Open"
+    # Бар задевает бывшую активацию — позиция не закрывается
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 101.0, 101.0, 99.5, 100.0))
+    assert [a for a, _ in tab.fills] == ["open_long"]
+
+
+def test_close_at_stop_and_profit_aliases_use_activation_fill():
+    tab = TesterTab()
+    tab.buy_at_limit(1.0, 90.0)
+    pos = tab.positions[-1]
+    tab.close_at_stop(pos, 100.0, 99.9)     # лимитный вариант — тот же слот
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 100.0, 100.5, 99.5, 100.0))
+    assert tab.fills[-1][1] == pytest.approx(100.0)
+
+    tab.buy_at_limit(1.0, 90.0)
+    pos2 = tab.positions[-1]
+    tab.close_at_profit(pos2, 120.0, 119.9)
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=10), 119.0, 120.5, 118.0, 120.0))
+    assert tab.fills[-1][1] == pytest.approx(120.0)
+
+
+def test_entry_stop_expires_after_one_bar():
+    # expires_bars=1: заявка живёт один следующий бар; если он её не задел —
+    # снимается в конце бара (CancelStopOpenerByNewCandle: ExpiresBars <= 1).
+    tab = TesterTab()
+    tab.buy_at_stop(1.0, 100.0, activation_price=100.0, expires_bars=1)
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 95.0, 99.0, 94.0, 96.0))
+    assert tab.pending_stops == []
+
+
+def test_entry_stop_expires_fires_on_first_bar():
+    # Тот же срок, но бар задел активацию — заявка срабатывает.
+    tab = TesterTab()
+    tab.buy_at_stop(1.0, 100.0, activation_price=100.0, expires_bars=1)
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 99.0, 100.5, 98.5, 100.0))
+    assert tab.fills == [("open_long", 100.0)]
+    assert tab.pending_stops == []
+
+
+def test_entry_stop_expires_bars_two_lives_two_bars():
+    tab = TesterTab()
+    tab.buy_at_stop(1.0, 100.0, activation_price=100.0, expires_bars=2)
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 95.0, 99.0, 94.0, 96.0))
+    assert len(tab.pending_stops) == 1  # первый бар прожит, заявка ждёт
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=10), 95.0, 99.5, 94.0, 96.0))
+    assert tab.pending_stops == []      # второй бар — снята (после шанса)
+
+
+def test_entry_stop_no_lifetime_survives():
+    # Дефолт (expires_bars=0) — бессрочная, как NoLifeTime.
+    tab = TesterTab()
+    tab.buy_at_stop(1.0, 100.0, activation_price=100.0)
+    for i in range(5):
+        tab.process_intrabar(_candle(_T0 + timedelta(minutes=9 + i), 95.0, 99.0, 94.0, 96.0))
+    assert len(tab.pending_stops) == 1
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=20), 99.0, 100.5, 98.5, 100.0))
+    assert tab.fills == [("open_long", 100.0)]
+
+
+def test_buy_stop_market_fills_at_activation():
+    tab = TesterTab()
+    tab.buy_at_stop_market(1.0, 100.0)
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 99.0, 100.5, 98.5, 100.0))
+    assert tab.fills == [("open_long", 100.0)]
+
+
+def test_sell_stop_market_fills_at_activation():
+    tab = TesterTab()
+    tab.sell_at_stop_market(1.0, 95.0)
+    tab.process_intrabar(_candle(_T0 + timedelta(minutes=9), 96.0, 96.5, 94.5, 95.0))
+    assert tab.fills == [("open_short", 95.0)]

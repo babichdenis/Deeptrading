@@ -168,13 +168,13 @@ def test_stop_slot_exit_recorded_as_trade():
     pos = tab.positions[0]
     tab.close_at_stop_market(pos, 95.0, 94.9)    # стоп-слот: активация 95
     c = _candle(1, 96.0, high=97.0, low=94.0)    # лоу 94 ≤ 95 — стоп сработал
-    tab.process_intrabar(c)                      # исполнение по order_price
+    tab.process_intrabar(c)                      # филл по активации (тестер OsEngine)
     tr.on_bar(c)
     r = tr.report()
     assert r["trades"] == 1
-    assert r["realized"] == pytest.approx(-5.1)  # 94.9 - 100
-    assert r["pnl"] == pytest.approx(-5.1)
-    assert r["max_dd"] == pytest.approx(5.1)
+    assert r["realized"] == pytest.approx(-5.0)  # 95.0 - 100
+    assert r["pnl"] == pytest.approx(-5.0)
+    assert r["max_dd"] == pytest.approx(5.0)
     assert r["in_market_pct"] == 0.0             # выход внутри бара → бар вне рынка
 
 
