@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     bot_test_start: str = ""
     bot_test_end: str = ""
     bot_test_pace: str = "fast"  # fast | wall (wall = поминутно, реальное время)
+    bot_test_log_persist: bool = False  # тест: писать логи реплея в bot_logs (BOT_TEST_LOG_PERSIST=1)
+    bot_test_variant: str = ""   # вариант тестового набора: data/ensemble_config.test.<variant>.json
     log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR
     log_debug_engine: bool = False  # подробные debug-логи движка (hot path)
     api_token: str = ""  # Bearer-токен для write-эндпойнтов API (пусто = auth отключена)
@@ -33,6 +35,20 @@ class Settings(BaseSettings):
     # Для публичного/строгого режима задать явно, напр. http://localhost:5173.
     cors_origins: str = ""
     run_migrations_on_start: bool = False  # alembic upgrade head при старте приложения
+
+    # --- Волатильная карусель (double-carousel) ---
+    # Периодически ранжирует весь TQBR по дневной волатильности RNG% из MOEX ISS
+    # и принудительно держит в юниверсе только top-N самых волатильных (остальные
+    # снимает). Управляет метками eligible в БД — подхват/снятие делает обычный
+    # hot-add/remove цикл бота (без рестарта).
+    # ВЫКЛЮЧЕНА ПО УМОЛЧАНИЮ — включение требует осознанного решения.
+    vol_carousel_enabled: bool = False          # мастер-переключатель
+    vol_carousel_top_n: int = 20                # сколько самых волатильных держать
+    vol_carousel_min_rng: float = 0.5           # мин. RNG% для добавления (порог)
+    vol_carousel_hysteresis: int = 3            # сколько циклов «мимо top-N» держать перед снятием
+    vol_carousel_cycle_sec: int = 300           # период цикла (5 мин)
+    vol_carousel_lot_min: float = 1.0           # мин. стоимость лота (₽) — отсечка мусора
+    vol_carousel_blacklist: str = ""            # тикеры-исключения через запятую
 
     @field_validator("log_debug_engine", mode="before")
     @classmethod

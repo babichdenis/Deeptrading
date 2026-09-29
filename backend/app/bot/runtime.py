@@ -35,8 +35,59 @@ def _skip_human(s: str) -> str:
     if "session_blocked" in _s:
         return "торговая сессия сейчас не активна"
     if "no_fresh" in _s:
-        return "нет свежих свечей (стрим отстаёт от биржи)"
+        return "нет свежего сигнала ансамбля за 30 мин (стрим исправен, просто давно не было входа по тикеру)"
     if "no_entries" in _s:
+        # no_entries(cand=N rej=M: COMBO_BIAS|BUY->SELL:TREND_UPx8, REGIME_OFFx3, ...)
+        _CODES = {
+            "COMBO_BIAS": "сторона не совпала с bias режима",
+            "REGIME_OFF": "режим не торгуется (bias_by_state)",
+            "AGAINST_BIAS": "сигнал против общего bias",
+            "SETUP_MISSING": "нет сигнала setup-стратегии",
+            "VOL_FILTER": "объём ниже порога",
+            "VOL_FLOW": "объёмный поток не подтвердил",
+            "STOCH_FILTER": "сток/перекупленность за пределами",
+            "IMOEX_VETO": "IMOEX-вето",
+            "REGIME_MODE": "режим разрешает только одну сторону",
+            "MACD_1M": "1m MACD против направления",
+            "MACD_1M_AGAINST": "1m MACD против направления",
+        }
+        _SIDE_RU = {"BUY": "лонг", "SELL": "шорт", "запрет": "вход запрещён"}
+        try:
+            _parts = _s.split("(", 1)[1].rsplit(")", 1)[0]
+            if ":" in _parts:
+                _reasons = _parts.split(":", 1)[1]
+            else:
+                _reasons = _parts
+            _detailed = []
+            _chunks = _reasons.replace(",", " ").split()
+            if any(c == "сигналов" for c in _chunks):
+                _detailed = ["сигналов нет"]
+            else:
+                for _chunk in _chunks:
+                    _chunk = _chunk.strip()
+                    if not _chunk:
+                        continue
+                    if "x" in _chunk:
+                        _code0, _, _n = _chunk.rpartition("x")
+                        if _n.isdigit():
+                            if "|" in _code0:
+                                _meta, _, _pat = _code0.partition("|")  # COMBO_BIAS | BUY->SELL:TREND_UP
+                                _src, _, _dst = _pat.partition("->")
+                                _mode = _dst.rsplit(":", 1)[1] if ":" in _dst else ""
+                                _dst_side = _dst.rsplit(":", 1)[0] if ":" in _dst else _dst
+                                _label = (f"ансамбль хотел {_SIDE_RU.get(_src, _src)}, "
+                                          f"bias {_mode} требует {_SIDE_RU.get(_dst_side, _dst_side)}")
+                            else:
+                                _label = _CODES.get(_code0, _code0)
+                            _detailed.append(f"{_label} ({_n})")
+                            continue
+                        _detailed.append(_code0)
+                        continue
+                    _detailed.append(_chunk)
+            if _detailed:
+                return "все кандидаты отклонены фильтрами: " + "; ".join(_detailed)
+        except Exception:
+            pass
         return "все кандидаты отклонены фильтрами"
     if "quorum" in _s.lower():
         return "не набран кворум голосов стратегий"
@@ -88,7 +139,7 @@ from app.services.signals import _load_candles as _lc
 from app.services.tinvest import INTERVAL_NAMES
 
 MAX_BUFFER = 300
-ENSEMBLE_BUFFER = 4320  # 3 дня 1m-свечей (~72 часовых бара для bias EMA50) — больше не нужно
+ENSEMBLE_BUFFER = 14400  # 10 дней 1m-свечей (~240 часовых бара) — warmup RegimeDetector(ema_slow=50)+запас
 DAILY_PNL_TTL = timedelta(seconds=30)
 POS_PCT = 0.40  # доля портфеля на одну позицию (модель portfolio_merge)
 
@@ -122,6 +173,9 @@ class BotConfig:
     # --- Trailing stop ---
     initial_sl_atr: float = 4.0  # стандартный SL = 4.0×ATR (шире, чтобы сигнальные/volume-выходы успевали)
     trail_activation_comm_mult: float | None = None  # None = трейлинг ОТКЛЮЧЁН (только SL/TP+сигналы)
+    # Инфо-трейлинг: если реальный выключен (трейлинг=None) но multi задан (напр. 4.0),
+    # виртуально считаем, где бы сработал трейл, и пишем в карточку сделки (SL/TP не трогаем).
+    trail_info_activation_comm_mult: float | None = None
     trail_distance_atr: float = 2.5  # базовая дистанция трейлинга за ценой = 2.5×ATR
     # --- Динамический трейлинг ---
     trail_compress_r: float = 1.0    # сжатие дистанции по прибыли (в R): чем больше плюс, тем теснее
@@ -145,6 +199,8 @@ class BotConfig:
     max_net_exposure_pct: float = 0.5   # |net notional| <= X equity (0=выкл)
     max_sector_pct: float = 0.35        # notional сектора <= X equity (0=выкл)
     max_sector_positions: int = 0       # макс. позиций в одном секторе-кластере (0=выкл)
+    beta_filter_enabled: bool = False    # лимит позиций по бета-группе (low/mid/high)
+    confirmed_cluster_enabled: bool = False  # лимит позиций в подтверждённых кластерах
     max_margin_use_pct: float = 0.8     # starting_margin <= X equity (0=выкл)
     max_stress_loss_pct: float = 0.10   # убыток при ±5% IMOEX <= X equity (0=выкл)
     queue_enabled: bool = True           # очередь кандидатов: топ-1 по силе входит с бустом
@@ -192,6 +248,9 @@ class BotConfig:
     # --- Overnight ---
     overnight: bool = False  # по умолчанию закрывать на конец торгового дня; True = держать через ночь
     eod_close_min_before: int = 10  # закрывать за N минут до конца последней сессии (overnight=False)
+    # --- Bias-exit: закрывать позицию, если bias_by_state сменил знак против позиции ---
+    # (по умолчанию ВЫКЛ: эталонный бэктест держит до EOD; опция — для экспериментов)
+    bias_exit_enabled: bool = False
     daily_bias: bool = True          # дневной MACD-bias: блокировать входы против дневного направления
     daily_bias_mode: str = "veto"    # veto | info
     mtf_align: bool = False          # H1 MACD должен совпадать с дневным bias (подтверждение)
@@ -209,6 +268,11 @@ class BotConfig:
     entry_h1_align: bool = True         # 7) H1 MACD должен подтверждать сторону входа
     entry_tf_conflict: bool = True      # 6) daily bias и H1 не должны противоречить
     entry_last_hour_block: bool = True  # 16) не входить в последний час сессии
+    # --- Veto по накопленному движению (heatmap-часы из 1м) ---
+    entry_hm_veto: bool = False         # вход против накопленного движения за окно → reject
+    hm_veto_window_h: int = 24          # окно в часах (закрытые часовые бары)
+    hm_veto_thr_pct: float = 3.0        # базовый порог |накопленного %|
+    hm_veto_mode: str = "veto"          # veto | info
     # --- Margin ---
     use_margin: bool = True  # использовать маржинальное кредитование
     margin_sessions: list = field(default_factory=lambda: ["day"])  # сессии с маржой: morning/day/evening
@@ -224,6 +288,7 @@ class BotConfig:
     replay_end: str = ""      # ISO UTC datetime конца окна (пусто = до конца данных)
     replay_pace: str = "fast" # fast (макс. скорость) | wall (в реальном времени по барам)
     test_name: str = ""       # имя теста (режим test): сделки реплея помечаются им
+    replay_log_persist: bool = False  # тест: писать логи в БД bot_logs (без флага — только ring/UI)
     intrabar_check_sec: float = 10.0  # период intrabar-проверки SL/TP по последней цене (0=выкл)
     # --- IMOEX guard: запрет новых входов против всплеска индекса MOEX ---
     imoex_guard: bool = True          # вкл/выкл защиту
@@ -239,12 +304,14 @@ class BotConfig:
     ai_approval: bool = False              # True = новые входы ждут подтверждения ИИ/человека
     ai_approval_timeout_sec: float = 45.0  # сколько ждать решение, сек
     ai_approval_default: str = "approve"   # approve | reject — что делать по таймауту
-    ai_reject_cooldown_min: float = 15.0   # пауза входов по тикеру после отклонения ИИ, мин (0=выкл)
+    ai_reject_cooldown_min: float = 5.0   # пауза входов по тикеру после отклонения ИИ, мин (0=выкл)
     # --- Стакан/ликвидность: гейт для ВСЕХ входов (движок + AI), первый после ансамбля ---
     entry_ob_imbalance_max: float = 0.3  # блок входа против потока стакана сильнее X (0=выкл)
     entry_ob_spread_max: float = 25.0    # блок входа при спреде > X б.п. (0=выкл)
     entry_min_turnover: float = 0.0      # мин. дневной оборот тикера, ₽ (0=выкл)
     entry_volatility_max_mult: float = 3.0  # блок если ATR% > X × медианы (0=выкл)
+    entry_news_blackout: bool = True     # блок входа по свежей негативной новости
+    entry_news_blackout_min: int = 60    # окно новостей для стоп-блока, минут
     # --- AI-ордера (AI-трейдер): чейзинг и потолки SL/TP ---
     ai_chase_pct: float = 3.0         # блок входа после хода >X% за день без отката (0=выкл)
     ai_sl_max_pct: float = 0.03       # потолок SL для AI-ордера, доля (0=без потолка)
@@ -257,17 +324,20 @@ BOT_PERSIST_FIELDS = (
     "margin_sessions", "margin_leverage", "margin_sizing",
     "trade_regimes", "trend_alignment",
     "trail_distance_atr", "trail_compress_r", "trail_min_factor", "trail_min_atr", "trail_vol_boost",
-    "stop_pct", "target_pct", "sl_mode", "atr_period", "atr_multiplier",
+    "trail_activation_comm_mult", "trail_info_activation_comm_mult",
+    "stop_pct", "target_pct", "sl_mode", "initial_sl_atr", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
-    "overnight", "eod_close_min_before", "daily_bias", "daily_bias_mode",
+    "overnight", "eod_close_min_before", "bias_exit_enabled", "daily_bias", "daily_bias_mode",
     "mtf_align", "mtf_trigger", "ensemble_require_member",
     "entry_h1_align", "entry_tf_conflict", "entry_last_hour_block",
+    "entry_hm_veto", "hm_veto_window_h", "hm_veto_thr_pct", "hm_veto_mode",
     "momentum_short", "momentum_n", "momentum_k", "momentum_stop_pct",
     "momentum_entry_time", "momentum_max_lev", "momentum_only", "momentum_side",
     "reentry_cooldown_bars", "confirm_flip", "invert_signals", "ensemble_entry_tf", "ensemble_entry_from_setups", "ensemble_direction_sid",
     "pos_pct", "max_positions", "reconcile_enabled", "max_exposure_pct", "max_short_share", "balance_min_positions",
     "max_net_exposure_pct", "max_sector_pct", "max_margin_use_pct", "max_stress_loss_pct",
     "max_sector_positions",
+    "beta_filter_enabled", "confirmed_cluster_enabled",
     "queue_enabled", "queue_ttl_min", "queue_interval_sec", "top_boost",
     "queue_min_turnover", "queue_adv_multiple", "queue_history_veto",
     "top_sizing", "top_relax_caps",
@@ -281,7 +351,8 @@ BOT_PERSIST_FIELDS = (
     "ai_reject_cooldown_min",
     "ai_chase_pct", "ai_sl_max_pct", "ai_tp_max_pct",
     "entry_ob_imbalance_max", "entry_ob_spread_max", "entry_min_turnover",
-    "entry_volatility_max_mult",
+    "entry_volatility_max_mult", "entry_news_blackout", "entry_news_blackout_min",
+    "daily_loss_limit", "max_margin_pct",
 )
 
 
@@ -362,7 +433,9 @@ def default_ensemble_config() -> dict:
                "tf": "5min", "params": V2P.get(s, {})} for s in _ENSEMBLE_ALL_STRATEGIES]
     return {"quorum": 2, "neutral_mode": "semi_flip", "setups": setups,
             "regime_setups_filter": {}, "bias": {"tf": "hour", "period": 50},
-            "entry_tf": "5min"}
+            "bias_mode": "info",
+            "entry_tf": "5min", "sl_source": "manual", "sl_mult": 2.0, "rr": 4.0,
+            "sl_override": 0.0, "rr_override": 0.0}
 
 
 # Тестовые оверрайды конфига (применяются ТОЛЬКО в mode=test, live не трогают).
@@ -456,8 +529,10 @@ def apply_test_overrides(cfg) -> list[str]:
 async def load_ensemble_config(mode: str = "") -> dict:
     """Состав кворума из data/ensemble_config.json (источник правды), дефолт если нет.
 
-    Для mode="test" приоритет — data/ensemble_config.test.json (тестовые сетапы,
-    чтобы не менять live-конфиг).
+    ПАРИТЕТ-СВИЧ (2026-09-24): для mode="test" грузится ensemble_config.test.json —
+    осознанный тестовый конфиг (10min setups, SL manual 2.0, TREND-only bias).
+    Live/sandbox — ensemble_config.json (5min, optuna SL). Файл остаётся
+    приоритетным поверх дефолтов.
     """
     _files = []
     if str(mode) == "test":
@@ -469,7 +544,11 @@ async def load_ensemble_config(mode: str = "") -> dict:
             if _p.exists():
                 _d = json.loads(_p.read_text(encoding="utf-8"))
                 if isinstance(_d, dict) and _d.get("setups"):
-                    return _d
+                    # Дополняем недостающие ключи дефолтами (напр. bias_mode в старых
+                    # ensemble_config.json) — файл остаётся приоритетным.
+                    _base = default_ensemble_config()
+                    _base.update(_d)
+                    return _base
         except Exception as _sw_e:
             _audit_swallow('load_ensemble_config@L393', _sw_e)  # audit silent-except
             continue
@@ -603,10 +682,18 @@ class PaperBotRuntime:
         # _bot_now() возвращает виртуальное время в реплее и реальное — в live. ---
         self._replay_from: datetime | None = None
         self._replay_cur: datetime | None = None
+        self._replay_to: datetime | None = None
+        self._last_replay_log: float = -1.0
         self._signal_busy: set[str] = set()
         self._skip_logged: dict[str, object] = {}  # figi -> ts последней залогированной причины "нет входа"
         self._held: set[str] = set()
         self._swing: set[str] = set()  # figis AI-сделок "swing" (не закрывать на EOD/ночь)
+        self._peak_pnl: dict[str, dict] = {}  # figi -> {pnl, ts, price, atr_pct} точка макс. прибыли позиции
+        # Виртуальный (info) трейлинг — считаем, где бы сработал трейл, НЕ меняя реальный SL/TP.
+        # figi -> {active: bool, trail_stop: float, trail_dist_atr: float, dist_pct_now: float,
+        #          peak_px: float, peak_pnl: float, peak_atr_pct: float,
+        #          hit_ts: str, hit_price: float, hit_reason: str}
+        self._trail_info: dict[str, dict] = {}
         self._held_since: dict[str, float] = {}  # figi -> время добавления в _held (для grace синка)
         self._log_persist_queue: deque[tuple[str, str, str, str]] = deque(maxlen=2000)  # (level, source, msg, ts_msk)
         self.stream_manager: StreamManager | None = None
@@ -636,6 +723,7 @@ class PaperBotRuntime:
         # --- Opposite-hold tracking ---
         self._opposite_count: dict[str, int] = {}  # figi -> consecutive opposite signals
         self._last_signal_side: dict[str, str] = {}  # figi -> last signal side
+        self._bias_exit_ts: dict[str, float] = {}  # figi -> last bias-exit init (monotonic), anti-spam
         # --- Re-entry cooldown tracking ---
         self._last_exit_bar: dict[str, int] = {}  # figi -> bar number of last exit
         self._bar_counter: int = 0  # global bar counter
@@ -643,6 +731,7 @@ class PaperBotRuntime:
         self._entry_bar_index: dict[str, int] = {}  # figi -> bar_index at entry
         self._no_trade_stats: dict[str, int] = {}  # reason -> count (NO_TRADE diagnostics)
         self._regimes: dict[str, dict] = {}  # figi -> {state, vol} последних 5м баров
+        self._entry_regime: dict[str, str | None] = {}  # figi -> regime, зафиксированный НА ВХОДЕ (сразу и навсегда)
         self._votes: dict[str, dict] = {}  # figi -> {ts, buy, sell, members} голоса на последнем 5m баре
         self._votes_logged: dict[str, str] = {}  # figi -> ts последнего залогированного набора голосов
         self._persist_task: asyncio.Task | None = None
@@ -686,7 +775,9 @@ class PaperBotRuntime:
         self._global_last_loss_ts: datetime | None = None
         # --- AI-гейт: пауза после отклонения (per-ticker) ---
         self._ai_reject_until: dict[str, datetime] = {}
-        self._ai_reject_logged: set[str] = set()  # дедуп логов «на паузе» (без спама)
+        self._ai_reject_reason: dict[str, str] = {}     # последняя причина отклонения по тикеру
+        self._ai_reject_last_log: dict[str, float] = {}  # monotonic-время последнего лога «на паузе»
+        self._ai_reject_cnt: dict[str, int] = {}        # сколько сигналов пропущено в паузе
         # --- Экспозиция: плечо по каждой позиции (для капа «свои ≤ equity») ---
         self._pos_leverage: dict[str, float] = {}
         # --- Портфель: кэш меты (sector/beta) и снапшота ---
@@ -697,10 +788,13 @@ class PaperBotRuntime:
         self._hist_cache: dict[str, dict] = {}
         self._hist_ts: float = 0.0
         self._turnover_cache: dict[str, float] = {}
+        self._turnover_ts: float = 0.0
         self._cand_queue: dict[str, dict] = {}
         self._equity_peak: float = 0.0
         self._mtf_cache: dict[str, dict] = {}
         self._mtf_ts: float = 0.0
+        self._hm_cache: dict[int, dict[str, tuple]] = {}
+        self._hm_ts: float = 0.0
         self._momentum_done: object = None
         self._momentum_cache: dict[str, float] = {}
         self._momentum_ts: float = 0.0
@@ -715,6 +809,7 @@ class PaperBotRuntime:
         self._ai_prompt: dict = {}  # текущий промпт/модель AI-гейта (для UI)
         # Управление AI из UI: переопределения промптов (gate/watch/trader) + срочная заметка.
         self._ai_control: dict = {"prompts": {}, "note": "", "updated_ts": ""}
+        self._ai_save_task = None  # ссылка на фоновое сохранение настроек AI (защита от GC)
         self._ai_defaults: dict = {}  # дефолтные промпты воркеров (gate/watch/trader)
         try:
             _acp = Path(_AI_CONTROL_FILE)
@@ -1045,6 +1140,61 @@ class PaperBotRuntime:
             pass
         return self._mtf_cache
 
+    async def hm_map(self, window_h: int = 24, ttl: float = 180.0) -> dict[str, tuple]:
+        """Накопленное движение за window_h часов по тикерам (heatmap-карта).
+
+        Возвращает {ticker: (pct, dur)}:
+          pct — % изменения цены за окно (часовые бары, закрытия из 1м свечей БД);
+          dur — длительность тренда: сколько последних часов подряд цена шла в ту же
+                сторону, что суммарное смещение за окна (для прогрессивного veto).
+        """
+        import time as _t
+        _replay = str(getattr(self.config, "feed", "")) == "replay"
+        if not _replay and self._hm_cache and (_t.monotonic() - self._hm_ts) < ttl:
+            return self._hm_cache.get(window_h) or {}
+        _cut = self._bot_now()
+        _frm = _cut - timedelta(hours=max(1, int(window_h)))
+        out: dict[str, tuple] = {}
+        try:
+            from sqlalchemy import text as _text
+            _figs = [u.get("figi") for u in (self.universe or []) if u.get("figi")]
+            if _figs:
+                async with SessionLocal() as db:
+                    rows = (await db.execute(_text(
+                        "SELECT figi, date_trunc('hour', ts) AS h, "
+                        "(array_agg(close ORDER BY ts DESC))[1] AS close "
+                        "FROM candles WHERE interval = 1 AND figi = ANY(:fs) "
+                        "AND ts >= :frm AND ts <= :cut "
+                        "GROUP BY figi, h ORDER BY figi, h"
+                    ), {"fs": _figs, "frm": _frm, "cut": _cut})).all()
+                by: dict[str, list[float]] = {}
+                for figi, _h, close in rows:
+                    by.setdefault(str(figi), []).append(float(close or 0.0))
+                for figi, closes in by.items():
+                    tk = str(self.tickers.get(figi, "") or "").upper()
+                    if not tk or len(closes) < 2:
+                        continue
+                    c0, c1 = closes[0], closes[-1]
+                    if c0 <= 0:
+                        continue
+                    pct = round((c1 / c0 - 1.0) * 100.0, 3)
+                    dur = 0
+                    _sign = 1 if pct >= 0 else -1
+                    for i in range(len(closes) - 1, 0, -1):
+                        _ch = closes[i] - closes[i - 1]
+                        if (_ch >= 0 and _sign >= 0) or (_ch < 0 and _sign < 0):
+                            dur += 1
+                        else:
+                            break
+                    out[tk] = (pct, dur)
+                self._hm_cache = {}
+                self._hm_cache[window_h] = out
+                self._hm_ts = _t.monotonic()
+        except Exception as _sw_e:
+            _audit_swallow('hm_map', _sw_e)  # audit silent-except
+            pass
+        return out
+
     async def momentum_map(self, ttl: float = 1800.0) -> dict[str, float]:
         """{ticker: изменение за N дней, %} по дневным барам (кэш 30 мин)."""
         import time as _t
@@ -1315,6 +1465,9 @@ class PaperBotRuntime:
     async def reduce_positions(self, close_pct: float, reason: str, side: str = "",
                                figis: set[str] | None = None) -> dict:
         """Закрыть долю позиций (худшие по P&L) — трейлинг-стоп портфеля/разворот/ночь."""
+        if not self._in_trading_session():
+            self._session_gate_log("закрытие позиций")
+            return {}
         positions = await self.broker.positions()
         items = []
         for p in positions:
@@ -1476,10 +1629,45 @@ class PaperBotRuntime:
     def _log(self, msg: str, level: str = "info", source: str = "bot") -> None:
         from app.services.loghub import hub, msk_now_str
         ts = msk_now_str()
+        # Реплей/тест: время в логе = ВИРТУАЛЬНОЕ время бота (чтобы видеть дату/время свечей).
+        try:
+            if str(getattr(self.config, "feed", "")) == "replay":
+                ts = self._bot_now().astimezone(timezone(timedelta(hours=3))).strftime(
+                    "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
         hub.push(msg, level=level, source=source, ts=ts)
         # Персистентная копия (level/source/msg/ts) — пишется в bot_logs флашером,
         # переживает рестарт и видна в Live через фильтры UI.
-        self._log_persist_queue.append((level, source, msg, ts))
+        # НЕ в реплее (умолчание): тест гонит десятки тысяч баров, запись в БД
+        # стоит ~235мс/бар, история логов прогона не нужна (в памяти кольцо).
+        # replay_log_persist=True — писать логи теста в bot_logs (прогон виден
+        # в истории логов UI, переживает рестарт).
+        if (str(getattr(self.config, "feed", "")) != "replay"
+                or bool(getattr(self.config, "replay_log_persist", False))):
+            self._log_persist_queue.append((level, source, msg, ts))
+
+
+    _last_session_gate_log: float = 0.0
+
+    def _session_gate_log(self, what: str) -> None:
+        """INFO-дедуп для операций, отложенных из-за закрытой торговой сессии.
+
+        Раз/минуту (не на каждый цикл intrabar/reduce), чтобы не спамить лог
+        ошибками, которые предсказуемы: sandbox/биржа не принимает заявки
+        вне сессии (код 30079), и SDK печатает это как ERROR.
+        """
+        now = _time.monotonic()
+        if now - self._last_session_gate_log < 60.0:
+            return
+        self._last_session_gate_log = now
+        self._log(f"ВНЕ ТОРГОВОЙ СЕССИИ: {what} отложен(а) до открытия биржи")
+
+    def _in_trading_session(self) -> bool:
+        """True, если сейчас активна хотя бы одна торговая сессия бота."""
+        if not self.config.sessions:
+            return True
+        return _sessions_allowed(self._bot_now(), self.config.sessions)
 
 
     def _get_5m_bars(self, figi: str, buf_list: list) -> list:
@@ -1503,7 +1691,7 @@ class PaperBotRuntime:
         Незакрытые/текущие обновления текущего бара отбрасываются.
         """
         try:
-            now = datetime.now(timezone.utc)
+            now = self._bot_now()
             return now >= c.ts
         except Exception as _sw_e:
             _audit_swallow('_is_closed@L1389', _sw_e)  # audit silent-except
@@ -1571,12 +1759,16 @@ class PaperBotRuntime:
             for s in ec.get("setups", []) if s.get("enabled")
         ]
         _bias = ec.get("bias") or {}
+        _src = str(ec.get("sl_source", "manual") or "manual")
+        _sl_key = "sl_override" if _src == "optuna" else "sl_mult"
+        _rr_key = "rr_override" if _src == "optuna" else "rr"
         return EnsembleParams(
-            figi=figi, lot=int(lot) if lot else 10, capital=capital,
-            quorum=int(ec.get("quorum", 2)), session="all", sessions=sessions,
-            setups=_setups,
-            sl_mult=(float(getattr(self.config, "ensemble_sl_mult", 0.0) or 0.0) or float(opt.get("sl_mult", 4.0))),
-            rr=(float(getattr(self.config, "ensemble_rr", 0.0) or 0.0) or float(opt.get("rr", 4.0))),
+        figi=figi, lot=int(lot) if lot else 10, capital=capital,
+        quorum=int(ec.get("quorum", 2)), session="all", sessions=sessions,
+        drop_useless=bool(ec.get("drop_useless", False)),
+        setups=_setups,
+        sl_mult=(float(ec.get(_sl_key) or 0.0) or float(getattr(self.config, "ensemble_sl_mult", 0.0) or 0.0) or float(opt.get("sl_mult", 2.0))),
+        rr=(float(ec.get(_rr_key) or 0.0) or float(getattr(self.config, "ensemble_rr", 0.0) or 0.0) or float(opt.get("rr", 4.0))),
             vol_thr=float(ec.get("vol_thr", 0.0) or 0.0),
             neutral_mode=str(ec.get("neutral_mode", "semi_flip")),
             entry_tf=str(getattr(self.config, "ensemble_entry_tf", "5min") or "5min"),
@@ -1584,12 +1776,17 @@ class PaperBotRuntime:
             entry_direction_sid=str(getattr(self.config, "ensemble_direction_sid", "") or ""),
             entry_confirm_closes=int(getattr(self.config, "entry_confirm_closes", 0) or 0),
             entry_confirm_closes_sides=list(getattr(self.config, "entry_confirm_closes_sides", None) or ["BUY"]),
-            entry_macd_1m=True,
+            entry_macd_1m=bool(ec.get("entry_macd_1m", False)),
             bias_tf=str(_bias.get("tf", "hour")),
             bias_period=int(_bias.get("period", 50)),
+            bias_mode=str(ec.get("bias_mode") or "veto"),
+            bias_by_state=dict(ec.get("bias_by_state") or {}),
+            ticker=str(ticker or ""),
             regime_setups_filter=ec.get("regime_setups_filter") or {},
             trade_regimes=list(getattr(self.config, "trade_regimes", []) or []),
             ml_filter=ec.get("ml_filter") or {},
+            rsi_filter=ec.get("rsi_filter") or {},
+            regime_entry_policy=ec.get("regime_entry_policy") or {},
         )
 
     async def reload_ensemble(self) -> int:
@@ -1617,6 +1814,30 @@ class PaperBotRuntime:
             self._log(f"⚙ КОНФИГ КВОРУМА: ошибка применения: {e}")
         return n
 
+    async def _daily_turnover(self, ticker: str) -> float:
+        """Дневной оборот тикера (VALTODAY из TQBR quotes, кэш 5 мин).
+
+        В universe.avg_daily_turnover лежит не дневной оборот (мелкие значения),
+        поэтому ликвидность считаем по живым котировкам биржи.
+        """
+        import time as _t
+        tk = str(ticker or "").upper()
+        now = _t.monotonic()
+        if self._turnover_cache and self._turnover_ts and (now - self._turnover_ts) < 300.0:
+            return float(self._turnover_cache.get(tk) or 0.0)
+        # Кэш пуст/устарел — обновляем дневной оборот с MOEX ISS (VALTODAY).
+        try:
+            from app.api.routes.screener import fetch_tqbr_market
+            q = await asyncio.to_thread(fetch_tqbr_market)
+            for _tk, row in (q or {}).items():
+                val = float((row or {}).get("turnover") or 0.0)
+                if val > 0:
+                    self._turnover_cache[str(_tk).upper()] = val
+            self._turnover_ts = now
+        except Exception:
+            pass
+        return float(self._turnover_cache.get(tk) or 0.0)
+
     def _log_no_trade(self, figi: str, reason: str, detail: str = "") -> None:
         """Log why no trade was made for diagnostics (NO_TRADE analysis)."""
         self._no_trade_stats[reason] = self._no_trade_stats.get(reason, 0) + 1
@@ -1627,9 +1848,64 @@ class PaperBotRuntime:
         """Return aggregated NO_TRADE reasons for diagnostics."""
         return dict(self._no_trade_stats)
 
+    def get_funnel(self, figi: str = "", ticker: str = "", limit: int = 400) -> dict:
+        """Воронка решений по аккумуляторам стратегий (raw→quorum→gate→entry).
+
+        Счётчики собираются в EnsembleV4Strategy.on_bar на каждом 5м-баре:
+          raw_setup_signals  — «сырые» сигналы setup-стратегий (до кворума)
+          quorum_candidates  — принятые merge_quorum (BUY/SELL кворум прошедшие)
+          gate_pass          — входы, прошедшие ensemble-гейты (accepted_decisions)
+          executed_entries   — фактически открытые брокером (заполняется при филах)
+        """
+        import time as _t
+        _out = {
+            "raw_setup_signals": 0, "quorum_candidates": 0,
+            "gate_pass": 0, "executed_entries": 0,
+            "by_reason": {}, "votes": {},
+            "period_start": None, "period_end": None,
+            "per_ticker": {}, "ring": [], "total": 0, "ring_size": 0,
+        }
+        try:
+            _items = []
+            for _f, _st in list((self.strategies or {}).items()):
+                try:
+                    _snap = _st.funnel_snapshot() if hasattr(_st, "funnel_snapshot") else {}
+                except Exception:
+                    _snap = {}
+                if not _snap:
+                    continue
+                _tk = str(getattr(_st, "p", object).ticker if getattr(_st, "p", None) else "") or _f[-6:]
+                if figi and _f != figi:
+                    continue
+                _low = str(ticker or "").upper()
+                if _low and _tk.upper() != _low:
+                    continue
+                _out["raw_setup_signals"] += int(_snap.get("raw_setup_signals", 0) or 0)
+                _out["quorum_candidates"] += int(_snap.get("quorum_candidates", 0) or 0)
+                _out["gate_pass"] += int(_snap.get("gate_pass", 0) or 0)
+                _out["executed_entries"] += int(_snap.get("executed_entries", 0) or 0)
+                for _r, _n in (_snap.get("by_reason") or {}).items():
+                    _out["by_reason"][str(_r)] = _out["by_reason"].get(str(_r), 0) + int(_n)
+                for _v, _n in (_snap.get("votes") or {}).items():
+                    _out["votes"][str(_v)] = _out["votes"].get(str(_v), 0) + int(_n)
+                if not _out["period_start"] or (_snap.get("period_start") and _snap["period_start"] < _out["period_start"]):
+                    _out["period_start"] = _snap.get("period_start")
+                if not _out["period_end"] or (_snap.get("period_end") and _snap["period_end"] > _out["period_end"]):
+                    _out["period_end"] = _snap.get("period_end")
+                _out["per_ticker"][_tk] = {
+                    "raw": int(_snap.get("raw_setup_signals", 0) or 0),
+                    "quorum": int(_snap.get("quorum_candidates", 0) or 0),
+                    "gate_pass": int(_snap.get("gate_pass", 0) or 0),
+                    "executed": int(_snap.get("executed_entries", 0) or 0),
+                }
+        except Exception:
+            pass
+        _out["total"] = _out["raw_setup_signals"]
+        return _out
+
     def _reject_entry(self, stage: str, key: str, detail: str, figi: str, ticker: str) -> None:
-        """Единое логирование отказа гейта: лог + событие + skip_counts (не молча)."""
-        self._log(f"ПРОПУСК ВХОДА {ticker}: [{stage}] {key} — {detail}")
+        """Единое логирование отказа гейта: лог (ГЕЙТ, красный в UI) + событие + skip_counts."""
+        self._log(f"ГЕЙТ {ticker}: [{stage}] {key} — {detail}", level="warn", source="gate")
         self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                         reason=str(key).upper(), detail=str(detail)[:160])
         self._log_no_trade(figi, key)
@@ -1688,6 +1964,12 @@ class PaperBotRuntime:
             _audit_swallow('_st_open@L1554', _sw_e)  # audit silent-except
             pass
         qty_shares = int(qty) * _lot
+        _er = (self._regimes.get(figi) or {}).get("state")
+        # _regimes[figi]["state"] может быть dict (timeline-запись от стратегии):
+        # всегда нормализуем до строки — в _entry_regime и в meta сделки, иначе
+        # в таблицу позиций уходит сырой dict (режим = "{'state': 'TREND_UP', ...}").
+        _er_norm = (_er.get("state") if isinstance(_er, dict) else _er) or "NO_REGIME"
+        self._entry_regime[figi] = _er_norm
         try:
             async with SessionLocal() as db:
                 # Идемпотентность: один открытый ряд на figi. Если уже есть
@@ -1713,12 +1995,21 @@ class PaperBotRuntime:
                     take_profit=float(tp) if tp else None,
                     entry_reason=(meta or {}).get("entry", {}).get("reason") if isinstance(meta, dict) else None,
                     meta=_json.dumps({**(meta or {}), "sl_initial": float(sl) if sl else None,
-                                      "entry_price0": float(price)}, ensure_ascii=False, default=str),
+                                      "entry_price0": float(price),
+                                      "entry_regime": _er_norm,
+                                      "entry_time": _now.isoformat()}, ensure_ascii=False, default=str),
                     leverage=float(leverage),
                     mode=self.broker_mode,
                     test_name=getattr(self.config, "test_name", "") or None,
                 ))
                 await db.commit()
+                # Funnel: фактический вход (executed_entries) — инкремент стратегии figi
+                try:
+                    _st_f = self.strategies.get(figi)
+                    if _st_f is not None and hasattr(_st_f, "_funnel_stats"):
+                        _st_f._funnel_stats["executed_entries"] = int(_st_f._funnel_stats.get("executed_entries", 0) or 0) + 1
+                except Exception:
+                    pass
         except Exception as _sw_e:
             _audit_swallow('_st_open@L1588', _sw_e)  # audit silent-except
             pass
@@ -1747,7 +2038,20 @@ class PaperBotRuntime:
                     meta.setdefault("entry_price", float(row.entry_price))
                     meta.setdefault("sl_db", float(row.stop_loss) if row.stop_loss is not None else None)
                     meta.setdefault("trail_active", bool(self._trail_active.get(figi, False)))
+                    # Инфо-трейлинг: где бы сработал трейл (виртуальный след, SL/TP не трогали).
+                    _ti = self._trail_info.pop(figi, None)
+                    if _ti and _ti.get("hit_ts"):
+                        meta["trail_info"] = {
+                            "activated": bool(_ti.get("active")),
+                            "trail_stop": float(_ti.get("act_track") or 0.0),
+                            "trail_dist_atr": _ti.get("trail_dist_atr"),
+                            "hit_ts": str(_ti.get("hit_ts")),
+                            "hit_price": float(_ti.get("hit_price") or 0.0),
+                            "hit_reason": str(_ti.get("hit_reason")),
+                        }
+                    # Пик PnL позиции (трекается в _step_exit на каждом баре).
                     # Пик P&L сделки: лучший ход (макс. цена лонг / мин. шорт), ATR, MAE.
+                    # .get, НЕ pop: этот же пик читает открытая позиция (_test_position_row).
                     _peak = (meta.pop("peak", None) or self._peak_pnl.get(figi) or {})
                     if _peak:
                         meta["max_pnl"] = float(_peak.get("pnl") or 0.0)
@@ -1952,8 +2256,9 @@ class PaperBotRuntime:
             _atr = self.atr_now(bb)
             _dsa = (abs(last - sl) / _atr) if (last and sl and _atr) else None
             _dta = (abs(tp - last) / _atr) if (last and tp and _atr) else None
-            reg = (self._regimes.get(bb) or {}).get("state")
-            reg_name = reg.get("state") if isinstance(reg, dict) else reg
+            # regime сделки = зафиксированный НА ВХОД (self._entry_regime[bb]),
+            # НЕ текущее состояние детектора (иначе "не сразу и не всегда").
+            reg_name = self._entry_regime.get(bb) or (self._regimes.get(bb) or {}).get("state")
             out["positions"].append({
                 "figi": bb, "ticker": self.tickers.get(bb, getattr(p, "ticker", "") or bb[-6:]),
                 "side": "LONG" if long_ else "SHORT", "qty": qty,
@@ -1961,7 +2266,7 @@ class PaperBotRuntime:
                 "sl": sl, "tp": tp,
                 "dist_sl_pct": d_sl, "dist_tp_pct": d_tp,
                 "atr": _atr, "dist_sl_atr": _dsa, "dist_tp_atr": _dta,
-                "regime": reg_name, "trail_active": bool(self._trail_active.get(bb)),
+                "regime": self._entry_regime.get(bb), "trail_active": bool(self._trail_active.get(bb)),
                 "hold": "swing" if bb in self._swing else "intraday",
                 "notional": (abs(qty) * last) if last else None,
             })
@@ -2013,6 +2318,11 @@ class PaperBotRuntime:
                             continue
                         pos = await self.broker.get_position(figi)
                         if pos is None:
+                            continue
+                        # Вне сессии биржа/sandbox не принимает заявки (30079) —
+                        # не дёргаем брокера, выход дожидается открытия сессии.
+                        if not self._in_trading_session():
+                            self._session_gate_log("intrabar-выход")
                             continue
                         reason = "intrabar_sl" if hit_sl else "intrabar_tp"
                         trade = await self.broker.close_position(figi, float(px), reason)
@@ -2335,6 +2645,8 @@ class PaperBotRuntime:
                 "trail_min_factor": self.config.trail_min_factor,
                 "trail_min_atr": self.config.trail_min_atr,
                 "trail_vol_boost": self.config.trail_vol_boost,
+                "trail_activation_comm_mult": self.config.trail_activation_comm_mult,
+                "trail_info_activation_comm_mult": self.config.trail_info_activation_comm_mult,
                 "commission_rate": self.config.commission_rate,
                 "slippage_bps": self.config.slippage_bps,
                 "confirm_flip": self.config.confirm_flip,
@@ -2344,6 +2656,7 @@ class PaperBotRuntime:
                 "replay_start": self.config.replay_start,
                 "replay_end": self.config.replay_end,
                 "replay_pace": self.config.replay_pace,
+                "replay_log_persist": bool(getattr(self.config, "replay_log_persist", False)),
                 "test_name": self.config.test_name,
             },
             "universe": self.universe,
@@ -2369,6 +2682,20 @@ class PaperBotRuntime:
                 "source": self.data_source,
                 "last_candle_ts": self.last_candle_ts.isoformat() if self.last_candle_ts else None,
             },
+            "replay": ({
+                "active": True,
+                "start": self._replay_from.isoformat(),
+                "end": self._replay_to.isoformat(),
+                "now": self._replay_cur.isoformat(),
+                "now_msk": self._replay_cur.astimezone(timezone(timedelta(hours=3))).isoformat(),
+                "pct": round(self._replay_progress_pct(), 2) if self._replay_progress_pct() is not None else None,
+                "pace": str(getattr(self.config, "replay_pace", "") or ""),
+            } if (self._replay_from is not None and self._replay_cur is not None)
+              else {
+                "active": False,
+                "start": None, "end": None, "now": None, "now_msk": None,
+                "pct": None, "pace": str(getattr(self.config, "replay_pace", "") or ""),
+            }),
             "risk": {
                 "state": risk.state,
                 "daily_pnl": round(risk.daily_pnl, 2),
@@ -2397,6 +2724,16 @@ class PaperBotRuntime:
             entries_paused=self.entries_paused,
         )
 
+    def _replay_progress_pct(self) -> float | None:
+        """Прогресс реплея в % (0-100). None вне реплея или если нет конца окна."""
+        if self._replay_from is None or self._replay_cur is None or self._replay_to is None:
+            return None
+        _span = (self._replay_to - self._replay_from).total_seconds()
+        if _span <= 0:
+            return None
+        _done = (self._replay_cur - self._replay_from).total_seconds()
+        return max(0.0, min(100.0, _done / _span * 100.0))
+
     def _bot_now(self) -> datetime:
         """Виртуализированные часы бота.
 
@@ -2417,6 +2754,8 @@ class PaperBotRuntime:
         if self._daily_pnl_cache and now - self._daily_pnl_cache[0] < DAILY_PNL_TTL:
             return self._daily_pnl_cache[1]
         self._daily_pnl_cache = (now, 0.0)
+        self._turnover_cache: dict[str, float] = {}
+        self._turnover_ts = 0.0
         return self._daily_pnl_cache[1]
 
     async def refresh_daily_pnl(self) -> float:
@@ -2523,7 +2862,16 @@ class PaperBotRuntime:
                 self._replay_from = None
                 self._log(f"⚠ REPLAY: не удалось распарсить replay_start={cfg.replay_start!r}")
             if self._replay_from is not None:
-                self._log(f"REPLAY START: окно с {self._replay_from.isoformat()} pacing={cfg.replay_pace}")
+                try:
+                    self._replay_to = datetime.fromisoformat(
+                        cfg.replay_end.replace("Z", "+00:00")
+                    )
+                except Exception:
+                    self._replay_to = None
+                if self._replay_to is not None and self._replay_to.tzinfo is None:
+                    self._replay_to = self._replay_to.replace(tzinfo=timezone.utc)
+                self._log(f"REPLAY START: окно с {self._replay_from.isoformat()} "
+                          f"до {self._replay_to.isoformat() if self._replay_to else 'нет-конца'} pacing={cfg.replay_pace}")
         self._log(
             f"Параметры бота: сессии: {'/'.join(cfg.sessions) or '—'} · "
             f"маржа: {'/'.join(cfg.margin_sessions) or '—'} "
@@ -2592,7 +2940,10 @@ class PaperBotRuntime:
         self.broker_mode = cfg.mode
         if cfg.feed == "replay" or (cfg.mode != "sandbox" and cfg.mode != "live"):
             self.broker_mode = "paper"
-            self.broker = PaperBroker(SessionLocal)
+            # CostModel из конфига: комиссия/проскальзывание теста = настройки бота
+            from app.engine.costs import CostModel as _CostModel
+            self.broker = PaperBroker(SessionLocal, cost_model=_CostModel(
+                commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps))
         else:
             self.broker = LiveBroker(SessionLocal, config=cfg)
             # --- StreamManager: subscribe to server streams ---
@@ -2635,6 +2986,35 @@ class PaperBotRuntime:
                     await db.commit()
                 self._log(f"REPLAY RESET: чистая бумажная книга ({cfg.initial_cash:.0f} ₽)"
                           + (f" — тест {cfg.test_name!r}" if cfg.test_name else ""))
+                # Окно прогона в bot_test_runs (upsert): /bot/tests видит тест сразу,
+                # даже до первой сделки; replay_start/end — истинные границы окна.
+                if cfg.test_name:
+                    from sqlalchemy import text as _btr_text
+                    _btr_end = None
+                    if cfg.replay_end:
+                        try:
+                            _btr_end = datetime.fromisoformat(cfg.replay_end.replace("Z", "+00:00"))
+                            if _btr_end.tzinfo is None:
+                                _btr_end = _btr_end.replace(tzinfo=timezone.utc)
+                        except Exception as _sw_e:
+                            _audit_swallow('start@test_window', _sw_e)
+                            _btr_end = None
+                    try:
+                        async with SessionLocal() as db:
+                            await db.execute(_btr_text(
+                                "CREATE TABLE IF NOT EXISTS bot_test_runs ("
+                                "name VARCHAR(64) PRIMARY KEY, replay_start TIMESTAMPTZ, "
+                                "replay_end TIMESTAMPTZ, updated_at TIMESTAMPTZ DEFAULT now())"))
+                            await db.execute(_btr_text(
+                                "INSERT INTO bot_test_runs (name, replay_start, replay_end, updated_at) "
+                                "VALUES (:n, :s, :e, now()) "
+                                "ON CONFLICT (name) DO UPDATE SET "
+                                "replay_start = EXCLUDED.replay_start, "
+                                "replay_end = EXCLUDED.replay_end, updated_at = now()"
+                            ), {"n": cfg.test_name, "s": self._replay_from, "e": _btr_end})
+                            await db.commit()
+                    except Exception as _sw_e:
+                        _audit_swallow('start@bot_test_runs', _sw_e)
             except Exception as e:
                 self._log(f"REPLAY RESET FAIL: {type(e).__name__}: {str(e)[:80]}")
         await self.broker.ensure_account(cfg.initial_cash)
@@ -2651,11 +3031,11 @@ class PaperBotRuntime:
                 tick_rows = await db.execute(select(Instrument.figi, Instrument.ticker))
                 self.tickers = dict(tick_rows.all())
 
-            from sqlalchemy import text
-            ii_rows = await db.execute(text(
-                "SELECT figi, ticker FROM instrument_info"))
-            self.bbg_to_tcs = {}
-            self.tcs_to_bbg = {}
+                from sqlalchemy import text
+                ii_rows = await db.execute(text(
+                    "SELECT figi, ticker FROM instrument_info"))
+                self.bbg_to_tcs = {}
+                self.tcs_to_bbg = {}
             for ii_figi, ii_ticker in ii_rows.all():
                 bb = figi_by_ticker.get(ii_ticker)
                 if bb and ii_figi:
@@ -2716,7 +3096,7 @@ class PaperBotRuntime:
                             from app.bot.moex import ensure_moex_candles
                             await ensure_moex_candles(u["figi"], u.get("ticker", ""), days=10)
                             candles = await _lc(db, u["figi"], 1,
-                                                date_from=self._bot_now() - timedelta(days=3),
+                                                date_from=self._bot_now() - timedelta(days=10),
                                                 date_to=self._bot_now())
                             for row in candles:
                                 buf.append(EC(ts=row.ts, open=row.open, high=row.high,
@@ -2909,7 +3289,8 @@ class PaperBotRuntime:
                     pass
         # Хвостовые циклы (persist/imoex/queue/…): если _run уже завершился сам,
         # они остаются висеть и блокируют graceful shutdown uvicorn — гасим явно.
-        for _attr in ('_persist_task', '_held_sync_task', '_hot_add_task', '_reconcile_task',
+        for _attr in ('_persist_task', '_held_sync_task', '_hot_add_task', '_vol_carousel_task',
+                  '_reconcile_task',
                       '_session_task', '_metrics_task', '_intrabar_task', '_imoex_task',
                       '_queue_task', '_momentum_task', '_guard_task'):
             _t = getattr(self, _attr, None)
@@ -3040,6 +3421,7 @@ class PaperBotRuntime:
             "applied": bool(payload.get("applied", False)),
             "latency_ms": payload.get("latency_ms"),
             "shadow": bool(payload.get("shadow", False)),
+            "usage": payload.get("usage") or {},
         }
         self._ai_decisions.append(rec)
         self.events.log("AI_DECISION", figi=payload.get("figi"), ticker=rec["ticker"],
@@ -3184,7 +3566,12 @@ class PaperBotRuntime:
             pass
         try:
             import asyncio as _aio
-            _aio.get_running_loop().create_task(save_bot_settings(self.config))
+            # Ссылку держим в self: «голая» create_task без ссылки может быть
+            # собрана GC до закрытия asyncpg-соединения ->
+            # «non-checked-in connection ... will be terminated» в логах.
+            _t = _aio.get_running_loop().create_task(save_bot_settings(self.config))
+            self._ai_save_task = _t
+            _t.add_done_callback(lambda _ft: setattr(self, "_ai_save_task", None))
         except Exception as _sw_e:
             _audit_swallow('apply_ai_mode@L2951', _sw_e)  # audit silent-except
             pass
@@ -3211,6 +3598,9 @@ class PaperBotRuntime:
         _mode = str(payload.get("mode") or "").lower()
         if _mode in AI_MODES:
             self._ai_control["mode"] = _mode
+        elif "mode" in payload:
+            # Выбор «— не задан —» (пустая строка) — сброс: убираем override, бот работает по конфигу.
+            self._ai_control.pop("mode", None)
         self._ai_control["updated_ts"] = datetime.now(timezone.utc).isoformat()
         try:
             _p = Path(_AI_CONTROL_FILE)
@@ -3238,6 +3628,7 @@ class PaperBotRuntime:
             "suggestions": payload.get("suggestions") or [],
             "actions": payload.get("actions") or [],
             "now_msk": str(payload.get("now_msk") or ""),
+            "usage": payload.get("usage") or {},
         }
         return {"ok": True, "updated_ts": self._ai_report["updated_ts"]}
 
@@ -3264,10 +3655,12 @@ class PaperBotRuntime:
                 o.meta = {**(o.meta or {}), "ai_decision": "reject", "ai_reason": reason}
                 self._approvals_since.pop(o.id, None)
                 del self.pending_orders[figi]
+                self._ai_reject_reason[figi] = reason or "отклонение ИИ"
                 _cd = float(getattr(self.config, "ai_reject_cooldown_min", 15.0) or 0.0)
                 if _cd > 0:
                     self._ai_reject_until[figi] = self._bot_now() + timedelta(minutes=_cd)
-                    self._ai_reject_logged.discard(figi)
+                    self._ai_reject_last_log.pop(figi, None)
+                    self._ai_reject_cnt.pop(figi, None)
                 self._log(f"AI-ГЕЙТ: вход {o.ticker} {o.side} ОТКЛОНЁН — {reason or 'без причины'}"
                           + (f" (пауза входов {_cd:.0f} мин)" if _cd > 0 else ""))
                 self.events.log("AI_APPROVAL_REJECTED", figi=figi, ticker=o.ticker,
@@ -3277,6 +3670,9 @@ class PaperBotRuntime:
         return {"ok": False, "error": "order not found or not pending approval"}
 
     async def close_all(self) -> dict:
+        if not self._in_trading_session():
+            self._session_gate_log("закрытие всех позиций (kill-switch)")
+            return {"closed": 0, "positions": []}
         positions = await self.broker.positions()
         closed = []
         for p in positions:
@@ -3301,6 +3697,77 @@ class PaperBotRuntime:
                             reason="kill_switch_close_all", net_pnl=closed[-1]["net_pnl"])
         self.events.log("CLOSE_ALL", reason=f"closed={len(closed)}")
         return {"closed": len(closed), "positions": closed}
+
+    async def deactivate_figi(self, figi: str) -> dict:
+        """Убрать тикер из работающей карусели без рестарта (метка в БД уже снята).
+
+        Закрывает открытую позицию, отписывает стрим, вычищает стратегию/буфер
+        и все локальные state. Возвращает результат деактивации (для лога UI).
+        """
+        ticker = self.tickers.get(figi, figi[-6:])
+        closed = []
+        # 1) Закрываем открытую позицию (если есть) — как close_all, но для одной figi.
+        if self.broker is not None:
+            try:
+                pos = await self.broker.get_position(figi)
+                if pos is not None:
+                    buf = self.buffers.get(figi)
+                    price = float(buf[-1].close) if buf else float(pos.entry_price)
+                    try:
+                        trade = await self.broker.close_position(figi, price, "carousel_remove")
+                    except Exception as _cl_e:
+                        # Вне торговой сессии sandbox не принимает заявки (30079) — тикер
+                        # со снятой меткой останется в карусели до закрытия позиции, каждый
+                        # следующий цикл hot-add повторит попытку.
+                        self._log(f"⚠ deactivate {ticker}: позиция не закрылась — "
+                                  f"{type(_cl_e).__name__}: {str(_cl_e)[:120]}. Тикер остаётся до закрытия.")
+                        return {"ok": False, "ticker": ticker, "figi": figi,
+                                "closed": 0, "pending_position": True}
+                    self._held.discard(figi)
+                    self._clear_exit_state(figi)
+                    self._entry_bar_index.pop(figi, None)
+                    try:
+                        await self._st_close(figi,
+                                             float(trade.price) if (trade and getattr(trade, "price", None)) else price,
+                                             reason="carousel_remove",
+                                             net=float(trade.net_pnl) if trade else None)
+                    except Exception as _sw_e:
+                        _audit_swallow('deactivate_figi@st_close', _sw_e)
+                    closed.append({"figi": figi, "ticker": ticker, "price": round(price, 6),
+                                   "net_pnl": float(trade.net_pnl) if trade else None})
+                    self.events.log("POSITION_CLOSED", figi=figi, ticker=ticker,
+                                    reason="carousel_remove", net_pnl=closed[-1]["net_pnl"])
+            except Exception as _pos_e:
+                self._log(f"⚠ deactivate {ticker}: позиция — {type(_pos_e).__name__}: {str(_pos_e)[:120]}")
+
+        # 2) Отписываем стрим данных (stream-unsubscribe / polling берёт из self.figis).
+        try:
+            if self.feed is not None and figi in self.feed.figis:
+                self.feed.remove_figis([figi])
+                self._log(f"➖ FEED отписка {ticker} ({figi[-6:]})")
+        except Exception as _fb_e:
+            self._log(f"⚠ deactivate {ticker}: feed — {type(_fb_e).__name__}: {str(_fb_e)[:120]}")
+        try:
+            if figi in self.stream_universe:
+                self.stream_universe.remove(figi)
+        except Exception:
+            pass
+
+        # 3) Вычищаем все локальные state тикера.
+        self.strategies.pop(figi, None)
+        self.buffers.pop(figi, None)
+        self.tickers.pop(figi, None)
+        self.universe = [u for u in self.universe if u.get("figi") != figi]
+        self._clear_exit_state(figi)
+        self._entry_bar_index.pop(figi, None)
+        self._opposite_count.pop(figi, None)
+        self.pending_orders.pop(figi, None)
+        self._cand_queue.pop(figi, None)
+        self.events.log("CAROUSEL_REMOVE", figi=figi, ticker=ticker,
+                        reason=f"closed={len(closed)}", universe_now=len(self.universe))
+        self._log(f"➖ КАРУСЕЛЬ: {ticker} убран (позиций закрыто: {len(closed)}), "
+                  f"universe={len(self.universe)}")
+        return {"ok": True, "ticker": ticker, "figi": figi, "closed": len(closed)}
 
     async def _sync_held(self) -> None:
         while self.running:
@@ -3337,11 +3804,9 @@ class PaperBotRuntime:
 
         while self.running:
             try:
-                # Вне торговых сессий (ночь/выходной) хоровод универса не крутим:
-                # свечи стрима пишутся, а hot-add/стратегии подождём до сессии.
-                if not _sessions_allowed(self._bot_now(), self.config.sessions):
-                    await asyncio.sleep(60.0)
-                    continue
+                # Хоровод универса крутим независимо от торговых сессий:
+                # добавление/удаление тикеров должно работать как часы (ночью/в выходные
+                # свечи всё равно пишутся в БД потоком, а подписку подтянем к сессии).
                 async with SessionLocal() as db:
                     # Ищем eligible тикеры которые ещё НЕ в universe
                     current_figi = {u["figi"] for u in self.universe}
@@ -3392,7 +3857,7 @@ class PaperBotRuntime:
 
                         buf = deque(maxlen=ENSEMBLE_BUFFER if cfg.use_ensemble else MAX_BUFFER)
                         candles = await _lc(db, figi, 1,
-                                            date_from=datetime.now(timezone.utc) - timedelta(days=3))
+                                            date_from=datetime.now(timezone.utc) - timedelta(days=10))
                         for row in candles:
                             buf.append(EC(ts=row.ts, open=row.open, high=row.high,
                                           low=row.low, close=row.close, volume=row.volume))
@@ -3430,8 +3895,29 @@ class PaperBotRuntime:
                             "atr_pct": _atr_pct, "avg_price": 0, "avg_turnover": 0, "sector": "",
                         })
                         self.tickers[figi] = ticker
+                        # Подписываем feed (stream-unsubscribe карусельный): новый тикер
+                        # получает живые свечи теми же батовыми механизмами, что и остальные.
+                        try:
+                            if self.feed is not None and figi not in self.feed.figis:
+                                self.feed.add_figis([figi])
+                        except Exception as _fa_e:
+                            self._log(f"⚠ HOT-ADD feed.subscribe {ticker}: {type(_fa_e).__name__}: {str(_fa_e)[:100]}")
+                        if figi not in self.stream_universe:
+                            self.stream_universe.append(figi)
                         hot_adds_this_cycle += 1
                         self._log(f"➕ HOT-ADD: {ticker} ({figi[-6:]}) {cnt} bars")
+
+                    # --- Удаление: тикеры в universe, которых больше нет в eligible (метка снята) ---
+                    eligible_set = {r[0] for r in all_eligible}
+                    for _cur in list(self.universe):
+                        _f = _cur.get("figi")
+                        if _f in eligible_set:
+                            continue
+                        try:
+                            self._log(f"➖ КАРУСЕЛЬ (цикл): {_cur.get('ticker', _f[-6:])} — метка снята, убираю")
+                            await self.deactivate_figi(_f)
+                        except Exception as _de_e:
+                            self._log(f"⚠ карусель-remove {_f[-6:]}: {type(_de_e).__name__}: {str(_de_e)[:120]}")
 
                     # Обновляем диагностику
                     self.carousel_diag = {
@@ -3450,6 +3936,48 @@ class PaperBotRuntime:
                 self._log(f"⚠ HOT-ADD: ошибка — {type(_e).__name__}: {_e}")
                 self.carousel_diag["last_error"] = str(_e)
             await asyncio.sleep(60.0)
+
+    async def _vol_carousel_loop(self) -> None:
+        """Волатильная карусель: периодически ранжирует TQBR по RNG% и обновляет
+        eligible-метки (реализация — app/services/vol_carousel.py).
+
+        Чтобы ничего не сломать «втемную», работает всегда, но:
+          - enabled=False (по умолчанию) → DRY-RUN: только диагностика/лог,
+            БД не трогает;
+          - enabled=True → реально меняет eligible_tier, а дальше обычный
+            hot-add/remove цикл подхватывает без рестарта.
+        Управление только через settings (VOL_CAROUSEL_ENABLED и т.д.).
+        """
+        from app.config import get_settings
+        from app.services.vol_carousel import run_vol_carousel_once
+        from app.database import SessionLocal as _SL
+
+        _cycle = get_settings().vol_carousel_cycle_sec
+        while self.running:
+            try:
+                _settings = get_settings()
+                async with _SL() as db:
+                    _report = await run_vol_carousel_once(db, _settings, self,
+                                                          emit=self._log)
+                # Кладём свежий отчёт в carousel_diag для UI/лог-диагностики.
+                self.carousel_diag["vol_carousel"] = {
+                    "mode": _report.get("mode", "dry-run"),
+                    "ts": _report.get("ts"),
+                    "universe_now": _report.get("universe_now"),
+                    "target": _report.get("target_count"),
+                    "would_add": len(_report.get("would_add", [])),
+                    "would_drop": len(_report.get("would_drop", [])),
+                    "top": [e["ticker"] for e in _report.get("now", [])],
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as _e:
+                self._log(f"⚠ VOL-CAROUSEL: ошибка — {type(_e).__name__}: {_e}")
+                try:
+                    self.carousel_diag["vol_carousel"] = {"error": str(_e)}
+                except Exception:
+                    pass
+            await asyncio.sleep(_cycle)
 
     async def _session_monitor(self) -> None:
         """Фоновая задача: логирует состояние при смене торговой сессии.
@@ -3770,6 +4298,8 @@ class PaperBotRuntime:
                     r.exit_price = float(_exit_px or r.entry_price or 0.0)
                     r.exit_reason = "closed_at_broker"
                     r.net_pnl = _net
+                    if _px_out > 0:
+                        r.commission = round(_cr * (_epx + _px_out) * _q, 4)
                     closed_here += 1
                 closed += closed_here
                 if closed_here:
@@ -3887,6 +4417,50 @@ class PaperBotRuntime:
                 except Exception as e:
                     self._log(f"PERSIST_LOG_ERR {type(e).__name__}: {str(e)[:80]}")
 
+    async def _finalize_replay(self) -> None:
+        """Финал реплея: открытые позиции закрываются по последним ценам свечей
+        (replay_end_close), прогон фиксируется в bot_test_runs. Раньше тест
+        «зависал» с открытыми сделками и без итогов в /bot/tests."""
+        try:
+            _pos_list = list(await self.broker.positions())
+        except Exception as _sw_e:
+            _audit_swallow('_finalize_replay@positions', _sw_e)
+            _pos_list = []
+        _prices: dict = {}
+        try:
+            _lp = getattr(self.broker, "last_prices", None)
+            if _lp is not None and _pos_list:
+                _prices = await _lp([p.figi for p in _pos_list]) or {}
+        except Exception as _sw_e:
+            _audit_swallow('_finalize_replay@prices', _sw_e)
+            _prices = {}
+        _closed = 0
+        for _p in _pos_list:
+            try:
+                _px = float(_prices.get(_p.figi) or float(_p.entry_price or 0.0))
+                _trade = await self.broker.close_position(_p.figi, _px, "replay_end_close")
+                if _trade is None:
+                    continue
+                _closed += 1
+                await self._st_close(_p.figi, float(_trade.exit_price), reason="replay_end_close",
+                                     net=float(_trade.net_pnl))
+                self._log(f"ВЫХОД {_p.figi[-6:]} (replay_end) pnl={float(_trade.net_pnl):+.2f}")
+            except Exception as _sw_e:
+                _audit_swallow('_finalize_replay@close', _sw_e)
+        self._held.clear()
+        self._exit_plans.clear()
+        if getattr(self.config, "test_name", ""):
+            try:
+                from sqlalchemy import text as _btr_text2
+                async with SessionLocal() as db:
+                    await db.execute(_btr_text2(
+                        "UPDATE bot_test_runs SET updated_at = now() WHERE name = :n"
+                    ), {"n": self.config.test_name})
+                    await db.commit()
+            except Exception as _sw_e:
+                _audit_swallow('_finalize_replay@test_run', _sw_e)
+        self._log(f"REPLAY ЗАВЕРШЁН: закрыто {_closed} поз. по последним ценам (итоги в /bot/tests)")
+
     async def _run(self) -> None:
         # Feed = источник СВЕЧЕЙ: всегда боевой токен + основной API, потому что
         # sandbox НЕ отдаёт market-data стрим (CancelledError на подписке) и свежие
@@ -3933,6 +4507,7 @@ class PaperBotRuntime:
         self._persist_task = asyncio.create_task(self._flush_persist())
         self._held_sync_task = asyncio.create_task(self._sync_held())
         self._hot_add_task = asyncio.create_task(self._hot_add_universe())
+        self._vol_carousel_task = asyncio.create_task(self._vol_carousel_loop())
         self._reconcile_task = asyncio.create_task(self._reconcile_loop())
         self._session_task = asyncio.create_task(self._session_monitor())
         self._metrics_task = asyncio.create_task(self._metrics_loop())
@@ -3953,6 +4528,13 @@ class PaperBotRuntime:
                     self._replay_cur = candle.ts
                     if self.config.test_name:
                         self.mode = f"test:{self.config.test_name}"
+                    _pct = self._replay_progress_pct()
+                    if _pct is not None and (_pct - self._last_replay_log) >= 5.0:
+                        self._last_replay_log = (_pct // 5.0) * 5.0
+                        self._log(
+                            f"REPLAY PROGRESS: {self._replay_cur.astimezone(timezone(timedelta(hours=3))).strftime('%d.%m %H:%M')} МСК · "
+                            f"{_pct:.0f}% ({self._replay_from.strftime('%d.%m %H:%M')} → {self._replay_to.strftime('%d.%m %H:%M')})"
+                        )
                 _t1 = _time.perf_counter()
                 await self._process_candle(candle)
                 _dt = (_time.perf_counter() - _t1) * 1000
@@ -3971,13 +4553,20 @@ class PaperBotRuntime:
         else:
             self.mode = feed.mode
         finally:
+            # Реплей: финализация — закрыть открытые поз., зафиксировать прогон.
+            if getattr(self.config, "feed", "") == "replay":
+                try:
+                    await self._finalize_replay()
+                except Exception as _sw_e:
+                    _audit_swallow('_run@finalize_replay', _sw_e)
             if self._persist_task:
                 self._persist_task.cancel()
                 try:
                     await self._persist_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            for t in ('_held_sync_task', '_hot_add_task', '_reconcile_task', '_metrics_task',
+            for t in ('_held_sync_task', '_hot_add_task', '_vol_carousel_task', '_reconcile_task',
+                      '_metrics_task',
                       '_intrabar_task', '_imoex_task', '_session_task', '_queue_task',
                       '_momentum_task', '_guard_task'):
                 task = getattr(self, t, None)
@@ -4033,6 +4622,10 @@ class PaperBotRuntime:
         # Всегда сохраняем свечу в БД (для всех 20 eligible тикеров)
         self.candles_seen += 1
         self._bar_counter += 1
+        # PaperBroker: последняя цена = close валидной свечи (equity/маржа/intrabar)
+        _upd_px = getattr(self.broker, "update_price", None)
+        if _upd_px is not None:
+            _upd_px(figi, float(c.close))
         try:
             # В replay свечи УЖЕ в БД (оттуда и читаем) — обратная запись избыточна
             # и тормозит тест (persist ~540ms/флаш через сеть). Пишем только в live/sandbox.
@@ -4109,9 +4702,13 @@ class PaperBotRuntime:
             _tk = self.tickers.get(figi, figi[-6:])
             _ch = ((c.close - c.open) / c.open * 100) if c.open else 0.0
             _dir = "▲" if _ch > 0 else ("▼" if _ch < 0 else "·")
+            # Свечи — debug: в UI (info) не спамим; в консоль/БД пишутся для разбора.
+            # В реплее/тесте показываем и дату свечи (видно, где идёт прогон).
+            _cfmt = "%d.%m %H:%M" if str(getattr(self.config, "feed", "")) == "replay" else "%H:%M"
             self._log(
-                f"Свеча {_tk} {_msk_fmt(c.ts, '%H:%M')} МСК: {c.open:.2f} → {c.close:.2f} "
-                f"({_dir} {_ch:+.2f}%), объём {c.volume:g}"
+                f"Свеча {_tk} {_msk_fmt(c.ts, _cfmt)} МСК: {c.open:.2f} → {c.close:.2f} "
+                f"({_dir} {_ch:+.2f}%), объём {c.volume:g}",
+                level="debug",
             )
 
         _lookup = self.tcs_to_bbg.get(figi, figi)
@@ -4153,16 +4750,19 @@ class PaperBotRuntime:
         # стрим отдаёт бэклог (ночные свечи) и позиции ложно закрывались как overnight.
         if (not _closed and figi not in self._swing
                 and _should_force_close(self._bot_now(), self.config.sessions, self.config.overnight)):
-            trade = await self.broker.close_position(figi, float(c.open), "overnight_force_close")
-            self._held.discard(figi)
-            self._opposite_count.pop(figi, None)
-            self._last_exit_bar[figi] = self._bar_counter
-            self._clear_exit_state(figi)
-            _bh_overnight = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
-            if trade:
-                await self._st_close(figi, float(c.open), reason="overnight_force_close",
-                                      net=float(trade.net_pnl), meta={"bars_held": _bh_overnight})
-                self._log(f"ВЫХОД {figi[-6:]} (overnight) pnl={float(trade.net_pnl):+.2f}")
+            if self._in_trading_session():
+                trade = await self.broker.close_position(figi, float(c.open), "overnight_force_close")
+                self._held.discard(figi)
+                self._opposite_count.pop(figi, None)
+                self._last_exit_bar[figi] = self._bar_counter
+                self._clear_exit_state(figi)
+                _bh_overnight = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
+                if trade:
+                    await self._st_close(figi, float(c.open), reason="overnight_force_close",
+                                          net=float(trade.net_pnl), meta={"bars_held": _bh_overnight})
+                    self._log(f"ВЫХОД {figi[-6:]} (overnight) pnl={float(trade.net_pnl):+.2f}")
+            else:
+                self._session_gate_log("overnight закрытие")
 
         # --- Re-entry cooldown check ---
         cooldown = self.config.reentry_cooldown_bars
@@ -4221,7 +4821,8 @@ class PaperBotRuntime:
             _skip = getattr(strategy, "_last_skip", None)
             if _skip and self._skip_logged.get(figi) != c.ts:
                 self._skip_logged[figi] = c.ts
-                self._log(f"Пропуск входа {self.tickers.get(figi, figi[-6:])} ({_msk_fmt(c.ts, '%d.%m %H:%M')} МСК): {_skip_human(_skip)}")
+                self._log(f"ГЕЙТ {self.tickers.get(figi, figi[-6:])}: [ensemble] кандидаты отклонены — {_skip_human(_skip)}",
+                    level="warn", source="gate")
         _reg_state = getattr(strategy, "_last_regime", None)
         _reg_vol = getattr(strategy, "_last_vol", None)
         # Fallback: если стратегия не вернула regime timeline (новые/hot-add тикеры),
@@ -4229,10 +4830,8 @@ class PaperBotRuntime:
         # Дорого, поэтому только на 5m-границе и пока нет данных.
         if _reg_state is None and c.ts.minute % 5 == 0:
             try:
-                from app.services.regime import RegimeDetector
-                from app.services.ensemble import resample as _resample5
-                _c5 = _resample5(list(buffer), 3600)  # режим строго на H1
-                _tl = RegimeDetector().compute(_c5)
+                from app.services.regime import compute_regime as _CR5
+                _tl, _, _ = _CR5(list(buffer), 3600)  # режим строго на H1
                 if _tl:
                     _r = _tl[-1]
                     _reg_state = {"state": _r.get("state"), "reason": _r.get("reason"),
@@ -4243,11 +4842,19 @@ class PaperBotRuntime:
                 _audit_swallow('_process_candle@L3959', _sw_e)  # audit silent-except
                 pass
         if _reg_state is not None:
+            # state мог прийти dict-ом (timeline от стратегии): храним только имя.
+            _reg_state_name = (_reg_state.get("state") if isinstance(_reg_state, dict) else _reg_state) or "NO_REGIME"
             self._regimes[figi] = {
-                "state": _reg_state,
+                "state": _reg_state_name,
                 "vol": _reg_vol,
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
+        # Bias-exit (опция): закрыть позицию, если входной bias сменил знак против неё.
+        try:
+            await self._bias_exit_check(figi, self.tickers.get(figi, ""), c)
+        except Exception as _sw_e:
+            _audit_swallow('_process_candle@bias_exit', _sw_e)  # audit silent-except
+            pass
         # Голоса на последнем 5m баре (для вкладки «Голоса» и лога недобора кворума).
         _v = getattr(strategy, "_last_votes", None)
         if _v and _v.get("ts"):
@@ -4304,76 +4911,59 @@ class PaperBotRuntime:
         from app.engine.models import DecisionAction
         if action is DecisionAction.ACCEPT_ENTRY:
             if figi in self._held:
-                self._log(f"ПРОПУСК ВХОДА {ticker}: поз. уже открыта")
-                self._log_no_trade(figi, "already_held")
+                self._reject_entry("state", "already_held", "позиция уже открыта", figi, ticker)
                 return
             if not _sessions_allowed(self._bot_now(), self.config.sessions):
                 from app.bot.session import trading_session as _ts
-                self._log(f"ПРОПУСК ВХОДА {ticker}: вне торговых сессий "
-                          f"(сейчас {_ts() or '—'}, разрешены {'/'.join(self.config.sessions) or '—'})")
-                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="SESSION")
-                self._log_no_trade(figi, "session_filter")
+                self._reject_entry("time", "session_blocked",
+                                   f"вне торговых сессий (сейчас {_ts() or '—'}, "
+                                   f"разрешены {'/'.join(self.config.sessions) or '—'})",
+                                   figi, ticker)
                 return
             if self.entries_paused:
-                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                reason="ENTRIES_PAUSED")
-                self._log_no_trade(figi, "entries_paused")
+                self._reject_entry("pause", "entries_paused", "новые входы на паузе", figi, ticker)
                 return
             if sig.side.value == "BUY" and not self.config.long_allowed:
-                self._log(f"ПРОПУСК ВХОДА {ticker}: [time] direction_disabled — Long запрещён (Направление)")
-                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                reason="LONG_DISABLED")
-                self._log_no_trade(figi, "long_disabled")
+                self._reject_entry("time", "long_disabled", "Long запрещён (Направление)", figi, ticker)
                 return
             if sig.side.value == "SELL" and not self.config.short_allowed:
-                self._log(f"ПРОПУСК ВХОДА {ticker}: [time] direction_disabled — Short запрещён (Направление)")
-                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                reason="SHORT_DISABLED")
-                self._log_no_trade(figi, "short_disabled")
+                self._reject_entry("time", "short_disabled", "Short запрещён (Направление)", figi, ticker)
                 return
             # Regime gate: режим рынка должен быть в разрешённых trade_regimes.
             _allowed_reg = self.config.trade_regimes or []
             _reg = (self._regimes.get(figi) or {}).get("state")
-            _reg_name = _reg.get("state") if isinstance(_reg, dict) else None
+            _reg_name = _reg.get("state") if isinstance(_reg, dict) else _reg
             if _reg_name and _allowed_reg and _reg_name not in _allowed_reg:
-                self._log(f"ПРОПУСК ВХОДА {ticker}: режим {_reg_name} отключён "
-                          f"(разрешены {'/'.join(_allowed_reg) or '—'})")
-                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                reason=f"REGIME_{_reg_name}")
-                self._log_no_trade(figi, f"regime_{_reg_name.lower()}")
+                self._reject_entry("regime", f"regime_{_reg_name.lower()}",
+                                   f"режим {_reg_name} отключён "
+                                   f"(разрешены {'/'.join(_allowed_reg) or '—'})",
+                                   figi, ticker)
                 return
             # Trend-alignment: не входим против тренда (TREND_UP → только BUY, TREND_DOWN → только SELL).
             if getattr(self.config, "trend_alignment", True) and _reg_name in ("TREND_UP", "TREND_DOWN"):
                 _against = (_reg_name == "TREND_UP" and sig.side.value == "SELL") or \
                            (_reg_name == "TREND_DOWN" and sig.side.value == "BUY")
                 if _against:
-                    self._log(f"ПРОПУСК ВХОДА {ticker}: {sig.side.value} против тренда {_reg_name}")
-                    self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                    reason=f"TREND_ALIGN_{_reg_name}")
-                    self._log_no_trade(figi, "trend_alignment")
+                    self._reject_entry("trend", "trend_alignment",
+                                       f"{sig.side.value} против тренда {_reg_name}", figi, ticker)
                     return
             # HOLD после серии убытков: пауза входов (per-ticker или global).
             _hold, _hold_why = self._loss_streak_block(figi)
             if _hold:
-                self._log(f"ПРОПУСК ВХОДА {ticker}: [time] loss_streak_hold — HOLD после убытков — {_hold_why}")
-                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="LOSS_STREAK_HOLD")
-                self._log_no_trade(figi, "loss_streak_hold")
+                self._reject_entry("time", "loss_streak_hold", f"HOLD после убытков — {_hold_why}", figi, ticker)
                 return
             # IMOEX guard: не входить против всплеска индекса, пока он не стабилизируется.
             _imoex_why = self._imoex_block_reason(sig.side.value, figi)
             if _imoex_why:
                 if self._imoex_state is not None:
                     self._imoex_state.blocks += 1
-                self._log(f"ПРОПУСК ВХОДА {ticker}: [time] imoex_guard — против IMOEX — {_imoex_why}")
-                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="IMOEX_GUARD")
-                self._log_no_trade(figi, "imoex_guard")
+                self._reject_entry("time", "imoex_guard", f"против IMOEX — {_imoex_why}", figi, ticker)
                 return
             risk = self.risk_snapshot()
             if not risk.entries_allowed():
-                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
-                                reason=f"RISK_{risk.state}",
-                                daily_pnl=risk.daily_pnl)
-                self._log_no_trade(figi, f"risk_{risk.state.lower()}")
+                self._reject_entry("risk", f"risk_{risk.state.lower()}",
+                                   f"стоп-лимит {risk.state} (daily_pnl={risk.daily_pnl:+.2f})",
+                                   figi, ticker)
                 return
             if bool(getattr(self.config, "momentum_only", False)):
                 self._log(f"МОМЕНТУМ-ONLY: сигнал ансамбля {ticker} {sig.side.value} игнорируется")
@@ -4418,6 +5008,67 @@ class PaperBotRuntime:
                             reason=str(note))
             self._log_no_trade(figi, f"policy_reject:{note}")
 
+    async def _bias_exit_check(self, figi: str, ticker: str, c) -> bool:
+        """EIOT по смене bias_eff против позиции (bias_by_state, как в bt_flip2).
+
+        Проверяет направления входного bias (TREND→30m, HV→10m) на текущем баре;
+        если знак сменился против позиции — закрывает (reduce_positions).
+        Возвращает True, если инициировано закрытие.
+        """
+        try:
+            if not bool(getattr(self.config, "bias_exit_enabled", False)):
+                return False
+            if figi not in self._held:
+                return False
+            if figi in self._swing:
+                return False
+            # Быстрый гейт: не дублировать в течение 2 минут после инициации закрытия.
+            _last = self._bias_exit_ts.get(figi, 0.0)
+            from time import monotonic as _mono
+            if _mono() - _last < 120.0:
+                return False
+            strat = self.strategies.get(figi)
+            bbs = dict(getattr(getattr(strat, "p", None), "bias_by_state", {}) or {})
+            if not bbs:
+                return False
+            # Текущий режим фиги (H1) + его bias-конфиг (tf/period).
+            _reg = (self._regimes.get(figi) or {}).get("state")
+            _s = _reg.get("state") if isinstance(_reg, dict) else None
+            _bcfg = bbs.get(_s) if _s else None
+            if not _bcfg or not isinstance(_bcfg, dict):
+                return False  # NEUTRAL/RANGE и режимы без bias_by_state — выхода нет
+            _tf_name = str(_bcfg.get("tf") or "30min")
+            from app.services.ensemble import TF_SECONDS as _TF
+            _tf_sec = _TF.get(_tf_name)
+            if not _tf_sec:
+                return False
+            from app.services.ensemble import resample as _rs, compute_bias as _cb
+            buf = self.buffers.get(figi)
+            if not buf or len(buf) < 20:
+                return False
+            _tf_bars = _rs(list(buf), _tf_sec)
+            if not _tf_bars:
+                return False
+            _bias_map = _cb(_tf_bars, int(_bcfg.get("period") or 50), tf_seconds=_tf_sec)
+            _bucket = int(c.ts.timestamp()) // _tf_sec
+            _bv = _bias_map.get(_bucket, 0)
+            # Сторона позиции: BUY требует +1, SELL требует -1.
+            _pos_side = str(self._exit_side.get(figi) or "").upper()
+            _pos_buy = _pos_side in ("LONG", "BUY")
+            _desired = 1 if _pos_buy else -1
+            if _bv == 0 or _bv == _desired:
+                return False
+            self._bias_exit_ts[figi] = _mono()
+            self._log(f"🟣 BIAS-ВЫХОД {ticker}: позиция {'BUY' if _pos_buy else 'SELL'} против bias "
+                      f"{_bv:+d} ({_tf_name}) в режиме {_s or '?'} @ {_msk_fmt(c.ts, '%H:%M')} МСК — закрываю")
+            self.events.log("BIAS_EXIT", figi=figi, ticker=ticker, side="BUY" if _pos_buy else "SELL",
+                            bias=_bv, tf=_tf_name, regime=_s or "")
+            await self.reduce_positions(1.0, "bias_exit", figis={figi})
+            return True
+        except Exception as _e:
+            _audit_swallow('_bias_exit_check', _e)  # audit silent-except
+            return False
+
     async def _submit_order(self, figi: str, ticker: str, action: str, side: str, meta: dict | None = None) -> None:
         cfg = self.config
         # Инверсия уже применена на уровне сигнала (см. _process_candle) — здесь НЕ дублируем.
@@ -4426,6 +5077,12 @@ class PaperBotRuntime:
         _is_momentum = bool((meta or {}).get("momentum"))
         _is_ai = bool((meta or {}).get("ai_trader"))
         _is_priority = bool((meta or {}).get("priority"))
+        # Путь пройденных гейтов (time/market/trend/portfolio) — локал ЭТОЙ функции.
+        # Кладём в order.meta при создании ордера: _execute_pending — другая функция,
+        # её локалы здесь недоступны. ФИКС 2026-09-24: раньше _gate_path нигде не
+        # определялся → NameError на первом входе, прошедшем time-гейт (SILENT-EXCEPT
+        # _run, сигнал гиб ещё до создания ордера).
+        _gate_path: list[str] = []
         _boost = (float(getattr(cfg, "top_boost", 2.0) or 2.0) if _is_priority else 1.0)
         if _is_ai:
             _boost = float((meta or {}).get("notional_pct") or 1.0)
@@ -4458,6 +5115,8 @@ class PaperBotRuntime:
             if not _res_a.passed:
                 self._reject_entry("time", _res_a.key, _res_a.detail, figi, ticker)
                 return
+        if action == "open":
+            _gate_path.append("time")
         # ================= STAGE S: стакан/ликвидность (первый после ансамбля) ==========
         # MARKET_GATES из app/bot/gates.py: ликвидность → волатильность → стакан.
         # Ансамбль может кричать SHORT, но если стакан против (перевес бидов) или спред
@@ -4465,11 +5124,13 @@ class PaperBotRuntime:
         # до тренда/портфеля/маржи. Данные — app/services/orderbook.py (кэш 5с).
         if action == "open":
             from app.bot.gates import MarketContext, MARKET_GATES, run_gate_chain
-            _to_s = 0.0
+            # В реплее живые котировки не относятся к датам прогона — гейт ликвидности
+            # пропускаем (иначе ложные блоки на устаревшем/нулевом обороте).
+            _to_s = (0.0 if str(getattr(cfg, "feed", "")) == "replay"
+                     else await self._daily_turnover(ticker))
             _atr_s = None
             for _u in self.universe:
                 if _u.get("figi") == figi:
-                    _to_s = float(_u.get("avg_turnover") or 0.0)
                     _ap = _u.get("atr_pct")
                     _atr_s = float(_ap) if _ap else None
                     break
@@ -4488,12 +5149,25 @@ class PaperBotRuntime:
                     _ob_s = await fetch_orderbook(figi, 10)
                 except Exception:
                     _ob_s = None  # gate_orderbook вернёт orderbook_error
+            _nb_reason = ""
+            if bool(getattr(cfg, "entry_news_blackout", True)):
+                try:
+                    import asyncio as _aio_n
+                    from app.services.news import blackout_reason as _nbr, fetch_news as _nf
+                    _news_items = await _aio_n.to_thread(_nf)
+                    _nb_reason = _nbr(_news_items, ticker,
+                                      int(getattr(cfg, "entry_news_blackout_min", 60) or 60)) or ""
+                except Exception:
+                    _nb_reason = ""
             _mc = MarketContext(cfg=cfg, side=side, turnover=_to_s, atr_pct=_atr_s,
-                                atr_pct_median=_med_s, orderbook=_ob_s)
+                                atr_pct_median=_med_s, orderbook=_ob_s,
+                                news_blackout_reason=_nb_reason)
             _res_s = run_gate_chain(MARKET_GATES, _mc)
             if not _res_s.passed:
                 self._reject_entry("signal", _res_s.key, _res_s.detail, figi, ticker)
                 return
+            if action == "open":
+                _gate_path.append("market")
         # ================= STAGE B: сигнал/тренд (кэш-карты, без брокера) ================
         # TREND_GATES из app/bot/gates.py: daily_bias → h1_align → tf_conflict →
         # legacy MTF → якорь кворума → рейтинг. Short-circuit: первый отказ — стоп.
@@ -4525,6 +5199,15 @@ class PaperBotRuntime:
                 _rwhy = "" if _rok else str(_rwhy)
             except Exception:
                 _rwhy = ""
+            _hmp = None
+            _hmd = 0
+            try:
+                _hmw = max(1, int(getattr(cfg, "hm_veto_window_h", 24) or 24))
+                _hm = (await self.hm_map(_hmw)).get(str(ticker).upper())
+                if _hm:
+                    _hmp, _hmd = float(_hm[0]), int(_hm[1])
+            except Exception:
+                pass
             _tctx = TrendContext(
                 cfg=cfg, side=side,
                 daily_bias=_bias, daily_hist=_db.get("hist"),
@@ -4537,11 +5220,14 @@ class PaperBotRuntime:
                 votes=int(_qe.get("votes") or 0),
                 quorum=int(getattr(cfg, "ensemble_quorum", 2) or 2),
                 rank_why=_rwhy,
+                hm_pct=_hmp, hm_dur=_hmd,
             )
             _res_b = run_gate_chain(TREND_GATES, _tctx)
             if not _res_b.passed:
                 self._reject_entry("trend", _res_b.key, _res_b.detail, figi, ticker)
                 return
+            if action == "open":
+                _gate_path.append("trend")
         # ================= STAGE C: портфель (позиции/кластер/L-S, без брокера) ==========
         # PORTFOLIO_GATES из app/bot/gates.py: max_positions → sector_cluster → ls_balance.
         if action == "open":
@@ -4565,11 +5251,15 @@ class PaperBotRuntime:
                             if str(self._exit_side.get(_f, "")).upper() == "SHORT")
             _pctx = PortfolioContext(cfg=cfg, side=side, held_count=len(self._held),
                                      sector=_sector, sector_count=_sector_count,
-                                     short_count=_shorts_c)
+                                     short_count=_shorts_c, ticker=ticker,
+                                     held_tickers=tuple(self.tickers.get(_f, "").upper()
+                                                        for _f in self._held))
             _res_c = run_gate_chain(PORTFOLIO_GATES, _pctx)
             if not _res_c.passed:
                 self._reject_entry("portfolio", _res_c.key, _res_c.detail, figi, ticker)
                 return
+            if action == "open":
+                _gate_path.append("portfolio")
         # ================= STAGE C2: AI-чейзинг (стакан — общий, в STAGE S) =============
         # Только для AI-ордеров: после time/trend/portfolio, но ДО запроса маржи.
         if action == "open" and _is_ai:
@@ -4809,8 +5499,13 @@ class PaperBotRuntime:
                             _eff_lev = 1.0
                         _lot_cap = next((u.get("lot") for u in self.universe
                                          if u.get("figi") == figi), 1) or 1
+                        # Свои деньги НОВОЙ позиции = номинал / плечо именно этой позиции
+                        # (_used_lev). Точно в обоих режимах: divide — own=бюджет/lev,
+                        # multiply — own=бюджет=номинал/lev. Портфельный _eff_lev не годится:
+                        # при пустом портфеле он =1 и own_new раздувался до полного номинала
+                        # (лог: «свои 10000+9892 > equity 10000» при выбранном ×5).
                         _own_new = ((float(price) * int(qty) * int(_lot_cap))
-                                    / max(1.0, float(_eff_lev or _used_lev or 1.0)))
+                                    / max(1.0, float(_used_lev or 1.0)))
                         if _own_now + _own_new > _eq_cap * _cap:
                             self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] max_exposure — кап экспозиции "
                                       f"{_cap*100:.0f}% (свои {_own_now:.0f}+{_own_new:.0f} > equity {_eq_cap:.0f}₽)")
@@ -4828,7 +5523,8 @@ class PaperBotRuntime:
             action=action,
             side=side,
             qty=qty,
-            meta={**dict(meta or {}), "leverage": float(_used_lev)},
+            meta={**dict(meta or {}), "leverage": float(_used_lev),
+                  "gate_path": list(_gate_path)},
         )
         # --- Портфельные лимиты (net exposure / сектор / маржа / стресс) ---
         if action == "open":
@@ -4888,16 +5584,24 @@ class PaperBotRuntime:
             _until = self._ai_reject_until.get(figi)
             if _cd > 0 and _until is not None and self._bot_now() < _until:
                 _left = (_until - self._bot_now()).total_seconds() / 60.0
-                # В лог — только первый пропуск по этому тикеру (дальше счётчик, без спама)
-                if figi not in self._ai_reject_logged:
-                    self._ai_reject_logged.add(figi)
-                    self._log(f"AI-ГЕЙТ: {ticker} недавно отклонён ИИ — входы на паузе ещё {_left:.0f} мин "
-                              f"(повторы не пишу)")
+                # Пауза по тикеру: пишем понятный лог про каждый пропуск (раз в минуту,
+                # со счётчиком), чтобы всегда было видно, что именно отклонило вход.
+                self._ai_reject_cnt[figi] = self._ai_reject_cnt.get(figi, 0) + 1
+                _nn = self._ai_reject_cnt[figi]
+                _ll = self._ai_reject_last_log.get(figi, 0.0)
+                _now_m = _time.monotonic()
+                if _nn == 1 or (_ll and _now_m - _ll >= 60.0):
+                    self._ai_reject_last_log[figi] = _now_m
+                    _rsn = self._ai_reject_reason.get(figi, "отклонение ИИ")[:90]
+                    self._log(f"AI-ГЕЙТ: {ticker} на паузе ещё {_left:.0f} мин — отклонён: {_rsn} "
+                              f"(пропущено сигналов: {_nn})")
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="AI_REJECT_COOLDOWN")
                 self._log_no_trade(figi, "ai_reject_cooldown")
                 return
             order.status = "PENDING_APPROVAL"
             self._approvals_since[order.id] = _time.monotonic()
+            self._ai_reject_cnt.pop(figi, None)
+            self._ai_reject_last_log.pop(figi, None)
             self._log(f"AI-ГЕЙТ: вход {ticker} {side} qty={qty} ждёт подтверждения "
                       f"(таймаут {float(getattr(cfg, 'ai_approval_timeout_sec', 45.0)):.0f}с, "
                       f"default={getattr(cfg, 'ai_approval_default', 'approve')})")
@@ -4936,6 +5640,7 @@ class PaperBotRuntime:
                         _cdt = float(getattr(cfg, "ai_reject_cooldown_min", 15.0) or 0.0)
                         if _cdt > 0:
                             self._ai_reject_until[figi] = self._bot_now() + timedelta(minutes=_cdt)
+                            self._ai_reject_reason[figi] = "таймаут — AI-гейт не ответил (default=reject)"
                     except Exception as _sw_e:
                         _audit_swallow('_execute_pending@L4625', _sw_e)  # audit silent-except
                         pass
@@ -4953,6 +5658,8 @@ class PaperBotRuntime:
             if order.status == "REJECTED":
                 self._approvals_since.pop(order.id, None)
                 _why = str((order.meta or {}).get("ai_reason") or "")[:120]
+                if _why:
+                    self._ai_reject_reason[figi] = _why
                 self._log(f"AI-ГЕЙТ: вход {order.ticker} ОТКЛОНЁН — {_why}")
                 self.events.log("AI_APPROVAL_REJECTED", figi=figi, ticker=order.ticker,
                                 order_id=order.id, reason=(order.meta or {}).get("ai_reason"))
@@ -4975,7 +5682,8 @@ class PaperBotRuntime:
             self._held.discard(figi)
             self._clear_exit_state(figi)
             _bars_held = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
-            _exit_meta_sig = {"bars_held": _bars_held, "signal_note": "signal_exit"}
+            _exit_meta_sig = {"bars_held": _bars_held, "signal_note": "signal_exit",
+                              "gate_path_in": list((order.meta or {}).get("gate_path") or [])}
             await self._st_close(figi, actual_exit, reason="signal_exit",
                                   net=float(trade.net_pnl) if trade else None,
                                   meta=_exit_meta_sig)
@@ -4988,6 +5696,10 @@ class PaperBotRuntime:
         from app.engine.models import Side
         side = Side(order.side)
         if cfg.use_ensemble:
+            # локальный импорт НЕ нужен: AtrStopPolicy/FixedSlTpPolicy уже на top-level (L81).
+            # Если оставить import здесь — в Python это локальная переменная ВСЕЙ функции,
+            # и else-ветка ниже получит UnboundLocalError (баг 2026-09-23: бот падал,
+            # запись свечей в БД вставала).
             # SL: стандартный = cfg.initial_sl_atr (4×ATR, фикс вместо optuna sl_mult 4-5).
             # AtrStopPolicy/FixedSlTpPolicy импортированы на уровне модуля (L81); локальный
             # импорт здесь делал имя локальным для всей функции → UnboundLocalError в else.
@@ -5064,6 +5776,31 @@ class PaperBotRuntime:
         order.status = "FILLED"
         order.filled_at = datetime.now(timezone.utc)
         order.price = entry_px
+        try:
+            _om = dict(order.meta or {})
+            # gate_path берём из meta ордера (заполнен в _submit_order при создании):
+            # локалов _submit_order в этой функции нет — раньше NameError, который
+            # глушился этим же except и gate_path у сделок терялся.
+            _g = list(_om.get("gate_path") or [])
+            if _om.get("ai_trader"):
+                _g.append("ai")
+            if _om.get("momentum"):
+                _g.append("momentum")
+            _om["gate_path"] = _g
+            # ATR на входе — для UI «SL/TP был начальный в ATR/R/ROI» (meta сделки).
+            _ate = None
+            try:
+                if isinstance(exit_policy, AtrStopPolicy) and plan is not None \
+                        and plan.stop_loss is not None and plan.stop_loss != _fill \
+                        and exit_policy.multiplier > 0:
+                    _ate = abs(_fill - float(plan.stop_loss)) / exit_policy.multiplier
+            except Exception:
+                _ate = None
+            if _ate is not None and _ate > 0:
+                _om["atr_entry"] = round(float(_ate), 6)
+            order.meta = _om
+        except Exception:
+            pass
         self._held.add(figi)
         self._held_since.setdefault(figi, __import__("time").monotonic())
         await self._st_open(figi, order.ticker, order.side, order.qty, entry_px,
@@ -5187,6 +5924,11 @@ class PaperBotRuntime:
              выход — только по трейлинговому стопу.
         Возвращает True, если позиция закрыта на этом баре.
         """
+        # Вне сессии позицию не закрываем: sandbox/биржа не принимает заявки (30079),
+        # а бэклог ночных свечей не должен генерировать исполнения.
+        if not self._in_trading_session():
+            self._session_gate_log("сигнальный выход")
+            return False
         from app.engine.exits import intrabar_exit as _ibe
         policy = self._exit_plans[figi]
         _raw_side = self._exit_side.get(figi) or getattr(pos, "side", "LONG")
@@ -5272,7 +6014,8 @@ class PaperBotRuntime:
         tp = None if (trail_active or self._trail_active.get(figi, False)) else self._exit_target.get(figi)
         stop = self._trail_stop.get(figi)
         try:
-            from app.config import settings as _s
+            from app.config import get_settings as _get_settings
+            _s = _get_settings()
             _dbg = bool(getattr(_s, "log_debug_engine", False))
         except Exception as _sw_e:
             _audit_swallow('_step_exit@L4928', _sw_e)  # audit silent-except
@@ -5282,9 +6025,127 @@ class PaperBotRuntime:
                       f"bar_ts={c.ts.strftime('%H:%M:%S')} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} "
                       f"stop={stop if stop is not None else '-'} tp={tp if tp is not None else '-'} "
                       f"trail={trail_active} pnl_rub={(c.close - entry_px) * qty_sh if state == PositionState.LONG else (entry_px - c.close) * qty_sh:+.2f}")
+        # Пик PnL позиции: точка макс. прибыли на каждом баре (по экстремуму
+        # intrabar: high для LONG / low для SHORT, без комиссий) — для отчёта
+        # max PnL + время + ATR в карточке сделки.
+        try:
+            _peak_px = c.high if state == PositionState.LONG else c.low
+            _cur_pnl = (_peak_px - entry_px) * qty_sh if state == PositionState.LONG else (entry_px - _peak_px) * qty_sh
+            # MAE до пика: макс. просадка ниже входа (в ATR) на пути к пику прибыли.
+            # LONG — низ бара ниже входа, SHORT — верх бара выше входа.
+            # Копим с входа до момента пика; провалы ПОСЛЕ пика не учитываем.
+            _atr_v = None
+            try:
+                _atr_v = self.atr_now(figi)
+            except Exception:
+                _atr_v = None
+            _mae_cur = 0.0
+            try:
+                if _atr_v and entry_px:
+                    _adv_px = (float(c.low) - float(entry_px)) if state == PositionState.LONG else (float(entry_px) - float(c.high))
+                    if _adv_px > 0:
+                        _mae_cur = _adv_px / float(_atr_v)
+            except Exception:
+                _mae_cur = 0.0
+            _peak = self._peak_pnl.get(figi)
+            if _peak is None:
+                _peak = {"pnl": float("-inf"), "mae_cur": 0.0, "mae_atr": 0.0}
+            _peak["mae_cur"] = max(float(_peak.get("mae_cur", 0.0)), _mae_cur)
+            if _cur_pnl > float(_peak.get("pnl", -1e18)):
+                _atr_p = 0.0
+                try:
+                    _atr_p = float(_atr_v / entry_px * 100) if (_atr_v and entry_px) else 0.0
+                except Exception:
+                    pass
+                # Новая вершина: фиксируем накопленную на этот момент просадку.
+                _peak.update({"pnl": round(_cur_pnl, 2), "ts": c.ts.isoformat(),
+                              "price": float(_peak_px), "atr_pct": round(_atr_p, 2),
+                              "atr_abs": (round(float(_atr_v), 4) if _atr_v else None),
+                              "mae_atr": round(float(_peak.get("mae_cur", 0.0)), 2)})
+            self._peak_pnl[figi] = _peak
+        except Exception as _sw_e:
+            _audit_swallow('_step_exit@peak', _sw_e)  # audit silent-except
+            pass
+        # --- Виртуальный (info) трейлинг: считаем, где бы сработал трейл, НЕ трогая
+        # реальный SL/TP (реальный трейлинг может быть выключен — trail_activation_comm_mult=None).
+        # Логика зеркалит реальную: активация при pnl >= комиссия_входа×4, стоп идёт за ценой
+        # (update_stop, ratchet), срабатывание — только по закрытию бара за уровнем (close_based).
+        try:
+            if not self._trail_active.get(figi, False):
+                _ti = self._trail_info.get(figi)
+                if _ti is None:
+                    # Ленивая инициализация: виртуальный трейл-стоп стартует от реального SL.
+                    _ti = {"active": False, "act_track": self._trail_stop.get(figi)}
+                    self._trail_info[figi] = _ti
+                _ti_cfg = (getattr(self.config, "trail_info_activation_comm_mult", None)
+                            or getattr(self.config, "trail_activation_comm_mult", None))
+                if _ti_cfg is not None and _ti is not None:
+                    _act_bars = list(buf) if buf else [c]
+                    from dataclasses import replace as _dc_replace
+                    _tpol = _dc_replace(policy, trail_activation_comm_mult=_ti_cfg)
+                    _tact = getattr(_tpol, "trailing_activated", None)
+                    _tupd = getattr(_tpol, "update_stop", None)
+                    if not _ti.get("active"):
+                        # Этап активации: как бы включился трейлинг (info).
+                        try:
+                            _activated = False
+                            if _tact is not None:
+                                _activated = _tact(trail_side, float(entry_px), qty_sh, comm, _act_bars)
+                            if _activated:
+                                _ti["active"] = True
+                                _ti["act_track"] = self._trail_stop.get(figi)
+                                self._log(f"ИНФО-ТРЕЙЛ ВКЛ. {figi[-6:]} pnl>=комиссия×{_ti_cfg}")
+                        except Exception as _tie:
+                            self._log(f"инфо-трейл activate error {figi[-6:]}: {_tie}")
+                    # Этап движения стопа (что было бы) + проверка срабатывания.
+                    if _ti.get("active") and _tupd is not None:
+                        try:
+                            _prev = _ti.get("act_track")
+                            _new_stop = _tupd(trail_side, float(entry_px), _prev, _act_bars,
+                                              qty=qty_sh, commission=comm)
+                            if _new_stop is not None:
+                                _ti["act_track"] = float(_new_stop)
+                                # Дистанция трейл-стопа в ATR и % для отчёта.
+                                _tpol2_dist = None
+                                try:
+                                    _risk_now = float(_tpol._risk(float(entry_px), _act_bars))
+                                    _atr_now_val = (_risk_now / _tpol.multiplier) if _tpol.multiplier else None
+                                    if _atr_now_val:
+                                        _ti["trail_dist_atr"] = round(
+                                            (abs(float(c.close) - float(_new_stop)) / float(_atr_now_val)), 2)
+                                except Exception:
+                                    pass
+                                # Сработал бы трейл? Только закрытие за стопом (close_based).
+                                _ti_price, _ti_reason = _ibe(c, state, float(_new_stop), None, close_based=True)
+                                if _ti_price is not None and not _ti.get("hit_ts"):
+                                    _ti["hit_ts"] = c.ts.isoformat()
+                                    _ti["hit_price"] = float(_ti_price)
+                                    _ti["hit_reason"] = _ti_reason or "TRAIL"
+                                    self._log(f"ИНФО-ТРЕЙЛ СРАБОТАЛ БЫ {figi[-6:]} цена={_ti_price:.2f} "
+                                              f"({_ti_reason}) стоп={_new_stop:.2f} текущий_стоп={stop if stop is not None else '-'}")
+                        except Exception as _twe:
+                            self._log(f"инфо-трейл update error {figi[-6:]}: {_twe}")
+        except Exception as _tge:
+            self._log(f"инфо-трейл общий error {figi[-6:]}: {_tge}")
+
         price, reason = _ibe(c, state, stop, tp, close_based=bool(trail_active))
         if price is None:
             return False
+        # Выход «по лучшей»: внутри минуты порядок движения цены неизвестен.
+        # Если на баре выхода цена доходила до лучшего уровня (high для LONG,
+        # low для SHORT), считаем выход по нему — а не по стопу/закрытию бара.
+        _exit_best = False
+        try:
+            _rl = str(reason or "").lower()
+            if _rl and ("stop" in _rl or "trail" in _rl):
+                _best_px = float(c.high) if state == PositionState.LONG else float(c.low)
+                if ((state == PositionState.LONG and _best_px > float(price))
+                        or (state == PositionState.SHORT and _best_px < float(price))):
+                    price = _best_px
+                    _exit_best = True
+        except Exception as _bp_e:
+            _audit_swallow('_step_exit@best_px', _bp_e)  # audit silent-except
+            pass
         # Захватываем флаг трейлинга ДО _clear_exit_state (иначе диагностика врёт).
         _was_trail = bool(trail_active or self._trail_active.get(figi, False))
         # Проскальзывание на выходе (adverse), как в бэктесте (fill_price).
@@ -5306,6 +6167,7 @@ class PaperBotRuntime:
         await self._st_close(figi, price, reason=reason,
                               net=float(trade.net_pnl) if trade else None,
                               meta={"exit_reason": reason, "exit_price": float(price),
+                                    "exit_best": _exit_best,
                                     "sl": stop, "tp": tp,
                                     "trailing": _was_trail,
                                     "bars_held": _bh,

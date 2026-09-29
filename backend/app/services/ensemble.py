@@ -950,6 +950,32 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                               "trend_breakout": True})
         entries_raw = sorted(_kept, key=lambda x: x["ts"])
 
+    # regime_entry_policy {"trend": "breakout"}: в трендовых режимах ансамбль выключен —
+    # сетап-входы отбрасываются, вместо них входят micro_breakout-кандидаты того же ТФ
+    # (направление дальше валидирует COMBO-блок по bias). Не-трендовые режимы — обычный
+    # кворум-конвейер без изменений.
+    _rep = req.get("regime_entry_policy") or {}
+    if str(_rep.get("trend", "") or "") == "breakout" and regime_bars:
+        _trend_states = {"TREND_UP", "TREND_DOWN"}
+        _kept = []
+        for _e in entries_raw:
+            _ets = _e.get("ts")
+            if isinstance(_ets, str):
+                try:
+                    _ets = datetime.fromisoformat(_ets)
+                except Exception:
+                    _ets = None
+            _est = (regime_at(regime_bars, _ets) or {}).get("state") if _ets else None
+            if _est in _trend_states:
+                continue  # тренд: вход только по breakout, сетапы (ансамбль) off
+            _kept.append(_e)
+        for _b in micro_breakout(entry_candles, entry_lookback):
+            _bst = (regime_at(regime_bars, _b.get("ts")) or {}).get("state")
+            if _bst in _trend_states:
+                _kept.append({**_b, "reason": f"breakout:{_b.get('reason', '')}",
+                              "trend_breakout": True})
+        entries_raw = sorted(_kept, key=lambda x: x["ts"])
+
     # --- Тройное подтверждение входа на 1м свечах (monotonic closes) ---
     # req["entry_confirm_closes"] = N: для сторон из entry_confirm_closes_sides требуем,
     # чтобы последние N ЗАКРЫТИЙ 1м были строго по направлению входа:
@@ -1919,6 +1945,21 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict,
                 _bm = ctx.bias(_btf, _bpd)
             else:
                 _bm = compute_bias(_res(ctx, candles, _btf), _bpd, tf_seconds=_btf)
+            bias_by_state[_st] = {"map": _bm, "tf_sec": _btf, "period": _bpd,
+                                  "mode": _bc.get("mode")}
+
+    # --- per-regime bias (heatmap combo): направление входа по режиму и его bias-TF ---
+    #   req["bias_by_state"] = {"TREND_UP": {"tf": "30min", "period": 100},
+    #                           "TREND_DOWN": {"tf": "30min", "period": 100},
+    #                           "HIGH_VOLATILITY": {"tf": "10min", "period": 300}}
+    bias_by_state: dict[str, dict] | None = None
+    _bbs_cfg = req.get("bias_by_state")
+    if _bbs_cfg:
+        bias_by_state = {}
+        for _st, _bc in _bbs_cfg.items():
+            _btf = TF_SECONDS.get(str(_bc.get("tf", "30min")), 1800)
+            _bpd = int(_bc.get("period", max(2, round(50 * 3600 / _btf))))
+            _bm = compute_bias(cached_resample(candles, _btf), _bpd, tf_seconds=_btf)
             bias_by_state[_st] = {"map": _bm, "tf_sec": _btf, "period": _bpd,
                                   "mode": _bc.get("mode")}
 

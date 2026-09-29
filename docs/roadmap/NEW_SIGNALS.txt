@@ -1,0 +1,3529 @@
+все тесты делать на nadts@192.168.1.2 без пароля
+
+постоянно сообщай о ходе и результате тестов и следующих шагах
+
+Проверил именно текущую реализацию. И здесь уже видно, **почему я бы не внедрял предложенный тобой `M1 × M5 × M10 × 10 функций` напрямую**.
+
+### Что сейчас реально происходит
+
+У тебя `EnsembleV4Strategy.on_bar()` вызывается **на каждом 1m баре**, это прямо зафиксировано в коде. При этом `compute_ensemble()` вызывается каждый раз после проверки режима.  
+
+То есть при 30 акциях у тебя потенциально:
+
+```text
+30 акций
+× 1 раз / минуту
+× compute_ensemble()
+```
+
+И это намного важнее, чем кажется.
+
+Причём `compute_ensemble()` получает **весь массив `candles`**, а не только новый бар:
+
+```python
+res = compute_ensemble(list(candles), req)
+```
+
+То есть если `candles` содержит, например, несколько сотен M1 свечей, функция потенциально каждый раз заново работает с историей. 
+
+---
+
+# Главная проблема №1 — M10 тебе сейчас вообще не нужен как отдельный тяжёлый расчёт
+
+У тебя уже есть:
+
+```python
+bias_tf = "hour"
+entry_tf = "5min"
+regime_tf = "hour"
+```
+
+по умолчанию. 
+
+И `compute_ensemble` получает:
+
+```python
+"bias": {"tf": self.p.bias_tf, "period": self.p.bias_period},
+"entry_tf": self.p.entry_tf,
+"regime": {"tf": ...}
+```
+
+То есть архитектура уже фактически **multi-timeframe**, только не очень эффективно организована.
+
+Поэтому добавлять сверху ещё:
+
+```text
+M1
+M5
+M10
+```
+
+не надо.
+
+Я бы сначала **оптимизировал существующий pipeline**.
+
+---
+
+# Главная проблема №2 — режим у тебя уже кэшируется
+
+Вот это сделано правильно:
+
+```python
+if self._regime_cache.get("key") != _key:
+```
+
+и ключ — начало часа:
+
+```python
+_key = last.ts.replace(minute=0, second=0, microsecond=0)
+```
+
+То есть H1 regime не пересчитывается каждую минуту. 
+
+Это хороший подход.
+
+Но затем после этого ты всё равно вызываешь тяжёлый:
+
+```python
+compute_ensemble(...)
+```
+
+на каждом M1 баре.
+
+**Вот здесь главный резерв оптимизации.**
+
+---
+
+# Что я предлагаю сделать
+
+Не:
+
+```text
+30 × M1 × M5 × M10 × 10
+```
+
+а:
+
+```text
+             30 акций
+                 │
+                 ▼
+          H1 regime cache
+                 │
+          запрещён режим?
+             /       \
+           YES        NO
+            │          │
+            X          ▼
+                  M10/M5 context
+                     CACHE
+                       │
+                  есть setup?
+                   /      \
+                 NO        YES
+                 X          ▼
+                         M1 ENTRY
+```
+
+То есть дорогая часть запускается **только когда действительно требуется**.
+
+---
+
+# Самое важное изменение
+
+Сейчас:
+
+```python
+def on_bar(self, candles):
+    ...
+    res = compute_ensemble(list(candles), req)
+```
+
+Я бы сделал:
+
+```python
+def on_bar(self, candles):
+    ...
+    
+    if not self._is_new_5m_bar(last):
+        return self._process_cached_1m_entry(candles)
+
+    res = self._compute_5m_ensemble(...)
+    self._ensemble_cache = res
+```
+
+То есть:
+
+### M5
+
+Пересчитываем ensemble только на закрытии нового M5:
+
+```text
+09:50
+09:55
+10:00
+10:05
+...
+```
+
+### M1
+
+Между ними работаем только с дешёвым execution-фильтром.
+
+---
+
+# Это даст очень большой выигрыш
+
+Сейчас примерно:
+
+```text
+30 акций × 60 M1 баров/час
+= 1800 вызовов compute_ensemble / час
+```
+
+Если перейти на M5:
+
+```text
+30 × 12
+= 360 вызовов / час
+```
+
+То есть примерно **в 5 раз меньше вызовов тяжёлого ансамбля**.
+
+И при этом M1 можно оставить для:
+
+* подтверждения входа;
+* breakout;
+* MACD 1m;
+* RSI 1m;
+* volume;
+* execution timing.
+
+---
+
+# И у тебя уже есть хороший фундамент для этого
+
+В конфиге:
+
+```python
+entry_tf = "5min"
+entry_lookback = 1
+```
+
+
+
+То есть архитектура уже рассчитана на 5m entry.
+
+А `on_bar()` сейчас специально изменён так, чтобы оцениваться на каждом 1m баре:
+
+> «нужна для 1м-входа»
+
+
+
+Я бы **не убирал эту возможность**, а разделил расчёт:
+
+```text
+1m event
+   │
+   ├── дешёвые проверки → каждый M1
+   │
+   └── тяжёлый ensemble → только новый M5
+```
+
+---
+
+# Ещё одна проблема — `_votes_exit()`
+
+Вот здесь:
+
+```python
+closes = [float(c.close) for c in candles]
+```
+
+потом:
+
+```python
+h = _macd_hist(closes, ...)
+```
+
+и `_macd_hist()` заново строит:
+
+```text
+EMA fast
+EMA slow
+MACD
+EMA signal
+histogram
+```
+
+на **всей истории**. 
+
+Если `exit_macd_flip=True`, это происходит на каждом M1 баре для открытой позиции.
+
+Это очень хороший кандидат на incremental state.
+
+Вместо:
+
+```python
+_macd_hist(closes)
+```
+
+держать:
+
+```python
+@dataclass
+class MACDState:
+    ema_fast: float
+    ema_slow: float
+    signal: float
+    hist: float
+```
+
+и обновлять одним новым close.
+
+Это уже будет O(1), а не O(N).
+
+---
+
+# То же самое с RSI
+
+Сейчас при RSI-фильтре входа:
+
+```python
+_cl = [float(c.close) for c in candles]
+_r = _rsi_series(_cl)
+```
+
+то есть RSI снова считается по всей истории. 
+
+А внутри `_votes_exit()` RSI опять считается заново:
+
+```python
+_r = _rsi_series(closes)
+```
+
+
+
+Это нужно заменить на общий cached indicator state:
+
+```text
+ticker
+ ├── RSI14
+ ├── EMA20
+ ├── EMA10
+ ├── EMA12
+ ├── EMA26
+ ├── MACD
+ ├── ATR14
+ └── volume MA20
+```
+
+---
+
+# И ещё очень важный момент: resample
+
+У тебя при `exit_volume_drop` прямо внутри каждого M1 вызова:
+
+```python
+b5 = _rs(list(candles), 300)
+```
+
+
+
+То есть если включить этот выход:
+
+```text
+каждая M1 свеча
+    ↓
+получить весь candles
+    ↓
+заново сделать 5m resample
+    ↓
+посчитать volume MA
+```
+
+Для 30 бумаг это совершенно лишняя работа.
+
+Нужен:
+
+```python
+self._m5_cache[figi]
+```
+
+и обновлять его **только при появлении нового M5 бара**.
+
+---
+
+# Поэтому я бы сделал конкретно такой cache
+
+```python
+@dataclass
+class IndicatorCache:
+    last_m1_ts: datetime | None = None
+    last_m5_ts: datetime | None = None
+    last_m10_ts: datetime | None = None
+    last_h1_ts: datetime | None = None
+
+    rsi14: float | None = None
+
+    ema10: float | None = None
+    ema20: float | None = None
+    ema12: float | None = None
+    ema26: float | None = None
+
+    macd: float | None = None
+    macd_signal: float | None = None
+    macd_hist: float | None = None
+
+    atr14: float | None = None
+
+    volume_ma20: float | None = None
+```
+
+И:
+
+```python
+self._cache: dict[str, IndicatorCache]
+```
+
+---
+
+# Тогда обработка будет выглядеть так
+
+```python
+def on_bar(self, candles):
+
+    last = candles[-1]
+    state = self._cache[self.p.figi]
+
+    # 1. обновляем дешёвые M1 индикаторы
+    self._update_m1(state, last)
+
+    # 2. новый M5?
+    if self._is_new_5m(last, state):
+        self._update_m5(state, candles)
+        self._recalculate_ensemble(state, candles)
+
+    # 3. новый H1?
+    if self._is_new_h1(last, state):
+        self._update_regime(state, candles)
+
+    # 4. дешёвый M1 entry
+    return self._check_entry(state)
+```
+
+---
+
+# Но есть ещё более важный момент по качеству сигналов
+
+Я бы **не делал 30 голосов**.
+
+У тебя уже сейчас setup-ы:
+
+* RSI reversal
+* Bollinger reclaim
+* Pullback EMA
+* VWAP reclaim
+* Range compression breakout
+* MACD cross
+* Donchian breakout
+
+То есть семь стратегий уже есть в `V2_SETUPS`. 
+
+Если добавить ещё:
+
+```text
+M1 × 7
+M5 × 7
+M10 × 7
+```
+
+получится 21 голос, но многие голоса будут сильно коррелированы.
+
+Я бы сделал **иерархию**, а не плоский голосовой счёт:
+
+```text
+M10
+ └── direction
+
+M5
+ └── setup confirmation
+
+M1
+ └── entry timing
+```
+
+Например:
+
+```python
+if m10_direction != BUY:
+    return None
+
+if m5_votes < 2:
+    return None
+
+if not m1_entry:
+    return None
+
+return BUY
+```
+
+Это намного понятнее и для CPU, и для анализа результатов.
+
+---
+
+# И есть ещё один баг/риск, который я бы исправил
+
+В `on_bar()`:
+
+```python
+except Exception:
+    pass
+```
+
+при расчёте режима. 
+
+Это опасно.
+
+Если regime calculation начал падать, бот просто продолжает работу.
+
+Для production лучше:
+
+```python
+except Exception:
+    logger.exception(...)
+    self._last_skip = "regime_error"
+    return None
+```
+
+Иначе можно получить ситуацию:
+
+```text
+regime не посчитался
+       ↓
+ошибка проглочена
+       ↓
+тяжёлый ensemble всё равно запускается
+       ↓
+торговля продолжается
+```
+
+---
+
+# Мой приоритет для твоего кода
+
+Я бы делал **не переписывание всего ансамбля**, а вот так:
+
+| Приоритет | Изменение                                | Эффект                           |
+| --------- | ---------------------------------------- | -------------------------------- |
+| 🔴 1      | `compute_ensemble()` только на новом M5  | очень большой CPU ↓              |
+| 🔴 2      | cache M5/H1 resample                     | большой CPU ↓                    |
+| 🔴 3      | incremental RSI/MACD/EMA/ATR             | большой CPU ↓                    |
+| 🔴 4      | не считать `list(candles)` каждый раз    | CPU + memory ↓                   |
+| 🟠 5      | M1 только execution-фильтр               | меньше ложных входов             |
+| 🟠 6      | M10 как context, а не отдельный ансамбль | качество/стабильность            |
+| 🟡 7      | веса TF                                  | тестировать после базовой версии |
+| 🟡 8      | adaptive quorum                          | тестировать последним            |
+
+### В итоге я бы целился в:
+
+```text
+Сейчас:
+
+30 × M1 × полный compute_ensemble
+             ↓
+        ~1800 тяжёлых
+        вызовов/час
+
+
+После:
+
+30 × M5 × полный ensemble
+             ↓
+         ~360/час
+
++ M1 только:
+  MACD/RSI/volume/breakout
+  для кандидатов
+```
+
+И **не надо сразу делать 30 голосов**. У тебя уже есть полноценный ансамбль из 7 setup-ов; сначала заставим его работать дешёво и кэшировано, а затем добавим M10/M5/M1 как разные уровни принятия решения.
+
+Отдельно отмечу: в текущем коде уже есть хороший механизм `same_side_reentry_cooldown_bars=15`, `min_hold_bars`, `exit_confirm_window_bars` и фильтр turnover/density — их лучше оставить вне новой TF-логики, чтобы эксперимент не смешивал сразу слишком много переменных. 
+
+**Если хочешь именно сейчас переделать код, я бы начал с `EnsembleV4Strategy`: вынести M5/H1/индикаторы в cache и сделать `compute_ensemble()` раз в 5 минут. Это даст наиболее предсказуемое снижение нагрузки без изменения торговой логики.**
+
+
+
+
+Да. Для твоего ансамбля я бы улучшал **не количество голосов**, а саму структуру детекции: отдельно определить **направление → качество сетапа → момент входа → момент выхода**.
+
+С учётом твоего `EnsembleV4Strategy` я бы сделал так.
+
+### 1. Вход: не `N из 30`, а 3 уровня
+
+Сейчас у тебя несколько setup'ов (`RSI`, Bollinger, VWAP, MACD, Donchian и т.д.) довольно коррелированы. Поэтому 18/30 голосов не означает реальную независимую уверенность.
+
+Лучше:
+
+```text
+M10 → направление рынка
+        ↓
+M5  → подтверждение сетапа
+        ↓
+M1  → точка входа
+```
+
+Например:
+
+```python
+M10:
+    BUY / SELL / NEUTRAL
+
+M5:
+    минимум 2 подтверждения из 4
+    + не против M10
+
+M1:
+    trigger для фактического входа
+```
+
+То есть **M10 не должен голосовать за вход**, он должен задавать контекст.
+
+---
+
+## 2. Сделать голоса не бинарными
+
+Сейчас условно:
+
+```python
+BUY = 1
+SELL = -1
+NONE = 0
+```
+
+Я бы перешёл к силе сигнала:
+
+```python
+@dataclass
+class Signal:
+    side: int          # -1 / 0 / +1
+    strength: float    # 0..1
+    reason: str
+```
+
+Например:
+
+```text
+MACD cross       BUY  0.8
+RSI reversal     BUY  0.6
+VWAP reclaim     BUY  0.9
+Bollinger        BUY  0.4
+Donchian         NONE
+```
+
+Тогда ансамбль считает не просто:
+
+```python
+buy_votes >= quorum
+```
+
+а:
+
+```python
+weighted_score = sum(signal.side * signal.strength * weight)
+```
+
+Это намного информативнее.
+
+---
+
+# 3. Разделить `setup` и `trigger`
+
+Это, на мой взгляд, самое важное изменение.
+
+Например:
+
+### Setup
+
+M5 показывает:
+
+```text
+RSI вышел из oversold
++
+цена вернулась выше VWAP
++
+MACD histogram растёт
+```
+
+Это означает:
+
+> потенциально хороший LONG-контекст
+
+Но **это ещё не вход**.
+
+### Trigger
+
+На M1:
+
+```text
+close > high предыдущей свечи
++
+volume > average volume
++
+цена не слишком далеко от VWAP
+```
+
+И только здесь:
+
+```python
+ENTER_LONG
+```
+
+Получается:
+
+```text
+SETUP → CONFIRMATION → TRIGGER → ENTRY
+```
+
+Это обычно гораздо полезнее, чем пытаться заставить все индикаторы одновременно дать BUY.
+
+---
+
+# 4. Добавить оценку качества входа
+
+Я бы ввёл score примерно такого типа:
+
+```python
+score = (
+    0.30 * regime_score +
+    0.25 * setup_score +
+    0.20 * momentum_score +
+    0.15 * volume_score +
+    0.10 * execution_score
+)
+```
+
+Например:
+
+```text
+regime       0.90
+setup        0.80
+momentum     0.65
+volume       0.40
+execution    0.90
+
+score = 0.735
+```
+
+И правило:
+
+```python
+if score < 0.70:
+    skip
+```
+
+Но **0.70 не стоит считать правильным заранее** — его нужно подобрать только на train/validation и затем проверить на отдельном test.
+
+---
+
+# 5. Особенно важно: учитывать конфликт сигналов
+
+Сейчас условие вида:
+
+```python
+BUY votes >= 3
+```
+
+может скрывать плохую ситуацию:
+
+```text
+BUY:  3
+SELL: 2
+```
+
+и это будет считаться BUY.
+
+Я бы добавил:
+
+```python
+net_score = buy_score - sell_score
+```
+
+и минимальное преимущество:
+
+```python
+if buy_score < threshold:
+    skip
+
+if buy_score - sell_score < min_edge:
+    skip
+```
+
+Например:
+
+```text
+BUY  = 0.78
+SELL = 0.61
+
+edge = 0.17
+```
+
+Это гораздо полезнее, чем просто `3 vs 2`.
+
+---
+
+# 6. Добавить "качество движения"
+
+Для твоей стратегии я бы отдельно проверял:
+
+### Momentum
+
+```text
+EMA10 > EMA20
+MACD histogram increasing
+price above VWAP
+```
+
+### Expansion
+
+```text
+ATR растёт
+range свечи расширяется
+volume увеличивается
+```
+
+### Compression → breakout
+
+Для `range_compression_breakout`:
+
+```text
+compression
+      ↓
+range expansion
+      ↓
+breakout
+      ↓
+retest
+      ↓
+entry
+```
+
+Причём я бы **не входил просто на первом касании breakout**, а проверял подтверждение.
+
+---
+
+# 7. Сделать отдельные типы входов
+
+Не все BUY одинаковы.
+
+Я бы классифицировал:
+
+```python
+ENTRY_TYPE = {
+    "TREND_CONTINUATION",
+    "BREAKOUT",
+    "PULLBACK",
+    "MEAN_REVERSION",
+    "VWAP_RECLAIM",
+}
+```
+
+Например:
+
+### TREND_CONTINUATION
+
+```text
+M10 trend ↑
+M5 pullback
+M1 momentum resumes
+```
+
+### MEAN_REVERSION
+
+```text
+M10 neutral
+RSI extreme
+price far from VWAP
+M1 reversal
+```
+
+И **не использовать одинаковые правила для всех**.
+
+Это особенно важно, потому что сейчас у тебя в одном ансамбле находятся:
+
+* RSI reversal
+* Bollinger reclaim
+* VWAP reclaim
+* MACD cross
+* Donchian breakout
+* pullback
+* compression breakout
+
+Они фактически описывают **разные рыночные режимы**.
+
+---
+
+# 8. Режим рынка должен менять допустимые сигналы
+
+У тебя уже есть regime detection — это можно использовать гораздо сильнее.
+
+Например:
+
+```text
+TREND_UP
+    разрешить:
+        MACD
+        pullback
+        Donchian
+        VWAP reclaim
+
+    ослабить:
+        RSI reversal
+        Bollinger reversal
+```
+
+А:
+
+```text
+NEUTRAL
+    разрешить:
+        RSI
+        Bollinger
+        VWAP mean reversion
+
+    запретить:
+        слабые breakout-сигналы
+```
+
+То есть вместо:
+
+```python
+all_setups -> common_quorum
+```
+
+делать:
+
+```python
+regime -> relevant_setups -> score -> trigger
+```
+
+Это, на мой взгляд, даст больше пользы, чем переход с 7 на 30 голосов.
+
+---
+
+# 9. Выход я бы вообще отделил от входного ансамбля
+
+Не стоит делать:
+
+```text
+ENTRY ensemble
+       ↓
+EXIT ensemble
+```
+
+одной логикой.
+
+Для выхода лучше иметь несколько независимых причин:
+
+```text
+1. Hard SL
+2. TP
+3. Trailing ATR
+4. Regime flip
+5. Momentum deterioration
+6. Time stop
+7. Opposite signal
+```
+
+И приоритет:
+
+```text
+Hard SL / emergency
+        ↓
+Trailing
+        ↓
+Regime failure
+        ↓
+Momentum failure
+        ↓
+Opposite signal
+```
+
+---
+
+# 10. Очень полезный выход: deterioration
+
+Не ждать полного `SELL`.
+
+Например LONG:
+
+```text
+BUY score:
+
+0.82
+0.79
+0.76
+0.69
+0.61
+0.53
+```
+
+Можно определить:
+
+```python
+if score < 0.55:
+    exit
+```
+
+или ещё лучше:
+
+```python
+if score_drop > 0.25:
+    exit
+```
+
+То есть выходить не потому, что появился сильный SHORT, а потому что **исчезло преимущество LONG**.
+
+Это особенно хорошо подходит ансамблю.
+
+---
+
+# 11. Добавить hysteresis
+
+Очень полезно против дерганья:
+
+```text
+ENTRY threshold = 0.70
+EXIT threshold  = 0.45
+```
+
+а не:
+
+```text
+enter > 0.60
+exit  < 0.60
+```
+
+Иначе система может делать:
+
+```text
+BUY
+EXIT
+BUY
+EXIT
+BUY
+```
+
+на шумном рынке.
+
+---
+
+# 12. Для твоего кода есть ещё один важный момент
+
+У тебя сейчас часть вычислений вызывается на каждом M1:
+
+```python
+compute_ensemble(...)
+```
+
+и внутри пересчитываются исторические:
+
+* RSI
+* MACD
+* volume
+* resampling 5m
+* другие индикаторы.
+
+Поэтому я бы сначала сделал архитектуру:
+
+```text
+                ┌── M10 context ───────┐
+                │                       │
+M1 candles ──→ M5 setup ──→ M1 trigger ──→ ENTRY
+                │
+                └── regime ─────────────┘
+```
+
+При этом:
+
+```text
+M10       обновлять только при новой M10
+M5 setup  только при закрытии новой M5
+M1        каждый новый M1
+```
+
+а не пересчитывать всё каждый раз.
+
+---
+
+# 13. Конкретная схема, которую я бы тестировал
+
+Я бы сделал первую версию примерно такой:
+
+```python
+def detect_long_entry(state):
+
+    # 1. Market context
+    if state.m10_direction != BUY:
+        return None
+
+    # 2. Regime
+    if state.regime not in (
+        TREND_UP,
+        NEUTRAL,
+    ):
+        return None
+
+    # 3. M5 setup
+    if state.m5_setup_score < 0.60:
+        return None
+
+    # 4. M5 direction
+    if state.m5_score < 0.0:
+        return None
+
+    # 5. M1 trigger
+    if not state.m1_trigger:
+        return None
+
+    # 6. Final quality
+    score = (
+        0.35 * state.regime_score +
+        0.35 * state.m5_setup_score +
+        0.20 * state.m1_trigger_score +
+        0.10 * state.volume_score
+    )
+
+    if score < 0.70:
+        return None
+
+    return EntrySignal(
+        side=BUY,
+        score=score,
+    )
+```
+
+А выход:
+
+```python
+def detect_exit(position, state):
+
+    if state.hard_stop:
+        return "STOP"
+
+    if state.take_profit:
+        return "TP"
+
+    if state.trailing_stop:
+        return "TRAIL"
+
+    if state.regime_failed:
+        return "REGIME"
+
+    if state.momentum_score < 0.45:
+        return "MOMENTUM"
+
+    if state.entry_score - state.entry_score_peak < -0.25:
+        return "DETERIORATION"
+
+    return None
+```
+
+---
+
+## Что я бы внедрял по приоритету
+
+| Приоритет | Изменение                             | Зачем                                    |
+| --------- | ------------------------------------- | ---------------------------------------- |
+| **1**     | M10 → M5 → M1                         | убрать шум                               |
+| **2**     | Setup отдельно от Trigger             | повысить качество момента входа          |
+| **3**     | Weighted score вместо простого quorum | учитывать силу сигналов                  |
+| **4**     | `BUY - SELL` edge                     | отсеять конфликтующие сигналы            |
+| **5**     | regime-specific setups                | не использовать RSI и breakout одинаково |
+| **6**     | отдельная exit-модель                 | лучше фиксировать окончание движения     |
+| **7**     | deterioration exit                    | раньше ловить потерю импульса            |
+| **8**     | hysteresis                            | уменьшить flip-flop                      |
+| **9**     | incremental indicators/cache          | резко снизить CPU                        |
+| **10**    | adaptive quorum                       | только после проверки базовой версии     |
+
+**Я бы пока вообще не делал 30 голосов.** Сначала выжал бы максимум из твоих существующих 7 V2 setup'ов через `M10 context → M5 setup → M1 trigger`. Это даст гораздо более чистый эксперимент и позволит понять, **какая именно часть детектора реально улучшает сделки**.
+
+И самое важное: не ориентироваться только на `win rate`. Для каждой версии сравнивать минимум **expectancy, PF, max DD, среднюю прибыль/убыток, количество сделок и PnL после комиссии/проскальзывания** на out-of-sample периоде.
+
+
+
+
+
+Да. Для твоего случая я бы строил оптимизацию **не как один огромный Optuna-поиск**, а как последовательность экспериментов: сначала определить устойчивые параметры каждой функции, затем совместимость функций, затем веса, затем пороги ансамбля, и только в самом конце — совместно оптимизировать небольшое число наиболее важных параметров.
+
+Главная цель — получить не «максимум PnL на истории», а **устойчивую конфигурацию, которая сохраняет преимущество на невидимых данных**.
+
+## 0. Сначала зафиксировать экспериментальную среду
+
+Для каждого прогона неизменными должны быть:
+
+* комиссии;
+* slippage;
+* размер позиции;
+* правила исполнения;
+* торговые часы;
+* EOD;
+* universe;
+* лимиты позиций;
+* правила очереди;
+* правила выхода;
+* источник данных.
+
+Иначе Optuna будет оптимизировать не стратегию, а смесь из изменившихся условий теста.
+
+Для твоего проекта особенно важно сначала устранить конфликты вроде:
+
+```text
+quorum       2 / 3
+SL           4 ATR / 6 ATR
+cooldown     0 / 15
+turnover     100k / 1m
+commission   разные значения
+```
+
+---
+
+# 1. Разделить данные на Train / Validation / Test
+
+Это самое важное.
+
+Например, если у тебя исторический период:
+
+```text
+|--------- TRAIN ---------|--- VALIDATION ---|------ TEST ------|
+```
+
+Не надо давать Optuna видеть TEST.
+
+Лучше сделать ещё более строго — **walk-forward**:
+
+```text
+Window 1
+TRAIN       → VALIDATE
+[----------][------]
+
+Window 2
+       TRAIN       → VALIDATE
+       [----------][------]
+
+Window 3
+              TRAIN       → VALIDATE
+              [----------][------]
+```
+
+А финальный TEST вообще не трогать до конца.
+
+### Для 30 акций
+
+Я бы дополнительно делил не только по времени, но и проверял устойчивость по инструментам:
+
+```text
+train:
+    stocks A..Z
+
+validation:
+    те же stocks, но следующий период
+
+robustness:
+    отдельные stocks / сектора / периоды
+```
+
+Потому что иначе можно случайно подобрать параметры конкретно под несколько наиболее активных акций.
+
+---
+
+# 2. Сначала получить baseline
+
+До Optuna нужен **один полностью фиксированный baseline**.
+
+Например:
+
+```text
+RSI             fixed
+Bollinger       fixed
+VWAP            fixed
+MACD            fixed
+Donchian        fixed
+Pullback        fixed
+Compression     fixed
+
+weights         equal
+quorum          fixed
+M10             fixed
+M5              fixed
+M1              fixed
+```
+
+Получить:
+
+```text
+PnL
+Net PnL
+Profit Factor
+Expectancy
+Max DD
+Sharpe
+Sortino
+Win Rate
+Avg Win
+Avg Loss
+Trades
+Turnover
+commission
+slippage
+```
+
+И сохранить результат как:
+
+```text
+BASELINE_v1
+```
+
+Без этого Optuna бессмысленна: ты не знаешь, улучшает ли оптимизация систему.
+
+---
+
+# 3. Оптимизация каждой функции отдельно
+
+Вот здесь начинается Optuna.
+
+**Не оптимизируй сразу весь ансамбль.**
+
+Сначала:
+
+```text
+RSI
+ ↓
+Bollinger
+ ↓
+VWAP
+ ↓
+MACD
+ ↓
+Donchian
+ ↓
+Pullback
+ ↓
+Compression
+```
+
+Каждая функция тестируется **как самостоятельный сигнал**.
+
+---
+
+# 4. RSI
+
+Например параметры:
+
+```python
+period
+oversold
+overbought
+exit_level
+```
+
+Optuna:
+
+```python
+trial.suggest_int("period", 5, 30)
+trial.suggest_int("oversold", 20, 40)
+trial.suggest_int("overbought", 60, 90)
+```
+
+Но не надо оптимизировать 20 параметров сразу.
+
+Сначала:
+
+```text
+period
+oversold
+overbought
+```
+
+Потом уже дополнительные параметры.
+
+### Результат
+
+Не брать:
+
+```text
+best trial = 123.7% PnL
+```
+
+А посмотреть:
+
+```text
+какой диапазон параметров работает стабильно
+```
+
+Например:
+
+```text
+RSI period
+
+10  ███████
+12  ████████
+14  █████████
+16  █████████
+18  ████████
+20  ███████
+```
+
+Если оптимум находится в широком плато — хорошо.
+
+Если:
+
+```text
+period = 17 → отлично
+period = 16 → плохо
+period = 18 → плохо
+```
+
+это подозрительный результат.
+
+---
+
+# 5. Затем каждая функция отдельно
+
+Получится таблица:
+
+| Setup       | Лучшие параметры |  PF |  DD | Trades | Stability |
+| ----------- | ---------------- | --: | --: | -----: | --------- |
+| RSI         | ...              | ... | ... |    ... | ...       |
+| Bollinger   | ...              | ... | ... |    ... | ...       |
+| VWAP        | ...              | ... | ... |    ... | ...       |
+| MACD        | ...              | ... | ... |    ... | ...       |
+| Donchian    | ...              | ... | ... |    ... | ...       |
+| Pullback    | ...              | ... | ... |    ... | ...       |
+| Compression | ...              | ... | ... |    ... | ...       |
+
+Но **не выбирать автоматически максимальный PF**.
+
+Нам нужен устойчивый диапазон.
+
+---
+
+# 6. Второй этап — определить, какие функции вообще нужны
+
+После индивидуальной оптимизации:
+
+```text
+7 setups
+```
+
+проверяем комбинации.
+
+Например:
+
+```text
+RSI
+Bollinger
+VWAP
+MACD
+Donchian
+Pullback
+Compression
+```
+
+И делаем ablation:
+
+```text
+ALL
+
+ALL - RSI
+ALL - Bollinger
+ALL - VWAP
+ALL - MACD
+ALL - Donchian
+ALL - Pullback
+ALL - Compression
+```
+
+Это очень полезный эксперимент.
+
+Если:
+
+```text
+ALL       PF 1.55
+-no RSI   PF 1.62
+```
+
+это означает, что RSI в текущей архитектуре может ухудшать ансамбль.
+
+Но проверять это нужно на validation/walk-forward, а не только на train.
+
+---
+
+# 7. Потом — пары функций
+
+После ablation:
+
+```text
+RSI + VWAP
+RSI + MACD
+VWAP + MACD
+MACD + Donchian
+Pullback + MACD
+...
+```
+
+Но я бы не делал полный перебор всех комбинаций, если функций станет много.
+
+Можно использовать Optuna для:
+
+```python
+trial.suggest_categorical("rsi", [0, 1])
+trial.suggest_categorical("vwap", [0, 1])
+trial.suggest_categorical("macd", [0, 1])
+...
+```
+
+То есть Optuna выбирает **подмножество setup'ов**.
+
+---
+
+# 8. Только теперь оптимизировать веса
+
+Когда состав ансамбля уже определён:
+
+```text
+RSI
+VWAP
+MACD
+Donchian
+Pullback
+```
+
+начинаем:
+
+```text
+w_rsi
+w_vwap
+w_macd
+w_donchian
+w_pullback
+```
+
+Например:
+
+```python
+w_rsi = trial.suggest_float("w_rsi", 0.0, 1.0)
+w_vwap = trial.suggest_float("w_vwap", 0.0, 1.0)
+...
+```
+
+После этого нормализуем:
+
+```python
+weights /= sum(weights)
+```
+
+---
+
+# 9. Но я бы оптимизировал не только веса
+
+Сделай два уровня:
+
+```text
+Signal strength
+        ↓
+Function weight
+        ↓
+TF weight
+        ↓
+Final ensemble score
+```
+
+Например:
+
+```python
+final_score = (
+    0.40 * m10_score +
+    0.35 * m5_score +
+    0.25 * m1_score
+)
+```
+
+А внутри:
+
+```python
+m5_score = (
+    0.20 * rsi +
+    0.25 * vwap +
+    0.30 * macd +
+    0.25 * pullback
+)
+```
+
+Так Optuna может искать:
+
+```text
+function weights
++
+TF weights
+```
+
+но **не всё одновременно**.
+
+---
+
+# 10. Следующий эксперимент — TF weights
+
+После фиксации setup weights:
+
+```text
+M10
+M5
+M1
+```
+
+Оптимизировать:
+
+```python
+w_m10
+w_m5
+w_m1
+```
+
+Например:
+
+```text
+M10 = 0.40
+M5  = 0.40
+M1  = 0.20
+```
+
+против:
+
+```text
+M10 = 0.30
+M5  = 0.45
+M1  = 0.25
+```
+
+Но обязательно сравнивать с:
+
+```text
+equal weights
+```
+
+Иначе можно усложнить систему без реального улучшения.
+
+---
+
+# 11. Потом quorum / threshold
+
+Вот теперь:
+
+```text
+weights
++
+TF weights
+```
+
+фиксированы.
+
+И только теперь оптимизируем:
+
+```text
+entry_threshold
+exit_threshold
+minimum_edge
+minimum_votes
+```
+
+Например:
+
+```python
+entry_threshold = trial.suggest_float(
+    "entry_threshold", 0.55, 0.85
+)
+
+exit_threshold = trial.suggest_float(
+    "exit_threshold", 0.25, 0.60
+)
+
+min_edge = trial.suggest_float(
+    "min_edge", 0.05, 0.40
+)
+```
+
+---
+
+# 12. Потом оптимизировать подтверждение M1
+
+Очень важный этап.
+
+M5 говорит:
+
+```text
+"я готов"
+```
+
+M1 решает:
+
+```text
+"входим сейчас"
+```
+
+Параметры:
+
+```text
+breakout threshold
+volume multiplier
+body/range ratio
+distance from VWAP
+momentum threshold
+```
+
+Optuna ищет их **только после того, как M10/M5 уже стабилизированы**.
+
+---
+
+# 13. Отдельно оптимизировать выход
+
+Я бы вообще сделал отдельный study:
+
+```text
+ENTRY = frozen
+EXIT  = Optuna
+```
+
+Параметры:
+
+```text
+ATR stop
+ATR trail
+TP
+RR
+time stop
+momentum exit
+regime flip
+score deterioration
+opposite signal
+```
+
+Например:
+
+```python
+atr_sl
+atr_trail
+rr
+max_hold
+exit_threshold
+deterioration
+```
+
+Это важно.
+
+Если одновременно оптимизировать вход и выход, Optuna может компенсировать плохой вход агрессивным выходом — и ты не поймёшь, что реально улучшилось.
+
+---
+
+# 14. Затем joint optimization
+
+Только после всех предыдущих этапов.
+
+То есть уже есть:
+
+```text
+RSI parameters       FIXED-ish
+VWAP parameters      FIXED-ish
+MACD parameters      FIXED-ish
+...
+function weights     FIXED-ish
+TF weights           FIXED-ish
+entry threshold      FIXED-ish
+exit parameters      FIXED-ish
+```
+
+И только теперь разрешаем Optuna двигать **небольшое количество параметров**.
+
+Например 10–15:
+
+```text
+MACD fast
+MACD slow
+RSI period
+VWAP k
+Donchian period
+
+RSI weight
+MACD weight
+VWAP weight
+
+M10 weight
+M5 weight
+
+entry threshold
+min edge
+
+ATR stop
+ATR trail
+```
+
+Не 50–100 параметров.
+
+---
+
+# 15. Очень важный принцип Optuna: оптимизировать не PnL
+
+Я бы сделал objective примерно:
+
+```python
+objective =
+    PF
+    + alpha * expectancy
+    + beta * Sharpe
+    - gamma * max_drawdown
+    - penalty_for_low_trade_count
+```
+
+Но ещё лучше использовать **несколько objectives**.
+
+Optuna поддерживает multi-objective optimization.
+
+Например:
+
+```text
+maximize:
+    Net Profit
+    Profit Factor
+    Sharpe
+
+minimize:
+    Max Drawdown
+```
+
+Получишь Pareto frontier вместо одного искусственного «лучшего» решения.
+
+---
+
+# 16. Обязательно штрафовать overfitting
+
+Например, если:
+
+```text
+TRAIN PF = 2.4
+VALID PF = 1.3
+```
+
+это хуже, чем:
+
+```text
+TRAIN PF = 1.8
+VALID PF = 1.6
+```
+
+Для отбора я бы смотрел на:
+
+```text
+validation performance
++
+train/validation degradation
+```
+
+Например:
+
+```python
+degradation = train_pf - validation_pf
+```
+
+и штрафовал большое падение.
+
+---
+
+# 17. Ещё лучше — walk-forward objective
+
+Например 5 окон:
+
+```text
+W1: Train → Validation
+W2: Train → Validation
+W3: Train → Validation
+W4: Train → Validation
+W5: Train → Validation
+```
+
+Для одного trial:
+
+```text
+PF:
+1.62
+1.48
+1.71
+1.39
+1.55
+```
+
+Среднее:
+
+```text
+1.55
+```
+
+Но я бы учитывал и разброс:
+
+```text
+mean PF
+std PF
+worst window
+```
+
+То есть:
+
+```python
+objective = mean_pf - k * std_pf
+```
+
+Это заставляет искать **стабильные** параметры.
+
+---
+
+# 18. Проверять стабильность параметров
+
+После Optuna не брать один `best_params`.
+
+Например Optuna дала:
+
+```text
+RSI period = 14
+```
+
+Нужно проверить соседей:
+
+```text
+10
+11
+12
+13
+14
+15
+16
+17
+18
+```
+
+Если:
+
+```text
+12–17 → примерно одинаково
+```
+
+отлично.
+
+Если только:
+
+```text
+14 → супер
+13 → плохо
+15 → плохо
+```
+
+это повод относиться к результату как к потенциально переобученному.
+
+---
+
+# 19. Потом Monte Carlo
+
+Для лучших конфигураций я бы сделал Monte Carlo:
+
+```text
+перемешивание порядка сделок
+вариация slippage
+вариация комиссии
+random execution delay
+random trade omission
+```
+
+Смотреть:
+
+```text
+5th percentile PnL
+median PnL
+95th percentile DD
+```
+
+Это показывает, насколько результат зависит от конкретной последовательности сделок.
+
+---
+
+# 20. Финальный blind test
+
+После всего:
+
+```text
+TRAIN
+  ↓
+Optuna
+  ↓
+VALIDATION
+  ↓
+Walk-forward
+  ↓
+Robustness
+  ↓
+FINAL TEST
+```
+
+И **после финального TEST параметры больше не менять**.
+
+Если увидел:
+
+```text
+TEST плохо
+```
+
+нельзя просто снова оптимизировать на TEST.
+
+Нужно вернуться назад и создать новую исследовательскую итерацию.
+
+---
+
+# Я бы построил твой pipeline именно так
+
+```text
+                    ┌──────────────────┐
+                    │ Historical data  │
+                    └────────┬─────────┘
+                             ↓
+                    ┌──────────────────┐
+                    │ Train/Val/Test   │
+                    └────────┬─────────┘
+                             ↓
+                  ┌───────────────────────┐
+                  │ Baseline              │
+                  └──────────┬────────────┘
+                             ↓
+              ┌─────────────────────────────┐
+              │ Optimize each setup         │
+              │ RSI / VWAP / MACD / ...     │
+              └──────────────┬──────────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ Ablation        │
+                    │ remove setups   │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ Setup subsets   │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ Function weights│
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ TF weights      │
+                    │ M10/M5/M1       │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ Entry threshold │
+                    │ quorum / edge   │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ M1 trigger      │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ EXIT optimization│
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ Small joint     │
+                    │ optimization    │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ Walk-forward    │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ Monte Carlo     │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ BLIND TEST      │
+                    └─────────────────┘
+```
+
+## И главное — порядок не менять
+
+Я бы **не делал**:
+
+```text
+Optuna(все параметры сразу)
+```
+
+Потому что у тебя легко получится условно:
+
+```text
+7 setup × 3 TF × 5 параметров × 7 весов ×
+quorum × thresholds × SL × TP × trailing
+```
+
+и пространство станет настолько огромным, что Optuna найдёт прекрасную конфигурацию именно для конкретного куска истории.
+
+Вместо этого:
+
+```text
+1. baseline
+2. individual setup
+3. ablation
+4. setup composition
+5. function weights
+6. TF weights
+7. entry threshold
+8. M1 trigger
+9. exit
+10. limited joint optimization
+11. walk-forward
+12. robustness
+13. blind test
+```
+
+### Для твоего ансамбля я бы добавил ещё один обязательный отчёт
+
+Для **каждого trial** сохранять не только objective:
+
+```text
+trial_id
+parameters
+PnL
+PF
+DD
+Sharpe
+expectancy
+trades
+winrate
+commission
+slippage
+```
+
+но и **воронку сигналов**:
+
+```text
+raw setup signals
+        ↓
+M10 accepted
+        ↓
+M5 accepted
+        ↓
+M1 trigger
+        ↓
+entry
+        ↓
+exit
+```
+
+Тогда ты увидишь, например:
+
+```text
+100000 raw signals
+ ↓
+18000 M10
+ ↓
+6200 M5
+ ↓
+1400 M1
+ ↓
+800 actual entries
+```
+
+и сможешь понять, **какой фильтр реально улучшает качество, а какой просто уменьшает количество сделок**.
+
+Если хочешь сделать это уже на твоём `EnsembleV4Strategy`, следующим практическим шагом будет построить **структуру Optuna Study + параметры search space + objective + walk-forward runner + формат `trials.db`/результатов**, причём так, чтобы после каждого этапа можно было автоматически передавать найденные параметры в следующий этап.
+
+
+
+Да. В твоём случае **режимы рынка я бы сделал не ещё одним голосом ансамбля, а верхним уровнем управления ансамблем**.
+
+То есть:
+
+```text
+                 REGIME DETECTOR
+                       │
+        ┌──────────────┼──────────────┐
+        ↓              ↓              ↓
+     TREND UP       NEUTRAL       TREND DOWN
+        │              │              │
+        └──────────────┼──────────────┘
+                       ↓
+                 VOLATILITY
+                       │
+                       ↓
+              разрешённые setup'ы
+                       ↓
+                  M10 → M5 → M1
+                       ↓
+                    ENTRY
+```
+
+Это принципиально лучше, чем давать `NEUTRAL / TREND / VOLATILITY` один голос в общем кворуме.
+
+---
+
+# 1. Что должен делать regime detector
+
+Он **не должен говорить "BUY" или "SELL"**.
+
+Он должен говорить:
+
+```python
+regime = {
+    "trend": "UP",
+    "volatility": "NORMAL",
+    "confidence": 0.82
+}
+```
+
+Или твои четыре состояния:
+
+```text
+NEUTRAL
+TREND_UP
+TREND_DOWN
+HIGH_VOLATILITY
+```
+
+Но тут есть важный нюанс: **волатильность — это не совсем тот же тип измерения, что направление**.
+
+Лучше концептуально разделить:
+
+```text
+REGIME
+├── direction
+│   ├── UP
+│   ├── DOWN
+│   └── NEUTRAL
+│
+└── volatility
+    ├── LOW
+    ├── NORMAL
+    └── HIGH
+```
+
+Тогда возможна ситуация:
+
+```text
+TREND_UP + HIGH_VOLATILITY
+TREND_UP + LOW_VOLATILITY
+NEUTRAL + HIGH_VOLATILITY
+NEUTRAL + LOW_VOLATILITY
+```
+
+Это намного информативнее.
+
+---
+
+# 2. Не оптимизируй regime detector вместе с ансамблем
+
+Это очень важный момент для твоего Optuna-плана.
+
+Сначала:
+
+```text
+REGIME DETECTOR
+       ↓
+проверить его отдельно
+       ↓
+зафиксировать
+       ↓
+оптимизировать ансамбль
+```
+
+Не надо сразу:
+
+```text
+Optuna:
+regime parameters
++
+RSI
++
+MACD
++
+VWAP
++
+weights
++
+quorum
++
+SL
++
+TP
+```
+
+Иначе получится огромное пространство и будет сложно понять, что действительно работает.
+
+---
+
+# 3. Как использовать режимы для разных функций
+
+Вот здесь начинается самое интересное.
+
+Твои setup'ы логически делятся на две группы.
+
+### Trend-following
+
+```text
+MACD
+Donchian
+Pullback
+breakout
+momentum
+```
+
+### Mean-reversion
+
+```text
+RSI reversal
+Bollinger reclaim
+VWAP reclaim
+```
+
+Поэтому режим может **менять веса setup'ов**.
+
+Например:
+
+### TREND_UP
+
+```text
+MACD       weight 1.0
+Donchian   weight 1.0
+Pullback   weight 0.9
+VWAP       weight 0.7
+RSI        weight 0.3
+Bollinger  weight 0.2
+```
+
+Не потому, что эти цифры заранее правильные — **это search space для Optuna**.
+
+---
+
+### NEUTRAL
+
+Например:
+
+```text
+RSI        1.0
+Bollinger  1.0
+VWAP       0.9
+MACD       0.3
+Donchian   0.2
+Pullback   0.4
+```
+
+---
+
+### TREND_DOWN
+
+Для LONG-only стратегии особенно интересно:
+
+```text
+MACD       0.2
+Donchian   0.1
+Pullback   0.2
+RSI        0.5
+VWAP       0.4
+Bollinger  0.4
+```
+
+И часть setup'ов вообще может быть запрещена.
+
+---
+
+### HIGH_VOLATILITY
+
+Я бы не делал автоматически:
+
+```text
+HIGH_VOLATILITY → разрешить всё
+```
+
+Скорее:
+
+```text
+HIGH_VOLATILITY
+       ↓
+проверить качество движения
+       ↓
+либо breakout
+либо skip
+```
+
+Потому что высокая волатильность может быть как хорошим breakout, так и просто хаосом.
+
+---
+
+# 4. Режим должен менять не только веса
+
+Это ещё важнее.
+
+Режим может управлять:
+
+```text
+1. Какие setup разрешены
+2. Их веса
+3. Entry threshold
+4. Stop distance
+5. Take profit
+6. Trailing
+7. Minimum edge
+8. Cooldown
+9. M1 trigger
+```
+
+Например:
+
+```python
+REGIME_CONFIG = {
+    "TREND_UP": {
+        "allowed_setups": [
+            "macd",
+            "donchian",
+            "pullback",
+            "vwap"
+        ],
+        "entry_threshold": ...,
+        "min_edge": ...,
+    },
+
+    "NEUTRAL": {
+        "allowed_setups": [
+            "rsi",
+            "bollinger",
+            "vwap"
+        ],
+        "entry_threshold": ...,
+        "min_edge": ...,
+    },
+
+    "TREND_DOWN": {
+        "allowed_setups": [
+            "rsi",
+            "vwap"
+        ],
+        "entry_threshold": ...,
+        "min_edge": ...,
+    },
+
+    "HIGH_VOLATILITY": {
+        "allowed_setups": [
+            "donchian",
+            "breakout"
+        ],
+        "entry_threshold": ...,
+        "min_edge": ...,
+    }
+}
+```
+
+---
+
+# 5. Ещё лучше — regime как prior
+
+Я бы не делал жёсткое:
+
+```python
+if TREND_UP:
+    RSI = disabled
+```
+
+Потому что это может быть слишком грубо.
+
+Лучше:
+
+```python
+final_weight = base_weight * regime_multiplier
+```
+
+Например:
+
+```text
+RSI:
+base_weight = 0.8
+
+TREND_UP:
+multiplier = 0.4
+
+итог:
+0.8 × 0.4 = 0.32
+```
+
+А MACD:
+
+```text
+base_weight = 0.8
+TREND_UP multiplier = 1.4
+
+итог = 1.12
+```
+
+Так режим **смещает вероятность**, а не диктует результат.
+
+---
+
+# 6. И это прекрасно ложится на Optuna
+
+Ты можешь разделить оптимизацию на два уровня.
+
+### Stage A
+
+Оптимизируем базовые веса:
+
+```text
+w_RSI
+w_BB
+w_VWAP
+w_MACD
+w_DONCHIAN
+w_PULLBACK
+```
+
+### Stage B
+
+Оптимизируем regime multipliers:
+
+```text
+TREND_UP:
+    RSI_mult
+    BB_mult
+    VWAP_mult
+    MACD_mult
+    ...
+
+NEUTRAL:
+    RSI_mult
+    BB_mult
+    ...
+
+HIGH_VOL:
+    ...
+```
+
+Но **не сразу все multipliers**.
+
+Сначала только 2–3 наиболее важных.
+
+Например:
+
+```text
+TREND_UP:
+    trend_setup_multiplier
+    mean_reversion_multiplier
+
+NEUTRAL:
+    trend_setup_multiplier
+    mean_reversion_multiplier
+```
+
+И только если это показывает стабильное улучшение — расширять.
+
+---
+
+# 7. Я бы сделал ещё один уровень: режим на каждом TF
+
+Это особенно хорошо для твоей M10/M5/M1 архитектуры.
+
+Не:
+
+```text
+один regime
+```
+
+а:
+
+```text
+M10 regime
+M5 regime
+M1 micro-regime
+```
+
+Например:
+
+```text
+M10 = TREND_UP
+M5  = TREND_UP
+M1  = NEUTRAL
+```
+
+Это может быть отличным состоянием:
+
+```text
+старший тренд ↑
+       ↓
+M5 подтверждает
+       ↓
+M1 временно откатывается
+       ↓
+ждём M1 trigger
+```
+
+А вот:
+
+```text
+M10 = TREND_UP
+M5  = TREND_DOWN
+```
+
+можно считать конфликтом и требовать более сильного подтверждения.
+
+---
+
+# 8. Получается очень хорошая архитектура
+
+```text
+                 M10
+                  │
+          ┌───────┴────────┐
+          │                │
+       REGIME           DIRECTION
+          │                │
+          └───────┬────────┘
+                  ↓
+             M5 SETUPS
+                  │
+        ┌─────────┴─────────┐
+        │                   │
+      score              regime
+        │                   │
+        └─────────┬─────────┘
+                  ↓
+             M1 TRIGGER
+                  │
+                  ↓
+              ENTRY SCORE
+                  │
+                  ↓
+               ENTRY
+```
+
+---
+
+# 9. Самое интересное — режим можно использовать при обучении Optuna
+
+Я бы **не оптимизировал один набор параметров на всех режимах**.
+
+Например:
+
+```text
+Study #1
+TREND_UP
+
+Study #2
+TREND_DOWN
+
+Study #3
+NEUTRAL
+
+Study #4
+HIGH_VOLATILITY
+```
+
+И посмотреть:
+
+```text
+какие параметры стабильны внутри каждого режима
+```
+
+Например условно:
+
+```text
+              TREND    NEUTRAL    HIGH VOL
+RSI period     18         12          9
+MACD fast       9         12          8
+BB period      20         15         12
+Donchian       40         30         20
+```
+
+Но это **результат исследования**, а не значения, которые стоит заранее принять.
+
+---
+
+# 10. Потом возникает очень важный вопрос: нужен ли вообще отдельный набор параметров?
+
+Допустим Optuna показывает:
+
+```text
+TREND_UP:
+RSI period 15–18
+
+NEUTRAL:
+RSI period 14–17
+```
+
+Тогда нет смысла иметь:
+
+```text
+RSI_TREND_PERIOD
+RSI_NEUTRAL_PERIOD
+```
+
+Можно оставить:
+
+```text
+RSI_PERIOD = 16
+```
+
+Это **лучше для устойчивости**.
+
+А вот если:
+
+```text
+TREND_UP: 18–22
+NEUTRAL: 7–11
+```
+
+тогда режим-зависимый параметр действительно может быть оправдан.
+
+---
+
+# 11. Поэтому введи "complexity penalty"
+
+При сравнении двух конфигураций:
+
+```text
+A:
+20 параметров
+
+B:
+8 параметров
+```
+
+если они показывают практически одинаковый validation result, я бы предпочёл **более простую** конфигурацию.
+
+В objective можно добавить штраф:
+
+```python
+score = performance - complexity_penalty
+```
+
+где:
+
+```python
+complexity_penalty = k * number_of_active_parameters
+```
+
+Не обязательно буквально делать это сразу в формуле — можно использовать как критерий отбора Pareto-решений.
+
+---
+
+# 12. Как использовать HIGH_VOLATILITY
+
+Вот здесь я бы был особенно осторожен.
+
+Не стоит делать:
+
+```text
+HIGH_VOLATILITY → lower quorum
+```
+
+автоматически.
+
+Я бы разделил:
+
+```text
+HIGH_VOLATILITY
+        │
+        ├── directional expansion
+        │       ↓
+        │    breakout
+        │
+        └── chaotic expansion
+                ↓
+               SKIP
+```
+
+То есть нужен второй фильтр:
+
+```text
+volatility
++
+directional efficiency
+```
+
+Например можно измерять:
+
+```text
+abs(price_change)
+-----------------
+true_range
+```
+
+Если рынок сильно ходит, но почти никуда не продвигается:
+
+```text
+high volatility
++
+low directional efficiency
+=
+SKIP
+```
+
+Это потенциально очень полезный фильтр именно для твоей проблемы с ложными входами.
+
+---
+
+# 13. Для выхода режимы тоже очень полезны
+
+Например LONG в `TREND_UP`:
+
+```text
+не выходить сразу при первом слабом MACD flip
+```
+
+Потому что откаты внутри тренда нормальны.
+
+Можно использовать:
+
+```text
+TREND_UP:
+    trailing wider
+    exit threshold lower
+    allow pullback
+```
+
+А в `NEUTRAL`:
+
+```text
+    trailing tighter
+    exit faster
+```
+
+В `HIGH_VOLATILITY`:
+
+```text
+    ATR-based stop wider
+    но position size smaller
+```
+
+То есть режим влияет не только на **можно ли войти**, но и на **как управлять позицией**.
+
+---
+
+# 14. Как я бы встроил это в твой экспериментальный pipeline
+
+Тогда последовательность становится:
+
+```text
+01. Baseline
+       ↓
+02. Проверка regime detector
+       ↓
+03. Optimize setups WITHOUT regime adaptation
+       ↓
+04. Ablation
+       ↓
+05. Function weights
+       ↓
+06. TF weights
+       ↓
+07. Entry threshold
+       ↓
+08. M1 trigger
+       ↓
+09. Exit
+       ↓
+10. Добавить regime multipliers
+       ↓
+11. Regime-specific thresholds
+       ↓
+12. Regime-specific exits
+       ↓
+13. Limited joint optimization
+       ↓
+14. Walk-forward
+       ↓
+15. Monte Carlo
+       ↓
+16. Blind test
+```
+
+И это очень важно:
+
+**сначала доказать, что сам ансамбль работает, потом разрешать regime detector управлять им.**
+
+Иначе можно получить ситуацию:
+
+```text
+плохой ансамбль
++
+очень хорошо подогнанный regime filter
+=
+красивая история на backtest
+```
+
+---
+
+# 15. Я бы в твоём случае начал с 4 режимов именно так
+
+| Режим             | Основная роль                | Приоритет setup'ов                   |
+| ----------------- | ---------------------------- | ------------------------------------ |
+| `TREND_UP`        | continuation                 | MACD / Pullback / Donchian / VWAP    |
+| `TREND_DOWN`      | защита LONG от плохих входов | reversal / VWAP, сильное ограничение |
+| `NEUTRAL`         | mean reversion               | RSI / Bollinger / VWAP               |
+| `HIGH_VOLATILITY` | expansion/breakout или skip  | Donchian / breakout / volume         |
+
+Но это **гипотеза для первого эксперимента**, а не утверждение, что именно такая классификация окажется прибыльнее. Optuna и walk-forward должны это проверить.
+
+### Самая сильная идея здесь
+
+Я бы сделал не:
+
+```text
+Regime → BUY/SELL
+```
+
+а:
+
+```text
+Regime
+  ↓
+какие стратегии имеют право голосовать
+  ↓
+их веса
+  ↓
+порог входа
+  ↓
+M1 trigger
+  ↓
+ENTRY
+```
+
+То есть **режим — это "контекст", ансамбль — "доказательства", M1 — "момент", а exit-модель — отдельная система**.
+
+Если у тебя есть код самого `regime detector` (особенно как именно он сейчас определяет `NEUTRAL / TREND_UP / TREND_DOWN / HIGH_VOLATILITY`), пришли его — тогда можно будет построить конкретный `Regime → Setup Matrix` и search space для Optuna, а не абстрактную схему.
+
+
+
+
+
+
+
+
+Да. По этому реестру уже можно сделать **первичный отбор гейтов**, но я бы пока не включал новые фильтры в REF: сначала отделим **защитные гейты**, которые логично держать включёнными, от **alpha-гейтов**, которые способны изменить статистическое преимущество REF и поэтому требуют отдельного OOS/A-B теста.
+
+### Моя классификация
+
+| Гейт                          | Сейчас       | Что делать                                      |
+| ----------------------------- | ------------ | ----------------------------------------------- |
+| `bad_candle` / `stale_candle` | —            | **ВКЛ**                                         |
+| `already_held`                | —            | **ВКЛ**                                         |
+| `session_filter`              | —            | **ВКЛ**                                         |
+| `long/short_disabled`         | —            | **ВКЛ**                                         |
+| `risk_limit`                  | —            | **ВКЛ**                                         |
+| `max_positions`               | 6            | **ВКЛ**                                         |
+| `budget` / `margin_limit`     | —            | **ВКЛ**                                         |
+| `entry_last_hour_block`       | true         | **оставить ВКЛ**                                |
+| `cooldown`                    | 15           | **ВКЛ, frozen REF**                             |
+| `h1_align`                    | true         | **НЕ менять без теста**                         |
+| `tf_conflict`                 | true         | **НЕ менять без теста**                         |
+| `daily_bias`                  | ?            | **отдельный тест**                              |
+| `mtf_h1_align`                | false        | **ОСТАВИТЬ ВЫКЛ**                               |
+| `mtf_m5_trigger`              | false        | **ОСТАВИТЬ ВЫКЛ**                               |
+| `rank_filter`                 | false        | **ОСТАВИТЬ ВЫКЛ**                               |
+| `beta_filter`                 | false        | **пока ВЫКЛ**                                   |
+| `confirmed_cluster`           | false        | **пока ВЫКЛ**                                   |
+| `sector_cluster`              | 0            | **пока ВЫКЛ**                                   |
+| `orderbook`                   | 0.3 / 25 bps | **тестировать отдельно**                        |
+| `liquidity`                   | 0            | **0 оставить**, затем исследовать               |
+| `volatility_check`            | 3×           | **тестировать**                                 |
+| `news_blackout`               | true         | **ВКЛ как risk/data gate, но не считать alpha** |
+| `IMOEX guard`                 | true         | **оставить ВКЛ, но отдельно проверить**         |
+| `loss_streak_hold`            | true         | **отдельно проверить**                          |
+| `queue`                       | true         | **для research ВЫКЛ**                           |
+| `AI approval`                 | —            | **не использовать для оценки alpha**            |
+| `AI chase`                    | 3%           | **только execution/risk**                       |
+| `AI SL/TP caps`               | —            | **risk layer**                                  |
+
+Но есть несколько важных моментов прямо в коде.
+
+---
+
+# 1. Самые интересные кандидаты для исследования
+
+Я бы поставил в следующий экспериментальный пакет всего **5 гейтов**:
+
+### A. `entry_h1_align`
+
+Это один из наиболее осмысленных кандидатов:
+
+```python
+if ctx.h1_side != ctx.side:
+    reject
+```
+
+То есть:
+
+**BUY → H1 должен быть BUY**
+
+**SELL → H1 должен быть SELL**
+
+У вас REF уже жил с `entry_h1_align=true`, поэтому здесь особенно важно не «улучшить» его вслепую, а проверить:
+
+```text
+REF
+REF - H1 align
+REF + более строгий H1 threshold
+REF + более мягкий H1 threshold
+```
+
+Потому что сам факт, что H1 MACD имеет сторону, ещё не означает сильный сигнал.
+
+---
+
+# 2. `tf_conflict` — интереснее, чем просто H1 veto
+
+Сейчас:
+
+```python
+daily bias = UP
+H1 = SELL
+→ reject
+```
+
+Это фактически **conflict detector**.
+
+Но здесь есть потенциальная проблема: если дневной bias и H1 действительно расходятся в переходной фазе рынка, именно там могут возникать хорошие reversal-сделки.
+
+Поэтому я бы не делал его автоматически жёстче.
+
+Исследовать:
+
+```text
+A: current
+B: выключен
+C: reject только если disagreement сильный
+```
+
+То есть вместо бинарного:
+
+```python
+daily != H1
+```
+
+потом можно перейти к:
+
+```text
+|daily_strength| > X
+AND
+|h1_strength| > Y
+AND
+directions conflict
+```
+
+Это гораздо интереснее.
+
+---
+
+# 3. Orderbook — очень хороший кандидат, но сейчас порог выглядит грубым
+
+Сейчас:
+
+```python
+imbalance_max = 0.3
+spread_max = 25 bps
+```
+
+И логика:
+
+```text
+BUY:
+    imbalance < -0.3 → reject
+
+SELL:
+    imbalance > +0.3 → reject
+```
+
+Это разумная гипотеза.
+
+Но **25 bps для всех акций — подозрительно универсальный порог**.
+
+Для разных MOEX-инструментов микроструктура совершенно разная.
+
+Я бы исследовал отдельно:
+
+```text
+imbalance:
+0.20
+0.25
+0.30
+0.35
+0.40
+```
+
+и:
+
+```text
+spread:
+10
+15
+20
+25
+35
+50 bps
+```
+
+Но не делать сразу `5 × 6 = 30` комбинаций на полном поиске.
+
+Сначала:
+
+**imbalance fixed → spread sweep**
+
+потом лучший диапазон → **imbalance sweep**.
+
+И обязательно смотреть не только Net, но:
+
+* trade count;
+* PF;
+* expectancy;
+* average slippage;
+* MaxDD;
+* долю отклонённых сигналов.
+
+---
+
+# 4. `volatility_check` — потенциально очень полезный защитный фильтр
+
+Сейчас:
+
+```python
+ATR% > 3 × median ATR%
+→ reject
+```
+
+Это хороший кандидат именно потому, что он не пытается предсказывать направление.
+
+Он говорит:
+
+> «инструмент сейчас находится в аномальном состоянии относительно своего обычного поведения».
+
+Исследовать:
+
+```text
+2.0x
+2.25x
+2.5x
+3.0x
+3.5x
+4.0x
+OFF
+```
+
+Но здесь обязательно разделить:
+
+### HIGH volatility + directional
+
+и
+
+### HIGH volatility + chaotic
+
+Потому что для breakout-сетапа высокая волатильность может быть **плюсом**, а не минусом.
+
+Поэтому потенциально лучший будущий вариант:
+
+```text
+high ATR
++
+high directional efficiency
+→ разрешить
+
+high ATR
++
+low directional efficiency
+→ запретить
+```
+
+Но это **следующий эксперимент**, не сейчас.
+
+---
+
+# 5. `liquidity_check`
+
+Сейчас:
+
+```python
+entry_min_turnover = 0
+```
+
+Я бы **не включал его сразу с фиксированным ₽-порогом**.
+
+Причина прямо видна из кода:
+
+```python
+turnover < _min_to
+```
+
+Абсолютный оборот плохо нормализован между инструментами.
+
+Например, условные 1 млн ₽ для одного тикера могут быть огромным фильтром, а для другого — практически ничего.
+
+Лучше будущая версия:
+
+```text
+current turnover
+/
+median turnover instrument
+```
+
+или:
+
+```text
+current bar turnover
+/
+rolling median bar turnover
+```
+
+То есть **relative liquidity**, а не абсолютные ₽.
+
+---
+
+# 6. `daily_bias` — я бы пока не включал
+
+Он интересный:
+
+```python
+daily_bias = up
+SELL → reject
+```
+
+Но у вас уже есть:
+
+* H1 alignment;
+* TF conflict;
+* ensemble;
+* regime;
+* IMOEX.
+
+Добавить ещё один directional veto очень легко превращается в:
+
+> «все фильтры должны согласиться».
+
+А это обычно резко уменьшает trade count.
+
+И самое важное: у вас уже был эксперимент с regime/MTF, где дополнительные ограничения **не улучшили REF**.
+
+Поэтому `daily_bias` — отдельный A/B, а не default.
+
+---
+
+# 7. `loss_streak_hold` — очень спорный alpha-гейт
+
+Вот это:
+
+```text
+2 losses → HOLD 60 min
+```
+
+я бы **не воспринимал как доказанный защитный механизм**.
+
+Потому что после двух убытков могут происходить два совершенно разных сценария:
+
+### Сценарий A
+
+Рынок действительно поменялся → пауза полезна.
+
+### Сценарий B
+
+Стратегия получила случайную серию убытков → следующий сигнал имеет обычное ожидание.
+
+Во втором случае loss-streak просто пропускает хорошие сделки.
+
+Поэтому исследовать надо против:
+
+```text
+OFF
+1 loss
+2 losses
+3 losses
+```
+
+и отдельно:
+
+```text
+hold 30
+60
+90
+120 min
+```
+
+Но **не оптимизировать сразу оба параметра**.
+
+---
+
+# 8. Beta / clusters / sectors
+
+Здесь я бы пока **ничего не включал**.
+
+Почему?
+
+Потому что это не signal-quality filters. Это **portfolio construction**.
+
+Например:
+
+```python
+beta_filter
+```
+
+может отклонить хороший сигнал только потому, что уже есть другие high-beta позиции.
+
+Это может уменьшить portfolio DD, но не улучшить alpha конкретного сигнала.
+
+Поэтому их надо тестировать на другом уровне:
+
+```text
+Signal quality
+        ↓
+Portfolio construction
+        ↓
+Risk
+```
+
+И отдельно измерять:
+
+```text
+signal expectancy
+portfolio DD
+correlation
+concentration
+```
+
+---
+
+# 9. Queue — для research я бы выключил
+
+Это особенно важно.
+
+У вас:
+
+```text
+queue_enabled
+top_boost
+top_relax_caps
+```
+
+Это уже не просто gate.
+
+Это **механизм изменения исполнения и приоритетов**.
+
+Поэтому для исследования стратегии:
+
+```text
+queue = OFF
+```
+
+А потом отдельный эксперимент:
+
+```text
+REF
+REF + queue
+REF + top boost
+REF + relax caps
+```
+
+Иначе становится трудно понять, что именно улучшило результат.
+
+---
+
+# 10. Есть архитектурная проблема с `GATES`
+
+Вот это я бы исправил **до дальнейшей оптимизации**.
+
+Реестр говорит:
+
+```python
+GateSpec("risk_limit", ...)
+```
+
+но функция:
+
+```python
+gate_risk_day()
+```
+
+возвращает:
+
+```python
+f"risk_{str(ctx.risk_state).lower()}"
+```
+
+Например:
+
+```text
+risk_warning
+risk_stop
+```
+
+а не:
+
+```text
+risk_limit
+```
+
+Значит:
+
+**реестр и `skip_counts` могут расходиться.**
+
+То же самое надо проверить по всем динамическим reason codes.
+
+Это важно для экспериментов: иначе вы можете решить, что какой-то gate почти никогда не срабатывает, хотя его reject-коды просто записываются под другим именем.
+
+---
+
+# 11. Ещё одна важная проблема: `orderbook_error`
+
+Сейчас:
+
+```python
+if ctx.orderbook is None:
+    return False, "orderbook_error"
+```
+
+То есть:
+
+> если стакан не получили → торговля запрещена.
+
+Это **fail-closed**.
+
+Для безопасности это нормально.
+
+Но для research это опасно: недоступность стакана становится одновременно:
+
+**data-quality filter + trading filter.**
+
+Нужно разделить:
+
+```text
+orderbook_reject
+orderbook_unavailable
+```
+
+И статистику вести отдельно.
+
+Иначе можно ошибочно решить:
+
+> «orderbook gate улучшил стратегию»
+
+хотя на самом деле он просто не торговал в периоды проблем с данными.
+
+---
+
+# 12. Что включить DEFAULT прямо сейчас
+
+Для **замороженного REF**, без изменения его alpha:
+
+```text
+ON
+├─ bad_candle
+├─ stale_candle
+├─ session_filter
+├─ last_hour
+├─ direction
+├─ already_held
+├─ risk_limit
+├─ max_positions
+├─ budget
+├─ margin_limit
+├─ cooldown = 15
+├─ current H1 alignment = как в REF
+├─ current TF conflict = как в REF
+├─ news blackout
+└─ execution/data safety
+
+OFF / не трогать
+├─ MTF H1 legacy
+├─ M5 trigger legacy
+├─ rank
+├─ beta
+├─ confirmed clusters
+├─ sector cluster
+├─ queue
+└─ новые alpha-фильтры
+```
+
+А **исследовательский пул**:
+
+```text
+1. orderbook
+2. volatility
+3. daily_bias
+4. loss_streak
+5. liquidity
+```
+
+---
+
+## Как я бы поставил следующий эксперимент
+
+Не делать Optuna сразу.
+
+Сначала **gate ablation**:
+
+```text
+REF
+REF + orderbook
+REF + volatility
+REF + daily_bias
+REF + loss_streak
+REF + liquidity
+```
+
+И отдельно:
+
+```text
+REF - H1
+REF - TF conflict
+```
+
+Для каждого:
+
+```text
+Net
+PF
+MaxDD
+Sharpe
+Expectancy
+Trades
+WR
+Avg Win
+Avg Loss
+Commission
+Skipped signals
+Δ vs REF
+```
+
+А потом только лучшие 1–2 гейта проверять на **новом OOS/forward периоде**.
+
+### И главное
+
+Не надо выбирать gate по принципу:
+
+> «Net вырос → включаем».
+
+Например:
+
+```text
+REF:       +4000, 500 trades
+Gate A:    +4300, 350 trades
+```
+
+Это ещё не означает, что A лучше. Он мог просто убрать 150 плохих **и одновременно случайно убрать будущие хорошие сделки**.
+
+Поэтому я бы ввёл для каждого gate ещё два показателя:
+
+```text
+signal rejection rate
+retained expectancy
+```
+
+и обязательно смотреть **какие сделки он отбрасывает**, а не только конечный PnL.
+
+Если хочешь, следующим сообщением я могу прямо из этого кода составить **конкретный STAGE 16 “Gate Research” для нейросети: порядок экспериментов, exact search space, какие гейты frozen/default, какие OFF, метрики и критерий ADOPT/REJECT**, чтобы ты просто передал ей задачу.

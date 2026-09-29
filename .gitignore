@@ -247,3 +247,6 @@ backend/s5_*.json
 backend/scripts/logs/
 frontend/node_modules.broken/
 backend/tg-orchestrator/
+
+# бэкапы .env (секреты) — не коммитить
+backend/.env.pre-champion.*

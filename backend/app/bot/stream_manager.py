@@ -25,6 +25,26 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def _sid(v) -> str:
+    """Короткий id для логов (UUID → 8 символов)."""
+    return str(v or "")[:8]
+
+
+def _err(e) -> str:
+    return f"{type(e).__name__}: {str(e)[:80]}"
+
+
+def _sub_ok(sub) -> bool:
+    """Подписка успешна? (ResultSubscriptionStatus OK == 1)."""
+    try:
+        st = getattr(sub, "status", None)
+        if st is None:
+            st = getattr(sub, "subscription_status", None)
+        return int(getattr(st, "value", st)) == 1
+    except Exception:
+        return True
+
+
 @dataclass
 class ServerPosition:
     """Позиция с сервера (PositionsStream)."""
@@ -145,7 +165,7 @@ class StreamManager:
             asyncio.create_task(self._trades_loop(), name="stream-trades"),
             asyncio.create_task(self._orders_loop(), name="stream-orders"),
         ]
-        logger.info("StreamManager started (3 streams)")
+        logger.debug("StreamManager: старт (3 потока)")
 
     async def stop(self):
         """Остановить все стримы."""
@@ -154,7 +174,7 @@ class StreamManager:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
-        logger.info("StreamManager stopped")
+        logger.info("Стримы: остановлены")
 
     # ─── Positions Stream ─────────────────────────────────────
 
@@ -206,13 +226,13 @@ class StreamManager:
                         )
                         self._positions[sec.figi] = sp
                         self._uid_to_figi[sec.instrument_uid] = sec.figi
-                        logger.info(f"PositionsSnapshot: {sec.figi} {side} qty={abs(qty)}")
+                        logger.debug(f"Снапшот позиций: {sec.ticker or _sid(sec.figi)} {side} {abs(qty)}")
                 self._last_positions_update = time.monotonic()
-                logger.info(f"PositionsSnapshot: {len(self._positions)} positions loaded")
+                logger.info(f"Позиции: снапшот загружен — {len(self._positions)} шт")
             except Exception as e:
-                logger.warning(f"PositionsSnapshot failed: {e}")
+                logger.warning(f"Позиции: снапшот не получен — {_err(e)}")
 
-            logger.info(f"PositionsStream: subscribing to {len(account_ids)} accounts")
+            logger.info(f"Позиции: подписка на поток ({len(account_ids)} акк.)")
 
             async for response in client.operations_stream.positions_stream(
                 accounts=account_ids,
@@ -221,7 +241,10 @@ class StreamManager:
                 # Subscription confirmation
                 if response.subscriptions:
                     for sub in response.subscriptions.accounts:
-                        logger.info(f"PositionsStream: account {sub.account_id} status={sub.subscription_status}")
+                        if int(getattr(sub.subscription_status, "value", sub.subscription_status)) == 1:
+                            logger.debug(f"Позиции: подписка OK ({_sid(sub.account_id)})")
+                        else:
+                            logger.warning(f"Позиции: подписка не OK — {sub.subscription_status} ({_sid(sub.account_id)})")
 
                 # Initial positions (PositionsResponse with .securities)
                 if response.initial_positions:
@@ -286,11 +309,11 @@ class StreamManager:
                 self._reconnect_count += 1
                 delay = min(2 ** self._reconnect_count, 300)
                 logger.warning(
-                    f"TradesStream disconnected: {e}, "
-                    f"reconnect in {delay}s (attempt {self._reconnect_count})"
+                    f"Сделки: обрыв связи ({_err(e)}) — переподключение через {delay:.0f}с "
+                    f"(попытка {self._reconnect_count})"
                 )
                 if self._reconnect_count > self._max_reconnect:
-                    logger.error("TradesStream: max reconnect attempts reached")
+                    logger.error("Сделки: лимит переподключений исчерпан")
                     break
                 await asyncio.sleep(delay)
 
@@ -301,13 +324,16 @@ class StreamManager:
         async with AsyncClient(self.token, target=self.target) as client:
             account_ids = [self.account_id]
 
-            logger.info(f"TradesStream: subscribing to {len(account_ids)} accounts")
+            logger.info(f"Сделки: подписка на поток ({len(account_ids)} акк.)")
 
             async for response in client.orders_stream.trades_stream(
                 accounts=account_ids,
             ):
                 if response.subscription:
-                    logger.info(f"TradesStream: subscription status={response.subscription}")
+                    if _sub_ok(response.subscription):
+                        logger.info("Сделки: подписка OK")
+                    else:
+                        logger.warning(f"Сделки: подписка не OK — {response.subscription}")
 
                 if response.order_trades:
                     ot = response.order_trades
@@ -323,9 +349,8 @@ class StreamManager:
                         )
                         self._trades[trade.trade_id] = st
                         logger.info(
-                            f"TradesStream: {ot.figi} {st.direction} "
-                            f"qty={st.quantity} price={st.price:.2f} "
-                            f"order={ot.order_id[:12]}"
+                            f"Сделка: {ot.figi[:6]} {st.direction} "
+                            f"{st.quantity} @ {st.price:.2f} (заявка {_sid(ot.order_id)})"
                         )
 
                         # Resolve pending order future
@@ -349,11 +374,11 @@ class StreamManager:
                 self._reconnect_count += 1
                 delay = min(2 ** self._reconnect_count, 300)
                 logger.warning(
-                    f"OrderStateStream disconnected: {e}, "
-                    f"reconnect in {delay}s (attempt {self._reconnect_count})"
+                    f"Заявки: обрыв связи ({_err(e)}) — переподключение через {delay:.0f}с "
+                    f"(попытка {self._reconnect_count})"
                 )
                 if self._reconnect_count > self._max_reconnect:
-                    logger.error("OrderStateStream: max reconnect attempts reached")
+                    logger.error("Заявки: лимит переподключений исчерпан")
                     break
                 await asyncio.sleep(delay)
 
@@ -366,12 +391,15 @@ class StreamManager:
             request = OrderStateStreamRequest()
             request.ping_delay_millis = 10_000
 
-            logger.info("OrderStateStream: subscribing")
+            logger.info("Заявки: подписка на поток")
 
             stream = client.orders_stream.order_state_stream(request=request)
             async for response in stream:
                 if response.subscription:
-                    logger.info(f"OrderStateStream: subscription status={response.subscription}")
+                    if _sub_ok(response.subscription):
+                        logger.info("Заявки: подписка OK")
+                    else:
+                        logger.warning(f"Заявки: подписка не OK — {response.subscription}")
 
                 if response.order_state:
                     try:
@@ -398,12 +426,12 @@ class StreamManager:
                         )
                         self._orders[os_data.order_id] = so
                         logger.info(
-                            f"OrderStateStream: figi={figi or os_data.ticker} {so.direction} "
-                            f"status={status} order={os_data.order_id[:12]}"
+                            f"Заявка: {(figi or os_data.ticker or '')[:8]} {so.direction} "
+                            f"{status} (id {_sid(os_data.order_id)})"
                         )
                     except Exception as e:
                         # Битое сообщение ордера не должно ронять весь стрим
-                        logger.warning(f"OrderStateStream: skip bad message {type(e).__name__}: {str(e)[:120]}")
+                        logger.warning(f"Заявки: пропуск битого сообщения ({_err(e)})")
 
                 if response.ping:
                     logger.debug("OrderStateStream: ping")

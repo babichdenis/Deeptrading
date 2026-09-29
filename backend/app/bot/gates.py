@@ -32,8 +32,6 @@ GATES: tuple[GateSpec, ...] = (
              "engine", "Сетапы ансамбля не дали вход (funnel_raw); quorum в ensemble_config"),
     GateSpec("no_fresh", "Нет свежего сигнала", "signal", "signal", "",
              "engine", "Входы есть, но старее FRESH_MIN минут — не торгуем"),
-    GateSpec("vol_thr", "Объёмный фильтр", "signal", "signal", "vol_thr",
-             "engine", "volume/mean50 < порога — вход/выход отклонён (ensemble_config.vol_thr)"),
     GateSpec("AGAINST_BIAS", "Против bias", "signal", "signal", "bias",
              "engine", "Вход против дневного/часового bias ансамбля (ensemble_config.bias)"),
     GateSpec("REGIME_MODE", "Режим сетапов", "signal", "signal", "regime_setups_filter",
@@ -42,14 +40,12 @@ GATES: tuple[GateSpec, ...] = (
              "engine", "Всплеск индекса против стороны входа на этапе сигнала"),
     GateSpec("STOCH_FILTER", "Стохастик-фильтр", "signal", "signal", "",
              "engine", "Stochastic-фильтр сетапа"),
+    GateSpec("RSI_FILTER", "RSI-фильтр", "signal", "signal", "",
+             "engine", "RSI-гейт: BUY не входит вне нейтральной зоны (по умолч. RSI 40–60)"),
     GateSpec("VOL_FLOW", "Поток объёма", "signal", "signal", "",
              "engine", "volume flow против входа"),
     GateSpec("SETUP_MISSING", "Сетап не сработал", "signal", "signal", "",
              "engine", "Нет подтверждения конкретного сетапа"),
-    GateSpec("entry_confirm", "Подтверждение 1м-закрытиями", "signal", "signal",
-             "entry_confirm_closes", "engine", "N 1м-закрытий строго по направлению"),
-    GateSpec("entry_macd_1m", "MACD 1м триггер", "signal", "signal", "",
-             "engine", "1м MACD должен подтверждать сторону (entry_macd_1m)"),
 
     GateSpec("orderbook", "Стакан против входа", "signal", "signal",
              "entry_ob_imbalance_max", "engine",
@@ -62,6 +58,10 @@ GATES: tuple[GateSpec, ...] = (
     GateSpec("volatility_check", "Аномальная волатильность", "signal", "signal",
              "entry_volatility_max_mult", "engine",
              "ATR% тикера > X × медианы по универсу (защита от выбросов)"),
+    GateSpec("news_blackout", "Негативная новость", "signal", "signal",
+             "entry_news_blackout", "engine",
+             "Свежая (≤ entry_news_blackout_min) негативная новость по тикеру "
+             "(санкции/дестабилизация/допэмиссия/авария/иск…) — вход блокируется"),
     # ---------- 2. PRE_ORDER: _process_candle ----------
     GateSpec("cooldown", "Пауза после выхода", "risk", "time",
              "reentry_cooldown_bars", "engine", "Баров между выходом и повторным входом"),
@@ -75,16 +75,12 @@ GATES: tuple[GateSpec, ...] = (
              "long_allowed", "engine", "Направление long выключено в конфиге"),
     GateSpec("short_disabled", "Шорты запрещены", "session", "time",
              "short_allowed", "engine", "Направление short выключено в конфиге"),
-    GateSpec("regime_off", "Режим рынка запрещён", "trend", "trend",
-             "trade_regimes", "engine", "Режим (TREND_UP/…/RANGE) не в trade_regimes"),
     GateSpec("trend_alignment", "Против тренда", "trend", "trend",
              "trend_alignment", "engine", "В TREND_UP только BUY, в TREND_DOWN только SELL"),
     GateSpec("loss_streak_hold", "HOLD после убытков", "risk", "time",
              "loss_streak_hold", "engine", "N убытков подряд → пауза по тикеру/глобально"),
     GateSpec("imoex_guard", "IMOEX guard", "risk", "time",
              "imoex_guard", "engine", "Запрет входов против всплеска индекса MOEX"),
-    GateSpec("risk_limit", "Лимит дня", "risk", "time",
-             "daily_loss_limit", "engine", "risk.state != NORMAL (дневной лимит убытка/пауза)"),
 
     # ---------- 3. ORDER: _submit_order ----------
     GateSpec("daily_bias", "Дневной MACD-bias", "trend", "trend",
@@ -99,6 +95,10 @@ GATES: tuple[GateSpec, ...] = (
              "mtf_align", "engine", "Старый комбинированный MTF-фильтр (H1 vs bias)"),
     GateSpec("mtf_m5_trigger", "M5 триггер (legacy)", "trend", "trend",
              "mtf_trigger", "engine", "M5 MACD должен разворачиваться в сторону входа"),
+    GateSpec("hm_veto", "Veto накопл. движения", "trend", "trend",
+             "entry_hm_veto", "engine",
+             "Вход против накопленного движения за окно (часовые бары из 1м): "
+             "BUY при падении ≤ -thr%, SELL при росте ≥ +thr%"),
     GateSpec("require_member", "Якорь кворума", "signal", "trend",
              "ensemble_require_member", "engine", "Обязательный голос кворума (напр. macd_cross)"),
     GateSpec("rank_filter", "Рейтинг тикеров", "signal", "trend",
@@ -115,28 +115,26 @@ GATES: tuple[GateSpec, ...] = (
              "max_positions", "engine", "Максимум одновременных позиций"),
     GateSpec("sector_cluster", "Кластер сектора", "portfolio", "portfolio",
              "max_sector_positions", "engine", "Максимум позиций в одном секторе"),
+    GateSpec("beta_filter", "Бета-фильтр", "portfolio", "portfolio",
+             "beta_filter_enabled", "engine",
+             "Лимит позиций в бета-группе: low≤4 / mid≤3 / high≤2 (beta = корр с IMOEX)"),
+    GateSpec("confirmed_cluster", "Подтверждённые кластеры", "portfolio", "portfolio",
+             "confirmed_cluster_enabled", "engine",
+             "Лимит позиций в подтверждённых кластерах (steel/metals/oil/index/sber)"),
     GateSpec("ls_balance", "Баланс L/S", "portfolio", "portfolio",
              "max_short_share", "engine", "Доля шортов среди позиций ≤ max_short_share"),
     GateSpec("budget", "Сайзинг: бюджет", "sizing", "sizing",
              "pos_pct", "engine", "Цена/лот/бюджет не позволяют взять даже лот"),
-    GateSpec("margin_limit", "Сайзинг: маржа", "sizing", "sizing",
-             "max_margin_pct", "engine", "Лимит брокера/маржи: max lots = 0"),
-    GateSpec("queue", "Очередь кандидатов", "signal", "portfolio",
-             "queue_enabled", "engine", "Слабый вход отложен в очередь (top-1 входит с бустом)"),
     GateSpec("policy_reject", "Политика сигналов", "signal", "signal", "",
              "engine", "SignalPolicy.decide() отклонил сигнал"),
 
     # ---------- 4. APPROVAL: AI ----------
-    GateSpec("ai_approval", "AI-гейт (approve/reject)", "ai", "approval",
-             "ai_approval", "engine", "Заявка ждёт решения модели; таймаут → ai_approval_default"),
     GateSpec("ai_reject_cooldown", "Пауза после AI-reject", "ai", "approval",
              "ai_reject_cooldown_min", "engine", "Повторные входы по тикеру после отказа AI"),
     GateSpec("ai_already_pending", "Заявка уже в гейте", "ai", "approval", "",
              "engine", "Не дублируем заявку, пока предыдущая ждёт решения"),
     GateSpec("ai_chase", "AI: чейзинг", "ai", "approval",
              "ai_chase_pct", "ai", "Запрет AI-входа после хода >X% за день без отката"),
-    GateSpec("ai_sl_tp", "AI: потолки SL/TP", "ai", "approval",
-             "ai_sl_max_pct", "ai", "SL ≤ ai_sl_max_pct, TP ≤ ai_tp_max_pct для AI-ордеров"),
     GateSpec("ai_watch", "AI-вахтёр позиций", "ai", "approval",
              "ai_approval", "ai", "Вахтёр: close/tighten по позициям (Бот+++)"),
 
@@ -165,16 +163,190 @@ def _flag_enabled(cfg, name: str):
         return bool(v)
 
 
-def gates_report(cfg, skip_counts: dict | None = None) -> dict:
+# =====================================================================================
+# Переключаемые гейты (UI на «Складе»): key → как менять BotConfig, чтобы гейт
+# РЕАЛЬНО вкл/выкл. kind:
+#   bool       — флаг вкл/выкл напрямую;
+#   inv_bool   — гейт активен при ВЫКЛЮЧЕННОМ флаге (long_allowed=False → «Лонги запрещены»);
+#   threshold  — число: 0 = выкл, >0 = вкл (default_on — значение при включении);
+#   list       — список: пустой = выкл, default_on = разрешённый набор;
+#   enum       — строковое значение: on_value / off_value (напр. bias_mode veto/info);
+#   dict       — словарь: {}=выкл, default_on или авто-карта при вкл.
+# Поля "ensemble": True — хранятся в data/ensemble_config.json (не в BotConfig).
+# Гейтов без записи здесь в UI нет — они структурные (всегда активны).
+# =====================================================================================
+_ALL_REGIMES = ("NEUTRAL", "TREND_UP", "TREND_DOWN", "HIGH_VOLATILITY", "RANGE")
+
+GATE_TOGGLE: dict[str, dict] = {
+    # ---------- signal ----------
+    "orderbook":          {"field": "entry_ob_imbalance_max", "kind": "threshold", "default_on": 0.3},
+    "liquidity_check":    {"field": "entry_min_turnover", "kind": "threshold", "default_on": 500_000.0},
+    "volatility_check":   {"field": "entry_volatility_max_mult", "kind": "threshold", "default_on": 3.0},
+    "news_blackout":      {"field": "entry_news_blackout", "kind": "bool"},
+    # ---------- pre_order ----------
+    "cooldown":           {"field": "reentry_cooldown_bars", "kind": "threshold", "default_on": 30},
+    "long_disabled":      {"field": "long_allowed", "kind": "inv_bool"},
+    "short_disabled":     {"field": "short_allowed", "kind": "inv_bool"},
+    "trend_alignment":    {"field": "trend_alignment", "kind": "bool"},
+    "loss_streak_hold":   {"field": "loss_streak_hold", "kind": "bool"},
+    "imoex_guard":        {"field": "imoex_guard", "kind": "bool"},
+    # ---------- order ----------
+    "daily_bias":         {"field": "daily_bias", "kind": "bool"},
+    "last_hour":          {"field": "entry_last_hour_block", "kind": "bool"},
+    "h1_align":           {"field": "entry_h1_align", "kind": "bool"},
+    "tf_conflict":        {"field": "entry_tf_conflict", "kind": "bool"},
+    "mtf_h1_align":       {"field": "mtf_align", "kind": "bool"},
+    "mtf_m5_trigger":     {"field": "mtf_trigger", "kind": "bool"},
+    "hm_veto":            {"field": "entry_hm_veto", "kind": "bool"},
+    "rank_filter":        {"field": "rank_enabled", "kind": "bool"},
+    "max_exposure":       {"field": "max_exposure_pct", "kind": "threshold", "default_on": 1.0},
+    "portfolio_limit":    {"field": "max_net_exposure_pct", "kind": "threshold", "default_on": 0.5},
+    "max_positions":      {"field": "max_positions", "kind": "threshold", "default_on": 5},
+    "sector_cluster":     {"field": "max_sector_positions", "kind": "threshold", "default_on": 2},
+    "beta_filter":        {"field": "beta_filter_enabled", "kind": "bool"},
+    "confirmed_cluster":  {"field": "confirmed_cluster_enabled", "kind": "bool"},
+    "ls_balance":         {"field": "max_short_share", "kind": "threshold", "default_on": 0.7},
+    # ---------- approval / AI ----------
+    "ai_reject_cooldown": {"field": "ai_reject_cooldown_min", "kind": "threshold", "default_on": 15.0},
+    "ai_chase":           {"field": "ai_chase_pct", "kind": "threshold", "default_on": 3.0},
+    # ---------- ensemble (data/ensemble_config.json) ----------
+    "AGAINST_BIAS":       {"field": "bias_mode", "kind": "enum", "ensemble": True,
+                           "on_value": "veto", "off_value": "info"},
+    "REGIME_MODE":        {"field": "regime_setups_filter", "kind": "dict", "ensemble": True},
+}
+
+
+def _all_regimes_map(ec: dict) -> dict:
+    """regime_setups_filter включён БЕЗ ограничений: каждому включённому сетапу — все режимы."""
+    regs = list(_ALL_REGIMES)
+    return {s["strategy_id"]: regs
+            for s in (ec.get("setups") or []) if s.get("enabled", True)}
+
+
+def _field_val(owner, ec: dict | None, name: str):
+    """Значение поля: из ensemble_config.json (приоритет) или BotConfig."""
+    if name and ec is not None and name in ec:
+        return ec[name]
+    if name is None:
+        return None
+    try:
+        return getattr(owner, name, None)
+    except Exception:
+        return None
+
+
+def _val_enabled(v):
+    """enabled-семантика значения: bool / dict / список / число>0."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, dict):
+        return len(v) > 0
+    if isinstance(v, (list, tuple, set)):
+        return len(v) > 0
+    try:
+        return float(v) > 0
+    except Exception:
+        return bool(v)
+
+
+def _gate_logical_enabled(spec: dict | None, owner, ec: dict | None):
+    """РЕАЛЬНОЕ состояние гейта для UI (инверсия, enum, threshold, list, dict)."""
+    if not spec:
+        return True  # структурный — всегда на пути заявки
+    if "fields" in spec:
+        targets = spec["fields"]
+    else:
+        targets = [(spec["field"], None)]
+    for fname, _ in targets:
+        v = _field_val(owner, ec, fname)
+        kind = spec["kind"]
+        if kind == "inv_bool":
+            return not bool(v)
+        if kind == "enum":
+            return v == spec.get("on_value")
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, dict):
+            return len(v) > 0
+        if isinstance(v, (list, tuple, set)):
+            return len(v) > 0
+        try:
+            return float(v) > 0
+        except Exception:
+            return bool(v)
+    return True
+
+
+def toggle_gate(cfg, key: str, enabled: bool, ec: dict | None = None) -> dict:
+    """Применить вкл/выкл гейта. cfg = BotConfig; ec = dict ensemble_config (ensemble-гейты)."""
+    g = next((x for x in GATES if x.key == key), None)
+    if g is None:
+        return {"ok": False, "error": f"нет гейта с ключом {key!r}"}
+    spec = GATE_TOGGLE.get(key)
+    if not spec:
+        return {"ok": False, "error": f"гейт {key!r} структурный — не переключается"}
+    is_ens = bool(spec.get("ensemble"))
+    if is_ens and ec is None:
+        return {"ok": False, "error": f"гейт {key!r} — ensemble-гейт: нужен ensemble_config"}
+    if "fields" in spec:
+        targets: list[tuple] = list(spec["fields"])
+    else:
+        targets = [(spec["field"], spec.get("default_on"))]
+    kind = spec["kind"]
+    owner = ec if is_ens else cfg
+    changed: list[dict] = []
+    for fname, on_val in targets:
+        old = owner.get(fname) if is_ens else getattr(cfg, fname, None)
+        if kind == "inv_bool":
+            v = not bool(enabled)
+        elif kind == "bool":
+            v = bool(enabled)
+        elif kind == "enum":
+            v = spec.get("on_value" if enabled else "off_value")
+        elif kind == "threshold":
+            v = on_val if enabled else 0
+        elif kind == "list":
+            v = list(on_val) if enabled else []
+        elif kind == "dict":
+            v = dict(on_val) if (enabled and on_val) else {}
+            if not v and enabled:
+                v = _all_regimes_map(ec)
+        else:
+            v = bool(enabled)
+        if is_ens:
+            owner[fname] = v
+        else:
+            setattr(cfg, fname, v)
+        changed.append({"name": fname, "old": old, "new": v})
+    return {"ok": True, "key": key, "title": g.title, "on": bool(enabled),
+            "ensemble": is_ens, "fields": changed}
+
+
+def gates_report(cfg, skip_counts: dict | None = None, ec: dict | None = None) -> dict:
     """Реестр гейтов + текущее состояние + статистика отказов (skip_counts)."""
     sk = {str(k): int(v or 0) for k, v in (skip_counts or {}).items()}
     items = []
     for g in GATES:
+        spec = GATE_TOGGLE.get(g.key)
+        # Для переключаемых гейтов показываем значение ИХ поля (spec), а не config спеки
+        # (напр. AGAINST_BIAS: config="bias", а реальный рычаг — bias_mode).
+        _cfg_name = (spec["field"] if (spec and "field" in spec) else g.config)
+        fv = _field_val(cfg, ec, _cfg_name) if _cfg_name else None
+        if not _cfg_name:
+            _enabled = True
+        elif fv is None:
+            _enabled = None
+        else:
+            _enabled = _val_enabled(fv)
         items.append({
             "key": g.key, "title": g.title, "category": g.category, "stage": g.stage,
             "config": g.config, "scope": g.scope, "desc": g.desc,
-            "enabled": _flag_enabled(cfg, g.config),
-            "flag_value": (getattr(cfg, g.config, None) if g.config else None),
+            "enabled": _enabled,
+            "logical_enabled": _gate_logical_enabled(spec, cfg, ec),
+            "toggleable": bool(spec),
+            "flag_value": fv,
             "rejects": sk.get(g.key, 0),
         })
     cats: dict[str, list] = {}
@@ -183,7 +355,7 @@ def gates_report(cfg, skip_counts: dict | None = None) -> dict:
         cats.setdefault(x["category"], []).append(x)
         st = stages.setdefault(x["stage"], {"gates": 0, "enabled": 0, "rejects": 0})
         st["gates"] += 1
-        if x["enabled"]:
+        if x["logical_enabled"]:
             st["enabled"] += 1
         st["rejects"] += x["rejects"]
     _order = ["signal", "time", "trend", "portfolio", "sizing", "approval"]
@@ -229,6 +401,7 @@ class MarketContext:
     atr_pct_median: float | None = None
     orderbook: dict | None = None
     orderbook_checked: bool = True  # False = стакан не запрашивали (лимиты выключены)
+    news_blackout_reason: str = ""  # непусто = свежая негативная новость по тикеру
 
 
 # --- time (STAGE A) ------------------------------------------------------------------
@@ -324,9 +497,18 @@ def gate_orderbook(ctx: MarketContext) -> GateResult:
     return GateResult(True)
 
 
+def gate_news_blackout(ctx: MarketContext) -> GateResult:
+    """Стоп по свежей негативной новости (санкции/дестабилизация/допэмиссия/…)."""
+    if not bool(getattr(ctx.cfg, "entry_news_blackout", True)):
+        return GateResult(True)
+    if ctx.news_blackout_reason:
+        return GateResult(False, "news_blackout", ctx.news_blackout_reason)
+    return GateResult(True)
+
+
 TIME_GATES = (gate_entries_paused, gate_session, gate_last_hour, gate_direction,
               gate_risk_day, gate_loss_streak, gate_already_held)
-MARKET_GATES = (gate_liquidity, gate_volatility, gate_orderbook)
+MARKET_GATES = (gate_liquidity, gate_volatility, gate_orderbook, gate_news_blackout)
 
 
 def run_gate_chain(gates, ctx) -> GateResult:
@@ -356,9 +538,15 @@ GATE_CONFIG_FIELDS: tuple[str, ...] = (
     "entry_ob_spread_max",
     "entry_min_turnover",
     "entry_volatility_max_mult",
+    "entry_news_blackout",
+    "entry_news_blackout_min",
     # trend
     "entry_h1_align",
     "entry_tf_conflict",
+    "entry_hm_veto",
+    "hm_veto_window_h",
+    "hm_veto_thr_pct",
+    "hm_veto_mode",
     # portfolio
     "max_sector_positions",
     # approval / AI
@@ -374,8 +562,14 @@ GATE_CONFIG_DEFAULTS: dict = {
     "entry_ob_spread_max": 25.0,
     "entry_min_turnover": 0.0,
     "entry_volatility_max_mult": 3.0,
+    "entry_news_blackout": True,
+    "entry_news_blackout_min": 60,
     "entry_h1_align": True,
     "entry_tf_conflict": True,
+    "entry_hm_veto": False,
+    "hm_veto_window_h": 24,
+    "hm_veto_thr_pct": 3.0,
+    "hm_veto_mode": "veto",
     "max_sector_positions": 0,
     "ai_chase_pct": 3.0,
     "ai_sl_max_pct": 0.03,
@@ -445,6 +639,8 @@ class TrendContext:
     votes: int = 0
     quorum: int = 2
     rank_why: str = ""
+    hm_pct: float | None = None
+    hm_dur: int = 0
 
 
 def gate_daily_bias(ctx: TrendContext) -> GateResult:
@@ -478,6 +674,29 @@ def gate_tf_conflict(ctx: TrendContext) -> GateResult:
             return GateResult(False, "tf_conflict",
                               f"daily bias {ctx.daily_bias} против H1 {ctx.h1_side} "
                               f"(противоречие ТФ)")
+    return GateResult(True)
+
+
+def gate_hm_veto(ctx: TrendContext) -> GateResult:
+    if not bool(getattr(ctx.cfg, "entry_hm_veto", False)):
+        return GateResult(True)
+    thr = float(getattr(ctx.cfg, "hm_veto_thr_pct", 3.0) or 3.0)
+    p = ctx.hm_pct
+    d = max(0, int(ctx.hm_dur or 0))
+    if p is None:
+        return GateResult(True)
+    # Чем дольше тренд (часы подряд в одну сторону), тем ниже эффективный порог:
+    # длинный тренд считается более «убедительным» — вход против него жёстче режем.
+    _factor = 1.0 + min(d, 48) / 24.0
+    thr_eff = thr / _factor
+    _against = (ctx.side == "BUY" and p <= -thr_eff) or (ctx.side == "SELL" and p >= thr_eff)
+    if not _against:
+        return GateResult(True)
+    mode = str(getattr(ctx.cfg, "hm_veto_mode", "veto")).lower()
+    detail = (f"накоплен {p:+.2f}% за окно, тренд {d}ч против {ctx.side} "
+              f"(порог ±{thr_eff:.2f}% на базе {thr}%)")
+    if mode == "veto":
+        return GateResult(False, "hm_veto", detail)
     return GateResult(True)
 
 
@@ -528,18 +747,103 @@ def gate_rank(ctx: TrendContext) -> GateResult:
 
 
 TREND_GATES = (gate_daily_bias, gate_h1_align, gate_tf_conflict, gate_mtf_h1, gate_mtf_m5,
-               gate_require_member, gate_rank)
+               gate_require_member, gate_rank, gate_hm_veto)
 
 
 @dataclass
 class PortfolioContext:
-    """Контекст слоя portfolio (STAGE C): позиции/сектор/баланс L-S."""
+    """Контекст слоя portfolio (STAGE C): позиции/сектор/баланс L-S.
+
+    held_tickers — тикеры уже открытых позиций (для beta/кластерных гейтов).
+    """
     cfg: object
     side: str
     held_count: int = 0
     sector: str = ""
     sector_count: int = 0
     short_count: int = 0
+    ticker: str = ""                 # текущий кандидат на вход
+    held_tickers: tuple[str, ...] = ()  # тикеры открытых позиций
+
+
+# --- beta-фильтр и подтверждённые кластеры ---------------------------------
+# Beta = корреляция дневных доходностей с IMOEX (замер macro_corr, 2026-05..09).
+# Пороги: low <0.55 (диверсификаторы), mid 0.55–0.75, high >0.75 (привязаны к рынку).
+TICKER_BETA: dict[str, float] = {
+    "ASTR": 0.434, "PLZL": 0.461, "SNGSP": 0.494, "LENT": 0.496, "SFIN": 0.514,
+    "TRNFP": 0.539, "MVID": 0.542,
+    "SMLT": 0.550, "OZON": 0.569, "MTSS": 0.574, "GMKN": 0.612, "VTBR": 0.628,
+    "RNFT": 0.630, "ALRS": 0.647, "AFKS": 0.651, "NLMK": 0.668, "MAGN": 0.674,
+    "PHOR": 0.679, "AFLT": 0.679, "SIBN": 0.690, "VKCO": 0.694, "RUAL": 0.697,
+    "ROSN": 0.728, "CHMF": 0.731,
+    "TATN": 0.784, "SBER": 0.791, "LKOH": 0.800, "YDEX": 0.817, "T": 0.829,
+    "NVTK": 0.839, "GAZP": 0.850,
+}
+DEFAULT_BETA = 0.70  # для тикеров вне словаря — считаем средней (mid)
+
+K_BETA_LOW = 0.55   # beta < порога → low-beta
+K_BETA_HIGH = 0.75  # beta > порога → high-beta
+
+# Ограничения на число позиций в группе (по beta кандидата)
+BETA_LIMITS = {
+    "low": 4,   # диверсификаторы можно держать до 4
+    "mid": 3,
+    "high": 2,  # высокобета — максимум 2
+}
+
+
+def _beta_group(beta: float) -> str:
+    if beta < K_BETA_LOW:
+        return "low"
+    if beta > K_BETA_HIGH:
+        return "high"
+    return "mid"
+
+
+# Подтверждённые кластеры: только пары с реально высокой корреляцией (не сектора).
+# Эмпирика macro_corr (2026-05..09).
+CONFIRMED_CLUSTERS: dict[str, dict] = {
+    "steel":  {"tickers": ("CHMF", "MAGN", "NLMK"), "avg_r": 0.90, "max_positions": 1},
+    "metals": {"tickers": ("GMKN", "RUAL"),         "avg_r": 0.81, "max_positions": 1},
+    "oil":    {"tickers": ("LKOH", "ROSN", "TATN", "SIBN"),
+               "avg_r": 0.72, "max_positions": 2},
+    "index":  {"tickers": ("GAZP", "NVTK", "T", "AFKS"),
+               "avg_r": 0.73, "max_positions": 2},
+    "sber":   {"tickers": ("SBER", "TRNFP", "VTBR"), "avg_r": 0.82, "max_positions": 2},
+}
+
+
+def gate_beta_filter(ctx: PortfolioContext) -> GateResult:
+    """Лимит числа позиций по бета-группе (для текущего тикера)."""
+    if not getattr(ctx.cfg, "beta_filter_enabled", False):
+        return GateResult(True)
+    beta = TICKER_BETA.get(ctx.ticker.upper(), DEFAULT_BETA)
+    group = _beta_group(beta)
+    limit = BETA_LIMITS[group]
+    cnt = sum(1 for t in ctx.held_tickers if _beta_group(
+        TICKER_BETA.get(t.upper(), DEFAULT_BETA)) == group)
+    if cnt >= limit:
+        return GateResult(False, "beta_filter",
+                          f"бета-группа '{group}' уже {cnt}/{limit} (beta {beta:.2f} для {ctx.ticker})")
+    return GateResult(True)
+
+
+def gate_confirmed_cluster(ctx: PortfolioContext) -> GateResult:
+    """Лимит числа позиций внутри подтверждённого кластера (steel/metals/oil/index/sber)."""
+    if not getattr(ctx.cfg, "confirmed_cluster_enabled", False):
+        return GateResult(True)
+    t_up = ctx.ticker.upper()
+    cluster = next((name for name, cfg in CONFIRMED_CLUSTERS.items()
+                    if t_up in cfg["tickers"]), None)
+    if not cluster:
+        return GateResult(True)
+    cfg = CONFIRMED_CLUSTERS[cluster]
+    cnt = sum(1 for t in ctx.held_tickers if t.upper() in cfg["tickers"])
+    if cnt >= cfg["max_positions"]:
+        return GateResult(False, "confirmed_cluster",
+                          f"кластер '{cluster}' уже {cnt}/{cfg['max_positions']} "
+                          f"(avg_r={cfg['avg_r']:.2f})")
+    return GateResult(True)
 
 
 def gate_max_positions(ctx: PortfolioContext) -> GateResult:
@@ -570,4 +874,5 @@ def gate_ls_balance(ctx: PortfolioContext) -> GateResult:
     return GateResult(True)
 
 
-PORTFOLIO_GATES = (gate_max_positions, gate_sector_cluster, gate_ls_balance)
+PORTFOLIO_GATES = (gate_max_positions, gate_sector_cluster, gate_ls_balance,
+                   gate_beta_filter, gate_confirmed_cluster)

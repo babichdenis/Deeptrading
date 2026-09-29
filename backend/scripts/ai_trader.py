@@ -36,14 +36,13 @@ sandbox = тестовый счёт, live = реальные деньги). Ты
   imbalance (-1..+1, >0 = перевес покупок), depth_rub (глубина в рублях);
 - positions[].m5/h1: ЖИВЫЕ СВЕЧИ позиции (o/h/l/c/v, время МСК) — 5м и час;
 - movers: движения по горизонтам 1д/1н/1м/3м (up/down + streak; all — все тикеры);
-- universe[]: ВЕСЬ доступный универс + лидеры движений (даже вне универса — in_universe=false).
-  in_universe=false значит тикер НЕ входит в торговый универс движка (нет стрима/оптуны/лимитов
-  ликвидности) — данные по нему есть для анализа, но заявка по нему может не исполниться
-  (нет живого буфера цены); предпочитай in_universe=true, если торгуешь.
-  По каждому тикеру: price/turnover/rng_pct, chg_1d/chg_1w/chg_1m/chg_3m, ЖИВОЙ СТАКАН
-  (orderbook: spread_bps/imbalance/depth_rub), свечи m5/h1, ТОЧНЫЙ ATR (atr5/atr5_pct —
-  5м, atr_d/atr_d_pct — дневной) и d20/dv20 — 20 ДНЕВНЫХ закрытий/объёмов из БД;
-  рассматривай ЛЮБОЙ тикер из universe, а не только топы движений;
+- universe[]: весь универс. У ЛЮБОГО тикера есть price/turnover/rng_pct и
+  chg_1d/chg_1w/chg_1m/chg_3m. Полные данные (orderbook, m5/h1, d20/dv20, atr5/atr_d)
+  добавлены только по ФОКУСУ (focus[]: позиции + очередь движка + лидеры движений + новости).
+  Если нужен тикер без полных данных — можешь торговать по цене/движению, но оценивай риск выше.
+  in_universe=false значит тикер НЕ входит в торговый универс движка (нет стрима/оптуны);
+  заявка по нему может не исполниться — предпочитай in_universe=true.
+- news[]: свежие новости (source/age_min/title/tickers, топ-6 за ≤6ч) — контекст «в теме»;
 - queue[]: очередь движка — сильнейшие кандидаты бота (ticker/side/score/why);
 - imoex: направление индекса (dir/pct_20m/pct_60m/pct_day, breadth_up_pct);
 - risk: дневной P&L/лимит; recent_trades: последние сделки; now_msk.
@@ -137,35 +136,66 @@ def _ask_deepseek(system: str, user: dict, model: str = "deepseek-chat") -> tupl
             pass
     if not key:
         raise RuntimeError("нет DEEPSEEK_API_KEY")
-    body = {"model": model, "stream": False, "temperature": 0.3, "max_tokens": 6000,
-            "response_format": {"type": "json_object"}, "messages": [
+    body = {"model": model, "stream": False, "temperature": 0.3, "max_tokens": 3000,
+            "response_format": {"type": "json_object"},
+            "reasoning": os.environ.get("AI_THINKING", "0").lower() in ("1", "true", "yes", "on"), "messages": [
         {"role": "system", "content": system},
         {"role": "user",
          "content": json.dumps(user, ensure_ascii=False, default=str)[:100000]},
     ]}
 
+    _usage: dict = {}
+
     def _call(msgs: list) -> str:
         body["messages"] = msgs
-        with httpx.Client(timeout=180.0) as c:
+        with httpx.Client(timeout=300.0) as c:
             r = c.post(f"{base}/chat/completions",
                        headers={"Authorization": f"Bearer {key}"}, json=body)
             r.raise_for_status()
-            return (r.json().get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+            data = r.json()
+            try:
+                _usage.update(data.get("usage") or {})
+            except Exception:
+                pass
+            return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+
+    def _retryable(e: Exception) -> bool:
+        if isinstance(e, (httpx.TimeoutException, httpx.ConnectError, httpx.ConnectTimeout,
+                          httpx.ReadTimeout, httpx.NetworkError)):
+            return True
+        if isinstance(e, httpx.HTTPStatusError):
+            return e.response.status_code >= 500
+        return "timed out" in str(e) or "connection refused" in str(e).lower() or \
+            "connection reset" in str(e).lower()
 
     msgs = list(body["messages"])
-    txt = _call(msgs)
+    _last_e: Exception | None = None
+    txt: str = ""
+    for _attempt in range(3):
+        if _attempt:
+            time.sleep(2.0 * _attempt)  # backoff: 2с, 4с
+        try:
+            txt = _call(msgs)
+            break
+        except Exception as e:
+            _last_e = e
+            if _retryable(e):
+                continue
+            raise
+    else:
+        raise _last_e
     out = _parse_reply(txt)
     if not out[1]:
         if not out[0]:
             # Модель ответила прозой без JSON — сохраняем текст как analysis.
             # Жёсткий ретрай убран: он провоцировал ответы про формат вместо анализа.
-            return [str(txt).strip()[:3000], [], []]
-    return out
+            return [str(txt).strip()[:3000], [], [], _usage]
+    return [out[0], out[1], out[2], _usage]
 
 
 def _ask(system: str, user: dict, model: str, url: str) -> tuple:
     url = url.rstrip("/")
-    with httpx.Client(timeout=180.0) as c:
+    with httpx.Client(timeout=300.0) as c:
         sid = c.post(f"{url}/session", json={"title": "ai-trader"}).json().get("id")
         try:
             body = {
@@ -178,7 +208,8 @@ def _ask(system: str, user: dict, model: str, url: str) -> tuple:
             r.raise_for_status()
             txt = "".join(p.get("text", "") for p in (r.json().get("parts") or [])
                           if p.get("type") == "text")
-            return _parse_reply(txt)
+            _r = _parse_reply(txt)
+            return [_r[0], _r[1], _r[2], {}]
         finally:
             try:
                 c.delete(f"{url}/session/{sid}")
@@ -339,16 +370,59 @@ def _context(api: str) -> dict:
         out["movers"] = mv.get("horizons")
     except Exception:
         out["movers"] = {}
-    # Вселенная: ВСЕ eligible-тикеры + лидеры движений (даже вне универса) с полными
-    # данными: стакан, свечи m5/h1, дневная история d20/dv20 и точный ATR (день/5м).
+    # Вселенная: ВСЕ eligible-тикеры + лидеры движений. Полные данные (стакан, m5/h1,
+    # d20/dv20, ATR) — только по ФОКУСУ (позиции + очередь + лидеры движений + новости),
+    # остальные — лёгкие строки. Так контекст в разы меньше, а «в теме» AI остаётся.
     try:
         scr = _http("GET", f"{api}/api/v1/screener")
         _items = scr.get("items") or []
         rows = [r for r in _items if r.get("in_universe")][:40]
         _uni_tk = {r["ticker"] for r in rows}
         _by_all = {r["ticker"]: r for r in _items}
-        # Лидеры движений вне eligible-универса (LKOH/OZON/YDEX/MVID…) — раньше
-        # они были видны в movers, но без стакана/свечей и «отсекались на старте».
+        # Очередь движка — до обогащения (влияет на фокус-набор)
+        try:
+            _pf = _http("GET", f"{api}/api/v1/bot/portfolio_summary", timeout=15)
+            out["queue"] = [{"ticker": q.get("ticker"), "side": q.get("side"),
+                             "score": q.get("score"), "why": q.get("why")}
+                            for q in (_pf.get("queue") or [])[:5]]
+        except Exception:
+            out["queue"] = []
+        # Новости (компактно, топ-6 за ≤6ч) — контекст «в теме» + тикеры в фокус
+        _news_focus: set[str] = set()
+        try:
+            _nr = _http("GET", f"{api}/api/v1/news?limit=60", timeout=20)
+            _news_rows = [x for x in (_nr.get("news") or [])
+                          if x.get("age_min") is not None and int(x["age_min"]) <= 360]
+            _news_rows.sort(key=lambda x: int(x.get("age_min") or 999))
+            out["news"] = [{"source": x.get("source"), "age_min": x.get("age_min"),
+                            "title": str(x.get("title") or "")[:140],
+                            "tickers": x.get("tickers") or []}
+                           for x in _news_rows[:6]]
+            for x in out["news"]:
+                _news_focus.update(str(t).upper() for t in (x.get("tickers") or []))
+        except Exception:
+            out["news"] = []
+        # Фокус: позиции → очередь → лидеры движений (1д/1н/1м) → новости (кап 14)
+        _focus: list[str] = []
+
+        def _add_focus(tk):
+            tk = str(tk or "").upper()
+            if tk and tk not in _focus:
+                _focus.append(tk)
+
+        for p_ in (out.get("positions") or []):
+            _add_focus(p_.get("ticker"))
+        for q_ in (out.get("queue") or []):
+            _add_focus(q_.get("ticker"))
+        for lbl, k in (("1д", 3), ("1н", 2), ("1м", 2)):
+            h = (out.get("movers") or {}).get(lbl) or {}
+            for x in (h.get("up") or [])[:k] + (h.get("down") or [])[:k]:
+                _add_focus(x.get("ticker"))
+        for tk in _news_focus:
+            _add_focus(tk)
+        _focus_set = set(_focus[:14])
+        out["focus"] = sorted(_focus_set)
+        # Лидеры движений вне eligible-универса (LKOH/OZON/YDEX/MVID…)
         _extra: list[dict] = []
         for lbl in ("1д", "1н", "1м"):
             h = (out.get("movers") or {}).get(lbl) or {}
@@ -373,6 +447,8 @@ def _context(api: str) -> dict:
                    "rng_pct": r.get("rng_pct"),
                    "in_universe": bool(r.get("in_universe"))}
             row.update(_chg.get(tk) or {})
+            if tk not in _focus_set:
+                return row  # лёгкая строка: только цена/оборот/движение
             row["orderbook"] = _orderbook(api, fg)
             row["m5"] = _bars(api, fg, "5min", 6)
             row["h1"] = _bars(api, fg, "hour", 4)
@@ -380,7 +456,7 @@ def _context(api: str) -> dict:
             try:
                 _m5all = _bars(api, fg, "5min", 20)
                 _a5 = _calc_atr([b["h"] for b in _m5all], [b["l"] for b in _m5all],
-                           [b["c"] for b in _m5all], 14)
+                                [b["c"] for b in _m5all], 14)
                 if _a5:
                     row["atr5"] = round(_a5, 4)
                     row["atr5_pct"] = round(_a5 / (row.get("price") or 1) * 100, 2)
@@ -395,7 +471,7 @@ def _context(api: str) -> dict:
                 row["d20"] = [round(v, 4) for v in _cl]
                 row["dv20"] = [int(c.get("volume") or 0) for c in _cs]
                 _ad = _calc_atr([float(c.get("high") or 0) for c in _cs],
-                           [float(c.get("low") or 0) for c in _cs], _cl, 14)
+                                [float(c.get("low") or 0) for c in _cs], _cl, 14)
                 if _ad:
                     row["atr_d"] = round(_ad, 4)
                     row["atr_d_pct"] = round(_ad / (_cl[-1] or 1) * 100, 2)
@@ -404,17 +480,9 @@ def _context(api: str) -> dict:
                 row["dv20"] = []
             return row
 
-        # Параллельно: ~30+ тикеров × 4 запроса; иначе ~30-60с последовательно.
+        # Параллельно: полные данные только по фокусу, остальные — мгновенно.
         with ThreadPoolExecutor(max_workers=8) as ex:
             out["universe"] = list(ex.map(_enrich, rows))
-        # Очередь движка — сильнейшие кандидаты бота по score
-        try:
-            _pf = _http("GET", f"{api}/api/v1/bot/portfolio_summary", timeout=15)
-            out["queue"] = [{"ticker": q.get("ticker"), "side": q.get("side"),
-                             "score": q.get("score"), "why": q.get("why")}
-                            for q in (_pf.get("queue") or [])[:5]]
-        except Exception:
-            out["queue"] = []
     except Exception:
         out["universe"] = []
     # Сделки
@@ -447,6 +515,8 @@ def main() -> None:
     ap.add_argument("--opencode-url", default="http://192.168.1.3:4096")
     ap.add_argument("--model", default="")
     ap.add_argument("--interval", type=float, default=300.0)
+    ap.add_argument("--heartbeat", type=float, default=900.0,
+                    help="период вызова LLM при пустом портфеле и очереди, сек (экономия токенов)")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--report-only", action="store_true",
                     help="только отчёт/предложения и закрытия, без открытия позиций")
@@ -478,6 +548,7 @@ def main() -> None:
     print(f"[ai-trader] api={args.api} model={args.model} interval={args.interval}s", flush=True)
     post_prompt()
     _cycle = 0
+    _last_llm_ts = 0.0
     while True:
         _cycle += 1
         if _cycle % 100 == 0:
@@ -491,6 +562,30 @@ def main() -> None:
                     return
                 time.sleep(max(15.0, float(args.interval)))
                 continue
+            # Экономия токенов: если позиций нет и очередь пуста — модель не зовём,
+            # только лёгкий peek (state+portfolio) и ждём до heartbeat.
+            _now_m = time.monotonic()
+            if _last_llm_ts and (_now_m - _last_llm_ts) < float(args.heartbeat):
+                _has_pos = _has_q = False
+                try:
+                    _peek = _http("GET", f"{args.api}/api/v1/bot/state", timeout=15)
+                    _has_pos = bool(_peek.get("positions"))
+                except Exception:
+                    pass
+                if not _has_pos:
+                    try:
+                        _pfq = _http("GET", f"{args.api}/api/v1/bot/portfolio_summary", timeout=15)
+                        _has_q = bool(_pfq.get("queue"))
+                    except Exception:
+                        pass
+                if not (_has_pos or _has_q):
+                    print(f"[ai-trader] нет позиций/очереди — пропуск LLM "
+                          f"(до heartbeat {max(0, int(float(args.heartbeat) - (_now_m - _last_llm_ts)))}с)",
+                          flush=True)
+                    if args.once:
+                        return
+                    time.sleep(max(15.0, float(args.interval)))
+                    continue
             ctx = _context(args.api)
             n_pos = len(ctx.get("positions") or [])
             eq = (ctx.get("portfolio") or {}).get("equity")
@@ -519,9 +614,17 @@ def main() -> None:
 
 """)
             if str(args.provider) == "deepseek":
-                analysis, acts, sugg = _ask_deepseek(_sys, ctx, args.model or "deepseek-chat")
+                analysis, acts, sugg, _usage = _ask_deepseek(_sys, ctx, args.model or "deepseek-chat")
             else:
-                analysis, acts, sugg = _ask(_sys, ctx, args.model, args.opencode_url)
+                analysis, acts, sugg, _usage = _ask(_sys, ctx, args.model, args.opencode_url)
+            _prompt_est = (len(_sys) + len(json.dumps(ctx, ensure_ascii=False, default=str))) // 4
+            _usage_out = {
+                "prompt": int(_usage.get("prompt_tokens") or 0) or _prompt_est,
+                "completion": int(_usage.get("completion_tokens") or 0),
+                "estimated": not bool(_usage.get("prompt_tokens")),
+            }
+            _usage_out["total"] = _usage_out["prompt"] + _usage_out["completion"]
+            _last_llm_ts = time.monotonic()
             if analysis:
                 print(f"[ai-trader] РАЗБОР: {analysis}", flush=True)
                 try:
@@ -536,7 +639,7 @@ def main() -> None:
                     _http("POST", f"{args.api}/api/v1/bot/ai_report", {
                         "model": args.model, "analysis": str(analysis)[:8000],
                         "suggestions": sugg[:8], "actions": acts[:10],
-                        "now_msk": ctx.get("now_msk"),
+                        "now_msk": ctx.get("now_msk"), "usage": _usage_out,
                     }, timeout=20)
                 except Exception:
                     pass

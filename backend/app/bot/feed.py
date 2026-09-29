@@ -62,9 +62,43 @@ class CandleFeed:
         self._stop_requested = False
         self.on_log: object | None = None
         self._persist_buf: list[dict] = []
+        # Динамическое добавление/удаление figis «на лету» (карусель бота).
+        # Очереди заполняются извне (feed.add_figis / feed.remove_figis),
+        # а применяются внутри _stream_grpc / _polling между ответами.
+        self._add_q: list[str] = []
+        self._rm_q: list[str] = []
+
+    def add_figis(self, figis: list[str]) -> None:
+        """Подписаться на новые figis без перезапуска feed (stream + polling).
+
+        figis добавляются в общий список сразу (polling подхватывает по списку),
+        а для stream-режима ставится в очередь _add_q — _stream_grpc подпишет.
+        """
+        for f in figis:
+            if not f or f in self.figis:
+                continue
+            self.figis.append(f)
+            self._add_q.append(f)
+
+    def remove_figis(self, figis: list[str]) -> None:
+        """Отписаться от figis и убрать их из внутреннего списка feed."""
+        for f in figis:
+            if f in self.figis:
+                self.figis.remove(f)
+            if f in self._add_q:
+                self._add_q.remove(f)
+            if f not in self._rm_q:
+                self._rm_q.append(f)
+
+    def _drain_add_q(self) -> list[str]:
+        """Достаёт из очереди только те figis, которых ещё нет в stream-подписке."""
+        add = [f for f in self._add_q if f in self.figis]
+        self._add_q = []
+        return add
 
     def _emit(self, msg: str) -> None:
-        logger.info("CandleFeed %s", msg)
+        # Технические сообщения фида — в debug: в UI (info) не спамим, но пишем в консоль/БД.
+        logger.debug("CandleFeed %s", msg)
         cb = self.on_log
         if cb is not None:
             try:
@@ -125,7 +159,6 @@ class CandleFeed:
         self._stop_requested = True
 
     async def stream(self) -> AsyncIterator[ClosedCandle]:
-        t0 = _time.monotonic()
         self._emit(f"stream start interval={self.interval_name} figis={len(self.figis)} target={self.target or 'prod'}")
         # Первая свеча должна прийти быстро; если стрим «молчит» (не падает,
         # но и не отдаёт данные) — это тоже потеря поставки, уходим в polling.
@@ -134,58 +167,60 @@ class CandleFeed:
         # 75с (больше максимального ожидания закрытия) держит живой стрим и
         # не даёт упасть в polling с перемоткой исторического баклога.
         first_candle_timeout = 75.0
-        max_tries = 3
-        backoffs = (1.0, 3.0, 10.0)
-        for attempt in range(1, max_tries + 1):
-            got_candle = False
+        # Сколько секунд держим polling-фолбэк между попытками восстановить gRPC.
+        poll_recovery_sec = 120.0
+        attempt = 0
+        while not self._stop_requested:
+            attempt += 1
+            self.mode = "stream"
             dur = _time.monotonic()
-            it = None
+            got_candle = False
             try:
                 it = self._stream_grpc().__aiter__()
-                seen_any = False
                 while True:
                     item = await asyncio.wait_for(
                         it.__anext__(), timeout=first_candle_timeout
                     )
                     got_candle = True
-                    seen_any = True
                     yield item
-            except StopAsyncIteration:
-                break
             except asyncio.CancelledError:
                 if self._stop_requested:
                     self._emit("stream cancelled (stop requested)")
                     raise
                 tb = _tb.format_exc(limit=4).replace("\n", " | ")[:400]
                 self._emit(
-                    f"stream cancelled without shutdown attempt={attempt}/{max_tries} "
-                    f"got_candle={got_candle} uptime={_time.monotonic() - dur:.1f}s tb=[{tb}]"
+                    f"stream cancelled attempt={attempt} got_candle={got_candle} "
+                    f"uptime={_time.monotonic() - dur:.1f}s tb=[{tb}]"
                 )
-                if attempt < max_tries:
-                    await asyncio.sleep(backoffs[attempt - 1])
-                    continue
+                continue
+            except StopAsyncIteration:
+                self._emit(
+                    f"stream finished attempt={attempt} got_candle={got_candle} "
+                    f"uptime={_time.monotonic() - dur:.1f}s"
+                )
             except asyncio.TimeoutError:
                 self._emit(
                     f"stream SILENT (no candle in {first_candle_timeout:.0f}s) "
-                    f"attempt={attempt}/{max_tries} got_candle={got_candle} "
+                    f"attempt={attempt} got_candle={got_candle} "
                     f"uptime={_time.monotonic() - dur:.1f}s"
                 )
-                if attempt < max_tries:
-                    await asyncio.sleep(backoffs[attempt - 1])
-                    continue
             except Exception as e:
                 self._emit(
-                    f"stream gRPC error attempt={attempt}/{max_tries} type={type(e).__name__} "
-                    f"err={str(e)[:200]} got_candle={got_candle} uptime={_time.monotonic() - dur:.1f}s"
+                    f"stream gRPC error attempt={attempt} type={type(e).__name__} "
+                    f"err={str(e)[:200]} got_candle={got_candle} "
+                    f"uptime={_time.monotonic() - dur:.1f}s"
                 )
-                if attempt < max_tries:
-                    await asyncio.sleep(backoffs[attempt - 1])
-                    continue
-            break
-        self.mode = "polling"
-        self._emit("switching to polling (mode=polling)")
-        async for item in self._polling():
-            yield item
+            # gRPC упал/замолчал: какое-то время фолбэк-поллинг, потом снова пробуем gRPC.
+            self.mode = "polling"
+            self._emit("switching to polling (recovery)")
+            try:
+                async for item in self._polling(recovery_sec=poll_recovery_sec):
+                    yield item
+            except asyncio.CancelledError:
+                if self._stop_requested:
+                    self._emit("polling cancelled (stop requested)")
+                    raise
+                continue
 
     async def _stream_grpc(self) -> AsyncIterator[ClosedCandle]:
         interval = SUBSCRIPTION_INTERVAL[self.interval_name]
@@ -199,6 +234,26 @@ class CandleFeed:
             sub_tries: dict[str, int] = {f: 0 for f in self.figis}
             try:
                 async for resp in mds:
+                    # Динамическая карусель: применить накопленные подписки/отписки.
+                    _add = self._drain_add_q() if self._add_q else []
+                    if _add:
+                        try:
+                            mds.candles.waiting_close().subscribe(
+                                [CandleInstrument(figi=f, interval=interval) for f in _add]
+                            )
+                            self._emit(f"stream subscribe add figis={[f[-6:] for f in _add]}")
+                        except Exception as _sa_e:
+                            self._emit(f"stream subscribe add failed: {type(_sa_e).__name__} {str(_sa_e)[:120]}")
+                    _rm = self._rm_q[:]
+                    if _rm:
+                        self._rm_q = []
+                        try:
+                            mds.candles.waiting_close().unsubscribe(
+                                [CandleInstrument(figi=f, interval=interval) for f in _rm]
+                            )
+                            self._emit(f"stream unsubscribe figis={[f[-6:] for f in _rm]}")
+                        except Exception as _su_e:
+                            self._emit(f"stream unsubscribe failed: {type(_su_e).__name__} {str(_su_e)[:120]}")
                     # Проверка: подтвердилась ли подписка на свечи. Если какой-то figi
                     # не подписан — переподписываемся (но не вечно).
                     sub_resp = getattr(resp, "subscribe_candles_response", None)
@@ -250,11 +305,13 @@ class CandleFeed:
                 self._emit(f"gRPC disconnect: type={type(e).__name__} err={str(e)[:200]}")
                 raise
 
-    async def _polling(self) -> AsyncIterator[ClosedCandle]:
+    async def _polling(self, recovery_sec: float = 0.0) -> AsyncIterator[ClosedCandle]:
         step_sec = STEP_SEC[self.interval_name]
         buffers: dict[str, deque] = {f: deque(maxlen=3) for f in self.figis}
         seen: set[tuple[str, datetime]] = set()
         next_poll = datetime.now(timezone.utc)
+        started = _time.monotonic()
+        fail_cycles = 0
         async with AsyncClient(self.token, target=self.target) as client:
             while True:
                 wait = (next_poll - datetime.now(timezone.utc)).total_seconds()
@@ -262,6 +319,7 @@ class CandleFeed:
                     await asyncio.sleep(wait)
                 next_poll += timedelta(seconds=step_sec)
 
+                cycle_fail = 0
                 for figi in self.figis:
                     try:
                         resp = await client.market_data.get_candles(
@@ -290,5 +348,22 @@ class CandleFeed:
                             if len(self._persist_buf) >= 10:
                                 await self._flush_persist()
                             yield cc
-                    except Exception:
-                        continue
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as _e:
+                        cycle_fail += 1
+                        if cycle_fail == 1:
+                            self._emit(
+                                f"polling get_candles error {type(_e).__name__} {str(_e)[:100]} "
+                                f"(figi={figi[-6:]}) fail_cycles={fail_cycles}"
+                            )
+                if cycle_fail:
+                    fail_cycles += 1
+                    if fail_cycles >= 3:
+                        self._emit(f"polling FAILED {fail_cycles} циклов подряд — возврат к gRPC")
+                        break
+                else:
+                    fail_cycles = 0
+                if recovery_sec and (_time.monotonic() - started) >= recovery_sec:
+                    self._emit("polling recovery window expired — пробуем gRPC снова")
+                    break

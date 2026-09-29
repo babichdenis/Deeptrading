@@ -117,7 +117,7 @@ from app.bot.gates import (  # noqa: E402
     PortfolioContext, TrendContext, PORTFOLIO_GATES, TREND_GATES,
     gate_daily_bias, gate_h1_align, gate_ls_balance, gate_max_positions,
     gate_mtf_h1, gate_mtf_m5, gate_rank, gate_require_member, gate_sector_cluster,
-    gate_tf_conflict,
+    gate_tf_conflict, gate_beta_filter, gate_confirmed_cluster,
 )
 
 
@@ -202,8 +202,114 @@ def test_portfolio_gates():
                                             held_count=4, short_count=4)).passed
 
 
+def test_beta_filter():
+    # GAZP — high beta (0.85). Держим уже 2 high: T + NVTK → блок.
+    ctx = PortfolioContext(cfg=_tcfg(beta_filter_enabled=True), side="BUY", ticker="GAZP",
+                           held_tickers=("T", "NVTK"))
+    r = gate_beta_filter(ctx)
+    assert not r.passed and r.key == "beta_filter"
+
+    # Гейт выключен флагом — всегда пропускает
+    assert gate_beta_filter(PortfolioContext(
+        cfg=_tcfg(), side="BUY", ticker="GAZP", held_tickers=("T", "NVTK"))).passed
+
+    # Одна high позиция — проходит
+    assert gate_beta_filter(PortfolioContext(
+        cfg=_tcfg(beta_filter_enabled=True), side="BUY", ticker="GAZP", held_tickers=("T",))).passed
+
+    # SNGSP — low beta (0.49): 4 лоу уже открыто → блок
+    r_low = gate_beta_filter(PortfolioContext(
+        cfg=_tcfg(beta_filter_enabled=True), side="BUY", ticker="SNGSP",
+        held_tickers=("ASTR", "PLZL", "LENT", "SFIN")))
+    assert not r_low.passed and r_low.key == "beta_filter"
+
+    # 3 лоу + кандидат low — ок
+    assert gate_beta_filter(PortfolioContext(
+        cfg=_tcfg(beta_filter_enabled=True), side="BUY", ticker="SNGSP",
+        held_tickers=("ASTR", "PLZL", "LENT"))).passed
+
+    # неизвестный тикер → DEFAULT_BETA (mid), не бьёт чужие группы
+    assert gate_beta_filter(PortfolioContext(
+        cfg=_tcfg(beta_filter_enabled=True), side="BUY", ticker="UNKNOWN", held_tickers=())).passed
+
+
+def test_confirmed_cluster():
+    # steel: CHMF+MAGN открыто (лимит 1) → блок по NLMK
+    r = gate_confirmed_cluster(PortfolioContext(
+        cfg=_tcfg(confirmed_cluster_enabled=True), side="BUY", ticker="NLMK",
+        held_tickers=("CHMF", "MAGN")))
+    assert not r.passed and r.key == "confirmed_cluster"
+
+    # флаг выключен — пропускает
+    assert gate_confirmed_cluster(PortfolioContext(
+        cfg=_tcfg(), side="BUY", ticker="NLMK", held_tickers=("CHMF", "MAGN"))).passed
+
+    # steel: одна позиция (лимит 1) → повторный конец кластера блокируем
+    assert not gate_confirmed_cluster(PortfolioContext(
+        cfg=_tcfg(confirmed_cluster_enabled=True), side="BUY", ticker="MAGN",
+        held_tickers=("CHMF",))).passed
+
+    # metals: GMKN+RUAL (лимит 1) → блок
+    assert not gate_confirmed_cluster(PortfolioContext(
+        cfg=_tcfg(confirmed_cluster_enabled=True), side="BUY", ticker="RUAL",
+        held_tickers=("GMKN",))).passed
+
+    # oil: лимит 2, уже 1 → проходит (можно 2 из 4)
+    assert gate_confirmed_cluster(PortfolioContext(
+        cfg=_tcfg(confirmed_cluster_enabled=True), side="BUY", ticker="SIBN",
+        held_tickers=("LKOH",))).passed
+    # oil: уже 2 (лимит 2) → блок
+    assert not gate_confirmed_cluster(PortfolioContext(
+        cfg=_tcfg(confirmed_cluster_enabled=True), side="BUY", ticker="SIBN",
+        held_tickers=("LKOH", "ROSN"))).passed
+
+    # вне кластеров — всегда ок
+    assert gate_confirmed_cluster(PortfolioContext(
+        cfg=_tcfg(confirmed_cluster_enabled=True), side="BUY", ticker="SMLT",
+        held_tickers=("CHMF", "RUAL"))).passed
+
+
 def test_trend_portfolio_chains():
     assert run_gate_chain(TREND_GATES, TrendContext(cfg=_tcfg(), side="BUY")).passed
     r = run_gate_chain(PORTFOLIO_GATES,
                        PortfolioContext(cfg=_tcfg(max_positions=1), side="BUY", held_count=1))
     assert not r.passed and r.key == "max_positions"
+
+
+# --- news blackout -------------------------------------------------------------------
+
+from app.bot.gates import MarketContext, gate_news_blackout  # noqa: E402
+from app.services.news import NewsItem, blackout_reason  # noqa: E402
+
+
+def test_gate_news_blackout():
+    cfg = SimpleNamespace(entry_news_blackout=True)
+    r = gate_news_blackout(MarketContext(cfg=cfg, side="BUY",
+                                         news_blackout_reason="MOEX: дестабилизация цен"))
+    assert not r.passed and r.key == "news_blackout"
+    assert gate_news_blackout(MarketContext(cfg=cfg, side="BUY")).passed
+    cfg_off = SimpleNamespace(entry_news_blackout=False)
+    assert gate_news_blackout(MarketContext(cfg=cfg_off, side="BUY",
+                                            news_blackout_reason="x")).passed
+
+
+def test_blackout_reason_matching():
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    items = [
+        NewsItem(source="MOEX", title="Изменены меры по противодействию дестабилизации цен YDEX",
+                 tickers=["YDEX"], dt=now - timedelta(minutes=10)),
+        NewsItem(source="Ведомости", title="Лукойл отменил дивиденды", tickers=["LKOH"],
+                 dt=now - timedelta(minutes=30)),
+        NewsItem(source="ТАСС", title="Погода в Москве", tickers=[], dt=now),
+        NewsItem(source="Ведомости", title="Газпромбанк размещает облигации", tickers=["GAZP"],
+                 dt=now - timedelta(minutes=20)),
+    ]
+    assert blackout_reason(items, "YDEX", 60) is not None
+    assert blackout_reason(items, "LKOH", 60) is not None
+    assert blackout_reason(items, "GAZP", 60) is None          # шум (облигации)
+    assert blackout_reason(items, "SBER", 60) is None          # нет новостей
+    # старая новость вне окна
+    old = [NewsItem(source="X", title="Санкции против SBER", tickers=["SBER"],
+                    dt=now - timedelta(hours=3))]
+    assert blackout_reason(old, "SBER", 60) is None

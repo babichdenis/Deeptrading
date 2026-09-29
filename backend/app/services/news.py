@@ -11,6 +11,7 @@ import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 _TIMEOUT = 12.0
 _UA = "Mozilla/5.0 (Macintosh) deeptrading-news/1.0"
@@ -66,6 +67,41 @@ class NewsItem:
     url: str = ""
     ts: str = ""          # ISO/строка как отдал источник (МСК у RSS)
     tickers: list[str] = field(default_factory=list)
+    dt: datetime | None = None   # распарсенное время публикации (UTC-aware)
+
+    @property
+    def age_min(self) -> int | None:
+        if self.dt is None:
+            return None
+        try:
+            return max(0, int((datetime.now(timezone.utc) - self.dt).total_seconds() // 60))
+        except Exception:
+            return None
+
+
+def _parse_ts(ts: str) -> datetime | None:
+    """Распарсить время публикации: RSS (RFC822, МСК) или MOEX ("YYYY-MM-DD HH:MM:SS", МСК)."""
+    t = str(ts or "").strip()
+    if not t:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+        d = parsedate_to_datetime(t)
+        if d is not None:
+            return d.astimezone(timezone.utc) if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(t[:19], fmt).replace(
+                tzinfo=timezone(timedelta(hours=3))).astimezone(timezone.utc)
+        except Exception:
+            continue
+    try:
+        d = datetime.fromisoformat(t.replace("Z", "+00:00"))
+        return d.astimezone(timezone.utc) if d.tzinfo else d.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
 
 
 def _get(url: str, timeout: float = _TIMEOUT) -> bytes:
@@ -133,6 +169,7 @@ def fetch_news(limit_per_source: int = 50, use_cache: bool = True) -> list[NewsI
             continue
     for it in items:
         it.tickers = detect_tickers(it.title)
+        it.dt = _parse_ts(it.ts)
     _cache["items"] = items
     _cache["ts"] = now
     return list(items)
@@ -152,4 +189,44 @@ def filter_by_tickers(items: list[NewsItem], tickers: list[str]) -> list[NewsIte
 
 def news_payload(items: list[NewsItem]) -> list[dict]:
     return [{"source": x.source, "title": x.title, "url": x.url,
-             "ts": x.ts, "tickers": x.tickers} for x in items]
+             "ts": x.ts, "age_min": x.age_min, "tickers": x.tickers} for x in items]
+
+
+# --- News blackout: детерминированный стоп по ключевым словам ------------------------
+
+NEGATIVE_KEYWORDS: tuple[str, ...] = (
+    "санкц", "sanctions", "ограничительн", "дестабилизац", "дискретн",
+    "приостанов", "торги приостановлены", "допэмисс",
+    "дивидендный гэп", "авари", "пожар", "взрыв", "остановк производства",
+    "крупный иск", "штраф", "банкротств", "дефолт", "обыск", "изъят",
+)
+
+# Составные правила: (тема, стемы события) — «дивиденд» + «отмен/отказ/не выплат…».
+NEGATIVE_COMBOS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("дивиденд", ("отмен", "отказ", "не выплат", "перенос", "снижен", "приостанов")),
+    ("эмисси", ("доп", "дополнительн")),
+)
+
+
+def blackout_reason(items: list[NewsItem], ticker: str, window_min: int = 60) -> str | None:
+    """Причина стоп-блока тикера по свежей негативной новости (или None).
+
+    Смотрит только новости с явным упоминанием тикера и возрастом <= window_min.
+    """
+    tk = str(ticker or "").upper()
+    if not tk:
+        return None
+    for x in items:
+        if tk not in (x.tickers or []):
+            continue
+        age = x.age_min
+        if age is None or age > int(window_min):
+            continue
+        t = x.title.lower()
+        for kw in NEGATIVE_KEYWORDS:
+            if kw in t:
+                return f"{x.source}: {x.title[:140]} (возраст {age} мин)"
+        for topic, stems in NEGATIVE_COMBOS:
+            if topic in t and any(w in t for w in stems):
+                return f"{x.source}: {x.title[:140]} (возраст {age} мин)"
+    return None

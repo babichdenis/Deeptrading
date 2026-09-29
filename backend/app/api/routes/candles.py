@@ -106,6 +106,13 @@ async def get_candles(
         raise HTTPException(400, f"Unknown interval. Available: {', '.join(INTERVAL_NAMES)}")
 
     interval_value = int(getattr(interval, "value", interval))
+    # Старший интрадей-ТФ отстал от живого 1m — фоново дотягиваем из минутных
+    # свечей (не блокируя ответ), чтобы fallback-график тоже не застывал.
+    try:
+        from app.api.routes.analysis import _maybe_spawn_ensure_tf
+        await _maybe_spawn_ensure_tf(db, figi, interval_name, limit)
+    except Exception:
+        pass
     rows = await db.execute(
         select(Candle)
         .where(Candle.figi == figi, Candle.interval == interval_value)

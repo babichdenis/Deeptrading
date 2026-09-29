@@ -26,6 +26,7 @@ V2_SETUPS = [
 @dataclass
 class EnsembleParams:
     figi: str
+    ticker: str = ""
     lot: int = 10
     capital: float = 2000.0
     quorum: int = 2
@@ -37,6 +38,8 @@ class EnsembleParams:
     # --- Таймфреймы ансамбля (как в semi-flip тестах) ---
     bias_tf: str = "hour"        # направление (bias): "5min" | "15min" | "hour"
     bias_period: int = 50        # период EMA для bias
+    bias_mode: str = "veto"      # "info" | "veto" | "strict_ct" — отбрасывать ли входы ПРОТИВ bias
+    bias_by_state: dict = field(default_factory=dict)  # per-regime bias (combo): {state: {"tf","period"}}
     entry_tf: str = "5min"       # микро-вход: "1min" | "5min"
     entry_lookback: int = 1      # окно микро-брейкаута (бары entry_tf)
     # --- per-ticker optuna-параметры (расширение; дефолты == прежний хардкод) ---
@@ -62,6 +65,14 @@ class EnsembleParams:
     trade_regimes: list = field(default_factory=list)
     # --- ML-фильтр (LightGBM gate качества сигналов): {"threshold":0.55} ---
     ml_filter: dict = field(default_factory=dict)
+    # --- RSI-гейт входа: {"period":14, "min":40, "max":60} — BUY только в нейтральной зоне ---
+    rsi_filter: dict = field(default_factory=dict)
+    # --- Per-regime вход: {"trend": "breakout"} — в тренде ансамбль off, вход по breakout ---
+    regime_entry_policy: dict = field(default_factory=dict)
+
+
+class _No5mMarker(Exception):
+    """Внутренний маркер «не 5m-бар» для funnel-агрегации."""
 
 
 class EnsembleV4Strategy:
@@ -76,6 +87,21 @@ class EnsembleV4Strategy:
         self._last_votes = None
         self._last_skip: str | None = None
         self._regime_cache: dict = {"key": None, "state": None}
+        # Funnel-аккумулятор на 5m-баре (счётчики raw/quorum/gate/entry для UI «Анализ»).
+        self._NO_5M = type("_No5m", (Exception,), {})
+        self._funnel_stats: dict = {
+            "period_start": None, "period_end": None,
+            "raw_setup_signals": 0, "quorum_candidates": 0,
+            "gate_pass": 0, "executed_entries": 0,
+            "by_reason": {}, "votes": {},
+        }
+        self._funnel_last: dict = {}
+        self._last_5m_key: str | None = None
+
+    @property
+    def _tag(self) -> str:
+        """Метка инструмента для логов: тикер, иначе последние 6 символов FIGI."""
+        return (getattr(self.p, "ticker", "") or (self.p.figi[-6:] if self.p.figi else "?"))
 
     def warmup_bars(self) -> int:
         return 50
@@ -86,6 +112,12 @@ class EnsembleV4Strategy:
             self._last_skip = "no_candles"
             return None
         last = candles[-1]
+        # 5m-граница бара: на ней логируем funnel и ENSEMBLE ENTRY.
+        # ФИКС: _is_5m_bar раньше нигде не присваивался → NameError ниже по on_bar
+        # (строка "if _is_5m_bar:") на КАЖДОМ входе, прошедшем все гейты —
+        # сигнал гиб до возврата из on_bar, runtime ловил SIGNAL_ERROR (events),
+        # поэтому signals_seen=0 и 0 сделок при полном funnel.
+        _is_5m_bar = (last.ts.minute % 5 == 0)
         # Оценка на каждом баре (1м), а не только на 5м-границе — нужна для 1м-входа.
         # (раньше был гейт last.ts.minute % 5 != 0 → только 5м)
         # Проверяем сессию через sessions список из конфига
@@ -102,10 +134,8 @@ class EnsembleV4Strategy:
             try:
                 _key = last.ts.replace(minute=0, second=0, microsecond=0)
                 if self._regime_cache.get("key") != _key:
-                    from app.services.ensemble import resample as _rs
-                    from app.services.regime import RegimeDetector as _RD
-                    _h1 = _rs(list(candles), 3600)
-                    _states = _RD().compute(_h1) if _h1 else []
+                    from app.services.regime import compute_regime as _CR
+                    _states, _, _ = _CR(list(candles), 3600)
                     _st = _states[-1]["state"] if _states else None
                     self._regime_cache = {"key": _key, "state": _st}
                 _st_now = self._regime_cache.get("state")
@@ -121,8 +151,10 @@ class EnsembleV4Strategy:
 
             req = {
                 "figi": self.p.figi,
-                "bias_mode": "info",
+                "ticker": self.p.ticker,
+                "bias_mode": self.p.bias_mode,
                 "bias": {"tf": self.p.bias_tf, "period": self.p.bias_period},
+                "bias_by_state": self.p.bias_by_state or None,
                 "entry_tf": self.p.entry_tf,
                 "entry": {"tf": self.p.entry_tf, "lookback": self.p.entry_lookback},
                 "entry_session": self.p.session,
@@ -163,6 +195,10 @@ class EnsembleV4Strategy:
             req["regime"] = {"tf": getattr(self.p, "regime_tf", "hour") or "hour"}
             if self.p.ml_filter:
                 req["ml_filter"] = self.p.ml_filter
+            if self.p.rsi_filter:
+                req["rsi_filter"] = self.p.rsi_filter
+            if self.p.regime_entry_policy:
+                req["regime_entry_policy"] = self.p.regime_entry_policy
             if self.p.entry_macd_1m:
                 req["entry_macd_1m"] = True
                 req["entry_macd_fast"] = self.p.entry_macd_fast
@@ -173,14 +209,52 @@ class EnsembleV4Strategy:
             import logging as _lg
             self._last_skip = f"compute_error: {type(e).__name__}: {str(e)[:120]}"
             _lg.getLogger("ensemble_strategy").exception(
-                "on_bar compute_ensemble FAILED figi=%s candles=%d: %s", self.p.figi[-6:], len(candles), e)
+                "on_bar compute_ensemble FAILED inst=%s candles=%d: %s", self._tag, len(candles), e)
             return None
         if "error" in res:
             import logging as _lg
             self._last_skip = f"res_error: {res.get('error')} bars={res.get('bars')} buf={len(candles)}"
             _lg.getLogger("ensemble_strategy").warning(
-                "on_bar compute_ensemble ERROR figi=%s: %s", self.p.figi[-6:], res.get("error"))
+                "on_bar compute_ensemble ERROR inst=%s: %s", self._tag, res.get("error"))
             return None
+
+        # --- Funnel-аккумуляция и лог ENSEMBLE (только на 5m-баре) ---
+        try:
+            if last.ts.minute % 5 != 0:
+                raise _No5mMarker()
+            _st5 = res.get("static", {}) or {}
+            _fun = _st5.get("funnel", {}) or {}
+            _fun_tf = res.get("static", {}).get("funnel_tf", {}) or {}
+            _raw = int(_fun.get("raw_signals", 0))
+            _qc = int(_fun.get("quorum_unique", 0))
+            _gp = int(_fun.get("accepted_decisions", 0))
+            _votes_last = _st5.get("votes_last", {}) or {}
+            _bkey = last.ts.strftime("%Y-%m-%d %H:%M") if hasattr(last.ts, "strftime") else str(last.ts)
+            if self._last_5m_key != _bkey:
+                self._last_5m_key = _bkey
+            fs = self._funnel_stats
+            if fs.get("period_start") is None:
+                fs["period_start"] = _bkey
+            fs["period_end"] = _bkey
+            fs["raw_setup_signals"] = fs.get("raw_setup_signals", 0) + _raw
+            fs["quorum_candidates"] = fs.get("quorum_candidates", 0) + _qc
+            fs["gate_pass"] = fs.get("gate_pass", 0) + _gp
+            fs["executed_entries"] = fs.get("executed_entries", 0)
+            _rej = _fun_tf.get("rejected_by_reason", {}) or {}
+            for _code, _n in _rej.items():
+                fs["by_reason"][str(_code)] = fs["by_reason"].get(str(_code), 0) + int(_n)
+            for _k, _v in (_votes_last or {}).items():
+                if isinstance(_v, (int, float)):
+                    fs["votes"][str(_k)] = fs["votes"].get(str(_k), 0) + int(_v)
+            self._funnel_last = {
+                "ts": _bkey,
+                "raw": _raw, "quorum": _qc, "gate_pass": _gp,
+                "votes": dict(_votes_last or {}),
+                "funnel": dict(_fun),
+            }
+        except Exception:
+            pass
+
         try:
             tl = (res.get("regime") or {}).get("timeline") or []
             if tl:
@@ -202,12 +276,29 @@ class EnsembleV4Strategy:
             self._last_vol = None
         entries = res.get("static", {}).get("entries", [])
         if not entries:
-            self._last_skip = f"no_entries(funnel_raw={(res.get('static', {}).get('funnel') or {}).get('entries_raw')})"
+            _st = res.get("static", {}) or {}
+            _funnel = _st.get("funnel") or {}
+            _rej = _st.get("rejected") or []
+            _by_reason: dict = {}
+            for _r in _rej:
+                _code = str(_r.get("reason") or "?").split(":")[0]
+                # COMBO_BIAS несёт в reason ещё направление сторона->требуемое:
+                # COMBO_BIAS:BUY->SELL:TREND_UP:bias=SELL(-1) — группируем по полному
+                # шаблону COMBO_BIAS:A->B:режим, чтобы в логе было видно само расхождение.
+                if _code == "COMBO_BIAS":
+                    _sub = _code.split(":")[0]
+                    _rest = str(_r.get("reason")).split(":", 1)[1] if ":" in str(_r.get("reason")) else "?"
+                    _pat = _rest.rsplit(":", 1)[0]
+                    _code = f"{_sub}|{_pat}"
+                _by_reason[_code] = _by_reason.get(_code, 0) + 1
+            _why = ", ".join(f"{k}x{v}" for k, v in sorted(_by_reason.items(), key=lambda x: -x[1]))
+            self._last_skip = (f"no_entries(cand={_funnel.get('entries_raw')} "
+                               f"rej={len(_rej)}: {_why or 'сигналов нет'})")
             if last.ts.minute % 5 == 0:
                 import logging as _lg
                 _lg.getLogger("ensemble_strategy").debug(
-                    "on_bar no-entries figi=%s candles=%d funnel=%s",
-                    self.p.figi[-6:], len(candles),
+                    "on_bar no-entries inst=%s candles=%d funnel=%s",
+                    self._tag, len(candles),
                     (res.get("static", {}).get("funnel") or {}).get("entries_raw"))
             return None
         cutoff = last.ts - timedelta(minutes=FRESH_MIN)
@@ -217,8 +308,8 @@ class EnsembleV4Strategy:
             if last.ts.minute % 5 == 0:
                 import logging as _lg
                 _lg.getLogger("ensemble_strategy").debug(
-                    "on_bar no-fresh-entries figi=%s last=%s newest_entry=%s",
-                    self.p.figi[-6:], last.ts.isoformat(), entries[-1].get("ts"))
+                    "on_bar no-fresh-entries inst=%s last=%s newest_entry=%s",
+                    self._tag, last.ts.isoformat(), entries[-1].get("ts"))
             return None
         self._last_skip = None
         last_e = fresh[-1]
@@ -252,13 +343,33 @@ class EnsembleV4Strategy:
         _vol_max = max(_vols) if _vols else _vol_now
         _vol_min = min(_vols) if _vols else _vol_now
         _regime_now = (self._last_regime or {}).get("state") if isinstance(self._last_regime, dict) else None
+        # Bias на момент входа: базовый (bias_tf) и per-regime (если на входе режим).
+        try:
+            _bias_value = self._bias_at(candles, last_e.get("ts"))
+        except Exception:
+            _bias_value = None
         meta = {
             "entry": {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in last_e.items()},
             "quorum_event": quorum_event,
             "setups": {k: v for k, v in (st.get("setups") or {}).items()},
             "volume": {"v": _vol_now, "max": _vol_max, "min": _vol_min},
             "regime": _regime_now,
+            "bias": _bias_value,
+            "gate_path": [],
         }
+        if _is_5m_bar:
+            import logging as _lg
+            _mems = ",".join(str(x) for x in (quorum_event.get("members_for") or [])) or "-"
+            _opp = ",".join(str(x) for x in (quorum_event.get("opposition") or [])) or "-"
+            _votes_txt = " ".join(
+                f"{k}~{v.get('signals')}" for k, v in (st.get("setups") or {}).items()
+            ) or "-"
+            _lg.getLogger("ensemble_strategy").warning(
+                "ENSEMBLE %s ENTRY %s q=%s votes=[%s] in=[%s] opp=[%s] bias=%s reg=%s",
+                self._tag, side, quorum_event.get("quorum_k"),
+                _votes_txt, _mems, _opp,
+                (meta.get("bias") or {}).get("label") if isinstance(meta.get("bias"), dict) else "?",
+                _regime_now)
         return Signal(
             strategy_id=self.strategy_id,
             side=side,
@@ -267,3 +378,42 @@ class EnsembleV4Strategy:
             kind="entry",
             features=meta,
         )
+
+    def _bias_at(self, candles, ts_src) -> dict:
+        """Значение bias (bias_tf) на момент входа + per-regime bias, если есть."""
+        from app.services.ensemble import cached_resample, compute_bias, TF_SECONDS
+        out: dict = {}
+        try:
+            _tf = TF_SECONDS.get(self.p.bias_tf or "hour", 3600)
+            _bars = cached_resample(list(candles), _tf)
+            _map = compute_bias(_bars, int(self.p.bias_period or 50), tf_seconds=_tf)
+            if ts_src is not None:
+                _b = ts_src if isinstance(ts_src, datetime) else datetime.fromisoformat(str(ts_src))
+                _bb = int(_b.timestamp()) // _tf
+                _v = _map.get(_bb, 0)
+                out["tf"] = self.p.bias_tf or "hour"
+                out["value"] = _v
+                out["label"] = ("UP" if _v > 0 else "DOWN" if _v < 0 else "NEUTRAL")
+        except Exception:
+            pass
+        _reg = (self._last_regime or {}).get("state") if isinstance(self._last_regime, dict) else None
+        if _reg and self.p.bias_by_state:
+            _bbs = self.p.bias_by_state.get(_reg) or {}
+            if _bbs:
+                try:
+                    _rtf = TF_SECONDS.get(str(_bbs.get("tf", "30min")), 1800)
+                    _rb = cached_resample(list(candles), _rtf)
+                    _rm = compute_bias(_rb, int(_bbs.get("period", 50)), tf_seconds=_rtf)
+                    if ts_src is not None:
+                        _b = ts_src if isinstance(ts_src, datetime) else datetime.fromisoformat(str(ts_src))
+                        _rv = _rm.get(int(_b.timestamp()) // _rtf, 0)
+                        out["regime_state"] = _reg
+                        out["regime_tf"] = str(_bbs.get("tf", "30min"))
+                        out["regime_bias"] = _rv
+                except Exception:
+                    pass
+        return out
+
+    def funnel_snapshot(self) -> dict:
+        """Снимок аккумулятора funnel для UI «Анализ» (не мутирует)."""
+        return dict(self._funnel_stats)

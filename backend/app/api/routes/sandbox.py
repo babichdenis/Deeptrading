@@ -258,8 +258,8 @@ def _portfolio_to_dict(p):
     if _init_cash_cache is None:
         try:
             from sqlalchemy import create_engine, text
-            from app.config import settings
-            _eng = create_engine(settings.database_url.replace("+asyncpg", ""), pool_pre_ping=True)
+            from app.config import get_settings
+            _eng = create_engine(get_settings().database_url.replace("+asyncpg", ""), pool_pre_ping=True)
             with _eng.connect() as _conn:
                 row = _conn.execute(text("SELECT initial_cash FROM paper_accounts WHERE name='default'")).fetchone()
                 _init_cash_cache = float(row[0]) if row else 10000.0
@@ -623,7 +623,11 @@ async def _test_last_close(figi: str) -> float | None:
 
 async def _test_portfolio_digest(test_name: str, rows: list) -> dict:
     """Портфель теста только из нашей таблицы: closed net + unrealized открытых.
-    initial_cash берём из runtime.config (капитал реплея), fallback 10000."""
+
+    initial_cash берём из runtime.config (капитал реплея), fallback 10000.
+    equity = initial + closed_net + unreal (mark-to-market по цене реплея).
+    Обеспечение (own) = нотионал / плечо; свободные свои = initial + closed_net − own.
+    """
     initial = 10000.0
     try:
         from app.bot.runtime import runtime
@@ -636,39 +640,47 @@ async def _test_portfolio_digest(test_name: str, rows: list) -> dict:
     open_ = [r for r in rows if r.exit_time is None]
     closed_net = sum(float(r.net_pnl or 0) for r in closed)
     unreal = 0.0
-    mv = 0.0
+    mv = 0.0          # рыночная стоимость открытых (по текущей цене реплея)
+    own = 0.0         # наше обеспечение = нотионал / плечо
+    net_shares = 0.0  # знаковая стоимость: LONG +, SHORT −
     for r in open_:
-        # unrealized обязан двигаться за виртуальным временем реплея,
-        # иначе equity заморожен (раньше брался entry).
+        entry = float(r.entry_price)
+        qty = abs(int(r.qty))
         cur = await _test_price(r.figi)
         if cur is None:
-            cur = float(r.entry_price)
-        p = float(r.entry_price)
-        q = abs(int(r.qty))
-        unreal += (cur - p) * q if r.side == "LONG" else (p - cur) * q
-        mv += p * q
+            cur = entry
+        side = str(r.side or "LONG").upper()
+        is_long = side in ("LONG", "BUY")
+        unreal += ((cur - entry) if is_long else (entry - cur)) * qty
+        notional = cur * qty
+        lev = max(1.0, float(r.leverage or 1.0))
+        mv += notional
+        own += notional / lev
+        net_shares += notional if is_long else -notional
     positions_open = len(open_)
     wins = len([r for r in closed if (r.net_pnl or 0) > 0])
     total = len(closed)
+    free_own = initial + closed_net - own
+    equity = initial + closed_net + unreal
     return {
-        "cash": round(initial + closed_net - mv, 2),
+        "cash": round(free_own, 2),
         "initial_cash": round(initial, 2),
-        "equity": round(initial + closed_net + unreal, 2),
+        "equity": round(equity, 2),
         "market_value": round(mv, 2),
-        "pnl": round(closed_net, 2),
+        "pnl": round(closed_net + unreal, 2),
         "positions_open": positions_open,
-        "own_in_positions": round(mv, 2),
+        "own_in_positions": round(own, 2),
         "positions_value": round(mv, 2),
-        "tinkoff_currencies": 0,
-        "tinkoff_shares": 0,
+        "tinkoff_currencies": round(free_own, 2),
+        "tinkoff_shares": round(net_shares, 2),
         "trades": {
             "total": total,
             "wins": wins,
             "winrate": round(wins / total * 100, 1) if total else 0,
         },
         "reconcile": {"ok": True},
-        "free_funds": round(initial + closed_net - mv, 2),
-        "starting_margin": round(initial, 2),
+        "free_funds": round(equity - own, 2),
+        "starting_margin": round(own, 2),
     }
 
 
@@ -701,11 +713,78 @@ def _peak_fields(exit_meta) -> dict:
 def _test_trade_row(r) -> dict:
     """Одна сделка теста в формате /sandbox/trades (закрытая или открытая)."""
     is_open = r.exit_time is None
-    _peak = _peak_fields(getattr(r, "exit_meta", None))
+    _side = str(r.side or "LONG").upper()
+    _is_long = _side in ("LONG", "BUY")
+    _entry = float(r.entry_price) if r.entry_price else 0.0
+    _qty = abs(int(r.qty))
+    _lev = max(1.0, float(getattr(r, "leverage", None) or 1.0))
+    _notional = _entry * _qty
+    _own = _notional / _lev
+    # Пик PnL + время + ATR из exit_meta (пишется в runtime._st_close).
+    _peak = {"pnl": None, "time": None, "price": None, "atr_pct": None, "atr": None, "r": None, "roi_pct": None, "mae_atr": None}
+    _trail_info = None
+    try:
+        _em = json.loads(r.exit_meta) if r.exit_meta else {}
+        # Инфо-трейлинг: где бы сработал трейл (виртуальный след).
+        if _em.get("trail_info"):
+            _t = _em["trail_info"]
+            _tpx = float(_t.get("hit_price") or 0.0)
+            _trisk = abs(_entry - float(r.stop_loss)) * _qty if (r.stop_loss is not None and float(r.stop_loss) != _entry) else 0.0
+            _trail_info = {
+                "activated": bool(_t.get("activated")),
+                "trail_stop": round(float(_t.get("trail_stop") or 0.0), 6),
+                "trail_dist_atr": _t.get("trail_dist_atr"),
+                "hit_time": str(_t.get("hit_ts") or ""),
+                "hit_price": round(_tpx, 6),
+                "hit_reason": str(_t.get("hit_reason") or ""),
+                "hit_pnl": round(((_tpx - _entry) if _is_long else (_entry - _tpx)) * _qty, 2),
+                "hit_r": round(((_tpx - _entry) * _qty) / _trisk, 2) if (_trisk and _is_long) else (round(((_entry - _tpx) * _qty) / _trisk, 2) if _trisk else None),
+                "hit_roi_pct": round(((_tpx - _entry) * _qty) / _own * 100, 1) if (_own and _is_long) else (round(((_entry - _tpx) * _qty) / _own * 100, 1) if _own else None),
+            }
+        if _em.get("max_pnl") is not None:
+            _mp = float(_em["max_pnl"])
+            _slv = float(r.stop_loss) if r.stop_loss is not None else None
+            _risk = abs(_entry - _slv) * _qty if (_slv is not None and _slv != _entry) else 0.0
+            _peak = {
+                "pnl": round(_mp, 2),
+                "time": str(_em.get("max_pnl_time") or ""),
+                "price": round(float(_em.get("max_pnl_price") or 0.0), 6),
+                "atr_pct": round(float(_em.get("max_pnl_atr_pct") or 0.0), 2),
+                "atr": (round(float(_em["max_pnl_atr"]), 4) if _em.get("max_pnl_atr") is not None else None),
+                "r": round(_mp / _risk, 2) if _risk else None,
+                "roi_pct": round(_mp / _own * 100, 1) if _own else None,
+                # MAE до пика: макс. просадка ниже входа (в ATR) на пути к пику прибыли.
+                "mae_atr": (round(float(_em["max_pnl_mae_atr"]), 2) if _em.get("max_pnl_mae_atr") is not None else None),
+            }
+    except Exception:
+        pass
+    # Начальный SL/TP в ATR, R и ROI — из meta (atr_entry пишется при входе).
+    _init = {"sl_atr": None, "tp_atr": None, "rr_initial": None,
+             "roi_sl_pct": None, "roi_tp_pct": None}
+    try:
+        _m = json.loads(r.meta) if r.meta else {}
+        _atr_e = float(_m.get("atr_entry") or 0.0)
+        _sl0 = float(_m.get("sl_initial") or r.stop_loss) if (_m.get("sl_initial") is not None or r.stop_loss is not None) else None
+        _tp0 = float(r.take_profit) if r.take_profit is not None else None
+        if _atr_e > 0:
+            if _sl0 is not None and _sl0 != _entry:
+                _dsl = abs(_entry - _sl0)
+                _init["sl_atr"] = round(_dsl / _atr_e, 2)
+                _init["roi_sl_pct"] = round(-_dsl * _qty / _own * 100, 1) if _own else None
+            if _tp0 is not None and _tp0 != _entry:
+                _dtp = abs(_tp0 - _entry)
+                _init["tp_atr"] = round(_dtp / _atr_e, 2)
+                _init["roi_tp_pct"] = round(_dtp * _qty / _own * 100, 1) if _own else None
+            if _sl0 is not None and _tp0 is not None:
+                _dsl = abs(_entry - _sl0)
+                if _dsl > 0:
+                    _init["rr_initial"] = round(abs(_tp0 - _entry) / _dsl, 2)
+    except Exception:
+        pass
     return {
         "figi": r.figi, "ticker": r.ticker, "side": r.side,
         "qty": int(r.qty),
-        "entry_price": round(float(r.entry_price), 6),
+        "entry_price": round(_entry, 6),
         "exit_price": round(float(r.exit_price), 6) if r.exit_price is not None else None,
         "entry_time": str(r.entry_time),
         "ts": str(r.exit_time) if r.exit_time else None,
@@ -717,17 +796,30 @@ def _test_trade_row(r) -> dict:
         "entry_reason": r.entry_reason, "meta": r.meta, "exit_meta": r.exit_meta,
         **_peak,
         "strategy_id": "v4_enhanced",
+        "notional": round(_notional, 2), "leverage": round(_lev, 2),
+        "own_money": round(_own, 2),
+        "max_pnl": _peak["pnl"], "max_pnl_time": _peak["time"],
+        "max_pnl_price": _peak["price"], "max_pnl_atr_pct": _peak["atr_pct"],
+        "max_pnl_r": _peak["r"], "max_pnl_roi_pct": _peak["roi_pct"],
+        "max_pnl_mae_atr": _peak["mae_atr"],
+        "max_pnl_atr": _peak["atr"],
+        "trail_info": _trail_info,
+        "sl_atr": _init["sl_atr"], "tp_atr": _init["tp_atr"],
+        "rr_initial": _init["rr_initial"],
+        "roi_sl_pct": _init["roi_sl_pct"], "roi_tp_pct": _init["roi_tp_pct"],
     }
 
 
 async def _test_position_row(r, cur: float | None) -> dict:
     """Открытая позиция теста в формате /sandbox/positions."""
-    side = r.side
+    _raw_side = str(r.side or "LONG").upper()
+    is_long = _raw_side in ("LONG", "BUY")
+    side = "LONG" if is_long else "SHORT"   # нормализация для UI (кнопка Продать/Купить)
     entry = float(r.entry_price)
     qty = int(r.qty)
     if cur is None:
         cur = entry
-    pnl = (cur - entry) * qty if side == "LONG" else (entry - cur) * qty
+    pnl = (cur - entry) * qty if is_long else (entry - cur) * qty
     notional = entry * qty
     lev = max(1.0, float(r.leverage or 1.0))
     own = notional / lev          # свои средства (обеспечение)
@@ -1200,6 +1292,10 @@ async def sandbox_trades(limit: int = 50):
                     "exit_reason": "на торгах",
                     "entry_reason": e.get("entry_reason"), "meta": e.get("meta"),
                     "exit_meta": None, "strategy_id": "v4_enhanced",
+                    "leverage": round(float(e.get("leverage") or 1.0), 1),
+                    "notional": round(float(e.get("entry_price") or round(avg, 6)) * int(abs(qty)), 2),
+                    "own_money": round(round(float(e.get("entry_price") or round(avg, 6)) * int(abs(qty)), 2)
+                                       / (float(e.get("leverage") or 1.0)), 2),
                 })
         except Exception:
             pass
@@ -1220,6 +1316,8 @@ async def sandbox_trades(limit: int = 50):
                 )
                 rows = res.scalars().all()
                 for r in rows:
+                    _not = round(float(r.entry_price) * int(r.qty), 2)
+                    _lev = float(r.leverage) if r.leverage else 1.0
                     closed_stored.append({
                         "figi": r.figi, "ticker": r.ticker, "side": r.side,
                         "qty": r.qty,
@@ -1237,6 +1335,9 @@ async def sandbox_trades(limit: int = 50):
                         "exit_meta": r.exit_meta,
                         **_peak_fields(r.exit_meta),
                         "strategy_id": "v4_enhanced",
+                        "leverage": round(_lev, 1),
+                        "notional": _not,
+                        "own_money": round(_not / _lev, 2),
                     })
         except Exception:
             closed_stored = []

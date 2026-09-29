@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Deeptrading</title>
+  <script defer src="/vendor/lucide.min.js"></script>
+  </head>
+  <body>
+    <div id="modal-backdrop" class="modal-backdrop hidden"></div>
+    <div id="app">
+      <aside class="sidebar" id="sidebar">
+        <div class="mode-switch" id="mode-switch" title="Режим бота">
+          <button class="mode-btn" data-mode="live"><span class="m-dot live"></span>Live</button>
+          <button class="mode-btn" data-mode="sandbox"><span class="m-dot sandbox"></span>Sandbox</button>
+          <button class="mode-btn" data-mode="test"><span class="m-dot test"></span>Тест</button>
+        </div>
+        <nav class="side-nav">
+          <button class="nav-btn" data-page="chart"><span class="ico">📈</span><span>Склад</span></button>
+          <!-- <button class="nav-btn" data-page="lab"><span class="ico">🧪</span><span>Lab</span></button> -->
+          <button class="nav-btn active" data-page="bot"><span class="ico">🤖</span><span>Бот</span></button>
+          <button class="nav-btn" data-page="analytics"><span class="ico">📊</span><span>Анализ</span></button>
+        </nav>
+        <div class="sidebar-botbar">
+          <div class="action-row">
+            <button class="start-btn" id="btn-bot-start">▶ Запустить</button>
+            <button class="stop-btn" id="btn-bot-stop" title="Остановить бота">⏻</button>
+          </div>
+          <div class="aux-row">
+            <button class="pause-btn hidden" id="btn-bot-pause" title="Остановить НОВЫЕ входы; открытые позиции продолжают жить (SL/TP работают)">⏸ Пауза</button>
+            <button class="gear-btn" id="btn-bot-settings" title="Настройки бота">⚙</button>
+          </div>
+        </div>
+        <div class="sidebar-logs">
+          <div class="logs-heading">
+            <div class="sl-title">📜 ЛОГИ <span>(МСК)</span></div>
+            <div class="lg-head-btns">
+              <button class="lg-btn" id="lg-copy" title="Скопировать видимые логи как текст">⧉</button>
+              <button class="lg-btn lg-clear-btn" id="lg-clear" title="Очистить экран логов">🗑</button>
+            </div>
+          </div>
+          <div class="log-toolbar">
+            <label class="lg-chip on"><input type="checkbox" id="lg-candles" checked><span>Свечи</span></label>
+            <label class="lg-chip on"><input type="checkbox" id="lg-signals" checked><span>Сигналы</span></label>
+            <label class="lg-chip on"><input type="checkbox" id="lg-trades" checked><span>Сделки</span></label>
+            <label class="lg-chip on"><input type="checkbox" id="lg-events" checked><span>События</span></label>
+            <label class="lg-chip on"><input type="checkbox" id="lg-tech" checked><span>Тех</span></label>
+            <label class="lg-chip on"><input type="checkbox" id="lg-gates" checked><span>Гейты</span></label>
+          </div>
+          <div class="log-toolbar log-toolbar-r2">
+            <select id="lg-level" class="log-select" title="Фильтр по уровню">
+              <option value="">уровень: любой</option>
+              <option value="debug">debug</option>
+              <option value="info">info</option>
+              <option value="warn">warn ⚠</option>
+              <option value="error">error ✕</option>
+            </select>
+            <input type="text" id="lg-q" class="log-q" placeholder="🔍 поиск…" />
+            <input type="text" id="lg-ticker" class="log-q log-q-t" placeholder="тикер…" />
+          </div>
+          <div class="log-toolbar log-toolbar-r3">
+            <input type="date" id="log-filter-date" class="log-date-input" title="Фильтр по дате (МСК). Очисти, чтобы видеть все дни" />
+            <span class="lg-err-pill" id="lg-err-pill" title="Ошибок и предупреждений среди видимых логов"></span>
+          </div>
+          <div class="bot-live-logs" id="bot-live-logs"></div>
+          <div class="log-footer"><span class="lf-count" id="lg-title-hint">Логи <b id="log-count">0</b></span></div>
+        </div>
+        <div class="sidebar-grip" title="Изменить ширину"></div>
+      </aside>
+
+      <div class="main-col">
+        <header class="topbar">
+          <section class="stats-row" aria-label="Сводка портфеля">
+            <article class="metric-card" title="Equity — если закрыть всё">
+              <div class="metric-icon blue"><i data-lucide="wallet"></i></div>
+              <div>
+                <div class="metric-label">ЭКВИТИ</div>
+                <div class="metric-value"><span id="bs-equity">—</span></div>
+              </div>
+            </article>
+            <article class="metric-card" title="Свободные средства (ликвидный портфель − начальная маржа)">
+              <div class="metric-icon blue"><i data-lucide="coins"></i></div>
+              <div>
+                <div class="metric-label">СРЕДСТВА</div>
+                <div class="metric-value"><span id="bs-cash">—</span></div>
+              </div>
+            </article>
+            <article class="metric-card" title="Обеспечение под позиции (начальная маржа)">
+              <div class="metric-icon blue"><i data-lucide="shield"></i></div>
+              <div>
+                <div class="metric-label">ОБЕСПЕЧЕНИЕ</div>
+                <div class="metric-value"><span id="bs-positions-value">—</span></div>
+              </div>
+            </article>
+            <article class="metric-card" title="P&L">
+              <div class="metric-icon red"><i data-lucide="chart-no-axes-combined"></i></div>
+              <div>
+                <div class="metric-label">P&L</div>
+                <div class="metric-value"><span id="bs-pnl">—</span></div>
+              </div>
+            </article>
+            <article class="metric-card" title="Все деньги на счёте (total_amount_currencies)">
+              <div class="metric-icon blue"><i data-lucide="banknote"></i></div>
+              <div>
+                <div class="metric-label">ДЕНЬГИ</div>
+                <div class="metric-value"><span id="bs-currencies">—</span></div>
+              </div>
+            </article>
+            <article class="metric-card" title="Нетто-стоимость акций — минус = долг по шортам">
+              <div class="metric-icon red"><i data-lucide="trending-down"></i></div>
+              <div>
+                <div class="metric-label">ШОРТЫ</div>
+                <div class="metric-value"><span id="bs-shares">—</span></div>
+              </div>
+            </article>
+
+            <div class="hdr-indicators">
+              <div class="hdr-cluster hdr-live">
+                <span class="hdr-live-badge" title="Торговая сессия бота (МСК)">
+                  <i class="live-dot"></i>
+                  <b>Сессия</b>
+                  <span id="bs-session">—</span>
+                </span>
+                <span class="hdr-live-badge" title="MOEX Trading Status (T-Investments API)">
+                  <i class="mex-dot"></i>
+                  <b>MOEX</b>
+                  <span id="bs-trading-status">—</span>
+                </span>
+                <span class="hdr-live-badge" id="bs-imoex-guard" title="IMOEX guard: запрет входов против всплеска индекса и свежесть свечей MOEX">
+                  <i class="imoex-dot"></i>
+                  <b>IMOEX</b>
+                  <span id="bs-imoex-text">—</span>
+                </span>
+                <span class="hdr-live-badge hdr-ai-mode" title="Режим AI: 🧱 Бот — без нейросетей; 👁 Бот+ — вахтёр позиций; 🚦 Бот++ — +воркер-гейт входов; 🤖 Бот+++ — +AI-трейдер; 🧠 AI-трейдер — торговля только AI">
+                  <i class="ai-dot"></i>
+                  <b>AI</b>
+                  <select id="ai-mode-select" title="Режим AI (промпты — на вкладке AI-гейт, кнопка 📄)">
+                    <option value="">— не задан —</option>
+                    <option value="bot">🧱 Бот</option>
+                    <option value="bot+">👁 Бот+</option>
+                    <option value="bot++">🚦 Бот++</option>
+                    <option value="bot+++">🤖 Бот+++</option>
+                    <option value="ai">🧠 AI-трейдер</option>
+                  </select>
+                </span>
+              </div>
+              <div id="bot-pill-top" class="bot-pill off"><span class="dot"></span><span id="bot-state-text">Бот выключен</span><span id="bot-mode" class="mode-chip hidden"></span></div>
+            </div>
+          </section>
+
+          <section class="filter-row" aria-label="Фильтры">
+            <div class="filter-group" title="Сессии торговли бота">
+              <label class="pill" title="Утренняя сессия"><input type="checkbox" id="sg-morning"><i data-lucide="sun"></i><span>Утро</span></label>
+              <label class="pill" title="Дневная сессия"><input type="checkbox" id="sg-day" checked><i data-lucide="sun-medium"></i><span>День</span></label>
+              <label class="pill" title="Вечерняя сессия"><input type="checkbox" id="sg-evening"><i data-lucide="moon"></i><span>Вечер</span></label>
+              <label class="pill" title="Держать позиции через ночь (вне торговых сессий)"><input type="checkbox" id="sg-overnight"><i data-lucide="moon-star"></i><span>Overnight</span></label>
+              <label class="pill" title="Сверка позиций/кэша с брокером (каждые 60с, только в торговое время)"><input type="checkbox" id="rec-on" checked><i data-lucide="git-compare-arrows"></i><span>Сверка</span></label>
+            </div>
+
+            <div class="separator"></div>
+
+            <div class="filter-group" title="Направления торговли (хотя бы одно)">
+              <label class="pill long" title="Покупать (вход BUY)"><input type="checkbox" id="dg-long" checked><i data-lucide="circle-arrow-up"></i><span>Long</span></label>
+              <label class="pill short" title="Шортить (вход SELL)"><input type="checkbox" id="dg-short"><i data-lucide="circle-arrow-down"></i><span>Short</span></label>
+            </div>
+
+            <div class="separator"></div>
+
+            <div class="filter-group margin-group" title="Сессии, где торговля идёт с маржой (плечом)">
+              <div class="margin-pills">
+                <label class="pill" title="Утренняя маржа"><input type="checkbox" id="mg-morning"><i data-lucide="shield"></i><span>Утро</span></label>
+                <label class="pill" title="Дневная маржа"><input type="checkbox" id="mg-day" checked><i data-lucide="shield"></i><span>День</span></label>
+                <label class="pill" title="Вечерняя маржа"><input type="checkbox" id="mg-evening"><i data-lucide="shield"></i><span>Вечер</span></label>
+              </div>
+              <div class="range-wrap" title="Размер плеча при марже (не выше одобренного брокером)">
+                <span class="range-caption">Плечо</span>
+                <input type="range" id="mg-lev" min="0" max="4" step="1" value="4">
+                <span id="mg-lev-label">Max</span>
+              </div>
+            </div>
+
+            <div class="separator"></div>
+
+            <div class="filter-group" title="Режимы рынка, в которых разрешены входы">
+              <label class="pill" title="Нейтральный"><input type="checkbox" id="rg-neutral" checked><i data-lucide="activity"></i><span>Нейтр</span></label>
+              <label class="pill" title="Восходящий тренд"><input type="checkbox" id="rg-trendup" checked><i data-lucide="chart-no-axes-column-increasing"></i><span>Тренд↑</span></label>
+              <label class="pill" title="Нисходящий тренд"><input type="checkbox" id="rg-trenddown" checked><i data-lucide="chart-no-axes-column-decreasing"></i><span>Тренд↓</span></label>
+              <label class="pill" title="Высокая волатильность"><input type="checkbox" id="rg-highvol" checked><i data-lucide="waves"></i><span>Волат</span></label>
+              <label class="pill" title="Флэт/боковик"><input type="checkbox" id="rg-range" checked><i data-lucide="bar-chart-3"></i><span>Флэт</span></label>
+            </div>
+
+            <div class="separator"></div>
+
+            <div class="filter-group" title="Размер позиции и число слотов (применяется сразу)">
+              <div class="range-wrap" title="Размер одной позиции (доля equity на сделку)">
+                <span class="range-caption">Слот</span>
+                <input type="range" id="sz-pos" min="10" max="100" step="10" value="30">
+                <span id="sz-pos-label">30%</span>
+              </div>
+              <div class="range-wrap" title="Максимум одновременных позиций">
+                <span class="range-caption">Слоты</span>
+                <input type="range" id="sz-max" min="1" max="10" step="1" value="6">
+                <span id="sz-max-label">6</span>
+              </div>
+            </div>
+          </section>
+        </header>
+
+        <div class="pages">
+          <section class="page page-chart" id="page-chart">
+            <header class="toolbar">
+              <div class="toolbar-left">
+                <div class="symbol-block">
+                  <span class="symbol-ticker" id="symbol-ticker">SBER</span>
+                  <span class="symbol-name" id="symbol-name">Сбер Банк</span>
+                </div>
+                <div class="ohlc-legend" id="ohlc-legend"></div>
+              </div>
+              <div class="toolbar-center"><nav class="timeframes" id="timeframes"></nav></div>
+              <div class="toolbar-right">
+                <label class="toggle" title="Показывать сделки оракула (идеального трейдера) по открытому периоду"><input type="checkbox" id="cb-oracle" /> Оракул</label>
+                <div class="ind-wrap">
+                  <button class="btn-ind" id="btn-indicators">ƒ Индикаторы ▾</button>
+                  <div class="ind-menu hidden" id="indicators-menu">
+                    <label><input type="checkbox" data-ind="sma" /> SMA 20</label>
+                    <label><input type="checkbox" data-ind="ema" /> EMA 50</label>
+                    <label><input type="checkbox" data-ind="bb" /> Bollinger (20, 2σ)</label>
+                    <label><input type="checkbox" data-ind="rsi" /> RSI 14 <span class="pane-hint">отд. панель</span></label>
+                    <label><input type="checkbox" data-ind="macd" /> MACD 12 26 9 <span class="pane-hint">отд. панель</span></label>
+                  </div>
+                </div>
+                <button class="btn-sync" id="btn-sync" title="Загрузить свежие данные с биржи">⟳ Данные</button>
+              </div>
+            </header>
+            <div class="chart-section">
+              <main class="chart-wrap" id="chart-wrap">
+                <div id="chart"></div>
+                <div id="tooltip" class="tooltip hidden"></div>
+                <div id="loader" class="loader hidden"><div class="spinner"></div><span>Загрузка данных…</span></div>
+              </main>
+              <div class="resizer" id="resizer" title="Потяните, чтобы изменить высоту графика"><span></span></div>
+            </div>
+            <section class="bottom-panel">
+              <div class="panel-tabs">
+                <button class="ptab active" data-tab="strategies">Стратегии</button>
+                <button class="ptab" data-tab="reports">Отчёты</button>
+                <button class="ptab" data-tab="preview">Превью</button>
+                <button class="ptab" data-tab="diag">Диагностика</button>
+                <div class="panel-actions">
+                  <label class="toggle"><input type="checkbox" id="cb-markers" checked /> Маркеры</label>
+                  <span class="quorum-box">
+                    <input type="number" id="quorum-k" min="1" value="2" style="width:44px" /> из
+                    <b id="quorum-m">0</b>
+                    <button class="btn-quorum" id="btn-quorum">⚖ Кворум</button>
+                  </span>
+                  <button class="btn-run" id="btn-run-strategies">▶ Рассчитать выбранные</button>
+                  <button class="btn-secondary" id="btn-preview" title="Быстрый прогон конфигурации на текущей акции">👁 Превью</button>
+                  <button class="btn-secondary" id="btn-send-lab" title="Собрать конфигурацию из рассчитанных стратегий и отправить в Lab">В Lab ➜</button>
+                </div>
+              </div>
+              <div class="tab-content" id="tab-strategies">
+                <div class="wh-scroll" id="wh-scroll">
+                <div class="wh-grid">
+                  <div class="wh-col wh-catalog">
+                    <h4 class="wh-h">Каталог блоков</h4>
+                    <div class="cards" id="strategy-cards"></div>
+                  </div>
+                  <div class="wh-col wh-pipe">
+                    <h4 class="wh-h">Конструктор</h4>
+                    <div id="pipe-holder"></div>
+                  </div>
+                </div>
+                </div>
+              </div>
+              <div class="tab-content hidden" id="tab-preview">
+                  <div class="totals-line" id="pv-summary"></div>
+                  <div id="pv-why" style="margin:6px 0"></div>
+                  <div id="pv-funnel"></div>
+                </div>
+                <div class="tab-content hidden" id="tab-reports">
+                <table class="runs-table">
+                  <thead><tr><th>Стратегия</th><th>ТФ</th><th>Сигналов</th><th>Баров</th><th>Параметры</th><th>Рассчитан</th></tr></thead>
+                  <tbody id="runs-tbody"></tbody>
+                </table>
+              </div>
+              <div class="tab-content hidden" id="tab-diag">
+<div class="test-toolbar">
+              <div class="row2">
+                <label>Тикер<input type="text" id="test-ticker" value="RUAL" list="test-tickers" style="width:110px" /></label>
+                <datalist id="test-tickers"></datalist>
+                <label>ТФ<select id="test-interval">
+                  <option value="1min">1 мин</option>
+                  <option value="5min">5 мин</option>
+                  <option value="15min">15 мин</option>
+                  <option value="hour">Час</option>
+                  <option value="day">День</option>
+                </select></label>
+                <label>Баров<select id="test-limit">
+                  <option value="1000">1 000</option>
+                  <option value="3000" selected>3 000</option>
+                  <option value="10000">10 000</option>
+                  <option value="30000">все 1м (~30 дн)</option>
+                </select></label>
+                <label>Порог зигзага, %<input type="number" id="test-threshold" value="0.5" min="0.05" max="5" step="0.05" style="width:90px" /></label>
+                <label>Комиссия, %<input type="number" id="test-fee" value="0.05" min="0" max="1" step="0.05" style="width:90px" /></label>
+                <label>Капитал<input type="number" id="test-capital" value="10000" min="1000" style="width:110px" /></label>
+                <button class="btn-primary" id="btn-test-run">▶ Потолок торговли</button>
+              </div>
+            </div>
+            <div class="test-grid">
+              <div class="card test-chart-card">
+                <div class="mini-hint">Идеальный свинг-трейдер (зигзаг): стрелки ▼▲ — входы/выходы по подтверждённым волнам</div>
+                <div id="test-chart"></div>
+              </div>
+              <div class="card test-stats-card">
+                <div class="col-title">Потолок прибыли <span class="mini-hint" id="test-meta"></span></div>
+                <div class="stat-grid" id="test-stats"></div>
+                <div class="col-title" style="margin-top:14px">Предсказуемость сигналов</div>
+                <div id="test-predict"></div>
+              </div>
+            </div>
+            <div class="card" id="test-equity-card" style="margin-top:12px">
+              <div class="col-title">Кривая капитала идеального трейдера (мультиднев)</div>
+              <div id="test-equity"></div>
+            </div>
+            <div class="card" style="margin-top:12px">
+              <div class="col-title">Сделки идеального трейдера</div>
+              <table class="runs-table">
+                <thead><tr><th>Вход</th><th>Выход</th><th>Цена входа</th><th>Цена выхода</th><th>Лотов</th><th>PnL</th><th>Удержание</th></tr></thead>
+                <tbody id="test-trades-tbody"></tbody>
+              </table>
+            </div>
+            <div class="card" style="margin-top:12px">
+              <div class="col-title">📊 Диагностика: Funnel + Why no entry + Oracle coverage</div>
+              <div class="row2" style="margin-bottom:8px">
+                <button class="btn-secondary btn-sm" id="btn-diag-run">▶ Рассчитать диагностику</button>
+                <span class="mini-hint" id="diag-meta"></span>
+              </div>
+              <div class="ens-grid">
+                <div>
+                  <div class="col-title">Funnel по ТФ</div>
+                  <table class="runs-table"><tbody id="diag-funnel"></tbody></table>
+                  <div class="col-title" style="margin-top:10px">Причины отсева (rejected_by_reason)</div>
+                  <table class="runs-table"><tbody id="diag-reasons"></tbody></table>
+                </div>
+                <div>
+                  <div class="col-title">Покрытие оракула</div>
+                  <table class="runs-table"><tbody id="diag-oracle"></tbody></table>
+                </div>
+              </div>
+              <div class="col-title" style="margin-top:10px">Why no entry? — последние 100 отсевов</div>
+              <div style="max-height:300px;overflow:auto">
+                <table class="runs-table">
+                  <thead><tr><th>Время</th><th>Side</th><th>Код</th><th>Деталь</th></tr></thead>
+                  <tbody id="diag-why"></tbody>
+                </table>
+              </div>
+            </div>
+<div class="card" style="margin-top:16px">
+              <div class="col-title">📊 Матрица: FIGI × cooldown × подтверждение выхода <span class="mini-hint">net по одинаковому капиталу; цена акции в колонке — фильтруй по похожей цене</span></div>
+              <div class="test-toolbar" style="border:none;padding:0 0 10px;margin:0">
+                <div class="row2">
+                  <label>FIGI (через запятую)<input type="text" id="sweep-figis" value="BBG008F2T3T2, BBG004731032, BBG004S683W7" style="width:340px" /></label>
+                  <label>Дней<input type="number" id="sweep-days" value="3" min="1" max="60" style="width:60px" /></label>
+                  <label>Цена от<input type="number" id="sweep-pmin" value="1" style="width:70px" /></label>
+                  <label>Цена до<input type="number" id="sweep-pmax" value="1000" style="width:80px" title="исключи дорогие акции (LKOH ~4100)" /></label>
+                  <label>Cooldown<input type="text" id="sweep-cds" value="0,5,15,30,60" style="width:110px" /></label>
+                  <label>Confirm<input type="text" id="sweep-cfs" value="0,3" style="width:70px" /></label>
+                  <button class="btn-primary" id="btn-sweep-run">▶ Матрица</button>
+                </div>
+              </div>
+              <div id="sweep-note" class="mini-hint"></div>
+              <table class="runs-table" id="sweep-table"></table>
+            </div>
+            <div class="card ens-card" style="margin-top:16px">
+              <div class="col-title">🧩 Ансамбль: bias → setups + quorum → entry → exits <span class="mini-hint" id="ens-meta"></span></div>
+              <div class="ens-results">
+              <div class="test-toolbar" style="border:none;padding:0 0 10px;margin:0">
+                <div class="row2">
+                  <label><input type="checkbox" id="ens-all" checked /> Все функции</label>
+                  <label><input type="checkbox" id="ens-drop" checked /> Убрать бесполезные</label>
+                  <label>Кворум<input type="number" id="ens-quorum" value="2" min="1" max="5" style="width:70px" /></label>
+                  <label>Выход<select id="ens-exit">
+                    <option value="atr_stop">ATR Stop</option>
+                    <option value="fixed_sl_tp">Fixed SL/TP</option>
+                    <option value="atr_trailing">ATR Trailing</option>
+                  </select></label>
+                  <label>Cooldown входа, бар<input type="number" id="ens-cooldown" value="15" min="0" max="1440" style="width:70px" title="same_side_reentry_cooldown_bars: запрет повторного входа в ту же сторону после выхода" /></label>
+                  <label>Подтвержд. выхода, бар<input type="number" id="ens-exit-confirm" value="0" min="0" max="1440" style="width:70px" title="exit_confirm_window_bars: противоположный сигнал закрывает позицию только при повторе в окне" /></label>
+                  <label>Порог зигзага (оракул), %<input type="number" id="ens-oracle" value="0.5" min="0.05" max="5" step="0.05" style="width:90px" /></label>
+                  <label><input type="checkbox" id="ens-adaptive" checked /> Адаптив по режимам</label>
+                  <label>Дней<input type="number" id="ens-days" value="7" min="1" max="60" style="width:60px" /></label>
+                  <button class="btn-primary" id="btn-ens-run">▶ Ансамбль</button>
+                </div>
+              </div>
+              <div id="ens-adaptive-config" class="row4" style="margin-bottom:8px">
+                <label>RANGE<select id="ens-mode-range"><option value="both">both</option><option value="long">long</option><option value="short">short</option><option value="no_trade">no trade</option></select></label>
+                <label>TREND_UP<select id="ens-mode-trend-up"><option value="long">long</option><option value="both">both</option><option value="short">short</option><option value="no_trade">no trade</option></select></label>
+                <label>TREND_DOWN<select id="ens-mode-trend-down"><option value="short">short</option><option value="both">both</option><option value="long">long</option><option value="no_trade">no trade</option></select></label>
+                <label>HIGH_VOL<select id="ens-mode-hv"><option value="no_trade">no trade</option><option value="both">both</option><option value="long">long</option><option value="short">short</option></select></label>
+              </div>
+              <div id="ens-chart" style="height:360px"></div>
+              <div class="ens-grid">
+                <div>
+                  <div class="col-title">Воронка (static)</div>
+                  <table class="runs-table"><tbody id="ens-funnel"></tbody></table>
+                  <div class="col-title" style="margin-top:10px">Качество функций vs оракул</div>
+                  <table class="runs-table">
+                    <thead><tr><th>Функция</th><th>Side</th><th>Сигн.</th><th>Покр.%</th><th>Точн.%</th><th>Опереж. мин</th><th>FP</th><th></th></tr></thead>
+                    <tbody id="ens-quality"></tbody>
+                  </table>
+                  <div class="col-title" style="margin-top:10px">Эпизоды входа</div>
+                  <div id="ens-episodes"></div>
+                </div>
+                <div>
+                  <div class="col-title">Static vs Adaptive</div>
+                  <table class="runs-table" id="ens-compare"></table>
+                  <div class="col-title" style="margin-top:10px">Экономика сделки (static)</div>
+                  <div id="ens-costs"></div>
+                  <div class="col-title" style="margin-top:10px">Сделки по режимам (adaptive)</div>
+                  <table class="runs-table"><tbody id="ens-per-regime"></tbody></table>
+                </div>
+              </div>
+              <div class="col-title" style="margin-top:12px">🎯 Потолок vs Реальность (тот же период)</div>
+              <div id="ens-ideal-real" class="mini-hint">—</div>
+              <table class="runs-table" style="margin-top:6px">
+                <thead><tr><th>Показатель</th><th>Идеал (оракул)</th><th>Реальность</th></tr></thead>
+                <tbody id="ens-ideal-real-body"></tbody>
+              </table>
+              <div class="col-title" style="margin-top:12px">Сделки ансамбля</div>
+              <table class="runs-table">
+                <thead><tr><th>Режим</th><th>Side</th><th>Вход→Выход</th><th>Цены</th><th>Stop/TP</th><th>PnL</th><th>MFE/MAE</th><th>Costs</th><th>Причина</th></tr></thead>
+                <tbody id="ens-trades-tbody"></tbody>
+              </table>
+              </div>
+            </div>
+            <footer class="statusbar"><span id="status-text">Готово</span></footer>
+          </section>
+          </section>
+
+          
+          <section class="page page-pad" id="page-lab">
+            <h2 class="pg-h">🧪 Lab — тесты конфигураций</h2>
+            <div class="lab-columns">
+              <div class="lab-col">
+                <div class="col-title">Ожидают <button class="btn-secondary btn-sm" id="btn-cfg-new" title="Собрать новую">＋</button>
+                  <button class="btn-secondary btn-sm" id="btn-lab-settings" title="Настройки Lab">⚙️</button></div>
+                <div class="card hidden" id="cfg-editor">
+                  <div class="cfg-modal-head">
+                    <b id="cfg-modal-title">Сборка конфигурации</b>
+                    <button class="btn-secondary btn-sm" id="btn-cfg-close" title="Закрыть">✕</button>
+                  </div>
+                  <div class="cfg-modal-body">
+                    <div class="cfg-modal-col">
+                      <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--text-dim)">
+                        Название
+                        <div style="display:flex;gap:6px">
+                          <input type="text" id="cfg-name" value="Новая конфигурация" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)" />
+                          <button type="button" class="btn-secondary btn-sm" id="btn-cfg-autoname" title="Сформировать из блоков">⟳ авто</button>
+                        </div>
+                      </label>
+                      <div class="enslab-block">
+                        <div class="mini-hint">BIAS · контекст (1h EMA направление)</div>
+                        <label>Режим<select id="el-bias-mode">
+                          <option value="info" selected>info (не veto)</option>
+                          <option value="veto">veto (жёсткий)</option>
+                          <option value="strict_ct">strict_ct</option>
+                        </select></label>
+                        <label>Период EMA<input type="number" id="el-bias-period" value="50" min="5" max="300" style="width:60px" /></label>
+                      </div>
+                      <div class="enslab-block">
+                        <div class="mini-hint">SETUPS · функции-голоса (5м)</div>
+                        <div id="el-setups"></div>
+                      </div>
+                      <div class="enslab-block">
+                        <div class="mini-hint">ENTRY · триггер (микро-брейкаут)</div>
+                        <label>Таймфрейм<select id="el-entry-tf">
+                          <option value="5min" selected>5 мин</option>
+                          <option value="1min">1 мин</option>
+                        </select></label>
+                        <label>Lookback<input type="number" id="el-entry-lookback" value="1" min="1" max="20" style="width:60px" /></label>
+                      </div>
+                    </div>
+                    <div class="cfg-modal-col">
+                      <div class="enslab-block">
+                        <div class="mini-hint">QUORUM · оркестрация</div>
+                        <label>Кворум K<select id="cfg-quorum"></select></label>
+                        <label>Входы<select id="el-session">
+                          <option value="main" selected>основная сессия</option>
+                          <option value="all">все сессии</option>
+                        </select></label>
+                        <label>Cooldown, бар<input type="number" id="el-cooldown" value="15" min="0" style="width:60px" /></label>
+                      </div>
+                      <div class="enslab-block">
+                        <div class="mini-hint">EXIT · выход</div>
+                        <label>Политика<select id="el-exit">
+                          <option value="atr_stop" selected>ATR Stop</option>
+                          <option value="fixed_sl_tp">Fixed SL/TP</option>
+                          <option value="atr_trailing">ATR Trailing</option>
+                        </select></label>
+                        <div id="el-exit-params" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+                      </div>
+                      <div class="enslab-block">
+                        <div class="mini-hint">ТЕСТ · акции (клик — выбрать) и период</div>
+                        <div id="el-figis" class="chips-row"></div>
+                        <div class="row2" style="margin-top:6px">
+                          <label>Дней<input type="number" id="el-days" value="30" min="1" max="120" style="width:70px" /></label>
+                          <label>Капитал<input type="number" id="el-capital" value="100000" style="width:90px" /></label>
+                        </div>
+                        <div class="row2" style="margin-top:6px">
+                          <label>Дата с<input type="date" id="el-date-from" style="width:130px" /></label>
+                          <label>Дата по<input type="date" id="el-date-to" style="width:130px" /></label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="cfg-modal-foot">
+                    <button class="btn-primary" id="btn-cfg-save">💾 Сохранить</button>
+                    <button class="btn-primary" id="btn-cfg-save-run" style="background:#b388ff">🧪 Сохранить и Тестировать</button>
+                    <button class="btn-secondary" id="btn-cfg-cancel">Отмена</button>
+                  </div>
+                  <div id="el-queue" class="el-queue-box"></div>
+                </div>
+                <div id="cfg-list"></div>
+              </div>
+              <div class="lab-col">
+                <div class="col-title">Очередь / идут</div>
+                <div id="lab-running"><span class="mini-hint">нет активных прогонов</span></div>
+              </div>
+              <div class="lab-col lab-col-wide">
+                <div class="col-title">Протестированы</div>
+                <div id="cfg-tested"></div>
+              </div>
+            </div>
+            <div class="card" id="lab-results-v2">
+              <div id="lr-progress" style="display:none">
+                <div class="mini-hint">Текущая акция</div>
+                <div class="progress-track"><div class="progress-fill" id="lr-progress-stock" style="width:0%"></div></div>
+                <div class="mini-hint" style="margin-top:6px">Общий прогресс</div>
+                <div class="progress-track"><div class="progress-fill" id="lr-progress-total" style="width:0%"></div></div>
+              </div>
+              <div id="lr-details"></div>
+              <table class="runs-table" id="lr-table">
+                <thead><tr><th>Акция</th><th>Дней</th><th>Сделок</th><th>Gross</th><th>Costs</th><th>Net</th><th>PF</th><th>W/L</th></tr></thead>
+                <tbody id="lr-tbody"></tbody>
+              </table>
+              <div id="lr-summary" class="mini-hint"></div>
+            </div>
+          </section>
+
+          <section class="page page-pad" id="page-analytics">
+            <div class="an-head">
+              <div class="an-title">📊 Анализ</div>
+              <span class="an-sub" id="stats-test">—</span>
+              <span class="an-sizing" id="an-sizing" title="Размер слота на одну сделку (доля equity)">слот: —</span>
+              <button class="btn-secondary btn-xs" id="stats-refresh" title="Обновить">⟳ Обновить</button>
+            </div>
+            <div class="stats-period">
+              <label>С <input type="date" id="stats-from"></label>
+              <label>По <input type="date" id="stats-to"></label>
+              <select id="stats-mode" title="Источник данных">
+                <option value="">Авто</option>
+                <option value="sandbox">Live</option>
+                <option value="paper">Тест</option>
+              </select>
+              <button class="btn-secondary btn-xs" id="stats-apply" title="Применить период">OK</button>
+            </div>
+            <div class="stats-compare">
+              <button class="btn-secondary btn-xs" id="stats-cmp-toggle">⚖ Сравнить тесты</button>
+              <div class="stats-cmp-panel hidden" id="stats-cmp-panel">
+                <div class="stats-cmp-list" id="stats-cmp-list"></div>
+                <button class="btn-primary btn-xs" id="stats-cmp-run">Сравнить выбранные</button>
+              </div>
+            </div>
+            <div class="stats-cmp-result" id="stats-cmp-result"></div>
+            <div class="an-aigate" id="an-aigate"></div>
+            <div class="an-aireport" id="an-aireport"></div>
+            <div class="an-movers" id="an-movers"></div>
+            <div class="an-portfolio" id="an-portfolio"></div>
+            <div class="stats-body" id="stats-body"></div>
+          </section>
+
+          <section class="page page-pad active" id="page-bot">
+            <div class="universe-chips" id="bot-universe"></div>
+            
+            <div class="chart-section bot-chart-section" id="bot-chart-section">
+              <div class="chart-wrap bot-chart-wrap" id="bot-chart-wrap">
+                <iframe id="bot-chart-frame" src="/?embedded=1" title="График бота"></iframe>
+              </div>
+              <div class="resizer" id="bot-resizer" title="Потяните — изменится высота графика"><span></span></div>
+            </div>
+            <h3 class="pg-h3">Открытые позиции</h3>
+            <table class="runs-table" id="bot-positions-table">
+              <thead><tr><th>Вход время</th><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Notional</th><th>Текущая</th><th>P&L ₽</th><th>ROI %</th><th>Плечо</th><th>Режим</th><th>Vol</th><th>SL трейл</th><th>TP / P&L при стопе</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <div class="thead-ctrl">
+              <h3 class="pg-h3">Последние сделки</h3>
+              <span class="mini-hint">История исполненных сделок · клик по строке раскрывает детали</span>
+            </div>
+            <table class="runs-table" id="bot-trades-table">
+              <thead><tr><th>Время входа → выхода</th><th>Акция</th><th>Направл.</th><th>Кол-во</th><th>Цена входа → выхода</th><th>Доход</th><th>Комиссия</th><th>Причина выхода</th><th>Вход (голоса)</th><th>R</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+
+            <div class="bot-test-block" id="bot-test-block">
+              <div class="bot-test-head">
+                <h3 class="pg-h3" style="margin:16px 0 0">🧪 Результаты тестов</h3>
+                <button class="btn-secondary btn-sm" id="btn-test-new" title="Запустить новый тест">+ Новый тест</button>
+              </div>
+              <table class="runs-table" id="bot-tests-table">
+                <thead><tr><th>Тест</th><th>Период (входы)</th><th>Сделок</th><th>Wins</th><th>Losses</th><th>Gross Win</th><th>Gross Loss</th><th>Net</th><th>PF</th><th>WR%</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+              <div class="mini-hint" style="margin-top:6px">Клик по тесту = реальный replay-прогон через движок; сделки появятся в таблицах «Открытые позиции» и «Последние сделки» выше, как при Live.</div>
+            </div>
+
+
+          </section>
+        </div>
+
+        <footer class="global-footer">
+          <span>engine trade_engine_v1 · costs canonical_v1 · сигналы=данные</span>
+          <span id="footer-clock"></span>
+        </footer>
+      </div>
+
+      <aside class="sidebar sidebar-right" id="sidebar-right">
+        <div class="sidebar-grip sr-grip" title="Изменить ширину"></div>
+        <div class="sr-tabs">
+          <button class="sr-tab active" data-srtab="market">📊 Рынок · Голоса</button>
+          <button class="sr-tab" data-srtab="aigate">🤖 AI-гейт</button>
+        </div>
+        <div class="sr-tabpane" id="sr-pane-market">
+        <div class="sr-head">
+          <span class="sr-title">📊 Рынок · Голоса</span>
+          <span class="sr-sub" id="sr-count">—</span>
+          <span class="sr-live" id="sr-ts"></span>
+        </div>
+        <div class="sr-filters">
+          <input type="search" id="sr-query" class="sr-query" placeholder="Поиск…" />
+          <label class="sr-min-t">Оборот ≥ <input type="number" id="sr-min-t" value="0" min="0" step="1"> М₽</label>
+        </div>
+        <div class="sr-tools">
+          <label class="sr-univ-only" title="Показывать только бумаги вселенной бота"><input type="checkbox" id="sr-univ-only" /> только вселенная</label>
+          <span class="sr-legend">
+            <span class="sr-leg sr-leg-1">1</span>
+            <span class="sr-leg sr-leg-2">2</span>
+            <span class="sr-leg sr-leg-3">3+</span>
+          </span>
+          <button class="sr-refresh btn-secondary btn-xs" id="votes-config-btn" title="Состав кворума (управление движком)">⚙</button>
+          <button class="sr-refresh btn-secondary btn-xs" id="sr-refresh" title="Обновить с биржи">⟳</button>
+        </div>
+        <div class="votes-editor hidden" id="votes-editor"></div>
+        <div class="sr-carousel-panel" id="sr-carousel-panel"></div>
+        <div class="sr-table-wrap">
+          <table class="sr-table" id="sr-table">
+            <thead>
+              <tr>
+                <th data-sort="ticker">Название <span class="sr-arrow"></span></th>
+                <th class="sr-num" data-sort="price">Цена <span class="sr-arrow"></span></th>
+                <th class="sr-num" data-sort="turnover">Оборот <span class="sr-arrow"></span></th>
+                <th class="sr-num" data-sort="rng_pct" title="Волатильность дня из API: (HIGH−LOW)/WAPRICE · MOEX ISS">Волат API <span class="sr-arrow"></span></th>
+                <th class="sr-num" data-sort="atr_pct" title="Волатильность бота: ATR(14) на 5m / цена — только для вселенной">ATR% <span class="sr-arrow"></span></th>
+                <th class="sr-num" data-sort="votes" title="Голоса ансамбля на последнем 5m баре (1 синий · 2 жёлтый · 3+ зелёный)">Голоса <span class="sr-arrow"></span></th>
+                <th class="sr-num" data-sort="regime" title="Режим рынка (VS — волатильность, UP/DOWN тренд)">Режим <span class="sr-arrow"></span></th>
+                <th class="sr-num sr-col-action" title="Добавить в карусель">✦</th>
+              </tr>
+            </thead>
+            <tbody id="sr-tbody"></tbody>
+          </table>
+        </div>
+        </div>
+        <div class="sr-tabpane hidden" id="sr-pane-aigate">
+          <div class="sr-head">
+            <span class="sr-title">🤖 AI-гейт входов</span>
+            <span class="sr-sub" id="ag-sub">—</span>
+            <button class="sr-refresh btn-secondary btn-xs" id="ag-refresh" title="Обновить">⟳</button>
+            <button class="sr-refresh btn-secondary btn-xs" id="ag-prompt-btn" title="Показать промпт нейросети">📄</button>
+            <button class="sr-refresh btn-secondary btn-xs" id="ag-full" title="На весь экран">⛶</button>
+          </div>
+          <div class="ag-prompt hidden" id="ag-prompt">
+            <div class="ag-prompt-tabs">
+              <button class="ag-ptab active" data-kind="gate">🚦 Гейт входов</button>
+              <button class="ag-ptab" data-kind="watch">👁 Вахтёр</button>
+              <button class="ag-ptab" data-kind="trader">🤖 AI-трейдер</button>
+              <span class="ag-prompt-info" id="ag-prompt-info">—</span>
+            </div>
+            <textarea class="ag-prompt-edit" id="ag-prompt-edit" spellcheck="false"
+              placeholder="SYSTEM-промпт. Пусто = дефолт воркера. Сохраняется на сервере — воркеры читают каждый цикл."></textarea>
+            <div class="ag-prompt-actions">
+              <button class="btn-secondary btn-xs" id="ag-prompt-reset" title="Вернуть дефолт воркера (очистить переопределение)">↺ Дефолт</button>
+              <button class="btn-primary btn-xs" id="ag-prompt-save">💾 Сохранить промпт</button>
+              <span class="ag-prompt-status" id="ag-prompt-status"></span>
+            </div>
+          </div>
+          <div class="ag-summary" id="ag-summary">—</div>
+          <div class="ag-list" id="ag-list"><span class="ag-empty">нет решений</span></div>
+          <div class="ag-resizer" id="ag-resizer" title="Потяни — изменится высота блоков"><span></span></div>
+          <div class="ag-watch">
+            <div class="ag-watch-head">👁 Вахтёр позиций <span id="ag-watch-sub">—</span></div>
+            <div class="ag-notes" id="ag-notes"><span class="ag-empty">нет заметок</span></div>
+          </div>
+          <div class="ag-send">
+            <div class="ag-send-head">✍ Срочное сообщение AI <span class="dim">(увидят гейт, вахтёр и трейдер)</span></div>
+            <textarea class="ag-send-input" id="ag-send-input" rows="3"
+              placeholder="Например: вечернюю торговлю выключил — входы не предлагай"></textarea>
+            <div class="ag-send-actions">
+              <span class="ag-send-status" id="ag-send-status"></span>
+              <button class="btn-primary btn-xs" id="ag-send-btn">Отправить</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+<div class="modal-overlay hidden" id="bot-modal-overlay">
+  <div class="bot-modal">
+    <div class="bot-modal-head">
+      <b>⚙ Настройки бота</b>
+      <button class="btn-secondary btn-sm" id="bs-close" title="Закрыть">✕</button>
+    </div>
+    <div class="bot-modal-body">
+
+      <div class="bs-section">
+        <div class="bs-section-title">Режим SL/TP</div>
+        <div class="bs-radio-group">
+          <label class="bs-radio"><input type="radio" name="sl-mode" value="atr" checked /> ATR (адаптивный)</label>
+          <label class="bs-radio"><input type="radio" name="sl-mode" value="fixed" /> Fixed %</label>
+        </div>
+      </div>
+
+      <div class="bs-section" id="bs-atr-section">
+        <div class="bs-section-title">ATR SL/TP</div>
+        <div class="bs-grid">
+          <label>ATR период<input type="number" id="bs-atr-period" value="14" step="1" min="5" max="50" /></label>
+          <label>Multiplier (SL距离 = ATR × N)<input type="number" id="bs-atr-mult" value="4.0" step="0.5" min="0.5" max="20" /></label>
+          <label>Risk:Reward (TP = SL距离 × N)<input type="number" id="bs-atr-rr" value="4.0" step="0.5" min="0.5" max="20" /></label>
+        </div>
+        <div class="mini-hint">SL = entry − mult×ATR, TP = entry + mult×rr×ATR. Адаптируется под волатильность каждой акции.</div>
+      </div>
+
+      <div class="bs-section bs-hidden" id="bs-fixed-section">
+        <div class="bs-section-title">Fixed SL/TP</div>
+        <div class="bs-grid">
+          <label>Стоп (SL), %<input type="number" id="bs-sl" value="2.5" step="0.1" min="0.1" max="20" /></label>
+          <label>Тейк (TP), %<input type="number" id="bs-tp" value="2.5" step="0.1" min="0.1" max="20" /></label>
+        </div>
+        <div class="mini-hint">Фиксированный процент от цены входа. Одинаковый для всех акций.</div>
+      </div>
+
+      <div class="bs-section">
+        <div class="bs-section-title">Прочее</div>
+        <div class="bs-grid">
+          <label>Top-N акций<input type="number" id="bs-topn" value="20" min="2" max="30" /></label>
+          <label>Комиссия, %<input type="number" id="bs-commission" value="0.3" step="0.05" min="0" max="1" /></label>
+          <label>Re-entry cooldown (баров)<input type="number" id="bs-reentry" value="15" step="1" min="0" max="100" /></label>
+        </div>
+        <div class="bs-grid" style="margin-top:8px">
+          <label>Confirm flip (встречных перед закрытием)<input type="number" id="bs-confirm-flip" value="2" step="1" min="0" max="10" /></label>
+          <label>Quorum (голосов для входа)<input type="number" id="bs-quorum" value="2" step="1" min="1" max="7" /></label>
+        </div>
+      </div>
+
+      <div class="mini-hint bs-hint">Применяются при следующем запуске бота.</div>
+    </div>
+    <div class="bot-modal-foot">
+      <button class="btn-primary btn-sm" id="bs-save">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="test-modal-overlay">
+  <div class="bot-modal">
+    <div class="bot-modal-head">
+      <b>🧪 Запустить тест</b>
+      <button class="btn-secondary btn-sm" id="ts-close" title="Закрыть">✕</button>
+    </div>
+    <div class="bot-modal-body">
+      <div class="bs-section">
+        <div class="bs-section-title">Параметры прогона</div>
+        <label class="bs-field">
+          <span>Название теста</span>
+          <input id="ts-name" type="text" placeholder="напр. июль_main" autocomplete="off" />
+        </label>
+        <label class="bs-field">
+          <span>Начало периода</span>
+          <input id="ts-start" type="datetime-local" step="60" />
+        </label>
+        <label class="bs-field">
+          <span>Конец периода (пусто = до конца данных)</span>
+          <input id="ts-end" type="datetime-local" step="60" />
+        </label>
+        <div class="mini-hint bs-hint">
+          Тот же движок, что в Live/Sandbox, но свечи берутся из БД (никаких реальных заявок),
+          выход — paper-заглушка. Результат сохраняется под этим именем.
+          Время вводится по вашему часовому поясу и конвертируется в UTC.
+        </div>
+      </div>
+    </div>
+    <div class="bot-modal-foot">
+      <button class="btn-primary btn-sm" id="ts-run">Запустить</button>
+    </div>
+  </div>
+</div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
