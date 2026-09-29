@@ -28,9 +28,10 @@ export async function fetchAnalysis(
   intervalName: string,
   limit = 2000,
   beforeTs?: string,
+  signal?: AbortSignal,
 ): Promise<AnalysisDto> {
   const q = `interval_name=${encodeURIComponent(intervalName)}&limit=${limit}` + (beforeTs ? `&before_ts=${encodeURIComponent(beforeTs)}` : "");
-  const res = await fetch(`${API}/api/analysis/${figi}?${q}`);
+  const res = await fetch(`${API}/api/analysis/${figi}?${q}`, signal ? { signal } : undefined);
   if (!res.ok) throw new Error(`Ошибка загрузки анализа (${res.status})`);
   return res.json();
 }

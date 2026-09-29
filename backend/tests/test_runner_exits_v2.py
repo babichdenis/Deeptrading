@@ -63,7 +63,7 @@ class TestBreakeven:
     def test_long_be_moves_stop_and_exits_at_entry(self):
         rows = flat(3) + [
             (100.0, 100.2, 99.8, 100.05),   # вход LONG по open=100; стоп 99; риск 1
-            (100.05, 101.5, 100.3, 101.2),  # high 101.5 >= 101 -> BE; low нового стопа не задевает
+            (100.05, 101.5, 100.0, 101.2),  # high 101.5 >= 101 -> BE (стоп 100 со след. бара)
             (101.2, 101.3, 99.9, 100.0),    # low задевает стоп на входе -> выход в ноль
         ]
         led = run(rows, scripted({2: 'BUY'}), cfg(be_trigger_r=1.0))
@@ -76,17 +76,19 @@ class TestBreakeven:
     def test_long_be_not_triggered_below_threshold(self):
         rows = flat(3) + [
             (100.0, 100.2, 99.8, 100.05),
-            (100.05, 100.9, 100.2, 100.8),  # high 100.9 < 101 -> BE молчит
+            (100.05, 100.9, 100.0, 100.8),  # high 100.9 < 101 -> BE молчит
             (100.8, 100.9, 100.3, 100.5),
         ]
         led = run(rows, scripted({2: 'BUY'}), cfg(be_trigger_r=1.0))
         assert not any(t.exit_reason == 'stop_loss' for t in led.trades)
 
     def test_short_be_exits_at_entry_level(self):
+        # ENG-002 (audit 2026-09-29): BE активируется по close бара и действует
+        # со СЛЕДУЮЩЕГО бара — high того же бара его не выбивает.
         rows = flat(3) + [
             (100.0, 100.2, 99.8, 99.95),    # вход SHORT по open=100; стоп 101; риск 1
-            (99.95, 100.05, 98.4, 98.6),    # low 98.4 <= 99 -> BE (стоп -> 100); high 100.05 задевает
-            (98.6, 98.8, 98.0, 98.2),
+            (99.95, 100.05, 98.4, 98.6),    # close 98.6: прибыль 1.4R -> BE (стоп 100 со след. бара)
+            (98.6, 100.1, 98.0, 98.2),      # high задевает стоп 100 -> выход в ноль
         ]
         led = run(rows, scripted({2: 'SELL'}), cfg(be_trigger_r=1.0))
         assert len(led.trades) == 1
@@ -166,7 +168,7 @@ class TestPartialTake:
     def test_long_partial_then_be_exit(self):
         rows = flat(3) + [
             (100.0, 100.2, 99.8, 100.05),   # вход LONG qty=2; стоп ~99; риск ~1
-            (100.05, 101.5, 100.3, 101.2),  # high >= ~101 -> partial 1 шт; стоп -> вход
+            (100.05, 101.5, 100.0, 101.2),  # high >= ~101 -> partial 1 шт; стоп -> вход
             (101.2, 101.3, 99.9, 100.1),    # low задевает вход -> полный выход ~в ноль
         ]
         led = run(rows, scripted({2: 'BUY'}), cfg(qty=2, partial_r=1.0, partial_fraction=0.5))
@@ -180,8 +182,8 @@ class TestPartialTake:
     def test_partial_once_per_position(self):
         rows = flat(3) + [
             (100.0, 100.2, 99.8, 100.05),
-            (100.05, 101.5, 100.3, 101.2),  # partial; стоп -> вход
-            (101.2, 102.0, 100.5, 101.5),   # снова выше уровня: повторного partial нет
+            (100.05, 101.5, 100.0, 101.2),  # partial; стоп -> вход
+            (101.2, 102.0, 101.0, 101.5),   # снова выше уровня: повторного partial нет
             (101.5, 101.6, 99.9, 100.0),    # выход по BE-стопу
         ]
         led = run(rows, scripted({2: 'BUY'}), cfg(qty=2, partial_r=1.0))
@@ -192,7 +194,7 @@ class TestPartialTake:
     def test_qty1_partial_closes_full_position(self):
         rows = flat(3) + [
             (100.0, 100.2, 99.8, 100.05),
-            (100.05, 101.5, 100.3, 101.2),  # qty=1: partial закрывает всю позицию
+            (100.05, 101.5, 100.0, 101.2),  # qty=1: partial закрывает всю позицию
         ]
         led = run(rows, scripted({2: 'BUY'}), cfg(partial_r=1.0, partial_fraction=0.5))
         assert len(led.trades) == 1
@@ -203,7 +205,7 @@ class TestPartialTake:
     def test_no_partial_below_level(self):
         rows = flat(3) + [
             (100.0, 100.2, 99.8, 100.05),
-            (100.05, 100.9, 100.2, 100.8),  # high < уровня -> partial молчит
+            (100.05, 100.9, 100.0, 100.8),  # high < уровня -> partial молчит
             (100.8, 100.9, 100.3, 100.5),
         ]
         led = run(rows, scripted({2: 'BUY'}), cfg(qty=2, partial_r=1.0))

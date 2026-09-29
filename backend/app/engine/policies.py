@@ -11,14 +11,18 @@ class SignalPolicyConfig:
     id: str = "ignore_same_side"
     version: str = "1.0.0"
     min_hold_bars: int = 0
+    # allow_flip — DEPRECATED (ENG-014, audit 2026-09-29): фактическим
+    # переворотом управляет confirm_flip (см. runner._poll). Поле оставлено
+    # для обратной совместимости конфигов и ни на что не влияет.
     allow_flip: bool = False
     same_side_reentry_cooldown_bars: int = 0
     exit_confirm_window_bars: int = 0
     entry_confirm_bars: int = 0  # N подряд подтверждающих свечей (close>open для LONG, close<open для SHORT) перед входом; 0 = без подтверждения
     opposite_hold: bool = False
-    confirm_flip: bool = False
-    # Лимитный вход: вместо market по open ставим лимит на k*ATR лучше цены сигнала.
-    # 0 = выключено (market-вход, как раньше). Не исполнен за entry_limit_bars — отмена.
+    confirm_flip: bool = False  # ЕДИНСТВЕННЫЙ переключатель переворота: встречный сигнал разворачивает позицию
+    # Лимитный вход — НЕ ПОДДЕРЖИВАЕТСЯ (ENG-003, audit 2026-09-29): полный
+    # жизненный цикл лимита не реализован, runner валидацией отклоняет
+    # entry_limit_atr > 0. Поля оставлены только для чтения старых конфигов.
     entry_limit_atr: float = 0.0
     entry_limit_bars: int = 3
     entry_limit_chase: bool = False  # переносить лимит к цене каждый бар (chase)
@@ -52,7 +56,7 @@ class SignalPolicy:
                 DecisionAction.REJECT_MIN_HOLD,
                 f"bars_held={bars_held} < {self.config.min_hold_bars}",
             )
-        action = "flip" if self.config.allow_flip else "exit"
+        action = "flip" if self.config.confirm_flip else "exit"
         return DecisionAction.ACCEPT_EXIT, f"opposite {signal.reason} -> {action}"
 
 

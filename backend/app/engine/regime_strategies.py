@@ -63,32 +63,18 @@ def _atr_series(candles: Sequence[Candle], period: int = 14) -> list[float]:
 
 
 def _adx_last(candles: Sequence[Candle], period: int = 14):
-    n = len(candles)
-    if n < period + 2:
+    """Канонический Wilder ADX из IndicatorHub (ENG-010, audit 2026-09-29).
+
+    Раньше здесь жила вторая, нестандартная реализация (DM одного бара /
+    сглаженный ATR) — значения расходились с индикаторным хабом.
+    """
+    from app.engine.indicatorhub import _adx as _adx_rows
+
+    if not candles:
         return None, None, None
-    cs = candles[-2 * period - 1:] if n > 2 * period + 1 else candles
-    dx, di_p, di_m = [], [], []
-    for i in range(1, len(cs)):
-        prev, cur = cs[i - 1], cs[i]
-        up = float(cur.high) - float(prev.high)
-        down = float(prev.low) - float(cur.low)
-        plus_dm = up if (up > down and up > 0) else 0.0
-        minus_dm = down if (down > up and down > 0) else 0.0
-        tr = _tr(cur, prev)
-        if tr <= 0:
-            dx.append(0.0); di_p.append(0.0); di_m.append(0.0)
-            continue
-        dp = plus_dm / tr * 100
-        dm = minus_dm / tr * 100
-        s = dp + dm
-        dx.append(abs(dp - dm) / s * 100 if s else 0.0)
-        di_p.append(dp); di_m.append(dm)
-    if not dx:
-        return None, None, None
-    w = dx[-period:]
-    wp = di_p[-period:]
-    wm = di_m[-period:]
-    return sum(w) / len(w), sum(wp) / len(wp), sum(wm) / len(wm)
+    rows = _adx_rows(list(candles), period)
+    i = len(candles) - 1
+    return rows["adx"][i], rows["+di"][i], rows["-di"][i]
 
 
 def _rsi_last(closes: Sequence[float], period: int = 14) -> float | None:
@@ -187,6 +173,9 @@ def detect_regime(candles: Sequence[Candle]) -> RegimeResult:
 # Exit-менеджер
 # ============================================================
 class ExitReason(Enum):
+    """Внутренний контур ExitManager. Не путать с каноническим
+    models.ExitReason — маппинг кодов см. в models.ExitReason (ENG-018)."""
+
     STOP_LOSS = "stop_loss"
     TAKE_PROFIT = "take_profit"
     TRAILING_STOP = "trailing_stop"
@@ -440,31 +429,32 @@ class BreakoutStrategy:
         if regime.regime not in ("TRANSITIONING", "TRENDING"):
             return None
         closes = [float(c.close) for c in candles]
-        highs = [float(c.high) for c in candles]
-        lows = [float(c.low) for c in candles]
         lower, mid, upper = _bb_last(closes, self.bb_period, self.bb_std)
         if lower is None or upper is None or mid is None or mid == 0:
             return None
         bb_width = (upper - lower) / mid
         if len(candles) < self.bb_width_sma + self.bb_period:
             return None
+        # ENG-009 (audit 2026-09-29): rolling BB width смотрит НАЗАД от каждой
+        # точки (раньше — forward-срезы, у хвоста не хватало данных и стратегия
+        # всегда возвращала None), канал пробоя исключает текущий бар.
         bb_widths = []
-        for i in range(self.bb_width_sma):
-            idx = len(candles) - self.bb_width_sma + i
-            sl = closes[idx:idx + self.bb_period]
+        for end in range(len(closes) - self.bb_width_sma, len(closes)):
+            sl = closes[end - self.bb_period + 1: end + 1]
             if len(sl) == self.bb_period:
-                l, m, u = _bb_last(sl, self.bb_period, self.bb_std)
-                if l is not None and u is not None and m is not None and m > 0:
-                    bb_widths.append((u - l) / m)
+                bb_lo, bb_mid, bb_up = _bb_last(sl, self.bb_period, self.bb_std)
+                if bb_lo is not None and bb_up is not None and bb_mid is not None and bb_mid > 0:
+                    bb_widths.append((bb_up - bb_lo) / bb_mid)
         if len(bb_widths) < self.bb_width_sma:
             return None
         bb_width_sma = sum(bb_widths) / len(bb_widths)
         if bb_width >= 0.9 * bb_width_sma:
             return None
-        highest_high = _highest(highs, self.breakout_period)
-        lowest_low = _lowest(lows, self.breakout_period)
-        if highest_high is None or lowest_low is None:
+        prior = candles[-self.breakout_period - 1:-1]
+        if len(prior) < self.breakout_period:
             return None
+        highest_high = max(float(b.high) for b in prior)
+        lowest_low = min(float(b.low) for b in prior)
         close = closes[-1]
         feat = {"regime": regime.regime, "risk_multiplier": regime.risk_multiplier,
                 "bb_width": bb_width, "bb_width_sma": bb_width_sma}

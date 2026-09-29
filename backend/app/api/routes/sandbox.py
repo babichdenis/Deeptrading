@@ -728,18 +728,22 @@ def _test_trade_row(r) -> dict:
         # Инфо-трейлинг: где бы сработал трейл (виртуальный след).
         if _em.get("trail_info"):
             _t = _em["trail_info"]
-            _tpx = float(_t.get("hit_price") or 0.0)
+            _tpx_raw = float(_t.get("hit_price") or 0.0)
+            # Срабатывание виртуального трейла = hit_ts + цена > 0. Без этого
+            # НЕ считаем псевдо-прибыли от нулевой цены (fix 30.09: карточки
+            # показывали «Забрал бы −9 417 ₽» при отсутствии срабатывания).
+            _thit = bool(str(_t.get("hit_ts") or "").strip()) and _tpx_raw > 0
             _trisk = abs(_entry - float(r.stop_loss)) * _qty if (r.stop_loss is not None and float(r.stop_loss) != _entry) else 0.0
             _trail_info = {
                 "activated": bool(_t.get("activated")),
                 "trail_stop": round(float(_t.get("trail_stop") or 0.0), 6),
                 "trail_dist_atr": _t.get("trail_dist_atr"),
-                "hit_time": str(_t.get("hit_ts") or ""),
-                "hit_price": round(_tpx, 6),
-                "hit_reason": str(_t.get("hit_reason") or ""),
-                "hit_pnl": round(((_tpx - _entry) if _is_long else (_entry - _tpx)) * _qty, 2),
-                "hit_r": round(((_tpx - _entry) * _qty) / _trisk, 2) if (_trisk and _is_long) else (round(((_entry - _tpx) * _qty) / _trisk, 2) if _trisk else None),
-                "hit_roi_pct": round(((_tpx - _entry) * _qty) / _own * 100, 1) if (_own and _is_long) else (round(((_entry - _tpx) * _qty) / _own * 100, 1) if _own else None),
+                "hit_time": str(_t.get("hit_ts") or "") if _thit else "",
+                "hit_price": round(_tpx_raw, 6) if _thit else None,
+                "hit_reason": str(_t.get("hit_reason") or "") if _thit else "",
+                "hit_pnl": round(((_tpx_raw - _entry) if _is_long else (_entry - _tpx_raw)) * _qty, 2) if _thit else None,
+                "hit_r": (round(((_tpx_raw - _entry) * _qty) / _trisk, 2) if _is_long else round(((_entry - _tpx_raw) * _qty) / _trisk, 2)) if (_thit and _trisk) else None,
+                "hit_roi_pct": (round(((_tpx_raw - _entry) * _qty) / _own * 100, 1) if _is_long else round(((_entry - _tpx_raw) * _qty) / _own * 100, 1)) if (_thit and _own) else None,
             }
         if _em.get("max_pnl") is not None:
             _mp = float(_em["max_pnl"])

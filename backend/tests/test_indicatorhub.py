@@ -9,6 +9,21 @@ from app.engine.indicatorhub import IndicatorHub, INDICATORS
 from app.engine.models import Candle
 
 
+def test_envelops_reference_vector():
+    """Канон конвертов: SMA ± deviation% от уровня (reference-вектор вручную)."""
+    from app.engine.indicatorhub import _envelops
+    candles = [
+        Candle(ts=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=i),
+               open=float(v), high=float(v), low=float(v), close=float(v))
+        for i, v in enumerate((1, 2, 3, 4))
+    ]
+    out = _envelops(candles, 2, 10.0)
+    assert out["center"] == [None, 1.5, 2.5, 3.5]
+    assert out["up"][3] == pytest.approx(3.85)
+    assert out["down"][3] == pytest.approx(3.15)
+    assert out["up"][0] is None and out["down"][0] is None
+
+
 def _candles(n: int = 100, start: datetime | None = None) -> list[Candle]:
     if start is None:
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)

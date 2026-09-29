@@ -202,8 +202,11 @@ def test_ose_all_params_defaults_and_validation():
     assert strat.p.sma_stoch_step_pct == 1.0
     strat = build_strategy("ose_all", {"quorum": 3})
     assert strat.p.quorum == 3
+    # 29.09: в кворуме шесть роботов (подключён RsiTrade) — 6 валиден
+    strat = build_strategy("ose_all", {"quorum": 6})
+    assert strat.p.quorum == 6
     with pytest.raises(ParamValidationError):
-        build_strategy("ose_all", {"quorum": 6})
+        build_strategy("ose_all", {"quorum": 7})
     with pytest.raises(ParamValidationError):
         build_strategy("ose_all", {"unknown_param": 1})
 

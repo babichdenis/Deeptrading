@@ -2040,14 +2040,27 @@ class PaperBotRuntime:
                     meta.setdefault("trail_active", bool(self._trail_active.get(figi, False)))
                     # Инфо-трейлинг: где бы сработал трейл (виртуальный след, SL/TP не трогали).
                     _ti = self._trail_info.pop(figi, None)
-                    if _ti and _ti.get("hit_ts"):
+                    if _ti:
+                        # Пишем ВСЕГДА (30.09): карточка должна отвечать «где трейл»
+                        # даже когда он не активировался или активировался, но не сработал.
+                        _hit = bool(_ti.get("hit_ts"))
+                        _hit_pnl = None
+                        try:
+                            _hp = float(_ti.get("hit_price") or 0.0)
+                            if _hit and _hp > 0 and row.entry_price:
+                                _dir = 1.0 if str(row.side).upper() in ("LONG", "BUY") else -1.0
+                                _hit_pnl = round((_hp - float(row.entry_price)) * int(row.qty) * _dir, 2)
+                        except Exception:
+                            _hit_pnl = None
                         meta["trail_info"] = {
                             "activated": bool(_ti.get("active")),
                             "trail_stop": float(_ti.get("act_track") or 0.0),
                             "trail_dist_atr": _ti.get("trail_dist_atr"),
-                            "hit_ts": str(_ti.get("hit_ts")),
-                            "hit_price": float(_ti.get("hit_price") or 0.0),
-                            "hit_reason": str(_ti.get("hit_reason")),
+                            "hit_ts": str(_ti.get("hit_ts") or ""),
+                            "hit_time": str(_ti.get("hit_ts") or ""),  # имя, которое читает карточка
+                            "hit_price": float(_ti.get("hit_price") or 0.0) if _hit else None,
+                            "hit_reason": str(_ti.get("hit_reason") or "") if _hit else "",
+                            "hit_pnl": _hit_pnl,
                         }
                     # Пик PnL позиции (трекается в _step_exit на каждом баре).
                     # Пик P&L сделки: лучший ход (макс. цена лонг / мин. шорт), ATR, MAE.
@@ -2061,11 +2074,47 @@ class PaperBotRuntime:
                             meta["max_pnl_atr"] = float(_peak.get("atr_abs"))
                         if _peak.get("atr_pct") is not None:
                             meta["max_pnl_atr_pct"] = float(_peak.get("atr_pct"))
+                        # MAE (fix 29.09): макс. уход ПРОТИВ сделки за всю её жизнь.
+                        # Раньше max_pnl_mae_atr считался как ₽-PnL (с qty), делённый
+                        # на ATR за штуку — отсюда дикие «99.8 ATR». Теперь:
+                        #   mae_atr   — расстояние в ATR (per-share, единицы риска SL)
+                        #   mae_pct   — % от цены входа
+                        #   mae_price / mae_time — где и когда уходило хуже всего.
                         try:
-                            _mae = float(_peak.get("mae") or 0.0)
-                            _atr_c = self.atr_now(figi) if _mae > 0 else None
-                            if _atr_c:
-                                meta["max_pnl_mae_atr"] = round(_mae / float(_atr_c), 2)
+                            _entry_mae = float(meta.get("entry_price") or row.entry_price or 0.0)
+                            # Adverse до самого выхода: уход против, случившийся на
+                            # открытии бара выхода, тоже часть MAE (29.09).
+                            _exit_fill = float(exit_price or 0.0)
+                            _adv_exit = 0.0
+                            if _entry_mae > 0 and _exit_fill > 0:
+                                _is_long = str(row.side).upper() in ("LONG", "BUY")
+                                _adv_exit = (_entry_mae - _exit_fill) if _is_long else (_exit_fill - _entry_mae)
+                                _adv_exit = max(0.0, _adv_exit)
+                            _peak_dist = float(_peak.get("mae_dist") or 0.0)
+                            _mae_dist = max(_peak_dist, _adv_exit)
+                            _atr_c = None
+                            try:
+                                _atr_c = self.atr_now(figi)
+                            except Exception:
+                                _atr_c = None
+                            if _mae_dist > 0 and _atr_c:
+                                _mae_atr = _mae_dist / float(_atr_c)
+                            else:
+                                _mae_atr = float(_peak.get("mae_cur") or 0.0)
+                            meta["mae_atr"] = round(_mae_atr, 2)
+                            if _mae_dist > 0 and _entry_mae > 0:
+                                meta["mae_pct"] = round(_mae_dist / _entry_mae * 100.0, 2)
+                            if _adv_exit > _peak_dist:
+                                meta["mae_price"] = _exit_fill
+                                if row.exit_time is not None:
+                                    meta["mae_time"] = str(row.exit_time.isoformat())
+                            else:
+                                if _peak.get("mae_px") is not None:
+                                    meta["mae_price"] = float(_peak.get("mae_px"))
+                                if _peak.get("mae_ts"):
+                                    meta["mae_time"] = str(_peak.get("mae_ts"))
+                            # legacy-ключ карточки — теперь в корректных единицах
+                            meta["max_pnl_mae_atr"] = meta["mae_atr"]
                         except Exception as _sw_e:
                             _audit_swallow('_st_close@peak_mae', _sw_e)  # audit silent-except
                             pass
@@ -2848,6 +2897,18 @@ class PaperBotRuntime:
             pass
         if cfg.use_ensemble:
             cfg.interval_name = "1min"
+        if str(cfg.mode) == "test":
+            # Тест-оверрайды — ПОСЛЕДНИМИ по приоритету (после сохранёнок и
+            # gates_config): TEST_ENGINE/TEST_INTERVAL/TEST_PARAMS/TEST_GATES
+            # (см. apply_test_overrides). Вызов был потерян — переключение
+            # движка теста (напр. ose_all) молча не работало: env ставился,
+            # но никто его не читал.
+            try:
+                _ov = apply_test_overrides(cfg)
+                if _ov:
+                    self._log("ТЕСТ-ОВЕРРАЙДЫ: " + ", ".join(_ov[:10]))
+            except Exception as _sw_e:
+                _audit_swallow('start@test_overrides', _sw_e)
         # --- Replay: стартуем виртуальные часы с начала окна (до первой свечи). ---
         self._replay_from = None
         self._replay_cur = None
@@ -4676,8 +4737,16 @@ class PaperBotRuntime:
 
         _did_execute = await self._execute_pending(figi, c)
 
-        buffer.append(EngineCandle(ts=c.ts, open=c.open, high=c.high,
-                                   low=c.low, close=c.close, volume=c.volume))
+        _new_c = EngineCandle(ts=c.ts, open=c.open, high=c.high,
+                              low=c.low, close=c.close, volume=c.volume)
+        if buffer and buffer[-1].ts == c.ts:
+            # ENG-015 (audit 2026-09-29): стык preload (date_to=_bot_now) с
+            # первой живой/реплейной свечой даёт тот же ts. По семантике
+            # CandleHub это REPLACE, а не дубль — иначе движок отклоняет
+            # немонотонный ряд и ансамбль молчит весь день.
+            buffer[-1] = _new_c
+        else:
+            buffer.append(_new_c)
         # --- Ресемпл 1m → 5m: когда закрыт 5m бар (последняя минута интервала),
         # строим 5m из буфера и пишем в очередь (interval=5 в БД).
         try:
@@ -4904,6 +4973,16 @@ class PaperBotRuntime:
         state_now = PositionState.LONG if (pos_now and pos_now.side in ("LONG", "BUY")) else (
             PositionState.SHORT if (pos_now and pos_now.side in ("SHORT", "SELL")) else PositionState.FLAT
         )
+        # ENG-012 (bot-контур, 29.09): exit-intent на ФЛЭТЕ — это НЕ вход.
+        # Раньше голос «закрыл шорт» (close_short → BUY, kind="exit") открывал
+        # LONG: в тесте 24.09 так родились 18 из 39 сделок (46% фантомов).
+        # Симметрично движку EngineRunner (exit_ignored_flat). Когда позиция
+        # есть — exit-голос идёт обычным путём (противоположная сторона
+        # закрывает, своя — already_held).
+        if state_now is PositionState.FLAT and \
+                str(getattr(sig, "kind", "entry") or "entry") == "exit":
+            self._log_no_trade(figi, "exit_flat", "exit-голос на флэте проигнорирован (не вход)")
+            return
         bars_held = 0
         policy = SignalPolicy()
         action, note = policy.decide(sig, state_now, bars_held)
@@ -6040,17 +6119,27 @@ class PaperBotRuntime:
             except Exception:
                 _atr_v = None
             _mae_cur = 0.0
+            _adv_px = 0.0
             try:
-                if _atr_v and entry_px:
-                    _adv_px = (float(c.low) - float(entry_px)) if state == PositionState.LONG else (float(entry_px) - float(c.high))
-                    if _adv_px > 0:
+                if entry_px:
+                    # Adverse = ход ПРОТИВ позиции: LONG — ниже входа, SHORT — выше.
+                    # (29.09: для LONG знак был перевёрнут — low-entry>0 — MAE молчал.)
+                    _adv_px = (float(entry_px) - float(c.low)) if state == PositionState.LONG else (float(c.high) - float(entry_px))
+                    if _adv_px > 0 and _atr_v:
                         _mae_cur = _adv_px / float(_atr_v)
             except Exception:
                 _mae_cur = 0.0
+                _adv_px = 0.0
             _peak = self._peak_pnl.get(figi)
             if _peak is None:
                 _peak = {"pnl": float("-inf"), "mae_cur": 0.0, "mae_atr": 0.0}
             _peak["mae_cur"] = max(float(_peak.get("mae_cur", 0.0)), _mae_cur)
+            # Макс. просадка в ЦЕНЕ за всю сделку (для калибровки SL): расстояние,
+            # цена и время самого глубокого ухода против позиции (29.09).
+            if _adv_px > float(_peak.get("mae_dist", 0.0)):
+                _peak["mae_dist"] = float(_adv_px)
+                _peak["mae_px"] = float(c.low) if state == PositionState.LONG else float(c.high)
+                _peak["mae_ts"] = c.ts.isoformat()
             if _cur_pnl > float(_peak.get("pnl", -1e18)):
                 _atr_p = 0.0
                 try:
@@ -6082,7 +6171,24 @@ class PaperBotRuntime:
                 if _ti_cfg is not None and _ti is not None:
                     _act_bars = list(buf) if buf else [c]
                     from dataclasses import replace as _dc_replace
-                    _tpol = _dc_replace(policy, trail_activation_comm_mult=_ti_cfg)
+                    if getattr(policy, "trailing_activated", None) is None:
+                        # Реальная политика без трейлинга (fixed_sl_tp — «копия
+                        # OsEngine») — виртуальный трейл строим от ATR-конфига
+                        # НЕЗАВИСИМО. Раньше блок молчал: _dc_replace не добавляет
+                        # методы, и карточки не получали «трейл бы сработал» (29.09).
+                        from app.engine.exits import AtrStopPolicy as _AtrInfoPolicy
+                        _tpol = _AtrInfoPolicy(
+                            period=int(getattr(self.config, "atr_period", 14) or 14),
+                            multiplier=float(getattr(self.config, "initial_sl_atr", 4.0) or 4.0),
+                            trail_activation_comm_mult=_ti_cfg,
+                            trail_distance_r=float(getattr(self.config, "trail_distance_atr", 2.5) or 2.5),
+                            trail_compress_r=float(getattr(self.config, "trail_compress_r", 0.0) or 0.0),
+                            trail_min_factor=float(getattr(self.config, "trail_min_factor", 0.3) or 0.3),
+                            trail_min_atr=float(getattr(self.config, "trail_min_atr", 0.0) or 0.0),
+                            trail_vol_boost=float(getattr(self.config, "trail_vol_boost", 0.0) or 0.0),
+                        )
+                    else:
+                        _tpol = _dc_replace(policy, trail_activation_comm_mult=_ti_cfg)
                     _tact = getattr(_tpol, "trailing_activated", None)
                     _tupd = getattr(_tpol, "update_stop", None)
                     if not _ti.get("active"):

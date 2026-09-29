@@ -31,10 +31,11 @@ def mkcandles(n, seed=5, step_min=5, base=100.0):
         else:
             px = max(px + rng.gauss(0, 0.001) * px, 1.0)
         o = px
-        h = px * (1 + abs(rng.gauss(0, 0.001)))
-        lo = px * (1 - abs(rng.gauss(0, 0.001)))
-        out.append(Candle(ts=ts, open=o, high=h, low=lo,
-                          close=px + rng.gauss(0, 0.0005) * px, volume=1000))
+        c = px + rng.gauss(0, 0.0005) * px
+        # ENG-015: генератор обязан давать валидные OHLC (high >= max(o,c) >= min >= low)
+        h = max(o, c) * (1 + abs(rng.gauss(0, 0.001)))
+        lo = min(o, c) * (1 - abs(rng.gauss(0, 0.001)))
+        out.append(Candle(ts=ts, open=o, high=h, low=lo, close=c, volume=1000))
     return out
 
 

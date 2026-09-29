@@ -173,10 +173,18 @@ def test_short_rejected_when_not_allowed():
 
 
 def test_macd_cross_produces_signals_on_trend():
+    # ENG-008: стратегия получает warmup-историю с самого начала, поэтому
+    # кроссы должны быть ПОСЛЕ формального warmup — пила, затем контртренд
+    # и разворот вверх дают кроссы уже на «торгуемых» барах.
     rows = []
     price = 100.0
-    for i in range(80):
-        step = 0.35 if i > 30 else (-0.15 if i % 2 else 0.05)
+    for i in range(120):
+        if i < 40:
+            step = 0.30 if i % 2 else -0.25
+        elif i < 55:
+            step = -0.40
+        else:
+            step = 0.35
         price += step
         rows.append((price - 0.1, price + 0.3, price - 0.4, price))
     ledger = run(rows, MacdCrossStrategy(), exit_policy=FixedSlTpPolicy(0.02, 0.04))
@@ -212,7 +220,7 @@ def test_entry_confirm_reset_on_bad_candle():
     # нужна пара восходящих заново
     rows = flat(2)
     rows += [(100.0, 100.5, 99.8, 100.4)]  # бар 2: подтверждающая
-    rows += [(100.4, 100.2, 99.5, 99.6)]   # бар 3: против -> reset
+    rows += [(100.4, 100.45, 99.5, 99.6)]  # бар 3: против -> reset
     rows += [(99.6, 100.0, 99.4, 99.9)]    # бар 4: подтверждающая
     rows += [(99.9, 100.4, 99.7, 100.2)]   # бар 5: подтверждающая -> confirm done
     rows += [(100.2, 100.7, 100.0, 100.5)]  # бар 6: исполнение по open

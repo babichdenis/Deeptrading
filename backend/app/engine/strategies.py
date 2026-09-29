@@ -74,6 +74,14 @@ class MacdCrossStrategy:
     def warmup_bars(self) -> int:
         return self.params.slow + self.params.signal_period
 
+    def reset(self) -> None:
+        """ENG-007: возврат в исходное состояние — повторный run() детерминирован."""
+        self._ema_fast = None
+        self._ema_slow = None
+        self._ema_signal = None
+        self._prev_hist = None
+        self._count = 0
+
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         close = candles[-1].close
         self._count += 1
@@ -195,6 +203,14 @@ class _VolumeBase:
         self._lows: deque[float] = deque()
         self._count = 0
 
+    def reset(self) -> None:
+        """ENG-007: сброс накопленного окна состояния."""
+        self._volumes.clear()
+        self._closes.clear()
+        self._highs.clear()
+        self._lows.clear()
+        self._count = 0
+
     def _push(self, bar: Candle, maxlen: int) -> None:
         self._volumes.append(float(bar.volume or 0.0))
         self._closes.append(float(bar.close))
@@ -231,6 +247,10 @@ class VolumeDropStrategy(_VolumeBase):
 
     def warmup_bars(self) -> int:
         return self.params.ma_len + 2
+
+    def reset(self) -> None:
+        super().reset()
+        self._prev_close = None
 
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         bar = candles[-1]
@@ -493,6 +513,227 @@ class RangeReversionStrategy:
         return None
 
 
+@dataclass(frozen=True)
+class RsiTradeHubParams:
+    rsi_length: int = 20
+    upline: float = 65.0
+    downline: float = 35.0
+
+
+def _hub_rsi_incremental(owner, candles: Sequence[Candle], length: int) -> list:
+    """Wilder-RSI (канон hub) с хвостовым досчётом: значения бит-в-бит как у
+    indicatorhub._rsi, но на новом баре считаем один шаг, а не всю серию."""
+    from app.engine.indicatorhub import _rsi as _hub_rsi
+    n = len(candles)
+    st = getattr(owner, "_hub_rsi_state", None)
+    if (st is not None and st["n"] == n - 1 and st["len"] == length
+            and st["ag"] is not None):
+        prev = candles[n - 2].close
+        diff = candles[n - 1].close - prev
+        g = diff if diff > 0 else 0.0
+        lo = -diff if diff < 0 else 0.0
+        ag = (st["ag"] * (length - 1) + g) / length
+        al = (st["al"] * (length - 1) + lo) / length
+        val = 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
+        st["ag"], st["al"], st["n"] = ag, al, n
+        st["series"].append(val)
+        return st["series"]
+    series = _hub_rsi(list(candles), length)
+    ag = al = None
+    if n >= length + 1:
+        gains = [0.0] * n
+        losses = [0.0] * n
+        for i in range(1, n):
+            d = candles[i].close - candles[i - 1].close
+            if d > 0:
+                gains[i] = d
+            else:
+                losses[i] = -d
+        ag = sum(gains[1:length + 1]) / length
+        al = sum(losses[1:length + 1]) / length
+        for i in range(length + 1, n):
+            ag = (ag * (length - 1) + gains[i]) / length
+            al = (al * (length - 1) + losses[i]) / length
+    owner._hub_rsi_state = {"n": n, "len": length, "ag": ag, "al": al, "series": series}
+    return series
+
+
+class RsiTradeHubStrategy:
+    """Логика OsEngine RsiTrade на КАНОНИЧЕСКОМ Wilder-RSI (IndicatorHub).
+
+    Отличие от порта ose_rsi_trade: там реплика Scripts/Rsi.cs
+    (MovingAverageHard, буфер 20 баров, round(2)) — сигналы расходятся
+    (на SBER 10м совпало 24 из 99 кроссоверов). Здесь канонический RSI
+    проекта; сигналы — те же кресты (вверх через downline → BUY, вниз
+    через upline → SELL), выход/реверс разруливает SignalPolicy раннера.
+    """
+    strategy_id = "rsi_trade_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: RsiTradeHubParams | None = None):
+        self.p = params or RsiTradeHubParams()
+
+    def reset(self) -> None:
+        self._hub_rsi_state = None
+
+    def warmup_bars(self) -> int:
+        return int(self.p.rsi_length) + 2
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        r = _hub_rsi_incremental(self, candles, int(self.p.rsi_length))
+        if len(r) < 2 or r[-1] is None or r[-2] is None:
+            return None
+        prev, cur = r[-2], r[-1]
+        last = candles[-1]
+        if prev < self.p.downline < cur:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=last.ts,
+                          reason="rsi_up_down", features={"rsi": round(cur, 2)})
+        if prev > self.p.upline > cur:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=last.ts,
+                          reason="rsi_dn_up", features={"rsi": round(cur, 2)})
+        return None
+
+
+@dataclass(frozen=True)
+class EnvelopTrendHubParams:
+    length: int = 10
+    deviation: float = 0.3
+    trail_stop: float = 0.1
+
+
+class EnvelopTrendHubStrategy:
+    """Логика OsEngine EnvelopTrend на КАНОНИЧЕСКИХ конвертах (IndicatorHub).
+
+    Вход: касание полосы предыдущего закрытого бара (в порту — стоп-заявки по
+    полосам, филл по цене активации). Выход: трейлинг-стоп от полосы со сдвигом
+    trail_stop% — приходит exit-интентом (kind="exit"): раннер закроет позицию,
+    на флэте такой сигнал игнорируется (как exit-голоса OSE-адаптера).
+    Приоритет на баре: сначала выход-интент, затем вход (не терять закрытие).
+    """
+    strategy_id = "envelop_trend_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: EnvelopTrendHubParams | None = None):
+        self.p = params or EnvelopTrendHubParams()
+
+    def reset(self) -> None:
+        self._closes_cache = []
+
+    def warmup_bars(self) -> int:
+        return int(self.p.length) + 3
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        # Хвостовая формула канона (совпадает с indicatorhub._envelops для
+        # индекса -2 бит-в-бит): полоса предыдущего закрытого бара = SMA(L)
+        # от closes[-L-1:-1] ± deviation%. O(L) на бар; closes кэшируются
+        # инкрементально (без пересборки списка на каждом баре).
+        n = len(candles)
+        closes = getattr(self, "_closes_cache", None)
+        if closes is None or len(closes) != n - 1:
+            closes = [c.close for c in candles[:-1]]
+        else:
+            closes = closes + [candles[n - 1].close]
+        self._closes_cache = closes
+        L = int(self.p.length)
+        if len(closes) < L + 1:
+            return None
+        sma_prev = sum(closes[-L - 1:-1]) / L
+        dev = float(self.p.deviation)
+        up_prev = sma_prev + sma_prev * dev / 100.0
+        dn_prev = sma_prev - sma_prev * dev / 100.0
+        bar = candles[-1]
+        # Вход — приоритетно: касание полосы предыдущего закрытого бара
+        # (в порту эквивалент стоп-заявки с филлом по активации). Выход-интент
+        # (трейлинг от полосы) — только как else: на флэте он игнорируется
+        # раннером, но приоритет «выход вперёд» глушил бы все входы, потому что
+        # в боковике trail-условие истинно почти на каждом баре.
+        if bar.high >= up_prev:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=bar.ts,
+                          reason="break_up", features={"up": round(up_prev, 4)})
+        if bar.low <= dn_prev:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=bar.ts,
+                          reason="break_down", features={"down": round(dn_prev, 4)})
+        trail = float(self.p.trail_stop or 0.0)
+        if trail > 0.0:
+            if bar.low <= up_prev * (1.0 - trail / 100.0):
+                return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=bar.ts,
+                              reason="trail_long_exit", kind="exit",
+                              features={"level": round(up_prev * (1.0 - trail / 100.0), 4)})
+            if bar.high >= dn_prev * (1.0 + trail / 100.0):
+                return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=bar.ts,
+                              reason="trail_short_exit", kind="exit",
+                              features={"level": round(dn_prev * (1.0 + trail / 100.0), 4)})
+        return None
+
+
+@dataclass(frozen=True)
+class CanonEnsembleParams:
+    members: str = "rsi_trade_hub"  # CSV strategy_id реестра (параметры — дефолтные)
+    quorum: int = 1
+
+
+class CanonEnsembleStrategy:
+    """Ансамбль КАНОНИЧЕСКИХ стратегий реестра: голоса членов → кворум.
+
+    Члены считаются на том же окне (build_strategy, дефолтные параметры).
+    Вход: сторона набрала >= quorum голосов И больше противоположных (голосуют
+    только kind != "exit"). Если вход не сложился — наружу пропускается первый
+    exit-интент члена (kind="exit"): раннер закроет позицию, на флэте проигнорит.
+    """
+    strategy_id = "canon_ensemble"
+    version = "1.0.0"
+
+    def __init__(self, params: CanonEnsembleParams | None = None):
+        self.p = params or CanonEnsembleParams()
+        ids = [m.strip() for m in (self.p.members or "").split(",") if m.strip()]
+        if not ids:
+            raise ValueError("canon_ensemble: пустой список members")
+        self._members = []
+        for sid in ids:
+            if sid == self.strategy_id:
+                raise ValueError("canon_ensemble: самоссылка в members")
+            if sid not in STRATEGY_REGISTRY:
+                raise ValueError(f"canon_ensemble: неизвестная стратегия {sid!r}")
+            self._members.append((sid, build_strategy(sid, None)))
+
+    def reset(self) -> None:
+        for _sid, m in self._members:
+            r = getattr(m, "reset", None)
+            if callable(r):
+                r()
+
+    def warmup_bars(self) -> int:
+        return max((m.warmup_bars() for _sid, m in self._members), default=0) + 1
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        buy = sell = 0
+        exit_sig = None
+        for _sid, m in self._members:
+            s = m.on_bar(candles)
+            if s is None:
+                continue
+            if str(getattr(s, "kind", "entry") or "entry") == "exit":
+                if exit_sig is None:
+                    exit_sig = s
+                continue
+            if s.side is Side.BUY:
+                buy += 1
+            else:
+                sell += 1
+        q = max(1, int(self.p.quorum))
+        if buy >= q and buy > sell:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=candles[-1].ts,
+                          reason=f"canon_vote {buy}B/{sell}S q={q}",
+                          features={"buy": buy, "sell": sell, "quorum": q})
+        if sell >= q and sell > buy:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=candles[-1].ts,
+                          reason=f"canon_vote {buy}B/{sell}S q={q}",
+                          features={"buy": buy, "sell": sell, "quorum": q})
+        if exit_sig is not None:
+            return exit_sig
+        return None
+
+
 STRATEGY_REGISTRY: dict[str, type] = {
     "macd_cross": MacdCrossStrategy,
     "donchian_breakout": DonchianBreakoutStrategy,
@@ -508,6 +749,9 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "trend_up": TrendUpStrategy,
     "trend_down": TrendDownStrategy,
     "range_reversion": RangeReversionStrategy,
+    "rsi_trade_hub": RsiTradeHubStrategy,
+    "envelop_trend_hub": EnvelopTrendHubStrategy,
+    "canon_ensemble": CanonEnsembleStrategy,
     "long_ensemble": LongEnsembleStrategy,
     "short_ensemble": ShortEnsembleStrategy,
     "range_ensemble": RangeEnsembleStrategy,
@@ -539,6 +783,9 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "trend_up": TrendUpParams,
     "trend_down": TrendDownParams,
     "range_reversion": RangeReversionParams,
+    "rsi_trade_hub": RsiTradeHubParams,
+    "envelop_trend_hub": EnvelopTrendHubParams,
+    "canon_ensemble": CanonEnsembleParams,
     "long_ensemble": LongEnsembleParams,
     "short_ensemble": ShortEnsembleParams,
     "range_ensemble": RangeEnsembleParams,

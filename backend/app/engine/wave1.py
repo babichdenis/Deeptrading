@@ -129,12 +129,25 @@ class RsiReversalStrategy:
     def warmup_bars(self) -> int:
         return self.params.period + 2
 
+    def reset(self) -> None:
+        """ENG-007: сброс streaming-состояния RSI."""
+        self._count = 0
+        self._seed_gains.clear()
+        self._seed_losses.clear()
+        self._avg_gain = None
+        self._avg_loss = None
+        self._prev_close = None
+        self._prev_high = None
+        self._prev_low = None
+        self._prev_rsi = None
+
     def _update_rsi(self, close: float) -> float | None:
         p = self.params.period
         if self._prev_close is None:
             self._prev_close = close
             return None
         delta = close - self._prev_close
+        self._prev_close = close
         gain = max(delta, 0.0)
         loss = max(-delta, 0.0)
         if self._avg_gain is None:

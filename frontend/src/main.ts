@@ -330,7 +330,7 @@ finally { await pollPositions(); }
         if (!figi) return;
         const p = data.positions.find((x) => x.figi === figi);
         if (!p) return;
-        sendEmbedFocus({
+        focusBotChart({
           figi, ticker: p.ticker,
           trade: {
             entry_price: p.entry_price,
@@ -342,14 +342,14 @@ finally { await pollPositions(); }
         });
       });
     });
-    // Автофокус: график сразу смотрит на первую открытую позицию (как в оригинале),
-    // при изменении SL/TP/trailing пересылаем обновлённый trade в iframe.
+    // Автофокус: график сразу смотрит на первую открытую позицию (как в оригинале).
+    // Дальше — только обновление линий у ФОКУСИРОВАННОЙ позиции: смена SL/TP/trailing
+    // шлёт overlay-сообщение, а не focus, иначе каждые 5с грузились бы свечи заново.
     if (data.positions.length > 0) {
       if (!_botChartInit) {
         _botChartInit = true;
         const first = data.positions[0];
-        _botFocusFigi = first.figi;
-        sendEmbedFocus({
+        focusBotChart({
           figi: first.figi, ticker: first.ticker,
           trade: {
             entry_price: first.entry_price,
@@ -361,18 +361,19 @@ finally { await pollPositions(); }
       } else if (_botFocusFigi) {
         const cur = data.positions.find((x) => x.figi === _botFocusFigi);
         if (cur) {
-          const sig = `${cur.side}|${cur.entry_price}|${cur.stop_loss}|${cur.take_profit}|${cur.trail_active}`;
+          const overlayMsg: Omit<FocusMsg, "type"> = {
+            figi: cur.figi, ticker: cur.ticker,
+            trade: {
+              entry_price: cur.entry_price,
+              stop_loss: cur.stop_loss ?? undefined,
+              take_profit: cur.take_profit ?? undefined,
+            },
+            trades: [{ side: cur.side, entry_time: cur.entry_time, exit_time: undefined }],
+          };
+          const sig = focusSignature({ ...overlayMsg, type: "focus" });
           if (sig !== _botFocusSig) {
             _botFocusSig = sig;
-            sendEmbedFocus({
-              figi: cur.figi, ticker: cur.ticker,
-              trade: {
-                entry_price: cur.entry_price,
-                stop_loss: cur.stop_loss ?? undefined,
-                take_profit: cur.take_profit ?? undefined,
-              },
-              trades: [{ side: cur.side, entry_time: cur.entry_time, exit_time: undefined }],
-            });
+            overlayBotChart(overlayMsg);
           }
         }
       }
@@ -424,7 +425,7 @@ function bindTradesClicks(): void {
     const enSec = emEpoch(t.entry_time);
     const exSec = t.ts ? emEpoch(t.ts) : null;
     const centerSec = enSec != null && exSec != null ? Math.floor((enSec + exSec) / 2) : (enSec ?? undefined);
-    sendEmbedFocus({
+    focusBotChart({
       figi, ticker: t.ticker,
       trade: {
         entry_price: t.entry_price ?? undefined,
@@ -2473,7 +2474,7 @@ function renderSrTable(): void {
       if (!figi) return;
       try { localStorage.setItem("deeptrading_chart_figi", figi); } catch { }
       // График открываем во вкладке «Бот» (iframe), как в оригинале, а не в отдельной page-chart.
-      sendEmbedFocus({ figi, ticker: row.dataset.ticker ?? "", trade: null, trades: [] });
+      focusBotChart({ figi, ticker: row.dataset.ticker ?? "", trade: null, trades: [] });
       showPage("bot");
     });
   });
@@ -2643,7 +2644,7 @@ async function agOpenChartLazy(ticker: string, opts?: { sl?: number; tp?: number
 }
 
 function agOpenApplyChart(figi: string, ticker: string, opts?: { sl?: number; tp?: number }): void {
-  sendEmbedFocus({
+  focusBotChart({
     figi,
     ticker,
     trade: opts && (opts.sl != null || opts.tp != null)
@@ -3027,12 +3028,77 @@ let emOscPane = false;
 let lastAnalysis: AnalysisDto | null = null;
 const _IV_SEC: Record<string, number> = { "1min": 60, "5min": 300, "15min": 900, hour: 3600, day: 86400 };
 let _plottedFigi = "";
+let _priceScaleFigi = "";
 let _overlaySig = "";
 let chartToolbarInit = false;
 let indicators = loadIndicatorState();
 let chartInterval = "1min";
 let lastFocus: FocusMsg | null = null;
 let _lastFocusKey = "";
+
+// ——— Стабилизация графика: режимы, координатор запросов, снапшот вьюпорта ———
+
+type ChartMode = "LIVE_FOLLOW" | "USER_EXPLORE" | "TRADE_FOCUS";
+let chartMode: ChartMode = "LIVE_FOLLOW";
+
+let _chartReqId = 0;
+let _chartAbort: AbortController | null = null;
+let _loadInFlight = false;
+
+// Что сейчас реально нарисовано — нужно, чтобы решать setData vs update()
+let _applied: { figi: string; interval: string; firstTime: number; length: number } | null = null;
+
+function _candleSig(c: { ts: string; open: number; high: number; low: number; close: number; volume: number }): string {
+  return `${c.ts}|${c.open}|${c.high}|${c.low}|${c.close}|${c.volume}`;
+}
+
+function _isAbort(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
+// Снапшот вьюпорта ДО изменения данных: после setData индексы/logical уже другие.
+type ViewportSnap = { range: { from: Time; to: Time } | null; following: boolean };
+
+function captureViewport(): ViewportSnap {
+  if (!emChart) return { range: null, following: true };
+  try {
+    const lg = emChart.timeScale().getVisibleLogicalRange();
+    const len = lastAnalysis?.candles.length ?? 0;
+    const following = lg != null && lg.to >= len - 5 && lg.to >= 0;
+    return { range: emChart.timeScale().getVisibleRange(), following };
+  } catch {
+    return { range: null, following: true };
+  }
+}
+
+function restoreViewport(snap: ViewportSnap): void {
+  if (!emChart) return;
+  try {
+    if (snap.following) { emChart.timeScale().scrollToRealTime(); return; }
+    if (snap.range) { emChart.timeScale().setVisibleRange(snap.range); return; }
+    emChart.timeScale().fitContent();
+  } catch { /* noop */ }
+}
+
+function _setChartMode(next: ChartMode): void {
+  if (chartMode === next) return;
+  chartMode = next;
+  console.debug("[chart] mode=" + next);
+}
+
+// Дефолтное окно: последние 6 часов, а не все 2000 баров. Раньше fitContent()
+// впихивал в экран ~2.5 суток — свечи становились в пиксель, и минутные бары
+// визуально читались как 5-минутные.
+const DEFAULT_VIEW_HOURS = 6;
+
+function _applyLastWindow(times: ReadonlyArray<number | UTCTimestamp>, ivSec: number): void {
+  if (!emChart) return;
+  if (!times.length) { emChart.timeScale().fitContent(); return; }
+  const bars = Math.max(30, Math.round((DEFAULT_VIEW_HOURS * 3600) / ivSec));
+  const from = times[Math.max(0, times.length - bars)] as UTCTimestamp;
+  const to = times[times.length - 1] as UTCTimestamp;
+  emChart.timeScale().setVisibleRange({ from, to });
+}
 
 // Логарифмическая шкала цен (включена по умолчанию — при смене акций с разной
 // ценой 200₽→2500₽ и картинка, и скачки визуально сглаживаются).
@@ -3050,10 +3116,50 @@ function loadIndicatorState(): { sma: boolean; ema: boolean; bb: boolean; rsi: b
   } catch { return fallback; }
 }
 
-function sendEmbedFocus(msg: Omit<FocusMsg, "type">): void {
+// ——— Мост родитель↔iframe графика ———
+// Единая точка входа: любой выбор пользователя (позиция/сделка/скринер/AI-gate)
+// обязан идти через focusBotChart(), иначе автофокус по positions вернёт график
+// на прежний тикер, а refresh по SL/TP перезагрузит свечи без нужды.
+let _botFrameReady = false;
+let _botPendingFocus: FocusMsg | null = null;
+let _botBridgeInit = false;
+
+function _postToBotFrame(msg: FocusMsg): void {
   const frame = document.getElementById("bot-chart-frame") as HTMLIFrameElement | null;
   if (!frame?.contentWindow) return;
-  frame.contentWindow.postMessage({ type: "focus", ...msg }, "*");
+  frame.contentWindow.postMessage(msg, "*");
+}
+
+function focusSignature(msg: FocusMsg): string {
+  const t = msg.trade ?? null;
+  const ts = (msg.trades ?? []).map((x) => `${x.side}@${x.entry_time}`).join(",");
+  return `${msg.ticker ?? ""}|${t?.entry_price ?? ""}|${t?.stop_loss ?? ""}|${t?.take_profit ?? ""}|${ts}`;
+}
+
+function focusBotChart(msg: Omit<FocusMsg, "type">): void {
+  const full: FocusMsg = { type: "focus", ...msg };
+  _botFocusFigi = msg.figi ?? null;
+  _botFocusSig = focusSignature(full);
+  _botPendingFocus = full;
+  if (!_botFrameReady) return; // до chart-ready держим в очереди
+  _postToBotFrame(full);
+}
+
+// Только линии входа/SL/TP и маркеры — без перезапроса свечей.
+function overlayBotChart(msg: Omit<FocusMsg, "type">): void {
+  if (!_botFrameReady) return;
+  _postToBotFrame({ ...msg, type: "overlay" });
+}
+
+function initBotChartBridge(): void {
+  if (_botBridgeInit) return;
+  _botBridgeInit = true;
+  window.addEventListener("message", (e: MessageEvent) => {
+    const d = e.data as { type?: string } | null;
+    if (!d || d.type !== "chart-ready") return;
+    _botFrameReady = true;
+    if (_botPendingFocus) _postToBotFrame(_botPendingFocus);
+  });
 }
 
 function emTimeLabel(t: unknown): string {
@@ -3102,50 +3208,104 @@ function currentViewState(): { centerSec?: number; halfBars?: number } {
   return { centerSec: Math.floor((from + to) / 2), halfBars };
 }
 
-function _applyViewCenter(centerSec?: number, halfBars?: number, times?: number[]): void {
+// Текущая видимая ширина в барах — её сохраняем при переходе к сделке,
+// чтобы клик по строке сдвигал камеру, а не менял масштаб.
+function _visibleBarSpan(): number | null {
+  if (!emChart) return null;
+  try {
+    const lg = emChart.timeScale().getVisibleLogicalRange();
+    if (!lg) return null;
+    const span = lg.to - lg.from;
+    return span >= 2 ? span : null;
+  } catch { return null; }
+}
+
+function _applyViewCenter(centerSec?: number, halfBars?: number, times?: number[], ivSec = 60): void {
   if (!emChart) return;
   const tsArr = times ?? (lastAnalysis ? emCandleTimes(lastAnalysis) : []);
   if (!tsArr.length) { emChart.timeScale().fitContent(); return; }
-  if (centerSec == null) { emChart.timeScale().fitContent(); return; }
+  if (centerSec == null) { _applyLastWindow(tsArr, ivSec); return; }
   let best = 0; let bd = Infinity;
   for (let i = 0; i < tsArr.length; i++) {
     const d = Math.abs(tsArr[i] - centerSec);
     if (d < bd) { bd = d; best = i; }
   }
-  const half = halfBars != null ? Math.max(1, halfBars) : 20;
-  const fromIdx = Math.max(0, best - half);
-  const toIdx = Math.min(tsArr.length - 1, best + half);
-  emChart.timeScale().setVisibleRange({ from: tsArr[fromIdx] as UTCTimestamp, to: tsArr[toIdx] as UTCTimestamp });
+  // Раньше здесь стоял хардкод half=20 баров: клик по сделке сужал окно до 40 минут
+  // вместо дефолтных 6 часов — это и был «дикий зум». Теперь приоритет:
+  // текущая видимая ширина → msg.halfBars (смена ТФ) → дефолтные 6 часов.
+  const defaultHalf = Math.max(1, Math.round((DEFAULT_VIEW_HOURS * 3600) / ivSec / 2));
+  const span = _visibleBarSpan();
+  const half = Math.max(1, halfBars != null ? Math.round(halfBars) : (span != null ? Math.round(span / 2) : defaultHalf));
+  const last = tsArr.length - 1;
+  let from: number; let to: number;
+  if (best + half <= last) {
+    // Сделка не у правого края — держим по центру, пустого поля справа нет.
+    const f = best - half;
+    from = f >= 0 ? tsArr[f] : Math.floor(tsArr[0] - (half - f) * ivSec);
+    to = tsArr[best + half];
+  } else {
+    // Сделка у правого края данных — окно прижимаем влево, сохраняя ту же ширину.
+    to = tsArr[last];
+    from = tsArr[Math.max(0, last - half * 2)];
+  }
+  emChart.timeScale().setVisibleRange({ from: from as UTCTimestamp, to: to as UTCTimestamp });
 }
 
-function _applySeriesData(a: AnalysisDto): void {
+function _applySeriesData(a: AnalysisDto, opts?: { incremental?: boolean }): void {
   if (!emChart || !emSeries || !emVolume) return;
   const times = emCandleTimes(a);
-  emSeries.setData(a.candles.map((c, i) => ({
-    time: times[i], open: c.open, high: c.high, low: c.low, close: c.close,
-  })));
-  emVolume.setData(a.candles.map((c, i) => ({
-    time: times[i], value: c.volume,
-    color: c.close >= c.open ? "rgba(38,166,154,0.45)" : "rgba(239,83,80,0.45)",
-  })));
+  if (!times.length) return;
+  const n = a.candles.length;
+  // Инкрементально только если окно не сдвинулось (первый бар тот же) —
+  // тогда новые бары можно дописать update(), не перерисовывая 2000 точек.
+  const inc = !!opts?.incremental && !!_applied
+    && _applied.figi === (a.figi ?? "") && _applied.interval === chartInterval
+    && _applied.firstTime === times[0] && n >= _applied.length;
+  const from = inc ? Math.max(0, _applied!.length - 1) : 0;
+  if (!inc) {
+    emSeries.setData(a.candles.map((c, i) => ({
+      time: times[i], open: c.open, high: c.high, low: c.low, close: c.close,
+    })));
+    emVolume.setData(a.candles.map((c, i) => ({
+      time: times[i], value: c.volume,
+      color: c.close >= c.open ? "rgba(38,166,154,0.45)" : "rgba(239,83,80,0.45)",
+    })));
+  } else {
+    for (let i = from; i < n; i++) {
+      const c = a.candles[i];
+      emSeries.update({ time: times[i], open: c.open, high: c.high, low: c.low, close: c.close });
+      emVolume.update({
+        time: times[i], value: c.volume,
+        color: c.close >= c.open ? "rgba(38,166,154,0.45)" : "rgba(239,83,80,0.45)",
+      });
+    }
+  }
   const linePts = (arr: Array<number | null> | undefined): LineData[] => {
     if (!arr) return [];
     const out: LineData[] = [];
-    for (let i = 0; i < a.candles.length; i++) {
+    for (let i = 0; i < n; i++) {
       const v = arr[i];
       if (v != null) out.push({ time: times[i], value: v });
     }
     return out;
   };
-  emSma?.setData(linePts(a.sma20));
-  emEma?.setData(linePts(a.ema50));
-  emBbU?.setData(linePts(a.bb_upper));
-  emBbL?.setData(linePts(a.bb_lower));
+  const updLine = (s: ISeriesApi<"Line"> | null, arr: Array<number | null> | undefined): void => {
+    if (!s) return;
+    if (!inc) { s.setData(linePts(arr)); return; }
+    for (let i = from; i < n; i++) {
+      const v = arr?.[i];
+      if (v != null) s.update({ time: times[i], value: v });
+    }
+  };
+  updLine(emSma, a.sma20);
+  updLine(emEma, a.ema50);
+  updLine(emBbU, a.bb_upper);
+  updLine(emBbL, a.bb_lower);
   const macdHist: HistogramData[] = [];
   const macdLine: LineData[] = [];
   const signalLine: LineData[] = [];
   const rsiLine: LineData[] = [];
-  for (let i = 0; i < a.candles.length; i++) {
+  for (let i = 0; i < n; i++) {
     const m = a.macd.macd[i];
     if (m != null) macdLine.push({ time: times[i], value: m });
     const sg = a.macd.signal[i];
@@ -3157,10 +3317,44 @@ function _applySeriesData(a: AnalysisDto): void {
     const rv = a.rsi?.[i];
     if (rv != null) rsiLine.push({ time: times[i], value: rv });
   }
-  emMacdLine?.setData(macdLine);
-  emSigLine?.setData(signalLine);
-  emMacdHist?.setData(macdHist);
-  emRsi?.setData(rsiLine);
+  const updMacdLine = (s: ISeriesApi<"Line"> | null, pts: LineData[]): void => {
+    if (!s) return;
+    if (!inc) { s.setData(pts); return; }
+    for (let i = from; i < n; i++) {
+      const m = a.macd.macd[i];
+      if (m != null) s.update({ time: times[i], value: m });
+    }
+  };
+  const updSigLine = (s: ISeriesApi<"Line"> | null): void => {
+    if (!s) return;
+    if (!inc) { s.setData(signalLine); return; }
+    for (let i = from; i < n; i++) {
+      const sg = a.macd.signal[i];
+      if (sg != null) s.update({ time: times[i], value: sg });
+    }
+  };
+  const updHist = (s: ISeriesApi<"Histogram"> | null, get: (i: number) => number | null): void => {
+    if (!s) return;
+    if (!inc) { s.setData(macdHist); return; }
+    for (let i = from; i < n; i++) {
+      const h = get(i);
+      if (h == null) continue;
+      s.update({ time: times[i], value: h, color: h >= 0 ? "rgba(38,166,154,0.55)" : "rgba(239,83,80,0.55)" });
+    }
+  };
+  updMacdLine(emMacdLine, macdLine);
+  updSigLine(emSigLine);
+  updHist(emMacdHist, (i) => a.macd.hist[i]);
+  if (emRsi) {
+    if (!inc) emRsi.setData(rsiLine);
+    else {
+      for (let i = from; i < n; i++) {
+        const rv = a.rsi?.[i];
+        if (rv != null) emRsi.update({ time: times[i], value: rv });
+      }
+    }
+  }
+  _applied = { figi: a.figi ?? "", interval: chartInterval, firstTime: times[0], length: n };
 }
 
 function updateEmLegend(time: Time | null): void {
@@ -3237,12 +3431,26 @@ function _clearSeries(): void {
   emRsi?.setData([]);
 }
 
-async function loadEmbedChart(msg: FocusMsg): Promise<void> {
+async function loadEmbedChart(msg: FocusMsg, opts?: { full?: boolean }): Promise<void> {
   const figi = msg.figi;
   if (!figi || !emChart || !emSeries) return;
+  // Координатор: каждый новый запрос гасит предыдущий, и ответ применяется
+  // только если он всё ещё актуален (тот же figi, тот же таймфрейм, свежая ревизия).
+  const requestId = ++_chartReqId;
+  _chartAbort?.abort();
+  const ac = new AbortController();
+  _chartAbort = ac;
+  _loadInFlight = true;
+  const intervalAt = chartInterval;
+  const stale = (): boolean => requestId !== _chartReqId || chartInterval !== intervalAt || lastFocus?.figi !== figi;
   lastFocus = msg;
   const firstShow = figi !== _plottedFigi;
+  // Прайс-шкалу калибруем только при СМЕНЕ ИНСТРУМЕНТА. Переход по сделкам
+  // того же тикера (тот же figi) обязан оставить и масштаб по цене, и по
+  // времени — просто сместить окно к времени сделки.
+  const priceJump = figi !== _priceScaleFigi;
   _plottedFigi = figi;
+  _priceScaleFigi = figi;
   if (firstShow) skladOnChartFigiChange(figi);
   const focusKey = figi + "|" + (msg.centerSec ?? "");
   const keepView = !firstShow && focusKey === _lastFocusKey;
@@ -3252,64 +3460,85 @@ async function loadEmbedChart(msg: FocusMsg): Promise<void> {
   if (tickerEl) tickerEl.textContent = msg.ticker || figi;
   // Фокус на конкретной сделке/позиции: окно свечей должно ДОХОДИТЬ до нужной даты,
   // иначе (лимит 2000 баров при 1м ≈ 2 дня) центр уезжает на самый старый бар.
-  const ivSec = _IV_SEC[chartInterval] ?? 60;
+  const ivSec = _IV_SEC[intervalAt] ?? 60;
+  // Запас справа от сделки должен перекрывать всю сохраняемую ширину окна,
+  // иначе «не прижать влево» нечем — данных после сделки просто не будет.
+  const spanBars = _visibleBarSpan();
+  // Переход к сделке: ширину окна НЕ меняем — берём текущую видимую, иначе
+  // _applyViewCenter() с halfBars=undefined брал 20 баров и график дико
+  // приближался (40 минут вместо, скажем, 6 часов). Явно заданный halfBars
+  // (смена ТФ, currentViewState) по-прежнему главнее.
+  const focusHalfBars = msg.halfBars ?? spanBars ?? undefined;
   const focusBuffer = msg.centerSec != null
-    ? Math.max(12 * ivSec, (msg.halfBars ?? 100) * ivSec * 2)
+    ? Math.max(12 * ivSec, (msg.halfBars ?? 100) * ivSec * 2, (spanBars ?? 0) * ivSec + 2 * ivSec)
     : null;
+  const snap = captureViewport();
   let a: AnalysisDto | null = null;
   try {
     a = msg.centerSec != null && focusBuffer != null
-      ? await fetchAnalysis(figi, chartInterval, 5000, new Date((msg.centerSec + focusBuffer) * 1000).toISOString())
-      : await fetchAnalysis(figi, chartInterval, 2000);
+      ? await fetchAnalysis(figi, intervalAt, 5000, new Date((msg.centerSec + focusBuffer) * 1000).toISOString(), ac.signal)
+      : await fetchAnalysis(figi, intervalAt, 2000, undefined, ac.signal);
   } catch (err) {
+    if (_isAbort(err) || stale()) return; // фокус успел смениться — тихо уходим
     console.warn("analysis error", err);
     a = null;
   }
+  if (stale()) { _loadInFlight = false; return; }
   if (!a || !a.candles || !a.candles.length) {
     // Fallback: свечи без индикаторов.
     _clearSeries();
+    _applied = null;
     try {
-      const res = await fetch(`${API}/api/candles/${encodeURIComponent(figi)}?interval_name=${encodeURIComponent(chartInterval)}&limit=5000`);
+      const res = await fetch(`${API}/api/candles/${encodeURIComponent(figi)}?interval_name=${encodeURIComponent(intervalAt)}&limit=5000`, { signal: ac.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       const candles: Array<{ ts: string; open: number; high: number; low: number; close: number }> = json.candles ?? [];
-      emSeries.setData(candles.map((c) => ({
-        time: Math.floor(new Date(c.ts).getTime() / 1000) as UTCTimestamp,
-        open: c.open, high: c.high, low: c.low, close: c.close,
+      if (stale()) { _loadInFlight = false; return; }
+      const ftimes = candles.map((c) => Math.floor(new Date(c.ts).getTime() / 1000) as UTCTimestamp);
+      emSeries.setData(candles.map((c, i) => ({
+        time: ftimes[i], open: c.open, high: c.high, low: c.low, close: c.close,
       })));
       lastAnalysis = null;
       const nm = $("symbol-name");
       if (nm) nm.textContent = "";
       updateEmLegend(null);
-      _resetPriceScale(firstShow);
+      _resetPriceScale(priceJump);
       _applyOverlay(msg);
-      if (!keepView) {
-        _applyViewCenter(msg.centerSec, msg.halfBars, candles.map((c) => Math.floor(new Date(c.ts).getTime() / 1000)));
-      }
+      if (!keepView) _applyViewCenter(msg.centerSec, focusHalfBars, ftimes as unknown as number[], ivSec);
+      else restoreViewport(snap);
+      _setChartMode(msg.centerSec != null ? "TRADE_FOCUS" : "LIVE_FOLLOW");
     } catch (err2) {
+      if (_isAbort(err2) || stale()) { _loadInFlight = false; return; }
       console.warn("embedded candles error", err2);
-      _resetPriceScale(firstShow);
+      _resetPriceScale(priceJump);
       _applyOverlay(msg);
-      if (!keepView) _applyViewCenter(msg.centerSec, msg.halfBars);
+      if (!keepView) _applyViewCenter(msg.centerSec, focusHalfBars, undefined, ivSec);
+      else restoreViewport(snap);
     }
+    _loadInFlight = false;
     return;
   }
   lastAnalysis = a;
-  _applySeriesData(a);
+  _applySeriesData(a, { incremental: !opts?.full });
   if (tickerEl) tickerEl.textContent = a.ticker || msg.ticker || figi;
   const nm = $("symbol-name");
   if (nm) nm.textContent = a.name || "";
   updateEmLegend(null);
-  _resetPriceScale(firstShow);
+  _resetPriceScale(priceJump);
   _applyOverlay(msg);
-  if (!keepView) _applyViewCenter(msg.centerSec, msg.halfBars);
+  if (!keepView) _applyViewCenter(msg.centerSec, focusHalfBars, undefined, ivSec);
+  else restoreViewport(snap);
+  _setChartMode(msg.centerSec != null ? "TRADE_FOCUS" : (keepView && !snap.following ? "USER_EXPLORE" : "LIVE_FOLLOW"));
+  _loadInFlight = false;
 }
 
-// При смене ИНСТРУМЕНТА сбрасываем прайс-шкалу: цены другой акции (например 2500₽
-// вместо 200₽) иначе остаются за пределами экрана.
-function _resetPriceScale(firstShow: boolean): void {
-  if (!firstShow || !emChart || !emSeries) return;
-  emChart.timeScale().fitContent();
+// Прайс-шкалу сбрасываем только при смене ИНСТРУМЕНТА: цены другой акции
+// (например 2500₽ вместо 200₽) иначе остаются за пределами экрана. Переход по
+// сделкам того же тикера шкалу не трогает. fitContent здесь НЕ вызываем:
+// viewport в loadEmbedChart ставится сразу после (центр сделки либо дефолтные
+// 6 часов), а второй fitContent давал двойной прыжок камеры.
+function _resetPriceScale(resetPrice: boolean): void {
+  if (!resetPrice || !emChart || !emSeries) return;
   const ps = emSeries.priceScale();
   ps.applyOptions({ autoScale: false });
   ps.applyOptions({ autoScale: true });
@@ -3351,6 +3580,7 @@ function rebuildEmbedChart(): void {
   emMarkers = null;
   emVolume = null; emSma = null; emEma = null; emBbU = null; emBbL = null;
   emMacdHist = null; emMacdLine = null; emSigLine = null; emRsi = null;
+  _applied = null; // серии пересозданы — инкрементальное обновление недопустимо
   startChart();
   if (lastAnalysis) {
     _applySeriesData(lastAnalysis);
@@ -3361,10 +3591,25 @@ function rebuildEmbedChart(): void {
   if (logical && ch) ch.timeScale().setVisibleLogicalRange(logical);
 }
 
+// Версия дефолтов графика. При её смене сохранённый ранее интервал сбрасывается
+// на 1min — иначе старая настройка (например 5min из прошлой сессии) перебивала
+// требование «по умолчанию минутные». Дальше пользовательский выбор уважается.
+const CHART_DEFAULTS_VERSION = "v2-1min-6h";
+
 function initChartToolbar(): void {
   if (chartToolbarInit) return;
   chartToolbarInit = true;
-  try { chartInterval = localStorage.getItem("deeptrading_chart_interval") || "1min"; } catch { }
+  try {
+    if (localStorage.getItem("deeptrading_chart_defaults") !== CHART_DEFAULTS_VERSION) {
+      localStorage.setItem("deeptrading_chart_interval", "1min");
+      localStorage.setItem("deeptrading_chart_defaults", CHART_DEFAULTS_VERSION);
+    }
+    chartInterval = localStorage.getItem("deeptrading_chart_interval") || "1min";
+  } catch { }
+  if (chartInterval !== "1min") {
+    chartInterval = "1min";
+    try { localStorage.setItem("deeptrading_chart_interval", "1min"); } catch { }
+  }
   document.querySelectorAll<HTMLButtonElement>("#ct-intervals .ct-int").forEach((b) => {
     const v = b.dataset.int;
     b.classList.toggle("active", v === chartInterval);
@@ -3373,7 +3618,7 @@ function initChartToolbar(): void {
       chartInterval = v;
       try { localStorage.setItem("deeptrading_chart_interval", chartInterval); } catch { }
       document.querySelectorAll<HTMLButtonElement>("#ct-intervals .ct-int").forEach((x) => x.classList.toggle("active", x.dataset.int === v));
-      if (lastFocus?.figi) void loadEmbedChart({ ...lastFocus, ...currentViewState() });
+      if (lastFocus?.figi) void loadEmbedChart({ ...lastFocus, ...currentViewState() }, { full: true });
     });
   });
   document.querySelectorAll<HTMLInputElement>("#indicators-menu input[data-ind]").forEach((box) => {
@@ -3395,7 +3640,16 @@ function initChartToolbar(): void {
       if (!menu.contains(e.target as Node)) menu.classList.add("hidden");
     });
   }
-  $("btn-sync")?.addEventListener("click", () => { if (lastFocus?.figi) void loadEmbedChart({ ...lastFocus, ...currentViewState() }); });
+  // «К текущему»: если юзер ушёл в историю сделки — снимаем якорь и возвращаем
+  // живое окно; если уже в live — просто перезапрашиваем, сохраняя вьюпорт.
+  $("btn-sync")?.addEventListener("click", () => {
+    if (!lastFocus?.figi) return;
+    if (chartMode === "TRADE_FOCUS") {
+      void loadEmbedChart({ figi: lastFocus.figi, ticker: lastFocus.ticker ?? "", trade: lastFocus.trade ?? null, trades: lastFocus.trades ?? [] });
+      return;
+    }
+    void loadEmbedChart({ ...lastFocus, ...currentViewState() }, { full: true });
+  });
   const btnLog = $("btn-logscale") as HTMLButtonElement | null;
   if (btnLog) {
     const sync = (): void => {
@@ -3413,8 +3667,11 @@ function initChartToolbar(): void {
 }
 
 function onEmbedMessage(e: MessageEvent): void {
-  const d = e.data as FocusMsg;
-  if (!d || d.type !== "focus") return;
+  const d = e.data as FocusMsg & { type?: string };
+  if (!d) return;
+  // Только линии/маркеры (SL/TP/trailing) — свечи не перезапрашиваем.
+  if (d.type === "overlay") { _applyOverlay(d); return; }
+  if (d.type !== "focus") return;
   void loadEmbedChart(d);
 }
 
@@ -4002,6 +4259,18 @@ function startChart(): IChartApi | null {
   } catch { /* panes API может отсутствовать в старых версиях */ }
   emMarkers = createSeriesMarkers(emSeries);
   emMarkersSig = createSeriesMarkers(emSeries);
+  try {
+    // Режим скролла: у правой кромки — LIVE_FOLLOW (refresh догоняет),
+    // юзер ушёл влево — USER_EXPLORE (refresh не двигает вьюпорт).
+    emChart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+      if (!emChart || chartMode === "TRADE_FOCUS") return;
+      const len = lastAnalysis?.candles.length ?? 0;
+      if (!len) return;
+      const lg = emChart.timeScale().getVisibleLogicalRange();
+      if (!lg) return;
+      _setChartMode(lg.to >= len - 3 ? "LIVE_FOLLOW" : "USER_EXPLORE");
+    });
+  } catch { /* API может отсутствовать */ }
   setupEmTooltip(host);
   initChartToolbar();
   return emChart;
@@ -4075,42 +4344,47 @@ function setupEmTooltip(host: HTMLElement): void {
   });
 }
 
-// Тихий авто-рефреш (раз в 8с): обновляет данные/маркеры, но НЕ трогает
-// видимый диапазон и НЕ перезагружает всё с нуля (это и было причиной
-// «скачущего» графика). Копия поведения оригинала: keepView + прилипание
-// к правой кромке только когда юзер там и данные свежие.
+// Тихий авто-рефреш (раз в 8с). Правила:
+//  - TRADE_FOCUS (пользователь смотрит историческую сделку) — свечи НЕ трогаем,
+//    обновляем только линии входа/SL/TP;
+//  - снапшот вьюпорта снимается ДО setData, восстанавливается ПОСЛЕ;
+//  - данные неизменились (по сигнатуре последней свечи) — не перерисовываем.
 async function refreshEmbedChart(): Promise<void> {
   const lf = lastFocus;
   if (!lf?.figi || !emChart) return;
   if (document.hidden) return;
+  if (_loadInFlight) return; // не мешаем недозагруженному фокусу
+  if (chartMode === "TRADE_FOCUS") { _applyOverlay(lf); return; }
+  const requestId = _chartReqId;
+  const intervalAt = chartInterval;
   let nd: AnalysisDto | null = null;
   try {
-    nd = await fetchAnalysis(lf.figi, chartInterval, 2000);
+    nd = await fetchAnalysis(lf.figi, intervalAt, 2000);
   } catch (err) {
-    console.debug("[chart] refresh error", err);
+    if (!_isAbort(err)) console.debug("[chart] refresh error", err);
     return;
   }
+  if (requestId !== _chartReqId || chartInterval !== intervalAt) return; // фокус успел смениться
   if (!nd || !nd.candles || !nd.candles.length) return;
   if (nd.figi !== lf.figi) return;
   // Окно истории / тест: последний бар старый — живой привязки нет, не трогаем.
   const lastTs = new Date(nd.candles[nd.candles.length - 1].ts).getTime() / 1000;
   if (Date.now() / 1000 - lastTs > 1800) return;
   const prev = lastAnalysis;
-  const changed =
-    !prev || prev.candles.length !== nd.candles.length ||
-    prev.candles[prev.candles.length - 1].ts !== nd.candles[nd.candles.length - 1].ts;
-  if (!changed) return;
+  const ndTimes = emCandleTimes(nd);
+  const prevFirst = prev ? new Date(prev.candles[0].ts).getTime() / 1000 : 0;
+  const incremental = !!prev && ndTimes[0] === prevFirst;
+  const changed = !prev
+    || prev.candles.length !== nd.candles.length
+    || _candleSig(prev.candles[prev.candles.length - 1]) !== _candleSig(nd.candles[nd.candles.length - 1]);
+  if (!changed) { _applyOverlay(lf); return; }
+  const snap = captureViewport();
   lastAnalysis = nd;
-  _applySeriesData(nd);
+  _applySeriesData(nd, { incremental });
   updateEmLegend(null);
   _applyOverlay(lf);
-  try {
-    const lg = emChart.timeScale().getVisibleLogicalRange();
-    const bars = nd.candles.length;
-    const pinned = lg != null && lg.to >= bars - 5 && lg.to >= 0;
-    console.debug("[chart] refresh", "bars=" + bars, "pinned=" + pinned);
-    if (pinned) emChart.timeScale().scrollToRealTime();
-  } catch { /* noop */ }
+  restoreViewport(snap);
+  console.debug("[chart] refresh", "bars=" + nd.candles.length, "inc=" + incremental, "following=" + snap.following);
 }
 
 function initEmbedded(): void {
@@ -4118,6 +4392,9 @@ function initEmbedded(): void {
   document.getElementById("page-chart")?.classList.add("active");
   startChart();
   window.addEventListener("message", onEmbedMessage);
+  // Handshake: сообщаем родителю, что слушатель готов. До этого фокус не слали бы
+  // вообще — иначе сообщение могло уйти в пустоту, а дефолт загрузился поверх него.
+  try { window.parent?.postMessage({ type: "chart-ready" }, "*"); } catch { /* cross-origin */ }
   // Без focus-сообщения график был пустым всю страницу — грузим дефолт сразу
   // и авто-обновляем раз в 8с (как оригинал) либо последний показанный инструмент.
   void loadDefaultEmbedChart();
@@ -4170,6 +4447,7 @@ async function initMainChart(): Promise<void> {
 if (IS_EMBEDDED) {
   initEmbedded();
 } else {
+  initBotChartBridge();
   initNav();
   initSidebarResize();
   initRightRailResize();

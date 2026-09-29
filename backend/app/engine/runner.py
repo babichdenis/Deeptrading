@@ -41,6 +41,40 @@ class EngineConfig:
     partial_fraction: float = 0.5  # частичный тейк: доля закрываемой позиции (0..1]
     partial_to_be: bool = True   # частичный тейк: после него стоп переносится на вход (безубыток)
 
+    def validate(self) -> None:
+        """Invariant-проверка конфига (ENG-015, audit 2026-09-29).
+
+        Падаем сразу и с понятным текстом вместо AttributeError посреди прогона.
+        """
+        if int(self.qty) <= 0:
+            raise ValueError(f"qty must be > 0, got {self.qty}")
+        if self.mode not in ("both", "long", "short"):
+            raise ValueError(f"mode must be both|long|short, got {self.mode!r}")
+        if self.neutral_mode not in (None, "gate", "semi_flip"):
+            raise ValueError(
+                f"neutral_mode must be None|gate|semi_flip, got {self.neutral_mode!r}"
+            )
+        if not (0.0 < float(self.partial_fraction) <= 1.0):
+            raise ValueError(
+                f"partial_fraction must be in (0, 1], got {self.partial_fraction}"
+            )
+        if int(self.abort_max_bars) < 0:
+            raise ValueError(f"abort_max_bars must be >= 0, got {self.abort_max_bars}")
+        for _name in ("wick_tol", "be_trigger_r", "be_offset_pct", "abort_r", "partial_r"):
+            _v = float(getattr(self, _name) or 0.0)
+            if _v < 0:
+                raise ValueError(f"{_name} must be >= 0, got {_v}")
+        if self.partial_r > 0 and int(self.qty) < 1:
+            raise ValueError("partial_r требует qty >= 1")
+        _lim = float(getattr(self.signal_policy, "entry_limit_atr", 0.0) or 0.0)
+        if _lim > 0:
+            # ENG-003: feature не реализована (нет _atr_series/_place_limit и
+            # жизненного цикла лимита). Лучше явная ошибка, чем AttributeError.
+            raise ValueError(
+                "entry_limit_atr не поддерживается: лимитный вход не реализован "
+                "(ENG-003, audit 2026-09-29). Используйте market-вход (0)."
+            )
+
 
 @dataclass
 class _RunState:
@@ -54,15 +88,10 @@ class _RunState:
     last_exit_bar = None
     exit_candidate = None
     entry_confirm = None
-    limit_order = None
     current_session_date = None
     warmup = None
     tf_minutes = None
     session_active = None
-    _lim_k = None
-    _lim_bars = None
-    _lim_chase = None
-    _lim_atr = None
 
 
 class EngineRunner:
@@ -75,6 +104,7 @@ class EngineRunner:
         self.strategy = strategy
         self.exit_policy = exit_policy
         self.cfg = config or EngineConfig()
+        self.cfg.validate()
         self.policy = SignalPolicy(self.cfg.signal_policy)
         self.session = (
             SessionPolicy(self.cfg.session_policy) if self.cfg.session_policy else None
@@ -125,9 +155,21 @@ class EngineRunner:
         st = _RunState()
         total = len(candles)
         st.ledger = TradeLedger()
+        # ENG-007: состояние прогона живёт на состоянии _RunState/runner и
+        # сбрасывается здесь — повторный run() тем же runner детерминирован.
         self._pos_key = None
         self._entry_risk = None
         self._partial_done = None
+        self._trailing_active = False
+        self._chain_seq = 0
+        self.exit_coverage = {
+            "opposite_received": 0,
+            "exit_ignored_flat": 0,
+            "held": 0,
+            "candidate": 0,
+            "confirmed": 0,
+            "accepted": 0,
+        }
         st.position: Position | None = None
         st.pending: Signal | None = None
         st.pending_kind: str | None = None
@@ -135,14 +177,7 @@ class EngineRunner:
         st.last_exit_bar = -10**9
         st.exit_candidate: dict | None = None
         st.entry_confirm: dict | None = None  # {signal, side, confirm_needed} — ожидание N подряд подтверждающих свечей
-        st.limit_order: dict | None = None  # {side, limit, bars_left, signal} — висящий лимитный вход
         st.warmup = self.strategy.warmup_bars()
-        st._lim_k = float(getattr(self.cfg.signal_policy, "entry_limit_atr", 0.0) or 0.0)
-        st._lim_bars = max(1, int(getattr(self.cfg.signal_policy, "entry_limit_bars", 3) or 3))
-        st._lim_chase = bool(getattr(self.cfg.signal_policy, "entry_limit_chase", False))
-        st._lim_atr = (self._atr_series(
-            candles, int(getattr(self.cfg.signal_policy, "entry_limit_atr_period", 14) or 14))
-            if st._lim_k > 0 else None)
 
         st.tf_minutes = 1440
         if total > 1:
@@ -190,12 +225,7 @@ class EngineRunner:
 
         if st.pending is not None:
             if st.pending_kind == "entry":
-                if st._lim_atr is not None and st._lim_atr[i] is not None:
-                    if st.limit_order is not None:
-                        st.ledger.log(i, bar.ts, "DECISION", "LIMIT_REPLACED by new signal")
-                    st.limit_order = self._place_limit(i, bar, st.pending, st._lim_atr[i], st._lim_bars, st.ledger)
-                else:
-                    st.position = self._open(i, bar, candles, st.pending, st.position, st.ledger)
+                st.position = self._open(i, bar, candles, st.pending, st.position, st.ledger)
             elif st.pending_kind == "flip":
                 # --- NEUTRAL gate / semi-flip ---
                 neutral_mode = self.cfg.neutral_mode
@@ -255,44 +285,10 @@ class EngineRunner:
                     abs(st.position.entry_price - st.position.initial_stop)
                     if st.position.initial_stop is not None else None
                 )
-            if self.cfg.be_trigger_r > 0 and self._entry_risk is not None:
-                _be = breakeven_stop(
-                    _side_for_pol,
-                    st.position.entry_price,
-                    st.position.initial_stop,
-                    CandleWindow(candles, 0, i + 1),
-                    risk=self._entry_risk,
-                    trigger_r=self.cfg.be_trigger_r,
-                    offset_pct=self.cfg.be_offset_pct,
-                )
-                if _be != st.position.initial_stop:
-                    st.position.initial_stop = _be
-                    st.ledger.log(i, bar.ts, "DECISION",
-                               f"BREAKEVEN_STOP -> {_be:.6f}")
-            update_stop = getattr(self.exit_policy, "update_stop", None)
-            if update_stop is not None:
-                st.position.initial_stop = update_stop(
-                    _side_for_pol,
-                    st.position.entry_price,
-                    st.position.initial_stop,
-                    CandleWindow(candles, 0, i + 1),
-                    qty=st.position.qty,
-                    commission=st.position.entry_commission,
-                )
-            if not self._trailing_active:
-                activate = getattr(self.exit_policy, "trailing_activated", None)
-                _act_res = activate(
-                    _side_for_pol,
-                    st.position.entry_price,
-                    st.position.qty,
-                    st.position.entry_commission,
-                    CandleWindow(candles, 0, i + 1),
-                ) if activate is not None else False
-                if _act_res:
-                    self._trailing_active = True
-                    st.position.target = None
-                    st.ledger.log(i, bar.ts, "DECISION",
-                               "TRAILING_ACTIVATED pnl>=comm*4, signal/tp выходят отключены")
+            # --- Фаза 1 (ENG-002, audit 2026-09-29): выходы только по уровням,
+            # известным ДО этого бара. BE/trailing пересчитываются в конце бара
+            # (фаза 2) по его close и вступают в силу со СЛЕДУЮЩЕГО бара —
+            # иначе close текущего бара ретроактивно управлял бы его low/high.
             tp = None if self._trailing_active else st.position.target
             price, reason = intrabar_exit(
                 bar, st.position.state, st.position.initial_stop, tp,
@@ -355,6 +351,47 @@ class EngineRunner:
                 st.last_exit_bar = i
                 st.exit_candidate = None
                 st.position = self._close(i, bar.ts, st.position, price, reason, st.ledger)
+            elif st.position is not None:
+                # --- Фаза 2 (ENG-002): пересчёт защитных уровней по ЗАКРЫТОМУ
+                # бару; действуют со следующего бара.
+                if self.cfg.be_trigger_r > 0 and self._entry_risk is not None:
+                    _be = breakeven_stop(
+                        _side_for_pol,
+                        st.position.entry_price,
+                        st.position.initial_stop,
+                        CandleWindow(candles, 0, i + 1),
+                        risk=self._entry_risk,
+                        trigger_r=self.cfg.be_trigger_r,
+                        offset_pct=self.cfg.be_offset_pct,
+                    )
+                    if _be != st.position.initial_stop:
+                        st.position.initial_stop = _be
+                        st.ledger.log(i, bar.ts, "DECISION",
+                                   f"BREAKEVEN_STOP -> {_be:.6f}")
+                update_stop = getattr(self.exit_policy, "update_stop", None)
+                if update_stop is not None:
+                    st.position.initial_stop = update_stop(
+                        _side_for_pol,
+                        st.position.entry_price,
+                        st.position.initial_stop,
+                        CandleWindow(candles, 0, i + 1),
+                        qty=st.position.qty,
+                        commission=st.position.entry_commission,
+                    )
+                if not self._trailing_active:
+                    activate = getattr(self.exit_policy, "trailing_activated", None)
+                    _act_res = activate(
+                        _side_for_pol,
+                        st.position.entry_price,
+                        st.position.qty,
+                        st.position.entry_commission,
+                        CandleWindow(candles, 0, i + 1),
+                    ) if activate is not None else False
+                    if _act_res:
+                        self._trailing_active = True
+                        st.position.target = None
+                        st.ledger.log(i, bar.ts, "DECISION",
+                                   "TRAILING_ACTIVATED pnl>=comm*4, signal/tp выходят отключены")
 
         if st.position is not None:
             st.position.bars_held += 1
@@ -466,9 +503,12 @@ class EngineRunner:
                     entry_allowed = False
                     st.ledger.log(i, bar.ts, "DECISION",
                                f"REJECT_SESSION_CUTOFF {cutoff_note}")
-                if self.cfg.mode == "long" and signal.side is Side.SELL:
-                    entry_allowed = False
-                    st.ledger.log(i, bar.ts, "DECISION", "SKIP_ENTRY mode=long")
+            # ENG-004 (audit 2026-09-29): ограничение направления действует
+            # независимо от session state — раньше mode=short пропускал LONG
+            # на intraday-барах.
+            if self.cfg.mode == "long" and signal.side is Side.SELL:
+                entry_allowed = False
+                st.ledger.log(i, bar.ts, "DECISION", "SKIP_ENTRY mode=long")
             elif self.cfg.mode == "short" and signal.side is Side.BUY:
                 entry_allowed = False
                 st.ledger.log(i, bar.ts, "DECISION", "SKIP_ENTRY mode=short")
@@ -521,16 +561,57 @@ class EngineRunner:
         ):
             st.exit_candidate = None
 
+    @staticmethod
+    def _validate_candles(candles: Sequence[Candle]) -> None:
+        """Инварианты входной серии (ENG-015, audit 2026-09-29)."""
+        import math
+        prev_ts = None
+        for idx, c in enumerate(candles):
+            for name, value in (
+                ("open", c.open), ("high", c.high), ("low", c.low), ("close", c.close),
+            ):
+                try:
+                    fv = float(value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"candle[{idx}].{name} is not a number: {value!r}") from None
+                if not math.isfinite(fv):
+                    raise ValueError(f"candle[{idx}].{name} is not finite: {value!r}")
+            if float(c.high) < float(c.low):
+                raise ValueError(f"candle[{idx}]: high({c.high}) < low({c.low})")
+            if float(c.high) < max(float(c.open), float(c.close)) - 1e-12:
+                raise ValueError(f"candle[{idx}]: high({c.high}) < max(open, close)")
+            if float(c.low) > min(float(c.open), float(c.close)) + 1e-12:
+                raise ValueError(f"candle[{idx}]: low({c.low}) > min(open, close)")
+            if prev_ts is not None and c.ts <= prev_ts:
+                raise ValueError(
+                    f"candle[{idx}]: ts not strictly increasing ({c.ts} <= {prev_ts})"
+                )
+            prev_ts = c.ts
+
     def run(self, candles: Sequence[Candle], progress_cb=None) -> TradeLedger:
-        st = self._new_state(candles)
+        reset = getattr(self.strategy, "reset", None)
+        if callable(reset):
+            # ENG-007: повторный run() тем же runner детерминирован — стратегия
+            # возвращается в исходное состояние перед прогоном.
+            reset()
         total = len(candles)
+        if total == 0:
+            # ENG-006: пустой вход — пустой журнал (симметрия с finalize()).
+            return TradeLedger()
+        self._validate_candles(candles)
+        st = self._new_state(candles)
         for i in range(total):
             bar = candles[i]
             if progress_cb is not None and i > 0 and i % 500 == 0:
                 progress_cb(i, total, bar.ts)
             self._body(i, bar, candles, st)
-            if i + 1 < total and i >= st.warmup - 1:
-                self._poll(i, candles, st)
+            if i + 1 < total:
+                if i >= st.warmup - 1:
+                    self._poll(i, candles, st)
+                else:
+                    # ENG-008: stateful-стратегии получают закрытые бары с самого
+                    # начала; сигналы до формального warmup подавляются.
+                    self.strategy.on_bar(CandleWindow(candles, 0, i + 1))
         last = candles[-1]
         if st.position is not None:
             self._close(total - 1, last.ts, st.position, last.close, ExitReason.END_OF_DATA.value, st.ledger)
@@ -553,9 +634,15 @@ class EngineRunner:
         notional = fill * self.cfg.qty
         commission = self.cfg.cost_model.commission(notional)
         slippage = abs(fill - base) * self.cfg.qty
-        plan = self.exit_policy.plan_entry(side, fill, CandleWindow(candles, 0, index + 1))
+        # ENG-001 (audit 2026-09-29): план выходов строится по ЗАКРЫТОЙ истории
+        # ДО бара исполнения. Вход по open этого бара, его high/low/close ещё
+        # неизвестны — передавать их политике нельзя (look-ahead).
+        plan = self.exit_policy.plan_entry(side, fill, CandleWindow(candles, 0, index))
         state = PositionState.LONG if side is Side.BUY else PositionState.SHORT
-        ledger.log(index, bar.ts, "FILL_ENTRY", f"{side.value} qty={self.cfg.qty} price={fill}")
+        self._chain_seq = getattr(self, "_chain_seq", 0) + 1
+        chain_id = f"{self.cfg.figi}-P{self._chain_seq:04d}"
+        ledger.log(index, bar.ts, "FILL_ENTRY",
+                   f"{side.value} qty={self.cfg.qty} price={fill} chain={chain_id}")
         return Position(
             figi=self.cfg.figi,
             state=state,
@@ -568,6 +655,7 @@ class EngineRunner:
             bars_held=0,
             entry_commission=commission,
             entry_slippage=slippage,
+            chain_id=chain_id,
         )
 
     def _close(
@@ -613,6 +701,7 @@ class EngineRunner:
             exit_reason=reason,
             initial_stop=position.initial_stop,
             take_profit=position.target,
+            chain_id=position.chain_id,
         )
         ledger.log(index, ts, "FILL_EXIT", f"trade={trade.trade_id} reason={reason} net={net:.4f}")
         return None
@@ -676,6 +765,7 @@ class EngineRunner:
             exit_reason=ExitReason.PARTIAL.value,
             initial_stop=position.initial_stop,
             take_profit=position.target,
+            chain_id=position.chain_id,
         )
         ledger.log(index, ts, "FILL_EXIT",
                    f"partial qty={qty_to_close} price={fill} net={net:.4f} left={position.qty - qty_to_close}")

@@ -26,9 +26,13 @@ WARMUP
   истории: состояние сбрасывается и собирается заново, поэтому повторный
   прогрев на том же входе даёт тот же результат (детерминизм реплея).
 - Окно пересчёта ограничено max_lookback. Для рекуррентных индикаторов
-  (EMA/MACD/ADX) каноническим считается последний бар окна: рекурсия к
-  нему сходится, левое краевое значение окна может отличаться от
-  бесконечной истории.
+  (EMA/MACD/ADX) это КОНЕЧНОЕ окно (ENG-021, audit 2026-09-29): после
+  выпадения старых баров значение может слегка дрейфовать относительно
+  full-history варианта. Свойство осознанное и зафиксировано: для точного
+  совпадения с full-history нужен настоящий incremental state (задача C-13).
+  Маркер: IndicatorHub.finite_window == True. Каноническим считается
+  последний бар окна: рекурсия к нему сходится, левое краевое значение
+  окна может отличаться от бесконечной истории.
 
 ФОРМА ТОЧКИ
 - Индикатор — чистая функция от последовательности закрытых свечей,
@@ -292,12 +296,20 @@ def _macd(candles: Sequence[Candle], fast: int, slow: int, signal: int) -> Rows:
 
 
 def _adx(candles: Sequence[Candle], length: int) -> Rows:
+    """Wilder ADX (+DI/-DI/ADX) — каноническая реализация (ENG-010, audit 2026-09-29).
+
+    Отличие от прежней версии: directional movement и TR сглаживаются
+    по Wilder (running sum c вычитанием prev/length), а не берутся за один
+    бар; ADX — Wilder-сглаживание DX. Reference-вектор: см.
+    tests/test_audit_2026_09_29.py::test_adx_wilder_reference_vector.
+    """
     n = len(candles)
     plus_di: list[Number] = [None] * n
     minus_di: list[Number] = [None] * n
     adx_line: list[Number] = [None] * n
     if length <= 0 or n < length * 2:
         return {"+di": plus_di, "-di": minus_di, "adx": adx_line}
+    tr = [0.0] * n
     plus_dm = [0.0] * n
     minus_dm = [0.0] * n
     for i in range(1, n):
@@ -305,26 +317,62 @@ def _adx(candles: Sequence[Candle], length: int) -> Rows:
         down = candles[i - 1].low - candles[i].low
         plus_dm[i] = up if up > down and up > 0 else 0.0
         minus_dm[i] = down if down > up and down > 0 else 0.0
-    atr_values = _atr(candles, length)
+        tr[i] = max(
+            candles[i].high - candles[i].low,
+            abs(candles[i].high - candles[i - 1].close),
+            abs(candles[i].low - candles[i - 1].close),
+        )
+    # Wilder seed: суммы за первые length значений (i = 1..length).
+    smooth_tr = sum(tr[1:length + 1])
+    smooth_plus = sum(plus_dm[1:length + 1])
+    smooth_minus = sum(minus_dm[1:length + 1])
+
+    def _di(p: float, m: float) -> tuple[float, float, float]:
+        if smooth_tr <= 0:
+            return 0.0, 0.0, 0.0
+        pd = 100.0 * p / smooth_tr
+        md = 100.0 * m / smooth_tr
+        total = pd + md
+        dx = 0.0 if total == 0 else 100.0 * abs(pd - md) / total
+        return pd, md, dx
+
     dx: list[Number] = [None] * n
-    for i in range(length, n):
-        atr_value = atr_values[i]
-        if not atr_value:
-            continue
-        p = 100.0 * plus_dm[i] / atr_value
-        m = 100.0 * minus_dm[i] / atr_value
-        plus_di[i] = p
-        minus_di[i] = m
-        total = p + m
-        dx[i] = 0.0 if total == 0 else 100.0 * abs(p - m) / total
-    valid = [i for i in range(n) if dx[i] is not None]
+    first = length
+    p, m, d = _di(smooth_plus, smooth_minus)
+    plus_di[first], minus_di[first], dx[first] = p, m, d
+    for i in range(first + 1, n):
+        smooth_tr = smooth_tr - smooth_tr / length + tr[i]
+        smooth_plus = smooth_plus - smooth_plus / length + plus_dm[i]
+        smooth_minus = smooth_minus - smooth_minus / length + minus_dm[i]
+        p, m, d = _di(smooth_plus, smooth_minus)
+        plus_di[i], minus_di[i], dx[i] = p, m, d
+    valid = [i for i in range(first, n) if dx[i] is not None]
     if len(valid) >= length:
-        first = valid[0]
-        adx_line[first + length - 1] = sum(dx[i] for i in valid[:length]) / length
-        for i in range(first + length, n):
+        adx_start = valid[length - 1]
+        adx_line[adx_start] = sum(dx[i] for i in valid[:length]) / length
+        for i in range(adx_start + 1, n):
             if dx[i] is not None:
                 adx_line[i] = (adx_line[i - 1] * (length - 1) + dx[i]) / length
     return {"+di": plus_di, "-di": minus_di, "adx": adx_line}
+
+
+def _envelops(candles: Sequence[Candle], length: int, deviation: float) -> Rows:
+    """Конверты (канон проекта): SMA ± deviation% от уровня (не от шага цены)."""
+    n = len(candles)
+    up: list[Number] = [None] * n
+    center: list[Number] = [None] * n
+    down: list[Number] = [None] * n
+    if length <= 0:
+        return {"up": up, "center": center, "down": down}
+    sma_series = _sma([c.close for c in candles], length)
+    for i in range(n):
+        v = sma_series[i]
+        if v is None:
+            continue
+        center[i] = v
+        up[i] = v + v * deviation / 100.0
+        down[i] = v - v * deviation / 100.0
+    return {"up": up, "center": center, "down": down}
 
 
 def _donchian(candles: Sequence[Candle], length: int) -> Rows:
@@ -516,6 +564,18 @@ INDICATORS: dict[str, IndicatorDefinition] = {
         primary="center",
         dependencies=("sma",),
     ),
+    "envelops": IndicatorDefinition(
+        name="envelops",
+        category="volatility",
+        parameters=(
+            _spec("length", int, 10, minimum=2),
+            _spec("deviation", float, 0.3, minimum=0.01),
+        ),
+        calculate=lambda c, p: _envelops(c, _length(p), float(p["deviation"])),
+        warmup=_length,
+        primary="center",
+        dependencies=("sma",),
+    ),
     "donchian": IndicatorDefinition(
         name="donchian",
         category="price_structure",
@@ -621,6 +681,12 @@ class IndicatorHub:
     def max_lookback(self) -> int:
         """Размер окна пересчёта (не меньше required_bars индикатора)."""
         return self._max_lookback
+
+    @property
+    def finite_window(self) -> bool:
+        """ENG-021: рекуррентные индикаторы считаются по конечному окну
+        max_lookback — маркер конечного окна (не full-history)."""
+        return True
 
     # --- подписки --------------------------------------------------------
     def subscribe(

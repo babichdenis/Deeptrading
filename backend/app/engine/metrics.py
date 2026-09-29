@@ -10,6 +10,8 @@ def summarize(trades: Sequence[Trade]) -> dict:
     if n == 0:
         return {
             "trades": 0,
+            "positions": 0,
+            "partial_closes": 0,
             "wins": 0,
             "losses": 0,
             "win_rate": 0.0,
@@ -28,8 +30,13 @@ def summarize(trades: Sequence[Trade]) -> dict:
     losses = [x for x in nets if x <= 0]
     gross_win = sum(wins)
     gross_loss = abs(sum(losses))
+    # ENG-017 (audit 2026-09-29): частичный выход — отдельный Trade для P&L,
+    # но НЕ отдельная позиция. Считаем цепочки (chain_id) отдельно от сделок.
+    chains = {t.chain_id for t in trades if t.chain_id}
     return {
         "trades": n,
+        "positions": len(chains) if chains else n,
+        "partial_closes": sum(1 for t in trades if t.exit_reason == "partial_take"),
         "wins": len(wins),
         "losses": len(losses),
         "win_rate": round(len(wins) / n * 100, 2),
@@ -55,17 +62,32 @@ def equity_curve(trades: Sequence[Trade], start_capital: float = 100_000.0) -> l
     return curve
 
 
-def max_drawdown_pct(curve_values: Sequence[float]) -> float:
-    peak = float("-inf")
-    max_dd = 0.0
+def drawdown_stats(curve_values: Sequence[float]) -> tuple[float, float]:
+    """(max_dd_pct, max_dd_abs) от ПЕРВОЙ точки серии как начального пика.
+
+    ENG-005 (audit 2026-09-29): серия обязана включать стартовый капитал,
+    иначе первая убыточная сделка становится «пиком» и DD занижается.
+    ENG-016: это realised-only просадка (по закрытым сделкам), без MTM
+    открытых позиций.
+    """
+    peak: float | None = None
+    max_pct = 0.0
+    max_abs = 0.0
     for v in curve_values:
-        if v > peak:
+        if peak is None or v > peak:
             peak = v
+        dd_abs = peak - v
+        if dd_abs > max_abs:
+            max_abs = dd_abs
         if peak > 0:
-            dd = (peak - v) / peak * 100
-            if dd > max_dd:
-                max_dd = dd
-    return round(max_dd, 3)
+            dd = dd_abs / peak * 100
+            if dd > max_pct:
+                max_pct = dd
+    return round(max_pct, 3), round(max_abs, 4)
+
+
+def max_drawdown_pct(curve_values: Sequence[float]) -> float:
+    return drawdown_stats(curve_values)[0]
 
 
 def halves(trades: Sequence[Trade]) -> dict:
@@ -91,13 +113,20 @@ def max_consecutive_losses_from_sorted(trades: Sequence[Trade]) -> int:
 
 def full_report(trades: Sequence[Trade], start_capital: float = 100_000.0) -> dict:
     curve = equity_curve(trades, start_capital)
-    values = [p["equity"] for p in curve] or [start_capital]
+    # ENG-005: стартовый капитал — первая точка кривой просадки, иначе
+    # первая убыточная сделка не даёт просадки вовсе.
+    values = [float(start_capital)] + [p["equity"] for p in curve]
+    dd_pct, dd_abs = drawdown_stats(values)
     by_figi_map = by_figi(trades)
     top1 = top1_analysis(by_figi_map)
     s_base = summarize(trades)
     report = {
         "summary": s_base,
-        "max_drawdown_pct": max_drawdown_pct(values),
+        "max_drawdown_pct": dd_pct,
+        # ENG-016: явное имя realised-метрики; MTM открытых позиций нет.
+        "realised_max_drawdown_pct": dd_pct,
+        "max_drawdown_abs": dd_abs,
+        "dd_basis": "realised_only",
         "halves": halves(trades),
         "by_figi": by_figi_map,
         "by_day": per_day(trades),
@@ -108,8 +137,9 @@ def full_report(trades: Sequence[Trade], start_capital: float = 100_000.0) -> di
         "curve_points": len(curve),
     }
     if s_base["trades"] > 0 and s_base["net"] != 0:
-        dd = report["max_drawdown_pct"]
-        report["recovery"] = round(s_base["net"] / dd, 3) if dd > 0 else None
+        # Стандартный recovery factor: net / максимальная просадка в деньгах
+        # (раньше делилось на проценты — смешивание единиц, ENG-016).
+        report["recovery"] = round(s_base["net"] / dd_abs, 3) if dd_abs > 0 else None
     else:
         report["recovery"] = None
     return _json_safe(report)

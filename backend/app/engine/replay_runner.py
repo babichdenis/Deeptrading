@@ -22,6 +22,7 @@ from __future__ import annotations
 from app.engine.ledger import TradeLedger
 from app.engine.models import ExitReason
 from app.engine.runner import EngineRunner
+from app.engine.views import CandleWindow
 
 
 class IncrementalRunner:
@@ -69,6 +70,11 @@ class IncrementalRunner:
             if k - 1 > self._poll_done:
                 if k - 1 >= st.warmup - 1:
                     self.runner._poll(k - 1, self.history, st)
+                else:
+                    # ENG-008: warmup feed — один в один с batch run():
+                    # закрытые бары до warmup кормят stateful-стратегию,
+                    # сигналы подавляются.
+                    self.runner.strategy.on_bar(CandleWindow(self.history, 0, k))
                 self._poll_done = k - 1
             bar = self.history[k]
             if progress_cb is not None and k > 0 and k % 500 == 0:

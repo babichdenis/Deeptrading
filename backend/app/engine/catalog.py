@@ -317,13 +317,15 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
         },
     ),
     "ose_all": StrategyCard(
-        id="ose_all", name="OSEngine All Robots (5 votes)", family="ose", wave=5,
+        id="ose_all", name="OSEngine All Robots (6 votes)", family="ose", wave=5,
         long_rule="голос любого робота за лонг (quorum, дефолт 1)",
         short_rule="голос любого робота за шорт",
         timeframes=("1min", "5min"), status="AVAILABLE",
         params_schema={
-            "quorum": {"type": "int", "default": 1, "min": 1, "max": 5},
+            "quorum": {"type": "int", "default": 1, "min": 1, "max": 6},
             "sma_stoch_step_pct": {"type": "float", "default": 1.0, "min": 0.0, "max": 10.0},
+            "members": {"type": "str", "default": "",
+                        "desc": "CSV роботов (пусто = все 6); напр. price_channel,rsi_trade"},
         },
     ),
     "ose_price_channel": StrategyCard(
@@ -331,6 +333,10 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
         long_rule="high > канал вверх[−2] (пробой)",
         short_rule="low < канал вниз[−2] (пробой)",
         timeframes=("1min", "5min"), status="AVAILABLE",
+        params_schema={
+            "length_up": {"type": "int", "default": 21, "min": 2, "max": 200},
+            "length_down": {"type": "int", "default": 21, "min": 2, "max": 200},
+        },
     ),
     "ose_sma_stoch": StrategyCard(
         id="ose_sma_stoch", name="OSEngine SMA Stochastic", family="ose", wave=5,
@@ -346,24 +352,78 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
         long_rule="стоп-заявка по верхней полосе конвертов + трейлинг",
         short_rule="стоп-заявка по нижней полосе конвертов + трейлинг",
         timeframes=("1min", "5min"), status="AVAILABLE",
+        params_schema={
+            "length": {"type": "int", "default": 10, "min": 2, "max": 100},
+            "deviation": {"type": "float", "default": 0.3, "min": 0.05, "max": 5.0},
+            "trail_stop": {"type": "float", "default": 0.1, "min": 0.01, "max": 5.0},
+        },
     ),
     "ose_rsi_contrtrend": StrategyCard(
         id="ose_rsi_contrtrend", name="OSEngine RSI Contrtrend", family="ose", wave=5,
         long_rule="Sma<Close & RSI<downline (контртренд)",
         short_rule="Sma>Close & RSI>upline (контртренд)",
         timeframes=("1min", "5min"), status="AVAILABLE",
+        params_schema={
+            "sma_length": {"type": "int", "default": 50, "min": 5, "max": 200},
+            "rsi_length": {"type": "int", "default": 20, "min": 5, "max": 100},
+            "upline": {"type": "float", "default": 65.0, "min": 50.0, "max": 95.0},
+            "downline": {"type": "float", "default": 35.0, "min": 5.0, "max": 50.0},
+        },
     ),
     "ose_rsi_trade": StrategyCard(
         id="ose_rsi_trade", name="OSEngine RSI Trade", family="ose", wave=5,
         long_rule="RSI пересёк downline снизу вверх",
         short_rule="RSI пересёк upline сверху вниз",
         timeframes=("1min", "5min"), status="AVAILABLE",
+        params_schema={
+            "rsi_length": {"type": "int", "default": 20, "min": 5, "max": 100},
+            "upline": {"type": "float", "default": 65.0, "min": 50.0, "max": 95.0},
+            "downline": {"type": "float", "default": 35.0, "min": 5.0, "max": 50.0},
+        },
     ),
     "ose_bollinger": StrategyCard(
         id="ose_bollinger", name="OSEngine Bollinger", family="ose", wave=5,
         long_rule="close < нижней полосы BB (контртренд)",
         short_rule="close > верхней полосы BB (контртренд)",
         timeframes=("1min", "5min"), status="AVAILABLE",
+        params_schema={
+            "boll_length": {"type": "int", "default": 21, "min": 5, "max": 100},
+            "boll_deviation": {"type": "float", "default": 2.0, "min": 0.5, "max": 5.0},
+            "sma_length": {"type": "int", "default": 15, "min": 2, "max": 100},
+        },
+    ),
+    "rsi_trade_hub": StrategyCard(
+        id="rsi_trade_hub", name="RSI Trade (hub-канон)", family="momentum", wave=5,
+        long_rule="Wilder-RSI пересёк downline снизу вверх (канон IndicatorHub)",
+        short_rule="Wilder-RSI пересёк upline сверху вниз",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "rsi_length": {"type": "int", "default": 20, "min": 5, "max": 100},
+            "upline": {"type": "float", "default": 65.0, "min": 50.0, "max": 95.0},
+            "downline": {"type": "float", "default": 35.0, "min": 5.0, "max": 50.0},
+        },
+    ),
+    "envelop_trend_hub": StrategyCard(
+        id="envelop_trend_hub", name="Envelop Trend (hub-канон)", family="trend", wave=5,
+        long_rule="касание верхнего конверта (канон IndicatorHub) + трейлинг",
+        short_rule="касание нижнего конверта + трейлинг",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "length": {"type": "int", "default": 10, "min": 2, "max": 100},
+            "deviation": {"type": "float", "default": 0.3, "min": 0.05, "max": 5.0},
+            "trail_stop": {"type": "float", "default": 0.1, "min": 0.0, "max": 5.0},
+        },
+    ),
+    "canon_ensemble": StrategyCard(
+        id="canon_ensemble", name="Канон-ансамбль (кворум)", family="ensemble", wave=5,
+        long_rule=">= quorum канонных членов за BUY и больше противоположных",
+        short_rule=">= quorum членов за SELL",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "members": {"type": "str", "default": "rsi_trade_hub",
+                        "desc": "CSV strategy_id через запятую"},
+            "quorum": {"type": "int", "default": 1, "min": 1, "max": 9},
+        },
     ),
 }
 

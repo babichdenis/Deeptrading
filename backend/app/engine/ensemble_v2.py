@@ -3,15 +3,25 @@
 M1 (по 1м): micro_breakout (lookback=5 + фильтр перерастяжения), ema_signal, macd_signal, rsi_signal
 M5 (по 5м): donchian, pullback, range, volume, bollinger, atr_breakout
 
-Стратегия регистрируется с tf="1min" и сама ресемплит 5м внутри on_bar.
+M5 собирается через engine.candlehub.build_tf(include_partial=False) — формирующийся
+(незакрытый по времени) 5m-бакет в голосование НЕ попадает (ENG-013, audit 2026-09-29);
+раньше стратегия импортировала services.ensemble.resample и могла видеть полусвечу.
 Направление = большинство: long_votes >= min_votes и > short_votes.
+
+ENG-019: ошибки голосующих функций не проглатываются молча — они пишутся в
+logger и в self.errors; при params={"strict": True} ошибка прерывает прогон
+(research/backtest), иначе функция считается воздержавшейся (degraded).
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Sequence
 
+from app.engine.candlehub import build_tf
 from app.engine.models import Candle, Side, Signal
+
+logger = logging.getLogger(__name__)
 
 
 def _as_dict(p) -> dict:
@@ -283,37 +293,50 @@ class EnsembleVoteStrategy:
         self.min_votes = int(self.params.get("min_votes", 3))
         self.lookback = int(self.params.get("lookback", 5))
         self.overext_mult = float(self.params.get("overext_mult", 3.0))
+        # ENG-019: strict=True — ошибка голосующей функции прерывает прогон
+        # (research/backtest); False — воздержание с телеметрией (live).
+        self.strict = bool(self.params.get("strict", False))
+        self.errors: list[dict] = []
 
     def warmup_bars(self) -> int:
         return 210
 
+    def reset(self) -> None:
+        """ENG-007/019: телеметрия ошибок принадлежит прогону."""
+        self.errors.clear()
+
+    def _safe_call(self, label: str, fn, *args):
+        try:
+            return fn(*args)
+        except Exception as exc:  # noqa: BLE001 — контракт: телеметрия, не молчание
+            if len(self.errors) < 200:
+                self.errors.append({"func": label, "error": f"{type(exc).__name__}: {exc}"})
+            logger.warning("ensemble_vote %s failed: %s", label, exc)
+            if self.strict:
+                raise
+            return None
+
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
         if len(candles) < self.warmup_bars():
             return None
-        # 5м — ресемплим из 1м внутри
-        from app.services.ensemble import resample
-        c5 = resample(list(candles), 300)
+        # ENG-013: только ЗАКРЫТЫЕ 5m-бары (engine-owned build_tf, без
+        # формирующегося хвостового бакета и без зависимости engine→services).
+        c5 = build_tf(list(candles), 300)
         if len(c5) < 210:
             return None
 
         votes = []
         details: dict = {}
         for name, fn in M1_FUNCS:
-            try:
-                if name == "micro_breakout":
-                    s = fn(candles, self.lookback, self.overext_mult)
-                else:
-                    s = fn(candles)
-            except Exception:
-                s = None
+            if name == "micro_breakout":
+                s = self._safe_call(f"m1_{name}", fn, candles, self.lookback, self.overext_mult)
+            else:
+                s = self._safe_call(f"m1_{name}", fn, candles)
             if s:
                 votes.append(s)
                 details[f"m1_{name}"] = s.value
         for name, fn in M5_FUNCS:
-            try:
-                s = fn(c5)
-            except Exception:
-                s = None
+            s = self._safe_call(f"m5_{name}", fn, c5)
             if s:
                 votes.append(s)
                 details[f"m5_{name}"] = s.value
@@ -321,6 +344,9 @@ class EnsembleVoteStrategy:
         longs = sum(1 for v in votes if v == Side.BUY)
         shorts = sum(1 for v in votes if v == Side.SELL)
         feat = {"long_votes": longs, "short_votes": shorts, "total_votes": len(votes), **details}
+        if self.errors:
+            feat["degraded"] = True
+            feat["vote_errors"] = len(self.errors)
         if longs >= self.min_votes and longs > shorts:
             return Signal(strategy_id=self.strategy_id, side=Side.BUY,
                           time=candles[-1].ts, reason="ensemble_long", features=feat)
@@ -335,3 +361,4 @@ class EnsembleVoteParams:
     min_votes: int = 3
     lookback: int = 5
     overext_mult: float = 3.0
+    strict: bool = False

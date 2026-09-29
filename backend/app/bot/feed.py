@@ -38,6 +38,8 @@ INTERVAL_ENUM = {
     "5min": CandleInterval.CANDLE_INTERVAL_5_MIN,
     "10min": CandleInterval.CANDLE_INTERVAL_10_MIN,
     "15min": CandleInterval.CANDLE_INTERVAL_15_MIN,
+    "30min": CandleInterval.CANDLE_INTERVAL_30_MIN,
+    "hour": CandleInterval.CANDLE_INTERVAL_HOUR,
 }
 
 SUBSCRIPTION_INTERVAL = {
@@ -45,9 +47,11 @@ SUBSCRIPTION_INTERVAL = {
     "5min": SubscriptionInterval.SUBSCRIPTION_INTERVAL_FIVE_MINUTES,
     "10min": SubscriptionInterval.SUBSCRIPTION_INTERVAL_10_MIN,
     "15min": SubscriptionInterval.SUBSCRIPTION_INTERVAL_FIFTEEN_MINUTES,
+    "30min": SubscriptionInterval.SUBSCRIPTION_INTERVAL_30_MIN,
+    "hour": SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_HOUR,
 }
 
-STEP_SEC = {"1min": 60, "5min": 300, "10min": 600, "15min": 900}
+STEP_SEC = {"1min": 60, "5min": 300, "10min": 600, "15min": 900, "30min": 1800, "hour": 3600}
 
 logger = logging.getLogger("candle_feed")
 

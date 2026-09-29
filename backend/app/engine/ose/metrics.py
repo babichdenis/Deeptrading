@@ -154,14 +154,20 @@ def run_robot_with_metrics(robot, candles: Sequence[Candle]) -> dict:
 def synthetic_series(n: int = 400, seed: int = 42) -> list[Candle]:
     """Детерминированная серия для приёмочных гейтов и замеров роботов:
     синус-дрейф (период ~75 баров — тренды и откаты) + равномерный шум.
-    random.Random(seed) кроссплатформен — числа совпадают на Mac и .8,
-    что и требуется для сравнения замеров двух машин."""
+    random.Random(seed) кроссплатформен; синус-член дополнительно
+    квантуется round(..., 6), потому что libm sin не обязан совпадать
+    бит-в-бит между платформами (macOS/Windows расходятся на ±1 ulp) —
+    после квантования серия идентична на любой машине, что и требуется
+    для сравнения замеров двух машин."""
     rng = random.Random(seed)
     t0 = datetime(2026, 1, 5, 10, 0)
     out: list[Candle] = []
     price = 100.0
     for i in range(n):
-        close = price + math.sin(i / 12.0) * 0.8 + rng.uniform(-1.0, 1.0)
+        # Квантование синус-члена против 1-ulp расхождения libm sin
+        # между платформами (подробности — в докстринге).
+        wave = round(math.sin(i / 12.0) * 0.8, 6)
+        close = price + wave + rng.uniform(-1.0, 1.0)
         high = max(price, close) + rng.uniform(0.0, 0.6)
         low = min(price, close) - rng.uniform(0.0, 0.6)
         out.append(Candle(ts=t0 + timedelta(minutes=i), open=price,

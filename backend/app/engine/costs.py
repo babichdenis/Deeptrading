@@ -7,6 +7,19 @@ from app.engine.models import Side
 
 @dataclass(frozen=True)
 class CostModel:
+    """Контракт затрат (ENG-020, audit 2026-09-29).
+
+    round_price — nearest-tick (banker's rounding). Это ЯВНЫЙ КОНТРАКТ:
+    слиппедж на 2 bps при tick=0.01 может частично поглотиться округлением
+    (BUY округлится вниз, SELL вверх). Модель консервативна не строго —
+    для строго adverse-семантики нужен side-aware ceil/floor, что изменит
+    базовые числа; до отдельного решения фиксируем текущий контракт.
+
+    Поля Trade: gross_pnl уже посчитан по slipped-ценам входа/выхода —
+    slippage хранится отдельно как СПРАВКА, а не как вычитаемое.
+    Внешние отчёты НЕ должны вычитать его второй раз (net = gross - commission).
+    """
+
     id: str = "canonical_v1"
     version: str = "1.0.0"
     commission_rate: float = 0.0005

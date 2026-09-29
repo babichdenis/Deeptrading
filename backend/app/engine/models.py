@@ -27,6 +27,16 @@ class DecisionAction(str, Enum):
 
 
 class ExitReason(str, Enum):
+    """Канонические коды причин выхода (ENG-018, audit 2026-09-29).
+
+    Соответствия с внутренними контурами:
+      TAKE_PROFIT/TARGET            -> TARGET
+      PROTECTIVE_STOP/TRAILING_STOP -> STOP_LOSS (трейлинг — тоже стоп)
+      OPPOSITE_SIGNAL_EXIT          -> SIGNAL_EXIT
+    Внутренние enum'ы (regime_strategies.ExitReason, orderflow) — детали
+    собственных контуров; при пересечении границы маппить сюда.
+    """
+
     STOP_LOSS = "stop_loss"
     TARGET = "target"
     SIGNAL_EXIT = "signal_exit"
@@ -75,6 +85,7 @@ class Position:
     bars_held: int = 0
     entry_commission: float = 0.0
     entry_slippage: float = 0.0
+    chain_id: str | None = None  # ENG-017: id цепочки позиции (partial + финал — одна цепочка)
 
 
 @dataclass(frozen=True)
@@ -97,6 +108,7 @@ class Trade:
     exit_reason: str
     initial_stop: float | None = None
     take_profit: float | None = None
+    chain_id: str | None = None  # ENG-017: частичный выход и финальное закрытие делят id
 
 
 @dataclass(frozen=True)
