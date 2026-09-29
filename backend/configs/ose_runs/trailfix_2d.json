@@ -1,0 +1,14 @@
+{
+  "experiment": {"name": "trailfix_rsi_1h_2d"},
+  "robots": [
+    {"robot": "rsi_trade_hub", "params": {}}
+  ],
+  "timeframe": "hour",
+  "universe": ["SBER", "LKOH", "TATN"],
+  "period": ["2026-09-10", "2026-09-11"],
+  "costs": {"commission": 0.0005, "slippage_bps": 2.0, "qty": 1, "capital": 100000},
+  "execution": {"jobs": 3, "cache": true},
+  "filters": {"min_trades": 1, "min_net_pnl": -100000},
+  "exits": ["x07"],
+  "outputs": {"dir": "reports/experiments"}
+}

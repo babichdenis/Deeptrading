@@ -6059,8 +6059,13 @@ class PaperBotRuntime:
         new_stop = None
         if trail_active and upd is not None:
             try:
+                _pk_px = None
+                try:
+                    _pk_px = float((self._peak_pnl.get(figi) or {}).get("price")) or None
+                except Exception:
+                    _pk_px = None
                 new_stop = upd(trail_side, float(entry_px), self._trail_stop.get(figi),
-                               act_bars, qty=qty_sh, commission=comm)
+                               act_bars, qty=qty_sh, commission=comm, peak_price=_pk_px)
             except Exception as _te:
                 self._log(f"update_stop error {figi[-6:]}: {_te}")
             if new_stop is not None:
@@ -6207,8 +6212,13 @@ class PaperBotRuntime:
                     if _ti.get("active") and _tupd is not None:
                         try:
                             _prev = _ti.get("act_track")
+                            _pk_i = None
+                            try:
+                                _pk_i = float((self._peak_pnl.get(figi) or {}).get("price")) or None
+                            except Exception:
+                                _pk_i = None
                             _new_stop = _tupd(trail_side, float(entry_px), _prev, _act_bars,
-                                              qty=qty_sh, commission=comm)
+                                              qty=qty_sh, commission=comm, peak_price=_pk_i)
                             if _new_stop is not None:
                                 _ti["act_track"] = float(_new_stop)
                                 # Дистанция трейл-стопа в ATR и % для отчёта.

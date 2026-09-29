@@ -364,3 +364,25 @@ def test_partial_trade_and_final_share_position_chain():
     assert s["trades"] == 3
     assert s["positions"] == 2
     assert s["partial_closes"] == 1
+
+
+def test_atr_trail_uses_peak_not_pre_entry_window():
+    """Баг OZON (10.09.2026): трейл считался от окна period баров, куда попадал
+    пред-входовый хай → стоп вставал ВЫШЕ входа и «срабатывал» мгновенно.
+    С peak_price (пик с момента входа) стоп не может оказаться выше пика."""
+    bars = []
+    for i in range(7):  # флэт до спайка (ATR≈1)
+        bars.append(Candle(ts=T0 + timedelta(hours=i), open=100, high=100.5, low=99.5, close=100))
+    # пред-входовый спайк-хай: шум в окне period, но НЕ пик сделки
+    bars.append(Candle(ts=T0 + timedelta(hours=7), open=100, high=140, low=99, close=100))
+    for i in range(8, 13):
+        bars.append(Candle(ts=T0 + timedelta(hours=i), open=100, high=100.5, low=99.5, close=100))
+    # вход 100; последний бар делает пик сделки 105 (close 105)
+    bars.append(Candle(ts=T0 + timedelta(hours=13), open=100, high=105, low=99, close=105))
+    pol = AtrStopPolicy(period=14, multiplier=2.0, trail_activation_comm_mult=4.0,
+                        trail_distance_r=2.5, trail_min_factor=0.3)
+    stop_win = pol.update_stop(Side.BUY, 100.0, 98.0, bars, qty=100, commission=20.0)
+    stop_pk = pol.update_stop(Side.BUY, 100.0, 98.0, bars, qty=100, commission=20.0, peak_price=105.0)
+    assert stop_win is not None and stop_pk is not None
+    assert stop_pk < stop_win  # окно даёт завышенный стоп из-за пред-входового хая 140
+    assert stop_pk <= 105.0  # стоп не может быть выше пика с момента входа

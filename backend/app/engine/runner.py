@@ -370,6 +370,15 @@ class EngineRunner:
                                    f"BREAKEVEN_STOP -> {_be:.6f}")
                 update_stop = getattr(self.exit_policy, "update_stop", None)
                 if update_stop is not None:
+                    _peak_px = None
+                    try:
+                        _ei = int(st.position.entry_index)
+                        if 0 <= _ei <= i:
+                            _seg = candles[_ei : i + 1]
+                            _peak_px = (max(b.high for b in _seg) if _side_for_pol is Side.BUY
+                                        else min(b.low for b in _seg))
+                    except Exception:
+                        _peak_px = None
                     st.position.initial_stop = update_stop(
                         _side_for_pol,
                         st.position.entry_price,
@@ -377,6 +386,7 @@ class EngineRunner:
                         CandleWindow(candles, 0, i + 1),
                         qty=st.position.qty,
                         commission=st.position.entry_commission,
+                        peak_price=_peak_px,
                     )
                 if not self._trailing_active:
                     activate = getattr(self.exit_policy, "trailing_activated", None)

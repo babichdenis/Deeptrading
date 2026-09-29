@@ -279,16 +279,19 @@ class AtrStopPolicy(ExitPolicy):
             dist *= _adj
         if self.trail_min_atr > 0:
             dist = max(dist, self.trail_min_atr * dist_unit)
-        window = bars[-self.period :]
+        # Трейл-стоп: от пика с момента ВХОДА (peak_price), если он передан.
+        # Без пика (fallback) — от окна последних period баров: окно может
+        # содержать бары ДО входа, и стоп рискует встать выше входа (баг OZON
+        # 10.09.2026: пред-входовый хай 2724 → стоп 2650.59 при цене 2623).
         if side is Side.BUY:
-            highest = max(b.high for b in window)
+            highest = float(peak_price) if peak_price is not None else max(b.high for b in bars[-self.period :])
             if self.trail_activation_comm_mult is None:
                 move = highest - entry_price
                 if move < self.trail_activation_r * risk:
                     return current_stop
             candidate = highest - dist
             return max(current_stop or candidate, candidate)
-        lowest = min(b.low for b in window)
+        lowest = float(peak_price) if peak_price is not None else min(b.low for b in bars[-self.period :])
         if self.trail_activation_comm_mult is None:
             move = entry_price - lowest
             if move < self.trail_activation_r * risk:
