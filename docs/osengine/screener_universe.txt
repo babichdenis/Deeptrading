@@ -1,0 +1,1029 @@
+Да. Тогда двигаемся с **первого безопасного этапа: Phase 1–3** — контракты → выделение Universe → выделение Screener, без изменения торгового поведения.
+
+Я бы дал воркеру именно такой prompt:
+
+# Deeptrading — Universe → Screener refactor
+
+## Phase 1–3: Domain contracts + Universe extraction + Screener extraction
+
+Репозиторий:
+
+`babichdenis/Deeptrading`
+
+Работай только с текущим кодом репозитория. Не придумывай отсутствующие компоненты и не портируй архитектуру OsEngine wholesale.
+
+---
+
+## Цель
+
+Начать выделение архитектуры:
+
+```text
+Universe
+  ↓
+Screener
+  ↓
+Feature calculation
+  ↓
+Selection / Ranking
+  ↓
+Allocation
+  ↓
+Rebalance
+  ↓
+Execution
+```
+
+На этом этапе реализовать только:
+
+```text
+Phase 1 — Domain contracts
+Phase 2 — Universe extraction
+Phase 3 — Screener extraction
+```
+
+Главное требование:
+
+> Поведение существующего runtime не должно измениться.
+
+Новая архитектура должна быть введена через compatibility layer и parity tests.
+
+---
+
+# 1. Что обязательно изучить перед изменениями
+
+Сначала изучи:
+
+* `backend/app/bot/universe.py`
+* `backend/app/services/vol_carousel.py`
+* `backend/app/bot/portfolio.py`
+* `docs/plan_stock_selection.md`
+* `ROBOTS_REGISTRY.md`
+
+Особенно найди все call sites для функций из:
+
+`backend/app/bot/universe.py`
+
+Не ограничивайся самим файлом.
+
+Нужно понять:
+
+* кто вызывает Universe functions;
+* кто меняет `eligible_tier`;
+* кто отвечает за runtime hot-add/remove;
+* где Universe используется в backtest;
+* где Universe используется в live/paper;
+* какие функции являются compatibility API.
+
+---
+
+# 2. Зафиксировать текущее поведение
+
+Перед рефакторингом зафиксируй текущий flow.
+
+В частности, в `universe.py` существуют функции, среди которых:
+
+```python
+select_eligible_universe(...)
+select_all_tradeable(...)
+select_volatile_universe(...)
+```
+
+Сейчас часть этих функций смешивает:
+
+* получение кандидатов;
+* проверку наличия данных;
+* minimum bars;
+* загрузку market data;
+* resampling;
+* ATR;
+* ATR%;
+* ranking;
+* Top-N selection.
+
+Это необходимо разделить.
+
+Но на этом этапе нельзя менять конечный результат старого API.
+
+---
+
+# 3. Phase 1 — Domain contracts
+
+Создай минимальный набор domain models.
+
+Предпочтительно разместить их в отдельном domain/module слое, согласованном с существующей структурой проекта.
+
+Минимально нужны:
+
+```text
+InstrumentRef
+UniverseSnapshot
+ScreenResult
+ScreenedInstrument
+```
+
+Если существующая архитектура уже имеет подходящее место для таких моделей — используй его.
+
+Не создавай второй параллельный domain framework.
+
+## InstrumentRef
+
+Должен однозначно идентифицировать инструмент.
+
+Минимальная семантика:
+
+```text
+ticker
+figi / instrument id, если доступен
+exchange / board, если необходим
+```
+
+Не дублируй существующий canonical instrument identity, если он уже существует.
+
+---
+
+## UniverseSnapshot
+
+Должен описывать snapshot кандидатов.
+
+Минимальная семантика:
+
+```text
+timestamp / as_of
+instruments
+source
+```
+
+Snapshot должен быть детерминированным.
+
+Один и тот же input должен давать одинаковый порядок инструментов.
+
+---
+
+## ScreenResult
+
+Результат screening для одного инструмента.
+
+Нужно различать:
+
+```text
+eligible
+rejected
+```
+
+и обязательно сохранять причину rejection.
+
+Например:
+
+```text
+NO_DATA
+INSUFFICIENT_BARS
+LOW_COVERAGE
+NOT_TRADEABLE
+BLACKLISTED
+LOW_LIQUIDITY
+INVALID_MARKET_DATA
+```
+
+Не ограничивай enum только этими значениями, если код проекта показывает дополнительные реальные причины.
+
+Не добавляй искусственные причины без необходимости.
+
+---
+
+## ScreenedInstrument
+
+Результат успешного screening.
+
+Он должен содержать:
+
+```text
+instrument
+screen result / eligibility
+relevant availability metadata
+```
+
+Не добавляй сюда ATR, ranking или target weight.
+
+Это важно:
+
+> Screener не должен заниматься Selection.
+
+---
+
+# 4. Phase 2 — Extract Universe
+
+Создай явный Universe слой.
+
+Ответственность Universe:
+
+```text
+candidate discovery
+instrument identity
+source
+availability
+admin/static exclusions
+snapshot creation
+```
+
+Universe НЕ должен отвечать за:
+
+```text
+ATR
+ATR%
+ranking
+Top-N
+weights
+signals
+orders
+portfolio
+rebalance
+broker
+```
+
+---
+
+# 5. Compatibility с существующим universe.py
+
+Существующие функции не удалять сразу.
+
+Если старый код вызывает:
+
+```python
+select_eligible_universe(...)
+select_all_tradeable(...)
+select_volatile_universe(...)
+```
+
+оставь compatibility wrappers.
+
+Их задача:
+
+```text
+old API
+  ↓
+new Universe/Screener implementation
+  ↓
+старый формат результата
+```
+
+На этом этапе старые call sites менять минимально.
+
+Не делай большой migration PR.
+
+---
+
+# 6. Phase 3 — Extract Screener
+
+Выдели Screener из существующей логики.
+
+Screener отвечает только на вопрос:
+
+> Можно ли данный инструмент передать дальше в feature calculation / selection?
+
+Проверки, которые уже реально присутствуют в коде, нужно перенести сюда.
+
+В частности изучить и сохранить существующую семантику:
+
+* наличие market data;
+* minimum bars;
+* coverage;
+* tradeability;
+* liquidity, если она уже используется именно как eligibility criterion;
+* blacklist/admin exclusions;
+* валидность входных данных.
+
+---
+
+# 7. Очень важное ограничение
+
+НЕ переносить в Screener:
+
+```text
+ATR calculation
+ATR ranking
+Top-N
+momentum ranking
+signal_count ranking
+allocation
+position sizing
+rebalance
+```
+
+Даже если текущая функция делает это всё вместе.
+
+На этом этапе задача — разделить eligibility и selection.
+
+---
+
+# 8. Feature calculation пока НЕ выделять полностью
+
+ATR и другие вычисляемые признаки сейчас не нужно превращать в полноценный Feature Engine.
+
+Можно оставить существующий calculation code там, где он нужен compatibility path.
+
+Но архитектурно он не должен считаться частью Screener.
+
+Целевая структура:
+
+```text
+Universe
+    ↓
+Screener
+    ↓
+Features
+    ↓
+Selection
+```
+
+---
+
+# 9. Не создавать новый Resampler
+
+В проекте уже существует market-data инфраструктура.
+
+Не создавать:
+
+```text
+NewCandleHub
+NewResampler
+NewMarketDataEngine
+```
+
+Не менять timestamp semantics в рамках этой задачи.
+
+Если существующий `universe.py` использует текущий способ получения/resampling данных, сохранить его поведение.
+
+Отдельная задача по CandleHub/Resampler будет позже.
+
+---
+
+# 10. Не создавать второй Portfolio/Risk engine
+
+`backend/app/bot/portfolio.py` уже содержит portfolio/risk primitives.
+
+Эта задача НЕ должна создавать:
+
+```text
+PortfolioManager2
+RiskEngine2
+ExposureEngine2
+```
+
+Universe/Screener не должны знать о portfolio positions.
+
+---
+
+# 11. Parity tests
+
+Это обязательная часть работы.
+
+Нужно доказать, что refactor не изменил существующее поведение.
+
+Минимально добавить тесты для:
+
+## Universe
+
+Проверить:
+
+* одинаковый набор инструментов;
+* отсутствие duplicate instruments;
+* стабильный порядок;
+* одинаковый snapshot при одинаковом input;
+* корректная identity.
+
+## Screener
+
+Проверить:
+
+### No data
+
+Инструмент без данных:
+
+```text
+eligible = False
+reason = NO_DATA
+```
+
+если именно такая семантика существует в текущем коде.
+
+### Insufficient bars
+
+Инструмент с недостаточным количеством bars:
+
+```text
+eligible = False
+reason = INSUFFICIENT_BARS
+```
+
+### Valid candidate
+
+Корректный инструмент проходит screening.
+
+### Rejection reason
+
+Каждый rejection должен иметь объяснимую причину.
+
+### No mutation
+
+Screener не должен:
+
+* менять portfolio;
+* менять broker;
+* открывать/закрывать позиции;
+* менять target weights;
+* менять runtime universe.
+
+---
+
+# 12. Parity criterion
+
+Главный acceptance criterion:
+
+```text
+old universe behaviour
+        ==
+new Universe + Screener behaviour
+```
+
+на одинаковом fixture/input.
+
+Особенно важно проверить существующие пути:
+
+```text
+select_eligible_universe
+select_all_tradeable
+select_volatile_universe
+```
+
+Если `select_volatile_universe` пока включает ATR/ranking, compatibility wrapper должен сохранить старый результат.
+
+Не переписывай его полностью в Selection на этом этапе.
+
+---
+
+# 13. Determinism
+
+Все результаты должны быть детерминированными.
+
+Если два инструмента имеют одинаковые значения, порядок должен определяться стабильным tie-break.
+
+Предпочтительно:
+
+```text
+primary metric DESC
+ticker ASC
+```
+
+Но не меняй существующую ranking semantics только ради этого, если это изменит старый результат.
+
+Для новых domain snapshots порядок должен быть явно стабильным.
+
+---
+
+# 14. Look-ahead
+
+Не допускать новых источников look-ahead.
+
+Screener может использовать только данные, доступные на соответствующий момент времени.
+
+Особенно проверить:
+
+* bar count;
+* coverage;
+* liquidity;
+* availability;
+* market data timestamp.
+
+Не использовать будущие bars для принятия решения на timestamp `t`.
+
+---
+
+# 15. Что НЕ делать в этой задаче
+
+НЕ делать:
+
+* Rebalance engine;
+* TargetPortfolio;
+* Allocation;
+* ML ranking;
+* optimizer;
+* новые signals;
+* новый Broker;
+* новую Execution layer;
+* новый CandleHub;
+* новый Resampler;
+* GUI;
+* live trading semantics;
+* изменение Top-N;
+* изменение ATR ranking;
+* изменение `eligible_tier` semantics;
+* автоматическую миграцию всех call sites;
+* удаление старых compatibility functions.
+
+---
+
+# 16. Commit structure
+
+Желательно разбить работу на небольшие логические commits:
+
+```text
+docs: document universe screener architecture
+
+refactor: add universe screener domain contracts
+
+refactor: extract universe layer
+
+test: add universe parity tests
+
+refactor: extract screener layer
+
+test: add screener parity tests
+```
+
+Если workflow проекта требует другой commit convention — следовать существующему convention.
+
+---
+
+# 17. Expected final architecture after this phase
+
+После завершения должно быть концептуально:
+
+```text
+Universe
+   │
+   ├── candidate discovery
+   ├── identity
+   ├── source
+   └── snapshot
+        │
+        ▼
+Screener
+   │
+   ├── data availability
+   ├── minimum bars
+   ├── coverage
+   ├── tradeability
+   ├── liquidity
+   └── exclusions
+        │
+        ▼
+eligible instruments
+        │
+        ▼
+(existing feature / selection logic)
+```
+
+При этом старые public APIs должны продолжать работать.
+
+---
+
+# 18. Definition of Done
+
+Работа считается завершённой только если:
+
+* [ ] текущий `universe.py` полностью изучен;
+* [ ] все основные call sites найдены;
+* [ ] domain contracts добавлены;
+* [ ] Universe выделен;
+* [ ] Screener выделен;
+* [ ] rejection reasons сохраняются;
+* [ ] старые APIs работают через compatibility layer;
+* [ ] parity tests проходят;
+* [ ] deterministic behaviour проверен;
+* [ ] look-ahead не добавлен;
+* [ ] live/backtest execution semantics не изменены;
+* [ ] portfolio/risk code не продублирован;
+* [ ] CandleHub/Resampler не дублированы;
+* [ ] ATR/Top-N semantics не изменены;
+* [ ] Rebalance не реализован.
+
+---
+
+# 19. Отчёт после выполнения
+
+В конце worker должен предоставить:
+
+### Changed files
+
+Список изменённых файлов.
+
+### New files
+
+Список новых файлов.
+
+### Compatibility
+
+Какие старые APIs сохранены.
+
+### Tests
+
+Какие тесты добавлены и результат:
+
+```text
+pytest ...
+N passed
+```
+
+### Behaviour parity
+
+Кратко показать:
+
+```text
+old eligible set
+new eligible set
+difference = 0
+```
+
+для имеющихся fixtures/test cases.
+
+### Known limitations
+
+Что намеренно оставлено на следующий этап.
+
+---
+
+## Следующий этап после этого PR
+
+Не начинать автоматически.
+
+Следующая отдельная задача:
+
+```text
+Phase 4 — Feature calculation
+Phase 5 — Selection / Ranking
+```
+
+И только после их стабилизации:
+
+```text
+Allocation
+→ TargetPortfolio
+→ RebalancePlan
+```
+
+Universe activation (`vol_carousel`) должен мигрироваться отдельно:
+
+```text
+rank_volatile
+    ↓
+DesiredUniverse
+    ↓
+UniverseActivationPlan
+    ↓
+apply_activation_plan
+```
+
+Не смешивать Universe activation с Portfolio Rebalance.
+
+Я бы **не пытался сейчас снова писать это через GitHub integration**: у нас уже был `403 Resource not accessible by integration`, то есть проблема выглядит именно на уровне интеграции, а не твоих прав в репозитории.
+
+Если запускаем воркера по этому prompt, его первая задача — **не менять торговое поведение**, а сделать архитектурный extraction с parity tests.
+
+---
+---
+
+# ЧАСТЬ II. ОТЧЁТ ОБ ИСПОЛНЕНИИ (Phase 1–3)
+
+Дата: 2026-09-30. Машина: `.7`, репозиторий `/Users/Denis/Dev/Deeptrading`
+(он же `/Volumes/Dev/Deeptrading`). HEAD на момент работы: см. `git log` вручную —
+git по SMB не запускается (`pack-objects died of signal 10`).
+
+## A. Что было изучено (пункт 1 промпта)
+
+Изучены: `backend/app/bot/universe.py` (до удаления), `backend/app/services/vol_carousel.py`,
+`backend/app/bot/portfolio.py`, `backend/app/bot/runtime.py`, `backend/app/api/routes/screener.py`,
+`docs/plan_stock_selection.md`, `docs/osengine/ROBOTS_REGISTRY.md`.
+
+### A.1. Все call sites Universe (полный список, вне пакета)
+
+| Место | Что делает | Тип |
+|---|---|---|
+| `app/bot/runtime.py:3106` | `from app.bot.universe import select_eligible_universe, select_volatile_universe` | **единственный live-потребитель пакета** |
+| `app/bot/runtime.py:3112` | `select_eligible_universe(db, top_n=9999)` | старт бота |
+| `app/bot/runtime.py:3114` | `select_volatile_universe(...)` | альтернативная ветка |
+| `app/bot/runtime.py:3131` | `SELECT figi FROM universe WHERE eligible_tier='eligible'` — **сырой SQL, мимо пакета** | hot-path |
+| `app/bot/runtime.py:3877,3884` | сырой SQL по `universe` | hot-path |
+| `app/api/routes/screener.py:180,376,419,423,426,444,448` | INSERT/UPDATE/DELETE `eligible_tier` | **кто меняет tier — админ-API** |
+| `app/services/vol_carousel.py:40,152` | собственный `rank_volatile` — **отдельная реализация, не пакет** | отложено промптом |
+| `scripts/*.py` (10 файлов) | читают таблицу `universe` напрямую SQL | backtest |
+
+**Вывод по «runtime hot-add/remove»:** hot-add/remove в рантайме делается сырым SQL
+по таблице `universe` прямо в `runtime.py` (3131, 3877, 3884) и админ-API `screener.py`,
+**а не через пакет Universe**. Пакет Universe и рантайм-доступ к той же таблице —
+два независимых пути. Это важная находка и главный источник будущей рассинхронизации.
+
+### A.2. Кто меняет `eligible_tier`
+
+Только `app/api/routes/screener.py` (админский UI):
+- `INSERT ... ON CONFLICT ... SET eligible_tier='eligible'` (добавить);
+- `UPDATE universe SET eligible_tier=NULL WHERE ticker=:t` (убрать).
+
+То есть «admin/static exclusions» — это админ-API над таблицей, а не логика внутри Universe.
+
+## B. Разложение legacy `universe.py` (пункт 2)
+
+`select_eligible_universe` до рефакторинга в одном теле смешивал:
+
+1. discovery кандидатов (`SELECT ... FROM universe WHERE eligible_tier='eligible'`);
+2. пре-фильтр наличия данных (`GROUP BY figi HAVING count(ts)>=1`);
+3. minimum bars — **двумя** разными проверками: по сырым барам и по ресемпленным;
+4. загрузку market data (ORM, 1000 строк 1m на figi);
+5. resampling 1m→5m;
+6. ATR(14) по окну 44 бара;
+7. ATR%;
+8. ranking по `atr_pct`;
+9. Top-N.
+
+Это разнесено по слоям; конечный результат сохранён (см. раздел E).
+
+## C. Phase 1 — Domain contracts (пункт 3)
+
+Новый пакет `backend/app/bot/universe/` (8 модулей, 865 строк):
+
+| Файл | Строк | Ответственность |
+|---|---|---|
+| `domain.py` | 132 | контракты: `InstrumentRef`, `UniverseEntry`, `UniverseSnapshot`, `ScreenItem`, `ScreenResult`, `ScreenedInstrument`, `UniverseSource`, `ScreenReason` |
+| `discovery.py` | 147 | candidate discovery из трёх источников + `count_bars_by_figi` |
+| `bars.py` | 84 | загрузка баров из БД + адаптер `ClosedCandle` к каноническому ресемплеру |
+| `features.py` | 53 | ATR/ATR% (не полноценный Feature Engine — см. п. 8 промпта) |
+| `screener.py` | 118 | eligibility: `ScreenProfile`, `screen`, `screen_all`, `screen_reasons` |
+| `selection.py` | 16 | ranking/Top-N — **выделен, но не является частью Screener** |
+| `compat.py` | 221 | старый публичный API поверх новых слоёв |
+| `__init__.py` | 94 | реэкспорт legacy-имён |
+
+Соответствие требованиям пункта 3:
+
+- `InstrumentRef` — `frozen, order=True`; поля `ticker`, `figi`, `lot`; identity не дублирует
+  существующую (в проекте canonical-identity на уровне ORM нет, поле `figi` — ключ везде).
+- `UniverseSnapshot` — `frozen`; поля `as_of`, `source`, `entries`; порядок детерминирован
+  (сортировка по `figi`), property `instruments`.
+- `ScreenResult` — различает eligible/rejected и хранит причину.
+- `ScreenedInstrument` — только инструмент + результат + availability-метаданные
+  (`source_bars`, `resampled_bars`); **ATR/ranking/weight сюда НЕ помещены** (требование 3 соблюдено).
+
+### C.1. `ScreenReason` — состав и обоснование
+
+Реализовано:
+
+```
+NO_DATA, INSUFFICIENT_BARS, INSUFFICIENT_RESAMPLED_BARS,
+INVALID_MARKET_DATA, NOT_TRADEABLE, BLACKLISTED
+```
+
+Из предложенных промптом значений **не добавлены** `LOW_COVERAGE` и `LOW_LIQUIDITY`:
+в текущем коде нет соответствующих проверок как eligibility-критерия. Промпт явно
+говорит «не добавляй искусственные причины без необходимости» — поэтому enum отражает
+только реально существующие проверки. `INSUFFICIENT_RESAMPLED_BARS` добавлен, т.к.
+legacy отсеивал сырые и ресемпленные бары двумя разными проверками.
+
+## D. Phase 2 — Universe + Phase 3 — Screener (пункты 4–7)
+
+- **Universe** (`discovery.py`): discovery, identity, source, availability, snapshot.
+  Не считает ATR, не ранжирует, не знает про portfolio/signals/orders.
+- **Screener** (`screener.py`): только «можно ли передать дальше» — наличие данных,
+  minimum bars (сырые и ресемпленные), валидность (`features_valid`, `close>0`), tradeable.
+  Не содержит ATR, ranking, Top-N, allocation, sizing.
+- **Features** (`features.py`): ATR и ATR% оставлены рядом с compat-путём, как разрешает
+  пункт 8. Архитектурно не считаются частью Screener.
+- **Selection** (`selection.py`): ranking/Top-N вынесены отдельно. Это НЕ Screener.
+
+## E. Compatibility (пункт 5)
+
+Старые API сохранены полностью, поведение — байт в байт:
+
+```python
+select_eligible_universe(db, top_n)   # -> list[dict]: figi, ticker, lot, name, atr_pct, avg_price, avg_turnover, sector
+select_all_tradeable(db, top_n)
+select_volatile_universe(db, top_n)
+count_day_candles(...)
+LIQUID_TICKERS, utc_now, session_date, align_step
+```
+
+`app/bot/universe.py` заменён на пакет `app/bot/universe/`. **Это ключевая деталь:**
+путь импорта `from app.bot.universe import select_eligible_universe` не изменился, поэтому
+единственный live-потребитель (`runtime.py:3106`) продолжил работать без правок.
+Функции перенесены, не удалены. Исходный текст сохранён как oracle:
+`/tmp/universe_legacy_backup.py` на `.7`.
+
+`select_volatile_universe`, содержащий ATR/ranking, **не переписан в Selection** —
+compat-wrapper сохраняет старый результат (пункт 12 промпта соблюдён).
+
+## F. Отклонения от промпта (обязательно к прочтению)
+
+Три изменения выходят за букву промпта. Все проверены на побитовую эквивалентность.
+
+### F.1. Удалён пре-фильтр наличия данных в `select_eligible_universe`
+
+Было:
+
+```python
+has_data = await count_bars_by_figi(db, figi_list, interval=1, min_bars=1)
+for entry in snapshot.entries:
+    if entry.ref.figi not in has_data:
+        continue
+```
+
+Убрано. Обоснование: пре-фильтр отсекал ровно figi с нулём свечей, а `load_bars` ниже
+отсекает их же по `len(bars) < min_source_bars`. **Выход не менялся ни на байт**
+(проверено на живой БД: 30 = 30).
+
+Почему это важно: запрос `GROUP BY figi HAVING count(ts)>=1` агрегировал **всю историю**
+1m-свечей — 21 млн строк ради 30 000 (0.14% таблицы). Замер на живой БД:
+
+```
+[2] count_bars_by_figi (GROUP BY + HAVING по candles)   6576 ms   ← 86% цикла
+    тот же запрос при interval=5                           85 ms   ← в 77 раз быстрее
+[3] load_bars × 31 (30 000 строк → EngineCandle)          849 ms
+[4] resample_1m_to_5m                                     116 ms
+[5] atr_pct                                                 1 ms
+ПОЛНЫЙ ЦИКЛ select_eligible_universe                     7186 ms
+```
+
+После удаления пре-фильтра:
+
+```
+ПОЛНЫЙ ЦИКЛ select_eligible_universe                      879 ms   (8.2×)
+```
+
+Итог фиксирован в docstring функции — «не возвращать без перепроверки плана запросов».
+
+### F.2. ATR переключён на канонический `indicatorhub._atr`
+
+Было: `engine.indicators.atr`. Стало: `app.engine.indicatorhub._atr` (импорт как
+`_atr_canonical`). Причина — единый канон, как уже сделано для ADX/RSI
+(`regime_strategies.py:64`, `strategies.py:522`). Математика идентична, паритет держит
+новый тест `tests/test_atr_canon_parity.py`. Микробенч показал, что хаб-версия
+**на 30% медленнее** (32.6 мкс против 25.1 мкс на 44 барах), но ATR — 0.1% цикла,
+поэтому это 0.006% от операции. Переключение сделано ради единого кода и защиты от
+разъезда, не ради скорости.
+
+### F.3. Файл `universe.py` → пакет
+
+Промпт: «Существующие функции не удалять сразу». Функции сохранены; удалён **файл**,
+заменённый одноимённым пакетом. Импорт-путь не изменился. Если ревью требует именно
+файла — это легко откатить, но пакет нужен для разделения слоёв.
+
+## G. Тесты (пункт 11)
+
+Добавлено 2 файла, 29 тестов:
+
+- `backend/tests/test_universe_screener_parity.py` — 24 теста
+- `backend/tests/test_atr_canon_parity.py` — 5 тестов
+
+Покрытие по пункту 11 промпта:
+
+**Universe:**
+- одинаковый набор инструментов — да (end-to-end против legacy-oracle);
+- отсутствие дублей — да;
+- стабильный порядок — да;
+- одинаковый snapshot при одинаковом входе — да;
+- корректная identity — да (`InstrumentRef` frozen/order).
+
+**Screener:**
+- no data → `eligible=False`, `NO_DATA` — да;
+- insufficient bars → `INSUFFICIENT_BARS` / `INSUFFICIENT_RESAMPLED_BARS` — да;
+- valid candidate проходит — да;
+- у каждого rejection объяснимая причина — да;
+- no mutation — проверено (Screener чистый: не трогает portfolio/broker/positions/universe).
+
+**Determinism (пункт 13):** tie-break `primary DESC, ticker ASC` проверен.
+**Look-ahead (пункт 14):** новых источников не добавлено; Screener использует только
+доступные на `t` данные (`as_of`, покрытие по загруженным барам).
+
+Результат:
+
+```
+$ pytest tests/test_universe_screener_parity.py tests/test_atr_canon_parity.py -q
+29 passed in 1.88s
+```
+
+Полный suite:
+
+```
+719 passed, 1 failed
+```
+
+Единственное падение — предсуществующее и не связанное:
+`tests/test_research_pack.py::test_e_session_boundary`
+(`execution_time_msk='2026-07-01T18:41:00+03:00'` не содержит подстроку `msk`).
+Файл не трогался.
+
+## H. Behaviour parity (пункт 12, 19)
+
+Живая БД (read-only), 31 figi-кандидат, oracle = `/tmp/universe_legacy_backup.py`:
+
+```text
+legacy: n=30
+new:    n=30
+difference = 0
+PARITY OK: списки идентичны
+  SMLT   atr%=0.472   lot=1     turnover=2441678.0
+  ASTR   atr%=0.309   lot=1     turnover=469481.0
+  GAZP   atr%=0.303   lot=10    turnover=498477.0
+  AFLT   atr%=0.298   lot=10    turnover=84127.0
+  MVID   atr%=0.269   lot=1     turnover=64802.0
+```
+
+Паритет подтверждён **и для `select_eligible_universe` с удалённым пре-фильтром**
+(см. F.1), и с лимитом 250 баров вместо 1000 (ATR не меняется).
+
+## I. Definition of Done (пункт 18) — статус по пунктам
+
+- [x] текущий `universe.py` изучен;
+- [x] все основные call sites найдены (см. A.1);
+- [x] domain contracts добавлены;
+- [x] Universe выделен;
+- [x] Screener выделен;
+- [x] rejection reasons сохраняются;
+- [x] старые APIs работают через compatibility layer;
+- [x] parity tests проходят (29);
+- [x] deterministic behaviour проверен;
+- [x] look-ahead не добавлен;
+- [x] live/backtest execution semantics не изменены (паритет байт-в-байт);
+- [x] portfolio/risk code не продублирован (в `portfolio.py` не лезли);
+- [x] CandleHub/Resampler не дублированы (переиспользован канонический
+      `app.marketdata.resampler.Resampler` через адаптер `ClosedCandle`; новый не создавался);
+- [x] ATR/Top-N semantics не изменены;
+- [x] Rebalance не реализован.
+
+Открытые формальности:
+
+- [ ] commit structure (пункт 16) — **коммиты не сделаны**. Git на `.7` падает по SMB;
+      плюс требуется явная команда владельца на коммит. Разбивка на 6 коммитов из
+      пункта 16 подготовлена логически, но не выполнена.
+
+## J. Дефекты и находки, не входившие в Phase 1–3 (для следующих этапов)
+
+### J.1. Ранжирование сейчас не ранжирование
+
+`runtime.py:3112` зовёт `select_eligible_universe(db, top_n=9999)` — забирает **все**
+31 бумагу. Сортировка по `atr_pct` существует, но порядок никто не читает: ни шортлиста,
+ни отсева. `selection.py` выделен, но не используется. Это архитектурная дыра: Selection
+формально существует, фактически отключён.
+
+### J.2. ATR% — абсолютное число без кросс-секционного контекста
+
+`0.30%` не говорит, верхняя это четверть рынка или нижняя. OsEngine в этой роли ранжирует
+кросс-секционно (`Σ(Center × Volume) × Lot`) и считает **дельту ранга**
+(`SecurityRankingMove`) — «взлетевшую бумагу». У нас ни перцентиля, ни дельты, ни истории
+снимков ранга. При этом ATR% **уже** потребляется: `runtime.py:5241` кладёт `atr_pct` и
+`atr_pct_median` в `MarketContext` для AI-гейта — то есть гейт получает сырое число,
+хотя перцентиль посчитать тривиально и он информативнее.
+
+### J.3. Колонка `sector` не читается нигде
+
+Заполняется, но нет ни одного `if` по ней. В OsEngine сектор — контейнер бумаг и единица
+рейтинга (9 секторных скринеров). У нас — мёртвая колонка.
+
+### J.4. Мёртвый конфиг `min_source_bars=5` при `min_resampled_bars=15`
+
+15 пятиминутных баров требуют ≥71 минутной свечи, поэтому `min_source_bars=5` физически
+не может сработать — связывает `min_resampled_bars`. Конфиг расходится с docstring
+(«отсеивала по числу баров»). Либо баг, либо legacy-артефакт — решить при выборе профиля.
+
+### J.5. Асимметрия ATR и ликвидности
+
+ATR считается по единому окну 44 бара 5m (≈3 ч 40 мин) для всех бумаг, без поправки на
+ликвидность. У illiquid-бумаг ATR% завышен из-за редких сделок, и в ATR-ранжировании они
+всегда сверху. OsEngine разводит это: ликвидность (денежный объём) — отдельная ось,
+а не искажение волатильности.
+
+### J.6. `avg_turnover` из topology-таблицы устаревает
+
+Рантайм это сам признаёт (`runtime.py:1028`): «Реальный дневной оборот — с MOEX ISS
+(скринер), колонка universe часто устарела». То есть у Universe два источника оборота —
+устаревшая колонка и ISS — и они не согласованы.
+
+### J.7. `vol_carousel.rank_volatile` — вторая реализация ranking
+
+`app/services/vol_carousel.py` содержит собственный `rank_volatile` + `run_vol_carousel_once`,
+включённый флагом `vol_carousel_enabled` (по умолчанию **False**). Это дублирование
+ranking-логики. Промпт отложил его миграцию отдельно («Universe activation должен
+мигрироваться отдельно») — сейчас оставлено как есть.
+
+## K. Замеры производительности (для контекста)
+
+Полный цикл `select_eligible_universe` на живой БД (.2, 21 млн свечей):
+
+| Конфигурация | Время | Ускорение |
+|---|---|---|
+| Исходная (1000 баров, с пре-фильтром) | 7186 ms | 1× |
+| Удалён пре-фильтр | 879 ms | **8.2×** |
+| + лимит 250 баров (не применён) | ~250 ms | ~29× |
+
+Остаток после удаления пре-фильтра — 90% это `load_bars` (30 000 строк ORM → EngineCandle
+ради 44 баров на бумагу). Лечится лимитом 250; проверено на 25 figi — ATR идентичен
+(floor-выравнивание даёт 49 полных 5m-бакетов при 250 1m-барах, ATR берёт последние 44,
+запас 5 баров). **Не применено** — требует учёта, что окно ATR нельзя будет удлинять
+в будущем без поднятия лимита.
+
+## L. Ограничения, оставленные нарочно (пункт 15, Known limitations)
+
+- Feature Engine не создан — ATR/ATR% живут в `features.py` рядом с compat-путём (п. 8).
+- `vol_carousel` / `rank_volatile` не мигрированы и остаются дублем (J.7).
+- Рантайм читает `universe` сырым SQL в обход пакета (A.1) — не мигрировано.
+- Ranking/Top-N не активированы (`top_n=9999`, J.1).
+- Rebalance/TargetPortfolio/Allocation не реализованы (п. 15).
+- Коммиты не сделаны (I).
+- Лимит 250 баров не применён (K).

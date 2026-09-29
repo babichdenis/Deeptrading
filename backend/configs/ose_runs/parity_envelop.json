@@ -1,0 +1,13 @@
+{
+  "name": "parity_envelop",
+  "period": ["2026-09-24", "2026-09-24"],
+  "interval": "10min",
+  "tickers": ["SBER", "LKOH", "TATN"],
+  "costs": {"commission": 0.0005, "slippage_bps": 2.0, "qty": 1, "capital": 100000},
+  "execute": {"jobs": 2},
+  "exits": ["x07"],
+  "robots": [
+    {"robot": "envelop_trend", "params": {}},
+    {"robot": "envelop_trend", "params": {"deviation": 0.5}}
+  ]
+}

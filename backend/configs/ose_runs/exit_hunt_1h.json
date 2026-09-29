@@ -1,0 +1,16 @@
+{
+  "experiment": {"name": "exit_hunt_1h"},
+  "robots": [
+    {"robot": "rsi_trade_hub", "params": {}}
+  ],
+  "timeframe": "1h",
+  "universe": ["SBER", "ROSN", "T", "GAZP", "LKOH", "NVTK", "AFLT", "SMLT", "SNGSP", "TRNFP",
+               "MAGN", "GMKN", "RUAL", "MTSS", "NLMK", "CHMF", "ASTR", "SFIN", "YDEX", "MVID",
+               "VKCO", "TATN", "ALRS", "PLZL", "RNFT", "OZON", "VTBR", "SIBN", "AFKS", "PHOR"],
+  "period": ["2026-09-09", "2026-09-21"],
+  "costs": {"commission": 0.0005, "slippage_bps": 2.0, "qty": 1, "capital": 100000},
+  "execution": {"jobs": 3, "cache": true},
+  "filters": {"min_trades": 0, "min_net_pnl": -1000000},
+  "exits": ["x07", "x02", "x05", "x10", "x12", "x13", "x14"],
+  "outputs": {"dir": "reports/experiments"}
+}

@@ -1,0 +1,20 @@
+{
+  "experiment": {"name": "month_trend_sep"},
+  "robots": [
+    {"robot": "rsi_trade_hub", "params": {}},
+    {"robot": "envelop_trend_hub", "params": {}},
+    {"robot": "donchian_breakout", "params": {}},
+    {"robot": "macd_cross", "params": {}},
+    {"robot": "pullback_ema", "params": {}}
+  ],
+  "timeframe": "1h",
+  "universe": ["SBER", "ROSN", "T", "GAZP", "LKOH", "NVTK", "AFLT", "SMLT", "SNGSP", "TRNFP",
+               "MAGN", "GMKN", "RUAL", "MTSS", "NLMK", "CHMF", "ASTR", "SFIN", "YDEX", "MVID",
+               "VKCO", "TATN", "ALRS", "PLZL", "RNFT", "OZON", "VTBR", "SIBN", "AFKS", "PHOR"],
+  "period": ["2026-09-01", "2026-09-24"],
+  "costs": {"commission": 0.0005, "slippage_bps": 2.0, "qty": 1, "capital": 100000},
+  "execution": {"jobs": 3, "cache": true},
+  "filters": {"min_trades": 0, "min_net_pnl": -1000000},
+  "exits": ["x07"],
+  "outputs": {"dir": "reports/experiments"}
+}

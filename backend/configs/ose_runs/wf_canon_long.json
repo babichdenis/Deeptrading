@@ -1,0 +1,19 @@
+{
+  "experiment": {"name": "wf_canon_long"},
+  "robots": [
+    {"robot": "rsi_trade_hub", "params": {}},
+    {"robot": "envelop_trend_hub", "params": {}},
+    {"robot": "canon_ensemble", "params": {"members": "rsi_trade_hub,envelop_trend_hub", "quorum": 1}},
+    {"robot": "canon_ensemble", "params": {"members": "rsi_trade_hub,envelop_trend_hub", "quorum": 2}}
+  ],
+  "timeframe": "10min",
+  "universe": ["SBER", "LKOH", "TATN"],
+  "period": ["2026-01-05", "2026-09-24"],
+  "costs": {"commission": 0.0005, "slippage_bps": 2.0, "qty": 1, "capital": 100000},
+  "execution": {"jobs": 3, "cache": true},
+  "filters": {"min_trades": 10, "min_net_pnl": 0},
+  "exits": ["x07"],
+  "wf": {"iterations": 4, "percent_oos": 25, "top_k": 2, "rank_by": "net_pnl",
+         "robustness": {"delta_pct": 20, "period_days": 10}},
+  "outputs": {"dir": "reports/experiments"}
+}

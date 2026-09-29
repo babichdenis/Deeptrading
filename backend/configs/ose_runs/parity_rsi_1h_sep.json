@@ -1,0 +1,15 @@
+{
+  "experiment": {"name": "parity_rsi_1h_sep"},
+  "robots": [
+    {"robot": "rsi_trade_hub", "params": {}}
+  ],
+  "timeframe": "1h",
+  "universe": ["MGNT", "SNGS", "PLZL", "GMKN", "ROSN", "GAZP", "PHOR", "CHMF", "ALRS", "VTBR",
+               "TATN", "LKOH", "AFLT", "SBER", "MTSS"],
+  "period": ["2026-09-01", "2026-09-24"],
+  "costs": {"commission": 0.0005, "slippage_bps": 2.0, "qty": 1, "capital": 100000},
+  "execution": {"jobs": 3, "cache": true},
+  "filters": {"min_trades": 0, "min_net_pnl": -1000000},
+  "exits": ["x07"],
+  "outputs": {"dir": "reports/experiments"}
+}
