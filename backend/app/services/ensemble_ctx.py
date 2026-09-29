@@ -17,6 +17,7 @@ O(N) на вызов, O(N^2) за день. Здесь — персистент�
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Sequence
 
 from app.engine.models import Candle as EngineCandle
@@ -37,16 +38,25 @@ def _msk():
 
 
 def _secs_of(ts) -> int:
-    return ts.hour * 3600 + ts.minute * 60 + ts.second
+    """UTC unix-секунды (для bucket-математики)."""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return int(ts.timestamp())
 
 
 def _bucket_of(ts, tf_sec: int) -> int:
-    return (_secs_of(ts) // tf_sec) * tf_sec
+    """UTC-grid ceil bucketing: bucket = ceil(unix / tf) * tf.
+
+    Совпадает с CandleHub.bucket_close и candle_cache.resample_from_1m.
+    """
+    import math
+    u = _secs_of(ts)
+    return math.ceil(u / tf_sec) * tf_sec
 
 
 def _key_of(ts, tf_sec: int):
     b = _bucket_of(ts, tf_sec)
-    return ts.replace(hour=b // 3600, minute=(b % 3600) // 60, second=0, microsecond=0)
+    return datetime.fromtimestamp(b, tz=timezone.utc)
 
 
 def _msk_day(ts) -> str:
@@ -258,27 +268,40 @@ class EnsembleContext:
 
     # ------------------------------------------------------------------- bias
     def bias(self, tf_sec: int, period: int) -> dict[int, int]:
+        """Инкрементальный bias == _bias_batch (бит-в-бит).
+
+        Персистентное состояние двигается ТОЛЬКО по закрытым барам: последний
+        бар resample всегда forming и может переписаться следующим 1m-баром,
+        поэтому его значение считается зондом (snapshot closes/ema) без
+        сохранения. Старая версия скармливала forming как финальный и больше
+        его не пересчитывала — расхождение с batch (знак bucket!).
+        """
         key = (tf_sec, period)
         if self._dirty or key not in self._bias:
-            bars = self.resample(tf_sec)
-            self._bias[key] = _bias_batch(bars, period, tf_sec)
-            self._bias_closes[key] = [b.close for b in bars]
-            self._bias_ema[key] = _ema([b.close for b in bars], period)
-            self._bias_n[key] = len(bars)
-            return self._bias[key]
+            self._bias[key] = {}
+            self._bias_closes[key] = []
+            self._bias_ema[key] = []
+            self._bias_n[key] = 0
         bars = self.resample(tf_sec)
-        new = bars[self._bias_n.get(key, 0):]
+        closed = bars[:-1] if bars else []
         closes = self._bias_closes[key]
         ema = self._bias_ema[key]
         alpha = 2.0 / (period + 1)
-        for b in new:
+        for b in closed[self._bias_n.get(key, 0):]:
+            if closes:
+                bucket = int(b.ts.timestamp()) // tf_sec
+                self._bias[key][bucket] = 1 if closes[-1] >= ema[-1] else -1
+            # типы как есть (Decimal/float): та же арифметика, что batch _ema
             closes.append(b.close)
-            ema.append(alpha * b.close + (1 - alpha) * ema[-1])
-            i = len(closes) - 1
+            ema.append(closes[0] if len(ema) == 0
+                       else alpha * closes[-1] + (1 - alpha) * ema[-1])
+        self._bias_n[key] = len(closed)
+        out = dict(self._bias[key])
+        if bars and closes:
+            b = bars[-1]
             bucket = int(b.ts.timestamp()) // tf_sec
-            self._bias[key][bucket] = 1 if closes[i - 1] >= ema[i - 1] else -1
-        self._bias_n[key] = len(bars)
-        return self._bias[key]
+            out[bucket] = 1 if closes[-1] >= ema[-1] else -1
+        return out
 
     # ---------------------------------------------------------------- signals
     def setup_signals(self, sid: str, params: dict, tf_sec: int) -> list[dict]:

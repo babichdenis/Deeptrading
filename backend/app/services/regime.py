@@ -79,11 +79,18 @@ def _percentile_rank(values: list[float], window: int) -> list[float]:
 class RegimeDetector:
     def __init__(
         self,
-        slope_threshold: float = 0.0005,  # |наклон EMA50| за 5 баров, выше = тренд (калибровано Optuna 2026-09)
-        adx_threshold: float = 19.0,      # ниже = боковик (калибровано)
+        slope_threshold: float = 0.0002,  # |наклон EMA20| за 5 баров (в направлении дрейфа)
+        adx_threshold: float = 19.0,      # ниже = боковик (оставлено для обратной совместимости)
         atr_percentile_threshold: float = 78.0,  # калибровано
         range_mult: float = 2.75,         # (high-low)/close > mult*ATR% → high vol (калибровано)
+        drift_pct: float = 0.5,           # |дрейф close за drift_bars| → порог «есть движение»
+        drift_bars: int = 6,              # окно дрейфа (6 часов)
+        drift_strong_pct: float = 1.0,    # дрейф, при котором консистентность можно ослабить
+        cons_pct: float = 0.71,           # доля баров в направлении дрейфа за cons_bars → тренд
+        cons_relax_pct: float = 0.66,     # порог консистентности при сильном дрейфе (4 из 6)
+        cons_bars: int = 6,
         atr_period: int = 14,
+        ema_slope: int = 20,              # EMA для скорости (быстрая, отзывчивая)
         ema_fast: int = 20,
         ema_slow: int = 50,
         window: int = 200,
@@ -92,7 +99,14 @@ class RegimeDetector:
         self.adx_threshold = adx_threshold
         self.atr_percentile_threshold = atr_percentile_threshold
         self.range_mult = range_mult
+        self.drift_pct = drift_pct
+        self.drift_bars = drift_bars
+        self.drift_strong_pct = drift_strong_pct
+        self.cons_pct = cons_pct
+        self.cons_relax_pct = cons_relax_pct
+        self.cons_bars = cons_bars
         self.atr_period = atr_period
+        self.ema_slope = ema_slope
         self.ema_fast = ema_fast
         self.ema_slow = ema_slow
         self.window = window
@@ -111,6 +125,7 @@ class RegimeDetector:
         closes = [c.close for c in candles]
         ema_f = _ema(closes, self.ema_fast)
         ema_s = _ema(closes, self.ema_slow)
+        ema_sp = _ema(closes, self.ema_slope)
         atr_pct = [a / max(c.close, 1e-9) * 100 for a, c in zip(_atr(candles, self.atr_period), candles[1:])]
         atr_pct = [None] * 1 + atr_pct  # выравнивание по индексу баров
         atr_pct = [v if v is not None else atr_pct[1] for v in atr_pct]
@@ -131,20 +146,43 @@ class RegimeDetector:
                 out.append({"ts": candles[i].ts, "state": "NEUTRAL", "features": None,
                             "reason": "warmup"})
                 continue
-            slope = (ema_s[i] - ema_s[i - 5]) / max(ema_s[i - 5], 1e-9)
+            slope = (ema_sp[i] - ema_sp[i - 5]) / max(ema_sp[i - 5], 1e-9)
             range_pct = (candles[i].high - candles[i].low) / max(candles[i].close, 1e-9) * 100
             a_pct = atr_pct[i]
             a_perc = atr_perc[i]
             a_adx = adx[i]
             v_ratio = vol_ratio[i]
+            # дрейф за drift_bars (накопленное движение, в %)
+            _db = self.drift_bars
+            dr = (closes[i] - closes[max(0, i - _db)]) / max(closes[max(0, i - _db)], 1e-9) * 100
+            # консистентность: доля баров за cons_bars в направлении дрейфа
+            _cb = self.cons_bars
+            _win = candles[max(0, i - _cb) : i + 1]
+            _n = len(_win) - 1 if len(_win) > 1 else 1
+            _ups = sum(1 for k in range(1, len(_win)) if _win[k].close >= _win[k - 1].close)
+            cons = _ups / _n if _n else 0.5
+            # «пила»: доля меньшинства баров не слишком мала (движение и туда, и сюда)
+            _minority = min(_ups, _n - _ups) / _n if _n else 0.5
             state: str
             reason: str
+            _driftok = dr >= self.drift_pct
+            _consok = cons >= self.cons_pct
+            # сильный дрейф ослабляет требование консистентности (≥cons_relax)
+            _consrelax = cons >= self.cons_relax_pct and dr >= self.drift_strong_pct
             if a_perc >= self.atr_percentile_threshold or range_pct > self.range_mult * a_pct:
                 state, reason = "HIGH_VOLATILITY", "atr_percentile_high_or_range_wide"
-            elif slope > self.slope_threshold and ema_f[i] > ema_s[i] and a_adx >= self.adx_threshold:
-                state, reason = "TREND_UP", "ema_up_adx_high"
-            elif slope < -self.slope_threshold and ema_f[i] < ema_s[i] and a_adx >= self.adx_threshold:
-                state, reason = "TREND_DOWN", "ema_down_adx_high"
+            elif slope >= 0 and _driftok and (_consok or _consrelax) and a_adx >= self.adx_threshold:
+                state, reason = "TREND_UP", f"drift_up_cons{cons:.2f}"
+            elif slope <= 0 and dr <= -self.drift_pct and \
+                    (cons <= 1 - self.cons_pct or (cons <= 1 - self.cons_relax_pct and dr <= -self.drift_strong_pct)) \
+                    and a_adx >= self.adx_threshold:
+                state, reason = "TREND_DOWN", f"drift_dn_cons{cons:.2f}"
+            elif abs(dr) < self.drift_pct:
+                # дрейф за окно слишком мал — боковик, даже если ADX/наклон что-то «видят»
+                state, reason = "RANGE", "low_drift"
+            elif _minority >= 0.34:
+                # движение в обе стороны примерно поровну — пила, тренда нет
+                state, reason = "RANGE", "low_consistency"
             elif abs(slope) < self.slope_threshold and a_adx < self.adx_threshold:
                 state, reason = "RANGE", "flat_ema_low_adx"
             else:
@@ -159,22 +197,42 @@ class RegimeDetector:
                     "ema_slope": round(slope * 100, 3),
                     "adx": round(a_adx, 1),
                     "volume_ratio": round(v_ratio, 2),
+                    "drift_pct": round(dr, 3),
+                    "consistency": round(cons, 2),
                 },
             })
         return out
 
 
+# Индекс для regime_at: id списка -> (len, first, last, [ts]).
+# Валидация по identity крайних элементов исключает ABA при reuse id().
+_regime_ts_index: dict = {}
+
+
 def regime_at(regime_bars: list[dict], ts: datetime) -> dict | None:
-    """Режим для момента ts: режим последнего ЗАКРЫТОГО бара детектора."""
+    """Режим для момента ts: режим последнего бара с ts <= query.
+
+    Индекс по (id, len, first, last): внутри одного вызова строится один раз
+    O(R), дальше O(log n). Контракт: строки упорядочены по ts (все продюсеры
+    выдают ordered) — тогда эквивалентно линейному скану бит-в-бит.
+    """
     if not regime_bars:
         return None
-    best = None
-    for r in regime_bars:
-        if r["ts"] <= ts:
-            best = r
-        else:
-            break
-    return best
+    import bisect as _bisect
+    key = id(regime_bars)
+    ent = _regime_ts_index.get(key)
+    n = len(regime_bars)
+    first = regime_bars[0]
+    last = regime_bars[-1]
+    if ent is None or ent[0] != n or ent[1] is not first or ent[2] is not last:
+        ent = (n, first, last, [r.get("ts") for r in regime_bars])
+        _regime_ts_index[key] = ent
+        if len(_regime_ts_index) > 64:
+            _regime_ts_index.pop(next(iter(_regime_ts_index)))
+    i = _bisect.bisect_right(ent[3], ts) - 1
+    if i < 0:
+        return None
+    return regime_bars[i]
 
 
 def regime_timeline(regime_bars: list[dict]) -> list[dict]:
@@ -193,3 +251,31 @@ def regime_timeline(regime_bars: list[dict]) -> list[dict]:
     if out:
         out[-1]["to"] = regime_bars[-1]["ts"]
     return out
+
+
+
+def detect_regime(bars: list, **detector_kwargs) -> tuple:
+    """Единый пересчёт режима по ГОТОВЫМ барам (ресемплированному ряду).
+
+    Единственная точка, где индикаторный детектор считается для бота:
+    compute_ensemble (бэктест), стратегия, runtime-фолбэк и heatmap зовут её.
+    Возвращает (states, timeline, bars).
+    """
+    det = RegimeDetector(**detector_kwargs)
+    states = det.compute(list(bars)) or []
+    if states:
+        tl = regime_timeline(states)
+    else:
+        tl = []
+    return states, tl, list(bars)
+
+
+def compute_regime(candles_1m: list, tf_seconds: int = 3600, **detector_kwargs) -> tuple:
+    """Единый пересчёт режима из 1м-свечей: ресемпл на ТФ -> detect_regime.
+
+    Возвращает (states, timeline, bars). tf_seconds=3600 — H1 (режимный ТФ по умолчанию).
+    Для тяжёлых вызовов можно ресемплировать заранее cached_resample и звать detect_regime.
+    """
+    from app.services.ensemble import resample  # lazy-импорт: избегаем цикла ensemble<->regime
+    bars = resample(list(candles_1m), tf_seconds)
+    return detect_regime(bars, **detector_kwargs)

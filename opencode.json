@@ -1,11 +1,12 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "providers": {
+  "instructions": ["AGENTS.md", "MEMORY.md"],
+  "provider": {
     "cloudflare-ai-gateway": {
-      "env": {
-        "CLOUDFLARE_ACCOUNT_ID": "6b18b8efca42d146946c528f367207ef",
-        "CLOUDFLARE_GATEWAY_ID": "cloude"
-      }
+      "env": [
+        "CLOUDFLARE_ACCOUNT_ID=6b18b8efca42d146946c528f367207ef",
+        "CLOUDFLARE_GATEWAY_ID=cloude"
+      ]
     }
   }
 }

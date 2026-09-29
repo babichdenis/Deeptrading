@@ -316,6 +316,49 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "min_body_pct": {"type": "float", "default": 0.0, "min": 0.0, "max": 5.0},
         },
     ),
+    "ose_all": StrategyCard(
+        id="ose_all", name="OSEngine All Robots (5 votes)", family="ose", wave=5,
+        long_rule="голос любого робота за лонг (quorum, дефолт 1)",
+        short_rule="голос любого робота за шорт",
+        timeframes=("1min", "5min"), status="AVAILABLE",
+        params_schema={
+            "quorum": {"type": "int", "default": 1, "min": 1, "max": 5},
+            "sma_stoch_step_pct": {"type": "float", "default": 1.0, "min": 0.0, "max": 10.0},
+        },
+    ),
+    "ose_price_channel": StrategyCard(
+        id="ose_price_channel", name="OSEngine Price Channel", family="ose", wave=5,
+        long_rule="high > канал вверх[−2] (пробой)",
+        short_rule="low < канал вниз[−2] (пробой)",
+        timeframes=("1min", "5min"), status="AVAILABLE",
+    ),
+    "ose_sma_stoch": StrategyCard(
+        id="ose_sma_stoch", name="OSEngine SMA Stochastic", family="ose", wave=5,
+        long_rule="close>SMA+step & %K пересёк downline снизу вверх",
+        short_rule="close<SMA−step & %K пересёк upline сверху вниз",
+        timeframes=("1min", "5min"), status="AVAILABLE",
+        params_schema={
+            "sma_stoch_step_pct": {"type": "float", "default": 1.0, "min": 0.0, "max": 10.0},
+        },
+    ),
+    "ose_envelop_trend": StrategyCard(
+        id="ose_envelop_trend", name="OSEngine Envelop Trend", family="ose", wave=5,
+        long_rule="стоп-заявка по верхней полосе конвертов + трейлинг",
+        short_rule="стоп-заявка по нижней полосе конвертов + трейлинг",
+        timeframes=("1min", "5min"), status="AVAILABLE",
+    ),
+    "ose_rsi_contrtrend": StrategyCard(
+        id="ose_rsi_contrtrend", name="OSEngine RSI Contrtrend", family="ose", wave=5,
+        long_rule="Sma<Close & RSI<downline (контртренд)",
+        short_rule="Sma>Close & RSI>upline (контртренд)",
+        timeframes=("1min", "5min"), status="AVAILABLE",
+    ),
+    "ose_bollinger": StrategyCard(
+        id="ose_bollinger", name="OSEngine Bollinger", family="ose", wave=5,
+        long_rule="close < нижней полосы BB (контртренд)",
+        short_rule="close > верхней полосы BB (контртренд)",
+        timeframes=("1min", "5min"), status="AVAILABLE",
+    ),
 }
 
 

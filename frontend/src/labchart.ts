@@ -119,7 +119,8 @@ export function createLabChart(
     grid: { vertLines: { color: "#1e2433" }, horzLines: { color: "#1e2433" } },
     crosshair: { mode: CrosshairMode.Normal },
     rightPriceScale: { borderColor: "#2a2e39" },
-    timeScale: { borderColor: "#2a2e39", timeVisible: true, secondsVisible: false },
+    timeScale: { borderColor: "#2a2e39", timeVisible: true, secondsVisible: false, tickMarkFormatter: labTickMark },
+    localization: { timeFormatter: labTimeLabel },
   });
 
   const candleSeries = chart.addSeries(CandlestickSeries, {
@@ -267,6 +268,23 @@ export function createLabChart(
       </div>`;
   });
 
+  function labTimeLabel(t: unknown): string {
+    let d: Date;
+    if (typeof t === "number") d = new Date(t * 1000);
+    else if (t && typeof t === "object") {
+      const b = t as { year: number; month: number; day: number };
+      d = new Date(Date.UTC(b.year, b.month - 1, b.day));
+    } else return String(t);
+    return d.toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+  function labTickMark(t: unknown): string {
+    // lightweight-charts рисует тики из UTC — конвертим в МСК (как emTickMark).
+    if (t === " " || t === "," || t == null) return String(t ?? "");
+    if (typeof t === "number") {
+      return new Date(t * 1000).toLocaleString("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit", hour12: false });
+    }
+    return labTimeLabel(t);
+  }
   function fmt(iso: unknown): string {
     const d = new Date(String(iso));
     return d.toLocaleString("ru-RU", { timeZone: "Europe/Moscow", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });

@@ -197,3 +197,34 @@ reconcile loop. НЕ реализовано: StreamingEnsemble (инкремен
 - Каждый правит свои файлы; перед правкой `git status`, чтобы не затереть чужое.
 - Договорённости и статус — в этот файл (chat.md не единственный носитель).
 - **ЕДИНЫЙ ДВИЖОК для тестов и живой торговли** — требование владельца (тест = бот).
+
+## 🏗️ CANDLEHUB V0.1 — ДОГОВОРЁННОСТИ (2026-09-28)
+
+- **CandleHub — собственный market data layer**, не буквальный порт OsEngine. Event-driven модель, разделение ответственности, плавная миграция через compatibility adapter.
+- **Старый feed.py не удалять сразу** — сначала compatibility adapter, затем parity-тесты, затем удаление.
+- **CandleHub не знает, какая стратегия торгует** — только управляет жизненным циклом свечи.
+- **IndicatorHub с кэшем** — один индикатор на (figi, tf, indicator, params), считается один раз.
+- **Две фазы индикатора** — preview(forming) и commit(closed).
+- **UTC-grid ceil bucketing** — единая конвенция для всех ТФ (совпадает с candle_cache.resample_from_1m).
+- **Полный набор ТФ** — 1min, 5min, 10min, 15min, 30min, hour, 2h, 4h, day предсоздаются автоматически.
+- **Логирование с префиксом [CandleHub]** — для фильтрации в production.
+
+## 🏗️ OSENGINE PORT — СТАТУС (2026-09-28)
+
+- **Решение**: полный порт OsEngine «по кусочкам» (clean-room). Тесты всегда на .8,
+  после зелёной приёмки — поэтапная установка на .2 (там живой прототип, не ломать).
+- **Готово**: `app/engine/ose/` — indicators.py (sma/rsi/stochastic/bollinger/envelops/
+  price_channel, семантика OsEngine), robots.py (5 роботов + TesterTab: слоты стоп/тейк
+  на позиции, OCO, TryReloadStop/Profit, трейлинг на стоп-слоте, срабатывание между
+  барами по касанию), strategy.py (6 стратегий в STRATEGY_CATALOG, wave 5).
+  Тесты зелёные на Mac и .8 (test_ose_indicators/robots/strategy).
+- **Документы** (`docs/osengine/`): PORT_NOTES_EXITS.md — механика выходов OsEngine
+  (позиция владеет стоп- и тейк-слотом, Reload перезаряжает, трейлинг тянет стоп);
+  PORTING_MAP.md — скан всех 201 роботов → волны порта; robots_registry.tsv;
+  scan_robots.py (перегенерация реестра).
+- **Волны порта**: A выходы (готово), B OnScriptIndicators (13), C Trend+CounterTrend
+  (10), D Patterns+Monitors (11), E PositionsMicromanagement (8), F айсберг+фьючерсы
+  (10), G остатки (6), H SPECIAL (40). Гриды/арбитраж/мм — вне плана. **Далее: волна B.**
+- Для волны B нужны индикаторы: macd, cci, rvi, bulls/bears power — добавлять в
+  ose/indicators.py в стиле OsEngine (сознательные отличия от наших indicators.py
+  сохраняем: совместимость с тестером).

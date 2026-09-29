@@ -423,6 +423,12 @@ def apply_test_overrides(cfg) -> list[str]:
     _src = dict(TEST_MODE_OVERRIDES)
     _src.update(TEST_GATES_ON if _gates != "off" else TEST_GATES_OFF)
     _src.update(TEST_VARIANTS.get(_variant, {}))
+    # Движок теста: env TEST_ENGINE=ose_all -> одиночная стратегия из реестра
+    # (use_ensemble=False), иначе ensemble_v4 с кворумом из ensemble_config.test.json.
+    _engine = str(_os.environ.get("TEST_ENGINE", "") or "").strip().lower()
+    if _engine:
+        _src["strategy_id"] = _engine
+        _src["use_ensemble"] = False
     for _k, _v in _src.items():
         try:
             setattr(cfg, _k, _v)
@@ -641,6 +647,10 @@ class PaperBotRuntime:
         self._trail_active: dict[str, bool] = {}    # figi -> трейлинг активирован (pnl>=comm*4)
         self._trail_stop: dict[str, float] = {}     # figi -> актуальный защитный стоп (изначально = SL входа, потом подтягивается)
         self._exit_target: dict[str, float] = {}    # figi -> актуальный TP (None после активации трейлинга)
+        # Пик P&L сделки: лучший ход в нашу сторону (макс. цена при лонге /
+        # мин. при шорте) + MAE; обновляется в _step_exit на каждом баре,
+        # пишется в exit_meta при закрытии (_st_close).
+        self._peak_pnl: dict[str, dict] = {}   # figi -> {pnl, ts, price, atr_abs, atr_pct, mae}
         # --- Broken candle validation (mirrors _validate_candles in ensemble.py) ---
         self._prev_close: dict[str, float] = {}  # figi -> last VALID close
         self._day_jumps: dict[str, dict[str, int]] = {}  # figi -> {msk_date: jump_count}
@@ -1723,6 +1733,24 @@ class PaperBotRuntime:
                     meta.setdefault("entry_price", float(row.entry_price))
                     meta.setdefault("sl_db", float(row.stop_loss) if row.stop_loss is not None else None)
                     meta.setdefault("trail_active", bool(self._trail_active.get(figi, False)))
+                    # Пик P&L сделки: лучший ход (макс. цена лонг / мин. шорт), ATR, MAE.
+                    _peak = (meta.pop("peak", None) or self._peak_pnl.get(figi) or {})
+                    if _peak:
+                        meta["max_pnl"] = float(_peak.get("pnl") or 0.0)
+                        meta["max_pnl_time"] = str(_peak.get("ts") or "")
+                        meta["max_pnl_price"] = float(_peak.get("price") or 0.0)
+                        if _peak.get("atr_abs") is not None:
+                            meta["max_pnl_atr"] = float(_peak.get("atr_abs"))
+                        if _peak.get("atr_pct") is not None:
+                            meta["max_pnl_atr_pct"] = float(_peak.get("atr_pct"))
+                        try:
+                            _mae = float(_peak.get("mae") or 0.0)
+                            _atr_c = self.atr_now(figi) if _mae > 0 else None
+                            if _atr_c:
+                                meta["max_pnl_mae_atr"] = round(_mae / float(_atr_c), 2)
+                        except Exception as _sw_e:
+                            _audit_swallow('_st_close@peak_mae', _sw_e)  # audit silent-except
+                            pass
                     row.exit_meta = _json.dumps(meta, ensure_ascii=False, default=str)
                     if net is not None:
                         row.net_pnl = float(net)
@@ -2199,6 +2227,51 @@ class PaperBotRuntime:
                 self._log(f"imoex-loop: {type(e).__name__}: {str(e)[:80]}")
                 await asyncio.sleep(30.0)
 
+    def _replay_progress(self) -> dict | None:
+        """Прогресс реплея/теста для прогресс-бара UI (bot-replay-bar).
+
+        Возвращает None вне теста/реплея. wall_start = старт прогона
+        (для замера времени теста). Безопасен: любая ошибка -> None,
+        статус никогда не ломается.
+        """
+        try:
+            mode = str(self.mode or "")
+            is_test = mode == "test" or mode.startswith("test:")
+            is_replay = str(getattr(self.config, "feed", "")) == "replay"
+            if not (is_test or is_replay) or not self.running:
+                return None
+
+            def _parse(v):
+                if not v:
+                    return None
+                try:
+                    from datetime import datetime as _dt, timezone as _tz
+                    d = _dt.fromisoformat(str(v).replace("Z", "+00:00"))
+                    return d if d.tzinfo else d.replace(tzinfo=_tz.utc)
+                except Exception:
+                    return None
+
+            start = _parse(getattr(self.config, "replay_start", ""))
+            end = _parse(getattr(self.config, "replay_end", ""))
+            now = self.last_candle_ts
+            pct = 0.0
+            if start is not None and end is not None and end > start and now is not None:
+                total = (end - start).total_seconds()
+                if total > 0:
+                    pct = max(0.0, min(100.0, (now - start).total_seconds() / total * 100))
+            return {
+                "active": True,
+                "start": start.isoformat() if start else None,
+                "end": end.isoformat() if end else None,
+                "now": now.isoformat() if now else None,
+                "now_msk": None,
+                "pct": round(pct, 1),
+                "pace": str(getattr(self.config, "replay_pace", "") or ""),
+                "wall_start": self.started_at.isoformat() if self.started_at else None,
+            }
+        except Exception:
+            return None
+
     @property
     def status(self) -> dict:
         step = STEP_SEC.get(self.config.interval_name, 300)
@@ -2216,6 +2289,7 @@ class PaperBotRuntime:
             "broker_mode": self.broker_mode,
             "contour": self.active_contour,
             "started_at": self.started_at.isoformat() if self.started_at else None,
+            "replay": self._replay_progress(),
             "error": self.error,
             "config": {
                 "strategy_id": self.config.strategy_id,
@@ -4900,8 +4974,9 @@ class PaperBotRuntime:
         from app.engine.models import Side
         side = Side(order.side)
         if cfg.use_ensemble:
-            from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy
             # SL: стандартный = cfg.initial_sl_atr (4×ATR, фикс вместо optuna sl_mult 4-5).
+            # AtrStopPolicy/FixedSlTpPolicy импортированы на уровне модуля (L81); локальный
+            # импорт здесь делал имя локальным для всей функции → UnboundLocalError в else.
             # TP: из optuna-параметров rr стратегии figi (EnsembleParams).
             strat = self.strategies.get(figi)
             _sl_mult = cfg.initial_sl_atr
@@ -4988,6 +5063,9 @@ class PaperBotRuntime:
         self._pos_leverage[figi] = max(1.0, float((order.meta or {}).get("leverage") or 1.0))
         self._trail_active[figi] = False
         self._trail_stop[figi] = float(plan.stop_loss) if plan.stop_loss is not None else 0.0
+        # Старт пика P&L: от входа, лучший ход = 0.
+        self._peak_pnl[figi] = {"pnl": 0.0, "ts": c.ts, "price": float(entry_px),
+                                "atr_abs": None, "atr_pct": None, "mae": 0.0}
         if plan.take_profit is not None:
             self._exit_target[figi] = float(plan.take_profit)
         self._entry_bar_index[figi] = self._bar_counter
@@ -5048,6 +5126,9 @@ class PaperBotRuntime:
             self._exit_entry_px[figi] = float(_entry_px)
             self._exit_qty[figi] = int(getattr(pos, "qty", 0) or 0)
             self._trail_active[figi] = False
+            # Пик P&L после рестарта считаем заново (прошлые бары недоступны).
+            self._peak_pnl[figi] = {"pnl": 0.0, "ts": c.ts, "price": float(_entry_px),
+                                    "atr_abs": None, "atr_pct": None, "mae": 0.0}
             # Источник уровней при восстановлении: сначала БД (ручные правки/прошлый
             # прогон переживают рестарт), иначе — расчёт от ATR.
             _db_sl = _db_tp = None
@@ -5108,6 +5189,32 @@ class PaperBotRuntime:
         # Буфер уже содержит текущий бар (добавлен до вызова _step_exit).
         buf = self.buffers.get(figi)
         act_bars = list(buf) if buf else [c]
+
+        # --- Пик P&L сделки: лучший ход в нашу сторону (макс. цена при лонге /
+        # мин. при шорте) и макс. просадка против нас (MAE) — на каждом баре.
+        try:
+            _pk = self._peak_pnl.setdefault(figi, {
+                "pnl": 0.0, "ts": c.ts, "price": float(entry_px),
+                "atr_abs": None, "atr_pct": None, "mae": 0.0})
+            _sgn = 1.0 if state == PositionState.LONG else -1.0
+            # Экстремумы бара с точки зрения позиции: лучший ход — макс. цена
+            # при лонге / мин. при шорте; худший — наоборот (иначе у шорта
+            # «пик» считался бы от high, т.е. от хода ПРОТИВ нас).
+            _best_px = float(c.high) if state == PositionState.LONG else float(c.low)
+            _worst_px = float(c.low) if state == PositionState.LONG else float(c.high)
+            _pnl_best = (_best_px - float(entry_px)) * qty_sh * _sgn    # лучший ход внутри бара
+            _pnl_worst = (_worst_px - float(entry_px)) * qty_sh * _sgn  # худший ход внутри бара
+            if _pnl_best > float(_pk.get("pnl") or 0.0):
+                _atr = self.atr_now(figi)
+                _pk.update(pnl=_pnl_best, ts=c.ts, price=_best_px,
+                           atr_abs=(float(_atr) if _atr else None),
+                           atr_pct=((float(_atr) / float(c.close) * 100.0) if (_atr and c.close) else None))
+            _mae_bar = max(0.0, -_pnl_worst)
+            if _mae_bar > float(_pk.get("mae") or 0.0):
+                _pk["mae"] = _mae_bar
+        except Exception as _pk_e:
+            _audit_swallow('_step_exit@peak_pnl', _pk_e)  # audit silent-except
+            pass
 
         upd = getattr(policy, "update_stop", None)
         act = getattr(policy, "trailing_activated", None)
@@ -5178,6 +5285,8 @@ class PaperBotRuntime:
 
         trade = await self.broker.close_position(figi, price, reason)
         self._held.discard(figi)
+        # Пик P&L снимаем ДО очистки состояния (иначе потеряем экстремумы сделки).
+        _peak_snap = dict(self._peak_pnl.pop(figi, None) or {})
         self._clear_exit_state(figi)
         _bh = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
         await self._st_close(figi, price, reason=reason,
@@ -5185,7 +5294,8 @@ class PaperBotRuntime:
                               meta={"exit_reason": reason, "exit_price": float(price),
                                     "sl": stop, "tp": tp,
                                     "trailing": _was_trail,
-                                    "bars_held": _bh})
+                                    "bars_held": _bh,
+                                    "peak": _peak_snap})
         pnl = float(trade.net_pnl) if trade else 0
         tag = "ВЫХОД-ТРЕЙЛИНГ" if trail_active else "ВЫХОД"
         self._log(f"{tag} {figi[-6:]} ({reason}) pnl={pnl:+.2f}")

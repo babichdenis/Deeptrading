@@ -6,7 +6,7 @@ import time as _time
 import traceback as _tb
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 from zoneinfo import ZoneInfo
 
@@ -73,10 +73,12 @@ class CandleFeed:
                 pass
 
     def _queue_persist(self, candle: ClosedCandle) -> None:
+        # Числовой код CandleInterval (тот же, что пишет upsert_candles), не шаг в минутах.
+        interval = INTERVAL_ENUM[self.interval_name]
         self._persist_buf.append(
             {
                 "figi": candle.figi,
-                "interval": 1,
+                "interval": int(getattr(interval, "value", interval)),
                 "ts": candle.ts,
                 "open": candle.open,
                 "high": candle.high,

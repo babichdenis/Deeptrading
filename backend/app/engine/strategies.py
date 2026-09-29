@@ -20,6 +20,17 @@ from app.engine.regime_ensembles import (
     ShortEnsembleParams,
     ShortEnsembleStrategy,
 )
+from app.engine.ose.strategy import (
+    OseAllParams,
+    OseAllStrategy,
+    OseBollingerStrategy,
+    OseEnvelopTrendStrategy,
+    OsePriceChannelStrategy,
+    OseRobotParams,
+    OseRsiContrtrendStrategy,
+    OseSmaStochParams,
+    OseSmaStochStrategy,
+)
 from app.engine.wave1 import (
     BollingerReclaimParams,
     BollingerReclaimStrategy,
@@ -503,6 +514,12 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "neutral_ensemble": NeutralEnsembleStrategy,
     "momentum_1bar": Momentum1BarStrategy,
     "ensemble_vote": EnsembleVoteStrategy,
+    "ose_all": OseAllStrategy,
+    "ose_price_channel": OsePriceChannelStrategy,
+    "ose_sma_stoch": OseSmaStochStrategy,
+    "ose_envelop_trend": OseEnvelopTrendStrategy,
+    "ose_rsi_contrtrend": OseRsiContrtrendStrategy,
+    "ose_bollinger": OseBollingerStrategy,
 }
 
 _PARAMS_BY_STRATEGY: dict[str, type] = {
@@ -527,6 +544,12 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "neutral_ensemble": NeutralEnsembleParams,
     "momentum_1bar": Momentum1BarParams,
     "ensemble_vote": EnsembleVoteParams,
+    "ose_all": OseAllParams,
+    "ose_price_channel": OseRobotParams,
+    "ose_sma_stoch": OseSmaStochParams,
+    "ose_envelop_trend": OseRobotParams,
+    "ose_rsi_contrtrend": OseRobotParams,
+    "ose_bollinger": OseRobotParams,
 }
 
 

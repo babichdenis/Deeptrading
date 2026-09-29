@@ -107,21 +107,28 @@ def entry_pullback_deep_pass(c5: list[EngineCandle], atr5: list[float | None],
 
 
 def resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]:
+    """Batch resample 1m → tf с UTC-grid ceil bucketing.
+
+    Совпадает с CandleHub.bucket_close и DataContext (_bucket_of).
+    """
+    import math
     out: list[EngineCandle] = []
     last_bucket: int | None = None
     for c in candles:
         ts = c.ts
-        # bucket в секундах внутри суток (без timestamp/fromtimestamp — дорогие вызовы)
-        secs = ts.hour * 3600 + ts.minute * 60 + ts.second
-        bucket = (secs // tf_seconds) * tf_seconds
+        if ts.tzinfo is None:
+            from datetime import timezone
+            ts = ts.replace(tzinfo=timezone.utc)
+        u = int(ts.timestamp())
+        bucket = math.ceil(u / tf_seconds) * tf_seconds
         if last_bucket == bucket and out:
             prev = out[-1]
             out[-1] = EngineCandle(ts=prev.ts, open=prev.open, high=max(prev.high, c.high),
                                    low=min(prev.low, c.low), close=c.close,
                                    volume=prev.volume + c.volume)
         else:
-            key = ts.replace(hour=bucket // 3600, minute=(bucket % 3600) // 60,
-                             second=0, microsecond=0)
+            from datetime import timezone
+            key = datetime.fromtimestamp(bucket, tz=timezone.utc)
             out.append(EngineCandle(ts=key, open=c.open, high=c.high, low=c.low,
                                     close=c.close, volume=c.volume))
             last_bucket = bucket
@@ -137,12 +144,16 @@ def _bar_stats_1m(candles: list[EngineCandle], tf_sec: int) -> dict:
     Нужно для гейта разряженности: бар, собранный из пары минут и единичных
     лотов, не должен порождать торговые сигналы.
     """
+    import math
+    from datetime import timezone
     stats: dict = {}
     for c in candles:
-        secs = c.ts.hour * 3600 + c.ts.minute * 60 + c.ts.second
-        bucket = (secs // tf_sec) * tf_sec
-        key = c.ts.replace(hour=bucket // 3600, minute=(bucket % 3600) // 60,
-                           second=0, microsecond=0)
+        ts = c.ts
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        u = int(ts.timestamp())
+        bucket = math.ceil(u / tf_sec) * tf_sec
+        key = datetime.fromtimestamp(bucket, tz=timezone.utc)
         st = stats.get(key)
         to = float(c.close) * float(c.volume or 0.0)
         if st is None:
@@ -186,15 +197,12 @@ def _res(ctx, candles, tf_sec):
 
 
 def _gensig(ctx, sid, params, tf_sec, candles):
-    """Сигналы сетапа: ресемпл из кэша (ctx) + batch-стратегия (паритет).
-
-    Инкрементальные ctx.setup_signals НЕ используем: стратегии stateful
-    (RSI Wilder running-state) + forming-5m-бакет обновляется in-place —
-    повторная подача того же бакета ломает состояние и даёт расхождение
-    с batch (raw_signals 18 vs 21). Точный инкремент требует checkpoint/restore
-    стратегий — отдельная проектная задача.
-    """
+    """Сигналы сетапа: инкрементально из ReplayState, ресемпл+batch из ctx,
+    batch-генерация без контекста. Первые два — паритет по построению."""
     if ctx is not None:
+        from app.services.replay_pipeline import ReplayState as _ReplayState
+        if isinstance(ctx, _ReplayState):
+            return ctx.setup_sigs(sid, params, tf_sec)
         return generate_signals(sid, params, ctx.resample(tf_sec))
     return generate_signals(sid, params, cached_resample(candles, TF_SECONDS.get(tf_sec, 300)))
 
@@ -831,6 +839,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   regime_tf_sec: int = 1800,
                   ctx: EnsembleContext | None = None) -> dict:
     """Один прогон (static или adaptive) через единый конвейер."""
+    from app.services.replay_pipeline import ReplayState as _ReplayState
     # Режим берём только по ЗАКРЫТЫМ барам детектора: бар с ts0 закрыт в ts0+tf.
     # Иначе forming-бар мигает (RANGE→TREND_UP) и карточка расходится с heatmap.
     _reg_closed_shift = timedelta(seconds=max(60, int(regime_tf_sec)))
@@ -908,7 +917,11 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             for sid, sigs in setup_runs for s in sigs
         ]
     else:
-        entries_raw = micro_breakout(entry_candles, entry_lookback)
+        from app.services.replay_pipeline import ReplayState as _ReplayState
+        if isinstance(ctx, _ReplayState):
+            entries_raw = ctx.micro_entries()
+        else:
+            entries_raw = micro_breakout(entry_candles, entry_lookback)
 
     # regime_entry_policy {"trend": "breakout"}: в трендовых режимах ансамбль выключен —
     # сетап-входы отбрасываются, вместо них входят micro_breakout-кандидаты того же ТФ
@@ -929,7 +942,8 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             if _est in _trend_states:
                 continue  # тренд: вход только по breakout, сетапы (ансамбль) off
             _kept.append(_e)
-        for _b in micro_breakout(entry_candles, entry_lookback):
+        for _b in (ctx.micro_entries() if isinstance(ctx, _ReplayState)
+                     else micro_breakout(entry_candles, entry_lookback)):
             _bst = (regime_at(regime_bars, _b.get("ts")) or {}).get("state")
             if _bst in _trend_states:
                 _kept.append({**_b, "reason": f"breakout:{_b.get('reason', '')}",
@@ -1008,12 +1022,19 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     rsi_gate_on = bool(req.get("rsi_filter"))
     _rsi_period = int((req.get("rsi_filter") or {}).get("period", 14))
     _sig_tf_sec = TF_SECONDS.get(str(req.get("signal_tf") or "10min"), 600)
-    rsi_sig_map = _rsi_map(_res(ctx, candles, _sig_tf_sec), _rsi_period)
-    _rsi_sig_keys = sorted(rsi_sig_map)
-    rsi_meta_map = _rsi_map(candles, _rsi_period)
-    _rsi_meta_keys = sorted(rsi_meta_map)
-    rsi5_meta_map = _rsi_map(_res(ctx, candles, 300), _rsi_period)
-    _rsi5_meta_keys = sorted(rsi5_meta_map)
+    from app.services.replay_pipeline import ReplayState as _ReplayState
+    if isinstance(ctx, _ReplayState):
+        _rmaps = ctx.rsi_maps()
+        rsi_sig_map, _rsi_sig_keys = _rmaps[_sig_tf_sec]
+        rsi_meta_map, _rsi_meta_keys = _rmaps[60]
+        rsi5_meta_map, _rsi5_meta_keys = _rmaps[300]
+    else:
+        rsi_sig_map = _rsi_map(_res(ctx, candles, _sig_tf_sec), _rsi_period)
+        _rsi_sig_keys = sorted(rsi_sig_map)
+        rsi_meta_map = _rsi_map(candles, _rsi_period)
+        _rsi_meta_keys = sorted(rsi_meta_map)
+        rsi5_meta_map = _rsi_map(_res(ctx, candles, 300), _rsi_period)
+        _rsi5_meta_keys = sorted(rsi5_meta_map)
 
     def _pair_at(mp: dict, keys: list, ts_val):
         _i = bisect.bisect_right(keys, ts_val)
@@ -1828,23 +1849,35 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict,
             figi=req.get("figi") or None,
         )
 
+    # L2.7: replay-режим: персистентное состояние идёт через ctx (ReplayState),
+    # флаг final — только через req (pop до хэшей, чтобы request_hash совпадал).
+    from app.services.replay_pipeline import ReplayState as _ReplayState
+    _replay_final = bool(req.pop("_replay_final", False))
+    _is_replay = isinstance(ctx, _ReplayState)
+
     # Фильтр окна: границы парсим ОДИН раз (раньше fromisoformat дёргался на каждую
     # свечу каждого вызова — сотни тысяч парсингов в реплее).
-    _f = req.get("from_ts")
-    _t = req.get("to_ts")
-    _fdt = datetime.fromisoformat(_f.replace("Z", "+00:00")) if _f else None
-    _tdt = datetime.fromisoformat(_t.replace("Z", "+00:00")) if _t else None
-    if _fdt is not None or _tdt is not None:
-        candles = [c for c in candles_1m
-                   if (_fdt is None or c.ts >= _fdt) and (_tdt is None or c.ts <= _tdt)]
+    # В replay-режиме окно зафиксировано в feed() — здесь пропускаем.
+    if _is_replay:
+        candles, skipped_count = ctx.feed(candles_1m)
     else:
-        _cut = datetime.now(timezone.utc) - timedelta(days=days)
-        candles = [c for c in candles_1m if c.ts >= _cut]
+        _f = req.get("from_ts")
+        _t = req.get("to_ts")
+        _fdt = datetime.fromisoformat(_f.replace("Z", "+00:00")) if _f else None
+        _tdt = datetime.fromisoformat(_t.replace("Z", "+00:00")) if _t else None
+        if _fdt is not None or _tdt is not None:
+            candles = [c for c in candles_1m
+                       if (_fdt is None or c.ts >= _fdt) and (_tdt is None or c.ts <= _tdt)]
+        else:
+            _cut = datetime.now(timezone.utc) - timedelta(days=days)
+            candles = [c for c in candles_1m if c.ts >= _cut]
     if len(candles) < 120:
         return {"error": "мало свечей", "bars": len(candles)}
 
     # --- Validate candles for anomalies ---
-    if ctx is not None:
+    if _is_replay:
+        pass  # валидация уже внутри feed()
+    elif ctx is not None:
         candles, skipped_count = ctx.sync(candles)
     else:
         candles, skipped_count = _validate_candles(candles)
@@ -1908,10 +1941,13 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict,
         regime_row = regime_bars
         _regime_gated = True
     else:
-        from app.services.regime import detect_regime
-        regime_row, timeline, _ = detect_regime(regime_bars, **{k: v for k, v in regime_cfg.items()
-                                                                if k in ("slope_threshold", "adx_threshold",
-                                                                         "atr_percentile_threshold", "range_mult")})
+        if _is_replay:
+            regime_row, timeline, _ = ctx.regime(regime_tf_sec, regime_cfg)
+        else:
+            from app.services.regime import detect_regime
+            regime_row, timeline, _ = detect_regime(regime_bars, **{k: v for k, v in regime_cfg.items()
+                                                                     if k in ("slope_threshold", "adx_threshold",
+                                                                              "atr_percentile_threshold", "range_mult")})
         _regime_gated = False
 
     # --- размер позиции и оракул ---

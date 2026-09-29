@@ -572,8 +572,30 @@ async def _test_trades_db(test_name: str):
 
 
 async def _test_last_close(figi: str) -> float | None:
-    """Последняя цена закрытия из БД (5m, fallback 1m), НЕ ПОЗЖЕ виртуального
-    времени теста (иначе берётся свежая рыночная свеча → мнимый P&L)."""
+    """Цена, которой реально торгует движок: последняя свеча из фида рантайма
+    (реплей/стрим), затем broker.last_prices, затем БД (5m, fallback 1m) —
+    БД-фоллбэк фильтруется по виртуальному времени теста (иначе мнимый P&L)."""
+    # 1) Фид рантайма: последняя закрытая свеча из буфера стратегий.
+    try:
+        from app.bot.runtime import runtime as _rt
+        _buf = (getattr(_rt, "buffers", None) or {}).get(figi)
+        if _buf:
+            _px = float(getattr(_buf[-1], "close", 0) or 0)
+            if _px > 0:
+                return _px
+    except Exception as e:
+        _log.debug("test last_close runtime-buffer %s: %s", figi, e)
+    # 2) Брокер (живой контур): last_prices.
+    try:
+        from app.bot.runtime import runtime as _rt
+        _lp = getattr(getattr(_rt, "broker", None), "last_prices", None)
+        if _lp is not None:
+            _px = float((await _lp([figi])).get(figi) or 0)
+            if _px > 0:
+                return _px
+    except Exception as e:
+        _log.debug("test last_close broker %s: %s", figi, e)
+    # 3) Fallback: БД (5m, потом 1m), не позже виртуального времени.
     try:
         from app.database import SessionLocal
         from app.models.candle import Candle
@@ -599,7 +621,7 @@ async def _test_last_close(figi: str) -> float | None:
     return None
 
 
-def _test_portfolio_digest(test_name: str, rows: list) -> dict:
+async def _test_portfolio_digest(test_name: str, rows: list) -> dict:
     """Портфель теста только из нашей таблицы: closed net + unrealized открытых.
     initial_cash берём из runtime.config (капитал реплея), fallback 10000."""
     initial = 10000.0
@@ -616,10 +638,14 @@ def _test_portfolio_digest(test_name: str, rows: list) -> dict:
     unreal = 0.0
     mv = 0.0
     for r in open_:
-        cur = None  # лениво: посчитаем ниже через cache
-        # используем последнее значение из мета-хука ниже если нужно; для скорости — entry
+        # unrealized обязан двигаться за виртуальным временем реплея,
+        # иначе equity заморожен (раньше брался entry).
+        cur = await _test_price(r.figi)
+        if cur is None:
+            cur = float(r.entry_price)
         p = float(r.entry_price)
         q = abs(int(r.qty))
+        unreal += (cur - p) * q if r.side == "LONG" else (p - cur) * q
         mv += p * q
     positions_open = len(open_)
     wins = len([r for r in closed if (r.net_pnl or 0) > 0])
@@ -646,9 +672,36 @@ def _test_portfolio_digest(test_name: str, rows: list) -> dict:
     }
 
 
+def _peak_fields(exit_meta) -> dict:
+    """Пик P&L сделки (макс. цена при лонге / мин. при шорте, ATR, MAE) из exit_meta."""
+    out = {"max_pnl": None, "max_pnl_time": None, "max_pnl_price": None,
+           "max_pnl_atr": None, "max_pnl_atr_pct": None, "max_pnl_mae_atr": None}
+    try:
+        import json as _pj
+        if not exit_meta:
+            return out
+        _m = _pj.loads(exit_meta) if isinstance(exit_meta, str) else exit_meta
+        if _m.get("max_pnl") is None:
+            return out
+        out["max_pnl"] = round(float(_m["max_pnl"]), 2)
+        out["max_pnl_time"] = str(_m.get("max_pnl_time") or "") or None
+        if _m.get("max_pnl_price") is not None:
+            out["max_pnl_price"] = round(float(_m["max_pnl_price"]), 6)
+        if _m.get("max_pnl_atr") is not None:
+            out["max_pnl_atr"] = round(float(_m["max_pnl_atr"]), 4)
+        if _m.get("max_pnl_atr_pct") is not None:
+            out["max_pnl_atr_pct"] = round(float(_m["max_pnl_atr_pct"]), 2)
+        if _m.get("max_pnl_mae_atr") is not None:
+            out["max_pnl_mae_atr"] = float(_m["max_pnl_mae_atr"])
+    except Exception:
+        pass
+    return out
+
+
 def _test_trade_row(r) -> dict:
     """Одна сделка теста в формате /sandbox/trades (закрытая или открытая)."""
     is_open = r.exit_time is None
+    _peak = _peak_fields(getattr(r, "exit_meta", None))
     return {
         "figi": r.figi, "ticker": r.ticker, "side": r.side,
         "qty": int(r.qty),
@@ -662,11 +715,12 @@ def _test_trade_row(r) -> dict:
         "net_pnl": None if is_open else round(float(r.net_pnl), 2) if r.net_pnl is not None else None,
         "exit_reason": "на торгах" if is_open else (r.exit_reason or ""),
         "entry_reason": r.entry_reason, "meta": r.meta, "exit_meta": r.exit_meta,
+        **_peak,
         "strategy_id": "v4_enhanced",
     }
 
 
-def _test_position_row(r, cur: float | None) -> dict:
+async def _test_position_row(r, cur: float | None) -> dict:
     """Открытая позиция теста в формате /sandbox/positions."""
     side = r.side
     entry = float(r.entry_price)
@@ -689,6 +743,23 @@ def _test_position_row(r, cur: float | None) -> dict:
     except Exception:
         _atr = None
     _net_est = pnl - _cr * (entry + cur) * qty
+    # Пик P&L открытой позиции — из in-memory учёта рантайма (в exit_meta попадёт при закрытии).
+    _peak = {"max_pnl": None, "max_pnl_time": None, "max_pnl_price": None,
+             "max_pnl_atr": None, "max_pnl_atr_pct": None, "max_pnl_mae_atr": None}
+    try:
+        from app.bot.runtime import runtime as _rt_pk
+        _pk = (_rt_pk._peak_pnl or {}).get(r.figi)
+        if _pk and float(_pk.get("pnl") or 0.0) > 0:
+            _peak["max_pnl"] = round(float(_pk["pnl"]), 2)
+            _peak["max_pnl_time"] = str(_pk.get("ts") or "") or None
+            if _pk.get("price") is not None:
+                _peak["max_pnl_price"] = round(float(_pk["price"]), 6)
+            if _pk.get("atr_abs") is not None:
+                _peak["max_pnl_atr"] = round(float(_pk["atr_abs"]), 4)
+            if _pk.get("atr_pct") is not None:
+                _peak["max_pnl_atr_pct"] = round(float(_pk["atr_pct"]), 2)
+    except Exception:
+        pass
     return {
         "figi": r.figi, "ticker": r.ticker, "side": side, "qty": qty,
         "entry_price": round(entry, 6),
@@ -712,20 +783,66 @@ def _test_position_row(r, cur: float | None) -> dict:
         "dist_sl_atr": (round(abs(cur - _sl) / _atr, 2) if (_atr and _sl) else None),
         "dist_tp_atr": (round(abs(_tp - cur) / _atr, 2) if (_atr and _tp) else None),
         "regime": "", "regime_reason": "", "regime_atr_pct": None, "regime_adx": None, "vol": None,
+        "regime_entry": await _regime_entry(r.figi, r.entry_time),
+        **_peak,
     }
 
 
-# Кэш последних цен для unrealized тестовых позиций (5м обновление — достаточно).
-_test_price_cache: dict[str, tuple[float, float | None]] = {}
+# Кэш последних цен для unrealized тестовых позиций.
+# Ключ ОБЯЗАН включать виртуальную минуту реплея: иначе цена замирает на
+# 300с wall-clock, пока виртуальное время убегает вперёд (позиции висят).
+_test_price_cache: dict[tuple, tuple[float, float | None]] = {}
+
+# Режим на момент входа (heatmap-hour — тот же источник, что heatmap):
+# bias/replay для закрытой позиции не посчитать, берём историю.
+# Значение неизменно во времени → кэш навсегда (ключ figi+час входа).
+_regime_entry_cache: dict[tuple[str, str], str] = {}
+
+
+async def _regime_entry(figi_tcs: str, entry_ts) -> str:
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        from app.bot.runtime import runtime as _rt3
+        from app.api.routes.bot import _hm_compute_meta
+        from app.database import SessionLocal as _DB3
+        ts = entry_ts
+        if isinstance(ts, str):
+            ts = _dt.fromisoformat(ts.replace("Z", "+00:00"))
+        if getattr(ts, "tzinfo", None) is None:
+            ts = ts.replace(tzinfo=_tz.utc)
+        bb = ((_rt3.tcs_to_bbg or {}).get(figi_tcs, figi_tcs))
+        hour = ts.replace(minute=0, second=0, microsecond=0)
+        key = (bb, hour.isoformat())
+        if key in _regime_entry_cache:
+            return _regime_entry_cache[key]
+        async with _DB3() as db:
+            meta, _, _ = await _hm_compute_meta(db, bb, ts)
+        st = (meta.get(hour.isoformat()) or {}).get("r", "") or ""
+        _regime_entry_cache[key] = st
+        return st
+    except Exception:
+        return ""
+
 
 async def _test_price(figi: str) -> float | None:
     import time as _t
     now = _t.monotonic()
-    hit = _test_price_cache.get(figi)
+    _vtm = None
+    try:
+        from app.bot.runtime import runtime as _r2
+        _vt = getattr(_r2, "_replay_cur", None)
+        if _vt is not None:
+            _vtm = _vt.replace(second=0, microsecond=0)
+    except Exception:
+        _vtm = None
+    _key = (figi, _vtm.isoformat() if _vtm is not None else "")
+    hit = _test_price_cache.get(_key)
     if hit and now - hit[0] < 300:
         return hit[1]
+    if len(_test_price_cache) > 2000:
+        _test_price_cache.clear()
     p = await _test_last_close(figi)
-    _test_price_cache[figi] = (now, p)
+    _test_price_cache[_key] = (now, p)
     return p
 
 
@@ -735,7 +852,7 @@ async def sandbox_status():
     if tn:
         try:
             rows = await _test_trades_db(tn)
-            dig = _test_portfolio_digest(tn, rows)
+            dig = await _test_portfolio_digest(tn, rows)
             _log.info("status: TEST mode %r → positions=%d trades=%d pnl=%.2f",
                       tn, dig["positions_open"], dig["trades"]["total"], dig["pnl"])
             return {"running": _bot_running(), "mode": f"TEST:{tn}", "portfolio": dig, "test_name": tn}
@@ -770,7 +887,7 @@ async def sandbox_positions():
             items = []
             for r in open_rows:
                 cur = await _test_price(r.figi)
-                items.append(_test_position_row(r, cur))
+                items.append(await _test_position_row(r, cur))
             items.sort(key=lambda t: t["entry_time"], reverse=True)
             _log.info("positions: TEST %r → %d open positions", tn, len(items))
             return {"count": len(items), "positions": items}
@@ -920,6 +1037,8 @@ async def sandbox_positions():
                 "own_money": round(own, 2),
                 "leveraged": round(notional - own, 2),
                 "regime": rg_state.get("state") or "",
+                "regime_entry": await _regime_entry(
+                    pos.figi, trade_et.get(pos.figi) or etimes.get(pos.figi, "")),
                 "regime_reason": rg_state.get("reason") or "",
                 "regime_atr_pct": (rg_state.get("features") or {}).get("atr_pct"),
                 "regime_adx": (rg_state.get("features") or {}).get("adx"),
@@ -1116,6 +1235,7 @@ async def sandbox_trades(limit: int = 50):
                         "entry_reason": r.entry_reason,
                         "meta": r.meta,
                         "exit_meta": r.exit_meta,
+                        **_peak_fields(r.exit_meta),
                         "strategy_id": "v4_enhanced",
                     })
         except Exception:

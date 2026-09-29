@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from app.engine.costs import CostModel
-from app.engine.exits import ExitPolicy, intrabar_exit
+from app.engine.exits import ExitPolicy, breakeven_stop, early_abort_exit, intrabar_exit, partial_take_exit
 from app.engine.ledger import TradeLedger
 from app.engine.models import (
     Candle,
@@ -31,6 +31,38 @@ class EngineConfig:
     session_policy: SessionPolicyConfig | None = None
     neutral_mode: str | None = None  # "gate" | "semi_flip" | None
     regime_bars: list[dict] | None = None  # regime timeline from RegimeDetector
+    # --- План выходов v2 (шаг 3, 2026-09-26): opt-in, по умолчанию выключено ---
+    wick_tol: float = 0.0        # прощение хвоста для начального SL (абс. цена; 0 = выкл)
+    be_trigger_r: float = 0.0    # безубыток: SL -> вход при прибыли >= trigger_r * risk (0 = выкл)
+    be_offset_pct: float = 0.0   # безубыток: сдвиг уровня от входа (доля цены)
+    abort_r: float = 0.0         # ранний аборт: провал >= abort_r * risk в первые бары (0 = выкл)
+    abort_max_bars: int = 0      # ранний аборт: окно в барах после входа
+    partial_r: float = 0.0       # частичный тейк: закрыть долю позиции при прибыли >= partial_r * risk (0 = выкл)
+    partial_fraction: float = 0.5  # частичный тейк: доля закрываемой позиции (0..1]
+    partial_to_be: bool = True   # частичный тейк: после него стоп переносится на вход (безубыток)
+
+
+@dataclass
+class _RunState:
+    """Переносимое состояние прогона: бывшие локальные переменные run()."""
+
+    ledger = None
+    position = None
+    pending = None
+    pending_kind = None
+    last_exit_side = None
+    last_exit_bar = None
+    exit_candidate = None
+    entry_confirm = None
+    limit_order = None
+    current_session_date = None
+    warmup = None
+    tf_minutes = None
+    session_active = None
+    _lim_k = None
+    _lim_bars = None
+    _lim_chase = None
+    _lim_atr = None
 
 
 class EngineRunner:
@@ -50,7 +82,11 @@ class EngineRunner:
         self._regime_bars = self.cfg.regime_bars or []
         self._regime_ts_cache = None
         self._regime_idx_cache = None
+        self._regime_len_cache = None  # L2.6: длина regime_bars на момент кэша
         self._trailing_active = False
+        self._pos_key = None      # (entry_index, entry_time) позиции с закэшированным risk
+        self._entry_risk = None   # |entry - initial_stop| на момент входа (для BE/abort)
+        self._partial_done = None  # pos_key позиции, у которой частичный тейк уже исполнен
         self.exit_coverage: dict = {
             "opposite_received": 0,
             "exit_ignored_flat": 0,
@@ -65,7 +101,14 @@ class EngineRunner:
         if not self._regime_bars:
             return None
         import bisect as _bisect
-        if self._regime_ts_cache is None:
+        # L2.6: regime_bars может расти между extend() — кэш валиден только
+        # пока те же длина и последний элемент (append-only); иначе перестройка
+        # тем же кодом (для статического списка поведение бит-в-бит).
+        _stamp = (len(self._regime_bars),
+                  id(self._regime_bars[-1]) if self._regime_bars else None,
+                  self._regime_bars[-1].get("ts") if self._regime_bars else None)
+        if self._regime_ts_cache is None or self._regime_len_cache != _stamp:
+            self._regime_len_cache = _stamp
             ts_list = [r.get("ts") for r in self._regime_bars]
             # Отбрасываем None-таймстампы (сохраняем соответствие индексов).
             pairs = [(t, i) for i, t in enumerate(ts_list) if t is not None]
@@ -78,330 +121,421 @@ class EngineRunner:
             return None
         return self._regime_bars[self._regime_idx_cache[i]].get("state")
 
-    def run(self, candles: Sequence[Candle], progress_cb=None) -> TradeLedger:
-        ledger = TradeLedger()
-        position: Position | None = None
-        pending: Signal | None = None
-        pending_kind: str | None = None
-        last_exit_side: Side | None = None
-        last_exit_bar = -10**9
-        exit_candidate: dict | None = None
-        entry_confirm: dict | None = None  # {signal, side, confirm_needed} — ожидание N подряд подтверждающих свечей
-        limit_order: dict | None = None  # {side, limit, bars_left, signal} — висящий лимитный вход
-        warmup = self.strategy.warmup_bars()
+    def _new_state(self, candles) -> "_RunState":
+        st = _RunState()
         total = len(candles)
-        _lim_k = float(getattr(self.cfg.signal_policy, "entry_limit_atr", 0.0) or 0.0)
-        _lim_bars = max(1, int(getattr(self.cfg.signal_policy, "entry_limit_bars", 3) or 3))
-        _lim_chase = bool(getattr(self.cfg.signal_policy, "entry_limit_chase", False))
-        _lim_atr = (self._atr_series(
+        st.ledger = TradeLedger()
+        self._pos_key = None
+        self._entry_risk = None
+        self._partial_done = None
+        st.position: Position | None = None
+        st.pending: Signal | None = None
+        st.pending_kind: str | None = None
+        st.last_exit_side: Side | None = None
+        st.last_exit_bar = -10**9
+        st.exit_candidate: dict | None = None
+        st.entry_confirm: dict | None = None  # {signal, side, confirm_needed} — ожидание N подряд подтверждающих свечей
+        st.limit_order: dict | None = None  # {side, limit, bars_left, signal} — висящий лимитный вход
+        st.warmup = self.strategy.warmup_bars()
+        st._lim_k = float(getattr(self.cfg.signal_policy, "entry_limit_atr", 0.0) or 0.0)
+        st._lim_bars = max(1, int(getattr(self.cfg.signal_policy, "entry_limit_bars", 3) or 3))
+        st._lim_chase = bool(getattr(self.cfg.signal_policy, "entry_limit_chase", False))
+        st._lim_atr = (self._atr_series(
             candles, int(getattr(self.cfg.signal_policy, "entry_limit_atr_period", 14) or 14))
-            if _lim_k > 0 else None)
+            if st._lim_k > 0 else None)
 
-        tf_minutes = 1440
+        st.tf_minutes = 1440
         if total > 1:
             delta = (candles[1].ts - candles[0].ts).total_seconds() / 60
-            tf_minutes = max(1, round(delta))
-        session_active = self.session is not None and tf_minutes < 1440
+            st.tf_minutes = max(1, round(delta))
+        st.session_active = self.session is not None and st.tf_minutes < 1440
 
-        current_session_date = None
+        st.current_session_date = None
 
-        for i in range(total):
-            bar = candles[i]
+        return st
 
-            if progress_cb is not None and i > 0 and i % 500 == 0:
-                progress_cb(i, total, bar.ts)
+    def _body(self, i, bar, candles, st) -> None:
+        """Один бар конвейера (бывшее тело цикла run); return = бывший continue."""
+        bar = candles[i]
 
-            if session_active and not self.cfg.session_policy.overnight:
-                sd = self.session.local(bar.ts).date()
-                if current_session_date is not None and sd != current_session_date:
-                    if position is not None:
-                        last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
-                        last_exit_bar = i
-                        exit_candidate = None
-                        position = self._close(
-                            i,
-                            bar.ts,
-                            position,
-                            bar.open,
-                            ExitReason.SESSION_CLOSE.value,
-                            ledger,
-                        )
-                current_session_date = sd
-                # принудительное закрытие в конце основной сессии (после close_time)
-                if position is not None and self.cfg.session_policy.force_flat_at_session_end:
-                    lt = self.session.local(bar.ts)
-                    ch, cm = (int(x) for x in self.session.config.close_time.split(":"))
-                    bar_min = lt.hour * 60 + lt.minute
-                    close_m = ch * 60 + cm
-                    if bar_min > close_m:
-                        last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
-                        last_exit_bar = i
-                        exit_candidate = None
-                        position = self._close(
-                            i, bar.ts, position, bar.open, ExitReason.SESSION_CLOSE.value, ledger,
-                        )
-
-            if pending is not None:
-                if pending_kind == "entry":
-                    if _lim_atr is not None and _lim_atr[i] is not None:
-                        if limit_order is not None:
-                            ledger.log(i, bar.ts, "DECISION", "LIMIT_REPLACED by new signal")
-                        limit_order = self._place_limit(i, bar, pending, _lim_atr[i], _lim_bars, ledger)
-                    else:
-                        position = self._open(i, bar, candles, pending, position, ledger)
-                elif pending_kind == "flip":
-                    # --- NEUTRAL gate / semi-flip ---
-                    neutral_mode = self.cfg.neutral_mode
-                    regime = self._regime_at(bar.ts) if neutral_mode else None
-                    if neutral_mode and regime == "NEUTRAL":
-                        if neutral_mode == "gate":
-                            # Полный запрет flip в NEUTRAL: не закрываем, не входим
-                            pending = None
-                            pending_kind = None
-                            ledger.log(i, bar.ts, "DECISION", "NEUTRAL_GATE flip blocked")
-                            continue
-                        elif neutral_mode == "semi_flip":
-                            # Semi-flip: закрываем позицию, НЕ входим в новую
-                            if position is not None:
-                                last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
-                                last_exit_bar = i
-                                exit_candidate = None
-                                position = self._close(
-                                    i, bar.ts, position, bar.open, ExitReason.SIGNAL_EXIT.value, ledger,
-                                )
-                            pending = None
-                            pending_kind = None
-                            ledger.log(i, bar.ts, "DECISION", "NEUTRAL_SEMI_FLIP closed, staying flat")
-                            continue
-                    # Обычный flip (вне NEUTRAL или neutral_mode=None)
-                    if position is not None:
-                        last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
-                        last_exit_bar = i
-                        exit_candidate = None
-                        entry_confirm = None
-                        self._close(
-                            i, bar.ts, position, bar.open, ExitReason.SIGNAL_EXIT.value, ledger,
-                        )
-                    position = self._open(i, bar, candles, pending, position, ledger)
-                else:
-                    if position is not None:
-                        last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
-                        last_exit_bar = i
-                        exit_candidate = None
-                    position = self._close(
+        if st.session_active and not self.cfg.session_policy.overnight:
+            sd = self.session.local(bar.ts).date()
+            if st.current_session_date is not None and sd != st.current_session_date:
+                if st.position is not None:
+                    st.last_exit_side = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
+                    st.last_exit_bar = i
+                    st.exit_candidate = None
+                    st.position = self._close(
                         i,
                         bar.ts,
-                        position,
+                        st.position,
                         bar.open,
-                        ExitReason.SIGNAL_EXIT.value,
-                        ledger,
+                        ExitReason.SESSION_CLOSE.value,
+                        st.ledger,
                     )
-                pending = None
-                pending_kind = None
+            st.current_session_date = sd
+            # принудительное закрытие в конце основной сессии (после close_time)
+            if st.position is not None and self.cfg.session_policy.force_flat_at_session_end:
+                lt = self.session.local(bar.ts)
+                ch, cm = (int(x) for x in self.session.config.close_time.split(":"))
+                bar_min = lt.hour * 60 + lt.minute
+                close_m = ch * 60 + cm
+                if bar_min > close_m:
+                    st.last_exit_side = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
+                    st.last_exit_bar = i
+                    st.exit_candidate = None
+                    st.position = self._close(
+                        i, bar.ts, st.position, bar.open, ExitReason.SESSION_CLOSE.value, st.ledger,
+                    )
 
-            if position is not None:
-                update_stop = getattr(self.exit_policy, "update_stop", None)
-                _side_for_pol = Side.BUY if position.state is PositionState.LONG else Side.SELL
-                if update_stop is not None:
-                    position.initial_stop = update_stop(
-                        _side_for_pol,
-                        position.entry_price,
-                        position.initial_stop,
-                        CandleWindow(candles, 0, i + 1),
-                        qty=position.qty,
-                        commission=position.entry_commission,
+        if st.pending is not None:
+            if st.pending_kind == "entry":
+                if st._lim_atr is not None and st._lim_atr[i] is not None:
+                    if st.limit_order is not None:
+                        st.ledger.log(i, bar.ts, "DECISION", "LIMIT_REPLACED by new signal")
+                    st.limit_order = self._place_limit(i, bar, st.pending, st._lim_atr[i], st._lim_bars, st.ledger)
+                else:
+                    st.position = self._open(i, bar, candles, st.pending, st.position, st.ledger)
+            elif st.pending_kind == "flip":
+                # --- NEUTRAL gate / semi-flip ---
+                neutral_mode = self.cfg.neutral_mode
+                regime = self._regime_at(bar.ts) if neutral_mode else None
+                if neutral_mode and regime == "NEUTRAL":
+                    if neutral_mode == "gate":
+                        # Полный запрет flip в NEUTRAL: не закрываем, не входим
+                        st.pending = None
+                        st.pending_kind = None
+                        st.ledger.log(i, bar.ts, "DECISION", "NEUTRAL_GATE flip blocked")
+                        return
+                    elif neutral_mode == "semi_flip":
+                        # Semi-flip: закрываем позицию, НЕ входим в новую
+                        if st.position is not None:
+                            st.last_exit_side = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
+                            st.last_exit_bar = i
+                            st.exit_candidate = None
+                            st.position = self._close(
+                                i, bar.ts, st.position, bar.open, ExitReason.SIGNAL_EXIT.value, st.ledger,
+                            )
+                        st.pending = None
+                        st.pending_kind = None
+                        st.ledger.log(i, bar.ts, "DECISION", "NEUTRAL_SEMI_FLIP closed, staying flat")
+                        return
+                # Обычный flip (вне NEUTRAL или neutral_mode=None)
+                if st.position is not None:
+                    st.last_exit_side = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
+                    st.last_exit_bar = i
+                    st.exit_candidate = None
+                    st.entry_confirm = None
+                    self._close(
+                        i, bar.ts, st.position, bar.open, ExitReason.SIGNAL_EXIT.value, st.ledger,
                     )
-                if not self._trailing_active:
-                    activate = getattr(self.exit_policy, "trailing_activated", None)
-                    _act_res = activate(
-                        _side_for_pol,
-                        position.entry_price,
-                        position.qty,
-                        position.entry_commission,
-                        CandleWindow(candles, 0, i + 1),
-                    ) if activate is not None else False
-                    if _act_res:
-                        self._trailing_active = True
-                        position.target = None
-                        ledger.log(i, bar.ts, "DECISION",
-                                   "TRAILING_ACTIVATED pnl>=comm*4, signal/tp выходят отключены")
-                tp = None if self._trailing_active else position.target
-                price, reason = intrabar_exit(
-                    bar, position.state, position.initial_stop, tp
+                st.position = self._open(i, bar, candles, st.pending, st.position, st.ledger)
+            else:
+                if st.position is not None:
+                    st.last_exit_side = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
+                    st.last_exit_bar = i
+                    st.exit_candidate = None
+                st.position = self._close(
+                    i,
+                    bar.ts,
+                    st.position,
+                    bar.open,
+                    ExitReason.SIGNAL_EXIT.value,
+                    st.ledger,
                 )
-                if price is not None:
-                    last_exit_side = Side.BUY if position.state is PositionState.LONG else Side.SELL
-                    last_exit_bar = i
-                    exit_candidate = None
-                    position = self._close(i, bar.ts, position, price, reason, ledger)
+            st.pending = None
+            st.pending_kind = None
 
-            if position is not None:
-                position.bars_held += 1
+        if st.position is not None:
+            _side_for_pol = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
+            _pos_key = (st.position.entry_index, st.position.entry_time)
+            if self._pos_key != _pos_key:
+                self._pos_key = _pos_key
+                self._entry_risk = (
+                    abs(st.position.entry_price - st.position.initial_stop)
+                    if st.position.initial_stop is not None else None
+                )
+            if self.cfg.be_trigger_r > 0 and self._entry_risk is not None:
+                _be = breakeven_stop(
+                    _side_for_pol,
+                    st.position.entry_price,
+                    st.position.initial_stop,
+                    CandleWindow(candles, 0, i + 1),
+                    risk=self._entry_risk,
+                    trigger_r=self.cfg.be_trigger_r,
+                    offset_pct=self.cfg.be_offset_pct,
+                )
+                if _be != st.position.initial_stop:
+                    st.position.initial_stop = _be
+                    st.ledger.log(i, bar.ts, "DECISION",
+                               f"BREAKEVEN_STOP -> {_be:.6f}")
+            update_stop = getattr(self.exit_policy, "update_stop", None)
+            if update_stop is not None:
+                st.position.initial_stop = update_stop(
+                    _side_for_pol,
+                    st.position.entry_price,
+                    st.position.initial_stop,
+                    CandleWindow(candles, 0, i + 1),
+                    qty=st.position.qty,
+                    commission=st.position.entry_commission,
+                )
+            if not self._trailing_active:
+                activate = getattr(self.exit_policy, "trailing_activated", None)
+                _act_res = activate(
+                    _side_for_pol,
+                    st.position.entry_price,
+                    st.position.qty,
+                    st.position.entry_commission,
+                    CandleWindow(candles, 0, i + 1),
+                ) if activate is not None else False
+                if _act_res:
+                    self._trailing_active = True
+                    st.position.target = None
+                    st.ledger.log(i, bar.ts, "DECISION",
+                               "TRAILING_ACTIVATED pnl>=comm*4, signal/tp выходят отключены")
+            tp = None if self._trailing_active else st.position.target
+            price, reason = intrabar_exit(
+                bar, st.position.state, st.position.initial_stop, tp,
+                wick_tol=self.cfg.wick_tol,
+            )
+            if price is None and self.cfg.abort_r > 0 and self._entry_risk is not None:
+                _ap, _ar = early_abort_exit(
+                    bar,
+                    _side_for_pol,
+                    st.position.entry_price,
+                    risk=self._entry_risk,
+                    bars_held=st.position.bars_held,
+                    max_bars=self.cfg.abort_max_bars,
+                    abort_r=self.cfg.abort_r,
+                )
+                if _ap is not None:
+                    price, reason = _ap, _ar
+            if (
+                price is None
+                and self.cfg.partial_r > 0
+                and self._entry_risk is not None
+                and st.position.qty > 0
+                and self._partial_done != _pos_key
+            ):
+                _pp = partial_take_exit(
+                    bar, _side_for_pol, st.position.entry_price,
+                    risk=self._entry_risk, partial_r=self.cfg.partial_r,
+                )
+                if _pp is not None:
+                    _closed = self._close_partial(
+                        i, bar.ts, st.position, _pp, self.cfg.partial_fraction, st.ledger,
+                    )
+                    self._partial_done = _pos_key
+                    st.ledger.log(i, bar.ts, "DECISION",
+                               f"PARTIAL_TAKE r={self.cfg.partial_r} closed={_closed} left={st.position.qty}")
+                    if st.position.qty <= 0:
+                        st.last_exit_side = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
+                        st.last_exit_bar = i
+                        st.exit_candidate = None
+                        st.position = None
+                    elif self.cfg.partial_to_be:
+                        _moved = False
+                        if st.position.state is PositionState.LONG and (
+                            st.position.initial_stop is None
+                            or st.position.initial_stop < st.position.entry_price
+                        ):
+                            st.position.initial_stop = st.position.entry_price
+                            _moved = True
+                        elif st.position.state is PositionState.SHORT and (
+                            st.position.initial_stop is None
+                            or st.position.initial_stop > st.position.entry_price
+                        ):
+                            st.position.initial_stop = st.position.entry_price
+                            _moved = True
+                        if _moved:
+                            st.ledger.log(i, bar.ts, "DECISION",
+                                       f"PARTIAL_STOP_TO_BE -> {st.position.entry_price:.6f}")
+            if price is not None:
+                st.last_exit_side = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
+                st.last_exit_bar = i
+                st.exit_candidate = None
+                st.position = self._close(i, bar.ts, st.position, price, reason, st.ledger)
 
-            if entry_confirm is not None and position is None:
+        if st.position is not None:
+            st.position.bars_held += 1
+
+        if st.entry_confirm is not None and st.position is None:
+            n_conf = max(0, int(self.cfg.signal_policy.entry_confirm_bars))
+            if n_conf > 0:
+                bullish = (st.entry_confirm["side"] is Side.BUY and bar.close > bar.open)
+                bearish = (st.entry_confirm["side"] is Side.SELL and bar.close < bar.open)
+                if bullish or bearish:
+                    st.entry_confirm["confirm_needed"] -= 1
+                    st.ledger.log(
+                        i, bar.ts, "DECISION",
+                        f"ENTRY_CONFIRM {bar.close:.4f} {st.entry_confirm['side'].value} "
+                        f"{st.entry_confirm['confirm_needed']} left",
+                    )
+                    if st.entry_confirm["confirm_needed"] <= 0:
+                        st.pending, st.pending_kind = st.entry_confirm["signal"], "entry"
+                        st.entry_confirm = None
+                else:
+                    st.entry_confirm["confirm_needed"] = n_conf
+                    st.ledger.log(
+                        i, bar.ts, "DECISION",
+                        f"ENTRY_CONFIRM_RESET {bar.close:.4f} не в сторону {st.entry_confirm['side'].value}",
+                    )
+
+
+    def _poll(self, i, candles, st) -> None:
+        """Опрос стратегии за бар i (бывший if-блок); return = бывший continue."""
+        bar = candles[i]
+        signal = self.strategy.on_bar(CandleWindow(candles, 0, i + 1))
+        if signal is not None and st.position is not None and self._trailing_active:
+            # Трейлинг активен: любые противоположные сигналы (и entry-флипы,
+            # и явные exit) игнорируются — позиция живёт до подтянутого стопа.
+            opp = (st.position.state is PositionState.LONG and signal.side is Side.SELL) or (
+                st.position.state is PositionState.SHORT and signal.side is Side.BUY
+            )
+            if opp:
+                self.exit_coverage["held"] += 1
+                st.ledger.log(i, bar.ts, "DECISION", "HOLD_TRAILING opposite signal ignored")
+                return
+        if signal is not None and signal.kind == "exit":
+            # === поток выхода: противоположный сигнал, отдельно от входа ===
+            if st.position is None:
+                self.exit_coverage["exit_ignored_flat"] += 1
+                return
+            same_side = (st.position.state is PositionState.LONG and signal.side is Side.BUY) or (
+                st.position.state is PositionState.SHORT and signal.side is Side.SELL
+            )
+            if same_side:
+                return
+            self.exit_coverage["opposite_received"] += 1
+            policy = self.cfg.signal_policy
+            if policy.opposite_hold:
+                self.exit_coverage["held"] += 1
+                st.exit_candidate = None
+                st.ledger.log(i, bar.ts, "DECISION", f"HOLD_NO_EXIT {signal.side.value} held")
+                return
+            confirm = policy.exit_confirm_window_bars
+            if policy.confirm_flip and confirm <= 0:
+                self.exit_coverage["accepted"] += 1
+                st.pending, st.pending_kind = signal, "flip"
+                return
+            if confirm > 0:
+                if st.exit_candidate is None:
+                    st.exit_candidate = {"bar": i, "side": signal.side}
+                    self.exit_coverage["candidate"] += 1
+                    st.ledger.log(
+                        i, bar.ts, "DECISION",
+                        f"EXIT_CANDIDATE {signal.side.value} waiting confirm within {confirm}b",
+                    )
+                elif policy.confirm_flip:
+                    st.exit_candidate = None
+                    self.exit_coverage["accepted"] += 1
+                    st.ledger.log(i, bar.ts, "DECISION", f"FLIP_CONFIRMED {signal.side.value}")
+                    st.pending, st.pending_kind = signal, "flip"
+                else:
+                    st.exit_candidate = None
+                    self.exit_coverage["accepted"] += 1
+                    st.ledger.log(i, bar.ts, "DECISION", f"EXIT_CONFIRMED {signal.side.value}")
+                    st.pending, st.pending_kind = signal, "exit"
+                return
+            self.exit_coverage["accepted"] += 1
+            st.pending, st.pending_kind = signal, "exit"
+            return
+
+        state = st.position.state if st.position else PositionState.FLAT
+        bars_held = st.position.bars_held if st.position else 0
+        action, note = self.policy.decide(signal, state, bars_held)
+        st.ledger.log(i, bar.ts, "DECISION", f"{action.value} {note}".strip())
+        if action is DecisionAction.ACCEPT_ENTRY:
+            entry_allowed = True
+            cooldown = self.cfg.signal_policy.same_side_reentry_cooldown_bars
+            if (
+                cooldown > 0
+                and st.last_exit_side is not None
+                and st.last_exit_side is signal.side
+                and i - st.last_exit_bar <= cooldown
+            ):
+                entry_allowed = False
+                st.ledger.log(
+                    i, bar.ts, "DECISION",
+                    f"REJECT_REENTRY same-side {signal.side.value} "
+                    f"{(i - st.last_exit_bar)}b < cooldown {cooldown}b",
+                )
+            if st.session_active:
+                ok_session, cutoff_note = self.session.can_enter(bar.ts, st.tf_minutes)
+                if not ok_session:
+                    entry_allowed = False
+                    st.ledger.log(i, bar.ts, "DECISION",
+                               f"REJECT_SESSION_CUTOFF {cutoff_note}")
+                if self.cfg.mode == "long" and signal.side is Side.SELL:
+                    entry_allowed = False
+                    st.ledger.log(i, bar.ts, "DECISION", "SKIP_ENTRY mode=long")
+            elif self.cfg.mode == "short" and signal.side is Side.BUY:
+                entry_allowed = False
+                st.ledger.log(i, bar.ts, "DECISION", "SKIP_ENTRY mode=short")
+            if signal.side is Side.SELL and not self.cfg.allow_short:
+                entry_allowed = False
+                st.ledger.log(i, bar.ts, "DECISION", "REJECT_SHORT short not allowed")
+            if entry_allowed:
                 n_conf = max(0, int(self.cfg.signal_policy.entry_confirm_bars))
                 if n_conf > 0:
-                    bullish = (entry_confirm["side"] is Side.BUY and bar.close > bar.open)
-                    bearish = (entry_confirm["side"] is Side.SELL and bar.close < bar.open)
-                    if bullish or bearish:
-                        entry_confirm["confirm_needed"] -= 1
-                        ledger.log(
+                    if st.entry_confirm is None or st.entry_confirm["side"] != signal.side:
+                        st.entry_confirm = {"signal": signal, "side": signal.side,
+                                         "confirm_needed": n_conf}
+                        st.ledger.log(
                             i, bar.ts, "DECISION",
-                            f"ENTRY_CONFIRM {bar.close:.4f} {entry_confirm['side'].value} "
-                            f"{entry_confirm['confirm_needed']} left",
+                            f"ENTRY_WAIT_CONFIRM {n_conf} следующих свечей в сторону {signal.side.value}",
                         )
-                        if entry_confirm["confirm_needed"] <= 0:
-                            pending, pending_kind = entry_confirm["signal"], "entry"
-                            entry_confirm = None
-                    else:
-                        entry_confirm["confirm_needed"] = n_conf
-                        ledger.log(
-                            i, bar.ts, "DECISION",
-                            f"ENTRY_CONFIRM_RESET {bar.close:.4f} не в сторону {entry_confirm['side'].value}",
-                        )
-
-            if i + 1 < total and i >= warmup - 1:
-                signal = self.strategy.on_bar(CandleWindow(candles, 0, i + 1))
-                if signal is not None and position is not None and self._trailing_active:
-                    # Трейлинг активен: любые противоположные сигналы (и entry-флипы,
-                    # и явные exit) игнорируются — позиция живёт до подтянутого стопа.
-                    opp = (position.state is PositionState.LONG and signal.side is Side.SELL) or (
-                        position.state is PositionState.SHORT and signal.side is Side.BUY
+                else:
+                    st.pending, st.pending_kind = signal, "entry"
+        elif action is DecisionAction.ACCEPT_EXIT:
+            policy = self.cfg.signal_policy
+            if policy.opposite_hold:
+                # держим позицию: слабый противоположный сигнал не закрывает
+                st.exit_candidate = None
+                st.ledger.log(i, bar.ts, "DECISION", f"HOLD_NO_EXIT {signal.side.value} held")
+                return
+            confirm = policy.exit_confirm_window_bars
+            if policy.confirm_flip and confirm <= 0:
+                # мгновенный переворот по противоположному сигналу
+                st.pending, st.pending_kind = signal, "flip"
+            elif confirm > 0:
+                if st.exit_candidate is None:
+                    st.exit_candidate = {"bar": i, "side": signal.side}
+                    st.ledger.log(
+                        i, bar.ts, "DECISION",
+                        f"EXIT_CANDIDATE {signal.side.value} waiting confirm within {confirm}b",
                     )
-                    if opp:
-                        self.exit_coverage["held"] += 1
-                        ledger.log(i, bar.ts, "DECISION", "HOLD_TRAILING opposite signal ignored")
-                        continue
-                if signal is not None and signal.kind == "exit":
-                    # === поток выхода: противоположный сигнал, отдельно от входа ===
-                    if position is None:
-                        self.exit_coverage["exit_ignored_flat"] += 1
-                        continue
-                    same_side = (position.state is PositionState.LONG and signal.side is Side.BUY) or (
-                        position.state is PositionState.SHORT and signal.side is Side.SELL
-                    )
-                    if same_side:
-                        continue
-                    self.exit_coverage["opposite_received"] += 1
-                    policy = self.cfg.signal_policy
-                    if policy.opposite_hold:
-                        self.exit_coverage["held"] += 1
-                        exit_candidate = None
-                        ledger.log(i, bar.ts, "DECISION", f"HOLD_NO_EXIT {signal.side.value} held")
-                        continue
-                    confirm = policy.exit_confirm_window_bars
-                    if policy.confirm_flip and confirm <= 0:
-                        self.exit_coverage["accepted"] += 1
-                        pending, pending_kind = signal, "flip"
-                        continue
-                    if confirm > 0:
-                        if exit_candidate is None:
-                            exit_candidate = {"bar": i, "side": signal.side}
-                            self.exit_coverage["candidate"] += 1
-                            ledger.log(
-                                i, bar.ts, "DECISION",
-                                f"EXIT_CANDIDATE {signal.side.value} waiting confirm within {confirm}b",
-                            )
-                        elif policy.confirm_flip:
-                            exit_candidate = None
-                            self.exit_coverage["accepted"] += 1
-                            ledger.log(i, bar.ts, "DECISION", f"FLIP_CONFIRMED {signal.side.value}")
-                            pending, pending_kind = signal, "flip"
-                        else:
-                            exit_candidate = None
-                            self.exit_coverage["accepted"] += 1
-                            ledger.log(i, bar.ts, "DECISION", f"EXIT_CONFIRMED {signal.side.value}")
-                            pending, pending_kind = signal, "exit"
-                        continue
-                    self.exit_coverage["accepted"] += 1
-                    pending, pending_kind = signal, "exit"
-                    continue
+                elif policy.confirm_flip:
+                    st.exit_candidate = None
+                    st.ledger.log(i, bar.ts, "DECISION", f"FLIP_CONFIRMED {signal.side.value}")
+                    st.pending, st.pending_kind = signal, "flip"
+                else:
+                    st.exit_candidate = None
+                    st.ledger.log(i, bar.ts, "DECISION", f"EXIT_CONFIRMED {signal.side.value}")
+                    st.pending, st.pending_kind = signal, "exit"
+            else:
+                st.pending, st.pending_kind = signal, "exit"
+        if (
+            st.exit_candidate is not None
+            and i - st.exit_candidate["bar"] >= self.cfg.signal_policy.exit_confirm_window_bars
+        ):
+            st.exit_candidate = None
 
-                state = position.state if position else PositionState.FLAT
-                bars_held = position.bars_held if position else 0
-                action, note = self.policy.decide(signal, state, bars_held)
-                ledger.log(i, bar.ts, "DECISION", f"{action.value} {note}".strip())
-                if action is DecisionAction.ACCEPT_ENTRY:
-                    entry_allowed = True
-                    cooldown = self.cfg.signal_policy.same_side_reentry_cooldown_bars
-                    if (
-                        cooldown > 0
-                        and last_exit_side is not None
-                        and last_exit_side is signal.side
-                        and i - last_exit_bar <= cooldown
-                    ):
-                        entry_allowed = False
-                        ledger.log(
-                            i, bar.ts, "DECISION",
-                            f"REJECT_REENTRY same-side {signal.side.value} "
-                            f"{(i - last_exit_bar)}b < cooldown {cooldown}b",
-                        )
-                    if session_active:
-                        ok_session, cutoff_note = self.session.can_enter(bar.ts, tf_minutes)
-                        if not ok_session:
-                            entry_allowed = False
-                            ledger.log(i, bar.ts, "DECISION",
-                                       f"REJECT_SESSION_CUTOFF {cutoff_note}")
-                        if self.cfg.mode == "long" and signal.side is Side.SELL:
-                            entry_allowed = False
-                            ledger.log(i, bar.ts, "DECISION", "SKIP_ENTRY mode=long")
-                    elif self.cfg.mode == "short" and signal.side is Side.BUY:
-                        entry_allowed = False
-                        ledger.log(i, bar.ts, "DECISION", "SKIP_ENTRY mode=short")
-                    if signal.side is Side.SELL and not self.cfg.allow_short:
-                        entry_allowed = False
-                        ledger.log(i, bar.ts, "DECISION", "REJECT_SHORT short not allowed")
-                    if entry_allowed:
-                        n_conf = max(0, int(self.cfg.signal_policy.entry_confirm_bars))
-                        if n_conf > 0:
-                            if entry_confirm is None or entry_confirm["side"] != signal.side:
-                                entry_confirm = {"signal": signal, "side": signal.side,
-                                                 "confirm_needed": n_conf}
-                                ledger.log(
-                                    i, bar.ts, "DECISION",
-                                    f"ENTRY_WAIT_CONFIRM {n_conf} следующих свечей в сторону {signal.side.value}",
-                                )
-                        else:
-                            pending, pending_kind = signal, "entry"
-                elif action is DecisionAction.ACCEPT_EXIT:
-                    policy = self.cfg.signal_policy
-                    if policy.opposite_hold:
-                        # держим позицию: слабый противоположный сигнал не закрывает
-                        exit_candidate = None
-                        ledger.log(i, bar.ts, "DECISION", f"HOLD_NO_EXIT {signal.side.value} held")
-                        continue
-                    confirm = policy.exit_confirm_window_bars
-                    if policy.confirm_flip and confirm <= 0:
-                        # мгновенный переворот по противоположному сигналу
-                        pending, pending_kind = signal, "flip"
-                    elif confirm > 0:
-                        if exit_candidate is None:
-                            exit_candidate = {"bar": i, "side": signal.side}
-                            ledger.log(
-                                i, bar.ts, "DECISION",
-                                f"EXIT_CANDIDATE {signal.side.value} waiting confirm within {confirm}b",
-                            )
-                        elif policy.confirm_flip:
-                            exit_candidate = None
-                            ledger.log(i, bar.ts, "DECISION", f"FLIP_CONFIRMED {signal.side.value}")
-                            pending, pending_kind = signal, "flip"
-                        else:
-                            exit_candidate = None
-                            ledger.log(i, bar.ts, "DECISION", f"EXIT_CONFIRMED {signal.side.value}")
-                            pending, pending_kind = signal, "exit"
-                    else:
-                        pending, pending_kind = signal, "exit"
-                if (
-                    exit_candidate is not None
-                    and i - exit_candidate["bar"] >= self.cfg.signal_policy.exit_confirm_window_bars
-                ):
-                    exit_candidate = None
-
+    def run(self, candles: Sequence[Candle], progress_cb=None) -> TradeLedger:
+        st = self._new_state(candles)
+        total = len(candles)
+        for i in range(total):
+            bar = candles[i]
+            if progress_cb is not None and i > 0 and i % 500 == 0:
+                progress_cb(i, total, bar.ts)
+            self._body(i, bar, candles, st)
+            if i + 1 < total and i >= st.warmup - 1:
+                self._poll(i, candles, st)
         last = candles[-1]
-        if position is not None:
-            self._close(total - 1, last.ts, position, last.close, ExitReason.END_OF_DATA.value, ledger)
+        if st.position is not None:
+            self._close(total - 1, last.ts, st.position, last.close, ExitReason.END_OF_DATA.value, st.ledger)
 
-        return ledger
+        return st.ledger
 
     def _open(        self,
         index: int,
@@ -412,6 +546,7 @@ class EngineRunner:
         ledger: TradeLedger,
     ) -> Position:
         self._trailing_active = False
+        self._partial_done = None  # новая позиция — частичный тейк снова доступен
         side = signal.side
         base = bar.open
         fill = self.cfg.cost_model.fill_price(base, side)
@@ -481,3 +616,68 @@ class EngineRunner:
         )
         ledger.log(index, ts, "FILL_EXIT", f"trade={trade.trade_id} reason={reason} net={net:.4f}")
         return None
+
+    def _close_partial(
+        self,
+        index: int,
+        ts,
+        position: Position,
+        base_price: float,
+        fraction: float,
+        ledger: TradeLedger,
+    ) -> int:
+        """Частичное закрытие позиции (шаг 5 плана выходов, 2026-09-26).
+
+        Закрывает max(1, round(qty * fraction)) единиц по цене base_price и
+        записывает Trade с причиной partial_take. Входная комиссия и слиппедж
+        распределяются пропорционально между закрытой и оставшейся частью,
+        чтобы сумма по сделкам совпала с полным закрытием. Если закрывается
+        вся позиция — вызывающий код трактует это как полный выход.
+        """
+        frac = min(max(float(fraction), 0.0), 1.0)
+        qty_to_close = max(1, round(position.qty * frac))
+        if qty_to_close >= position.qty:
+            qty_to_close = position.qty
+        action_side = Side.SELL if position.state is PositionState.LONG else Side.BUY
+        fill = self.cfg.cost_model.fill_price(base_price, action_side)
+        exit_commission = self.cfg.cost_model.commission(fill * qty_to_close)
+        exit_slippage = abs(fill - base_price) * qty_to_close
+
+        share = qty_to_close / position.qty
+        entry_commission_share = position.entry_commission * share
+        entry_slippage_share = position.entry_slippage * share
+        position.entry_commission -= entry_commission_share
+        position.entry_slippage -= entry_slippage_share
+
+        if position.state is PositionState.LONG:
+            gross = (fill - position.entry_price) * qty_to_close
+        else:
+            gross = (position.entry_price - fill) * qty_to_close
+
+        commission = entry_commission_share + exit_commission
+        slippage = entry_slippage_share + exit_slippage
+        net = gross - commission
+
+        ledger.add_trade(
+            figi=position.figi,
+            side=position.state.value,
+            qty=qty_to_close,
+            entry_index=position.entry_index,
+            entry_time=position.entry_time,
+            entry_price=position.entry_price,
+            exit_index=index,
+            exit_time=ts,
+            exit_price=fill,
+            bars_held=position.bars_held,
+            gross_pnl=gross,
+            commission=commission,
+            slippage=slippage,
+            net_pnl=net,
+            exit_reason=ExitReason.PARTIAL.value,
+            initial_stop=position.initial_stop,
+            take_profit=position.target,
+        )
+        ledger.log(index, ts, "FILL_EXIT",
+                   f"partial qty={qty_to_close} price={fill} net={net:.4f} left={position.qty - qty_to_close}")
+        position.qty -= qty_to_close
+        return qty_to_close
