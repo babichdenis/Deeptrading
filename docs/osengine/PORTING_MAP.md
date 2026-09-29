@@ -9,12 +9,22 @@ exit, trail, индикаторы, special, путь).
 
 | Категория | Шт | Суть |
 |---|---|---|
-| портировано | 5 | PriceChannelBreak, SmaStochastic, EnvelopTrend, RsiContrtrend, StrategyBollinger |
+| портировано | 15 | OnScriptIndicators 15/15 — Wave A (6): bollinger, envelop_trend, price_channel, rsi_contrtrend, rsi_trade, sma_stoch; Wave B (+9): cci_trade, bb_power, rvi_trade, macd_revers, macd_trail, bollinger_revers, bollinger_trailing, sma_trend, pc_volatility |
 | direct | 58 | один BotTabSimple, вход+выход обычными заявками — порт 1:1 |
 | SPECIAL | 40 | скринеры/мульти-таб/синтетические инструменты/арбитраж — нужна отдельная инфраструктура |
 | no-entry | 57 | без вызовов Buy/Sell: гриды (позиции напрямую), мониторы-хелперы, UI-фабрики частично |
 | skip_family | 29 | BotsFromStartLessons, TechSamples, AutoTestBots — учебные/тестовые, не портим |
 | skip_ui | 12 | `*Ui.xaml.cs` — UI-обёртки над уже учтёнными роботами |
+
+## Волны портов OnScriptIndicators (15/15 — done)
+
+- **Wave A (29.09)** — 6 роботов: bollinger, envelop_trend, price_channel, rsi_contrtrend, rsi_trade, sma_stoch. Свип 72/72 Mac↔Win8 бит-в-бит.
+- **Wave B (30.09)** — +9 роботов: cci_trade, bb_power, rvi_trade, macd_revers, macd_trail, bollinger_revers, bollinger_trailing, sma_trend, pc_volatility (оригинальные дефолты из C#, реверс-лимитники, трейлинг, ATR-логика PCV). Smoke 9 роботов × 2 seed → FAILS 0.
+  Свип: `backend/reports/bt_ose_sweep_mac_waveb.json` — 153 runs (15 роботов × 4 конфига × 3 seedа), 57.1s, EXIT=0, code_sha256=`1aaeafc70a0c0589`.
+  Лучшие на синтетике: macd_trail trail=1.0 (pnl 165–183, pf 38–108), bollinger_revers/trailing (pf=inf, pnl 100–139), sma_trend (pf 118–242), pc_volatility (pnl ~102–107, dd ≤7.3).
+  CCI-контртренд на синус-серии в минус (свойство стратегии, не баг порта). Для bb_power в сетку добавлены step 0.5/1/2 — дефолт Step=100 на синтетике ~100 инертен (честный дефолт оригинала).
+  Индикаторы: `+bulls_power/bears_power` (High/Low − SMA(Close), семантика BullsPower.cs/BearsPower.cs).
+- Хвост: бандл на Win8 для межмашинной сверки — code_sha256 уже в отчёте, сверка запуском одной команды.
 
 Трейлинг (`CloseAtTrailingStop*`) используют 29 роботов — механика уже
 реализована в TesterTab (трейлинг на стоп-слоте), см. PORT_NOTES_EXITS.md.

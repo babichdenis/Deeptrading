@@ -249,10 +249,13 @@ def bollinger(
         value_sma = sma_series[i]
         if value_sma is None or value_sma == 0.0:
             continue
-        squared = sum(
-            (candles[j].close - value_sma) ** 2
-            for j in range(i - length + 1, i + 1)
-        )
+        # dx * dx вместо (x) ** 2: libm pow не обязан быть бит-в-бит
+        # одинаковым между платформами, а умножение IEEE-детерминировано.
+        # Порядок суммирования прежний — слева направо, значения не меняются.
+        squared = 0.0
+        for j in range(i - length + 1, i + 1):
+            dx = candles[j].close - value_sma
+            squared += dx * dx
         std = math.sqrt(squared / divisor)
         center[i] = value_sma
         up[i] = round(value_sma + std * deviation, 6)
@@ -500,6 +503,32 @@ def rvi(
         else:
             two[i] = 0.0
     return {"rvi": one, "signal": two}
+
+
+def bulls_power(candles: Sequence[Candle], length: int = 13) -> list[float | None]:
+    """BullsPower (Charts/CandleChart/Indicators/BullsPower.cs):
+    High − SMA(Close) в семантике MovingAverage (см. _sma_charts).
+
+    Первый валид — i = length+1, до прогрева None.
+    """
+    base = _sma_charts(candles, length)
+    out: list[float | None] = []
+    for i, c in enumerate(candles):
+        v = base[i]
+        out.append(None if v is None else round(c.high - v, 8))
+    return out
+
+
+def bears_power(candles: Sequence[Candle], length: int = 13) -> list[float | None]:
+    """BearsPower (Charts/CandleChart/Indicators/BearsPower.cs):
+    Low − SMA(Close), семантика та же, что у bulls_power.
+    """
+    base = _sma_charts(candles, length)
+    out: list[float | None] = []
+    for i, c in enumerate(candles):
+        v = base[i]
+        out.append(None if v is None else round(c.low - v, 8))
+    return out
 
 
 def _sma_charts(candles: Sequence[Candle], length: int) -> list[float | None]:

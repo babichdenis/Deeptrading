@@ -1,0 +1,3657 @@
+{
+ "meta": {
+  "script": "scripts/bt_ose_sweep.py",
+  "created_utc": "2026-09-29T23:15:57+00:00",
+  "hostname": "MacBook-Pro-Babich.local",
+  "platform": "macOS-13.7.3-x86_64-i386-64bit",
+  "python": "3.11.7",
+  "git_commit": "2a47fe6",
+  "code_sha256": "1aaeafc70a0c0589",
+  "n_bars": 400,
+  "seeds": [
+   42,
+   7,
+   123
+  ],
+  "series_info": {
+   "42": {
+    "first_close": 100.278854,
+    "last_close": 120.093269,
+    "buy_hold": 19.814415
+   },
+   "7": {
+    "first_close": 99.647666,
+    "last_close": 105.424445,
+    "buy_hold": 5.776779
+   },
+   "123": {
+    "first_close": 99.104727,
+    "last_close": 93.839439,
+    "buy_hold": -5.265288
+   }
+  }
+ },
+ "runs": [
+  {
+   "robot": "price_channel",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 106.586453,
+    "unrealized": 5.50921,
+    "pnl": 112.095663,
+    "avg_trade": 10.658645,
+    "max_dd": 6.634771,
+    "in_market_pct": 94.25,
+    "buy_hold": 19.814415,
+    "equity_sha256": "c6edb8d656698601a8744c78f204fc5cde4671c3a83c0f351bd57d3bcc722aed"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 9,
+    "losses": 1,
+    "win_pct": 90.0,
+    "profit_factor": 218.730594,
+    "realized": 97.641274,
+    "unrealized": 8.679536,
+    "pnl": 106.32081,
+    "avg_trade": 9.764127,
+    "max_dd": 6.936727,
+    "in_market_pct": 94.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "1413e02a5038a48c06ecf7e205c9123bc0153bea136c8cb332a048dd76d842e6"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 9,
+    "losses": 1,
+    "win_pct": 90.0,
+    "profit_factor": 720.848446,
+    "realized": 93.432402,
+    "unrealized": 9.459722,
+    "pnl": 102.892124,
+    "avg_trade": 9.34324,
+    "max_dd": 8.382189,
+    "in_market_pct": 94.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "d38fd691ecf03f5c06fa2722e42067a310ab3adb4997d21d1e7289db72b281a1"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {
+    "length_up": 10,
+    "length_down": 10
+   },
+   "params_json": "{\"length_down\":10,\"length_up\":10}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 172.619213,
+    "unrealized": 7.69336,
+    "pnl": 180.312573,
+    "avg_trade": 17.261921,
+    "max_dd": 3.245855,
+    "in_market_pct": 97.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "d30cc7362657cdcac8fa8d14407cc44bfa5014981cb0188affa3573e14ffc57e"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {
+    "length_up": 10,
+    "length_down": 10
+   },
+   "params_json": "{\"length_down\":10,\"length_up\":10}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 159.040801,
+    "unrealized": 12.462747,
+    "pnl": 171.503548,
+    "avg_trade": 15.90408,
+    "max_dd": 4.447799,
+    "in_market_pct": 97.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "7c873ae751077f9ac08d35dce7017a1e851f476975b82eee8151b04331327284"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {
+    "length_up": 10,
+    "length_down": 10
+   },
+   "params_json": "{\"length_down\":10,\"length_up\":10}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 149.220547,
+    "unrealized": 11.157982,
+    "pnl": 160.378529,
+    "avg_trade": 14.922055,
+    "max_dd": 3.400678,
+    "in_market_pct": 96.75,
+    "buy_hold": -5.265288,
+    "equity_sha256": "db769b43591e63be013536ddd2958f85908d6d240d12d76bcafc467fa22001f0"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {
+    "length_up": 34,
+    "length_down": 34
+   },
+   "params_json": "{\"length_down\":34,\"length_up\":34}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 5,
+    "losses": 5,
+    "win_pct": 50.0,
+    "profit_factor": 0.809417,
+    "realized": -2.190637,
+    "unrealized": 2.504762,
+    "pnl": 0.314125,
+    "avg_trade": -0.219064,
+    "max_dd": 15.011257,
+    "in_market_pct": 91.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "73b92bbeda2902b165eeb39cac9bf655c99e2bdb674f569c4bc442cf0830c4f9"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {
+    "length_up": 34,
+    "length_down": 34
+   },
+   "params_json": "{\"length_down\":34,\"length_up\":34}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 7,
+    "losses": 3,
+    "win_pct": 70.0,
+    "profit_factor": 1.288446,
+    "realized": 3.863722,
+    "unrealized": 3.338729,
+    "pnl": 7.202452,
+    "avg_trade": 0.386372,
+    "max_dd": 12.353795,
+    "in_market_pct": 90.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "70e9164115e563583f651808fe99ad7b677b1f755fdf5603309bff313703d1ca"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {
+    "length_up": 34,
+    "length_down": 34
+   },
+   "params_json": "{\"length_down\":34,\"length_up\":34}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 4,
+    "losses": 6,
+    "win_pct": 40.0,
+    "profit_factor": 1.183396,
+    "realized": 2.734648,
+    "unrealized": 3.407223,
+    "pnl": 6.141872,
+    "avg_trade": 0.273465,
+    "max_dd": 13.877408,
+    "in_market_pct": 91.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "a6358536b94521178896b0533d8a18a8673712f225318d623095000854d2a499"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 5,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 53.014983,
+    "unrealized": 5.50921,
+    "pnl": 58.524194,
+    "avg_trade": 10.602997,
+    "max_dd": 6.321521,
+    "in_market_pct": 49.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "522b593854ba2e0b38aa7fc714274f7282ade8c052dd3cb7f6236c7af33463d4"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 4,
+    "losses": 1,
+    "win_pct": 80.0,
+    "profit_factor": 93.50418,
+    "realized": 41.483495,
+    "unrealized": 8.679536,
+    "pnl": 50.163031,
+    "avg_trade": 8.296699,
+    "max_dd": 5.984397,
+    "in_market_pct": 47.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "7e392a5b92fe5c4db8ac29ca03f6981ff32e3503a572a1357ee39b706f3f5d24"
+   }
+  },
+  {
+   "robot": "price_channel",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 4,
+    "losses": 1,
+    "win_pct": 80.0,
+    "profit_factor": 274.209961,
+    "realized": 35.461163,
+    "unrealized": 9.459722,
+    "pnl": 44.920884,
+    "avg_trade": 7.092233,
+    "max_dd": 8.382189,
+    "in_market_pct": 44.5,
+    "buy_hold": -5.265288,
+    "equity_sha256": "d53234387366af47ee630fdf5c0d8aee7d5df20dd09f1d5b1c296c5bbae38cb4"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 1.0
+   },
+   "params_json": "{\"step\":1.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 1.0
+   },
+   "params_json": "{\"step\":1.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 1,
+    "wins": 0,
+    "losses": 1,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -2.631421,
+    "unrealized": 0.0,
+    "pnl": -2.631421,
+    "avg_trade": -2.631421,
+    "max_dd": 2.631421,
+    "in_market_pct": 1.75,
+    "buy_hold": 5.776779,
+    "equity_sha256": "1fa0ff75216998675fbe7700eca9a1fcf2b21c8501e5f20e98666caa7bb71e8c"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 1.0
+   },
+   "params_json": "{\"step\":1.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 0.5
+   },
+   "params_json": "{\"step\":0.5}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 0.5
+   },
+   "params_json": "{\"step\":0.5}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 2,
+    "wins": 0,
+    "losses": 2,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -2.631524,
+    "unrealized": 0.0,
+    "pnl": -2.631524,
+    "avg_trade": -1.315762,
+    "max_dd": 2.631524,
+    "in_market_pct": 2.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "a9f750b104f218fca7dc1a5ef605bcede19ff0965a7b8598656a0fd188183534"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 0.5
+   },
+   "params_json": "{\"step\":0.5}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 1,
+    "wins": 1,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 14.90098,
+    "unrealized": 0.0,
+    "pnl": 14.90098,
+    "avg_trade": 14.90098,
+    "max_dd": 2.65634,
+    "in_market_pct": 9.5,
+    "buy_hold": -5.265288,
+    "equity_sha256": "59b3a8838c68755712037e8a679b967fd39b5ccd95f41dc090848cd0141712f8"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 2.0
+   },
+   "params_json": "{\"step\":2.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 2.0
+   },
+   "params_json": "{\"step\":2.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 2.0
+   },
+   "params_json": "{\"step\":2.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 1.0,
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\",\"step\":1.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 1.0,
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\",\"step\":1.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "sma_stoch",
+   "params": {
+    "step": 1.0,
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\",\"step\":1.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 30,
+    "wins": 15,
+    "losses": 15,
+    "win_pct": 50.0,
+    "profit_factor": 125.190977,
+    "realized": 195.893866,
+    "unrealized": 8.934867,
+    "pnl": 204.828732,
+    "avg_trade": 6.529796,
+    "max_dd": 2.681865,
+    "in_market_pct": 89.5,
+    "buy_hold": 19.814415,
+    "equity_sha256": "064a681a7e4d873388742b7de4efc7be7e6cc845084a47aef6652909ad5afebd"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 25,
+    "wins": 17,
+    "losses": 8,
+    "win_pct": 68.0,
+    "profit_factor": 258.835118,
+    "realized": 186.195097,
+    "unrealized": 14.131626,
+    "pnl": 200.326723,
+    "avg_trade": 7.447804,
+    "max_dd": 2.29909,
+    "in_market_pct": 90.5,
+    "buy_hold": 5.776779,
+    "equity_sha256": "01be7855f7a35034c9fa008ea9399d66fab02844e93c07ef263f556ea3d3a1fd"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 36,
+    "wins": 22,
+    "losses": 14,
+    "win_pct": 61.111111,
+    "profit_factor": 174.771268,
+    "realized": 169.308815,
+    "unrealized": 11.203325,
+    "pnl": 180.512139,
+    "avg_trade": 4.703023,
+    "max_dd": 2.204709,
+    "in_market_pct": 88.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "ed974cb4a9f6e916d8e626d4c998c33a78aba6d4dcd156b0a0bb4f23a38c76d9"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {
+    "deviation": 0.5
+   },
+   "params_json": "{\"deviation\":0.5}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 33,
+    "wins": 19,
+    "losses": 14,
+    "win_pct": 57.575758,
+    "profit_factor": 140.693085,
+    "realized": 194.947318,
+    "unrealized": 8.715522,
+    "pnl": 203.66284,
+    "avg_trade": 5.907494,
+    "max_dd": 2.682701,
+    "in_market_pct": 88.25,
+    "buy_hold": 19.814415,
+    "equity_sha256": "dbb4f34b0ee49442cf15ebbaef090fbf154f22b4055cbff99542d4fa359f5de4"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {
+    "deviation": 0.5
+   },
+   "params_json": "{\"deviation\":0.5}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 30,
+    "wins": 21,
+    "losses": 9,
+    "win_pct": 70.0,
+    "profit_factor": 346.88664,
+    "realized": 184.556605,
+    "unrealized": 13.949586,
+    "pnl": 198.506191,
+    "avg_trade": 6.151887,
+    "max_dd": 2.299758,
+    "in_market_pct": 89.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "8ba7e6f5505df6d05aea8513d5f4dad9a98c68f85173b9d63ae86ab8b1615a10"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {
+    "deviation": 0.5
+   },
+   "params_json": "{\"deviation\":0.5}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 43,
+    "wins": 28,
+    "losses": 15,
+    "win_pct": 65.116279,
+    "profit_factor": 159.837559,
+    "realized": 167.349024,
+    "unrealized": 11.038547,
+    "pnl": 178.387571,
+    "avg_trade": 3.891838,
+    "max_dd": 2.204325,
+    "in_market_pct": 86.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "dce2e51d47688806ee6e04469d2ac450c6a664234aa11e2712fc6fd78f69f0a9"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {
+    "trail_stop": 0.5
+   },
+   "params_json": "{\"trail_stop\":0.5}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 15,
+    "wins": 10,
+    "losses": 5,
+    "win_pct": 66.666667,
+    "profit_factor": 71.117264,
+    "realized": 193.241682,
+    "unrealized": 8.904409,
+    "pnl": 202.14609,
+    "avg_trade": 12.882779,
+    "max_dd": 2.981988,
+    "in_market_pct": 93.25,
+    "buy_hold": 19.814415,
+    "equity_sha256": "701697ff3a07c6452596503d10736aa12fed0d65d6af07bd505099d4c01475f9"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {
+    "trail_stop": 0.5
+   },
+   "params_json": "{\"trail_stop\":0.5}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 17,
+    "wins": 10,
+    "losses": 7,
+    "win_pct": 58.823529,
+    "profit_factor": 57.275216,
+    "realized": 181.525163,
+    "unrealized": 14.131626,
+    "pnl": 195.656789,
+    "avg_trade": 10.677951,
+    "max_dd": 2.796883,
+    "in_market_pct": 92.75,
+    "buy_hold": 5.776779,
+    "equity_sha256": "c3415cc865bb870b5335751dedc22eb4747c94d0e6c36c4caf7d6e2aa1cdb317"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {
+    "trail_stop": 0.5
+   },
+   "params_json": "{\"trail_stop\":0.5}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 21,
+    "wins": 11,
+    "losses": 10,
+    "win_pct": 52.380952,
+    "profit_factor": 41.657928,
+    "realized": 165.803022,
+    "unrealized": 11.241772,
+    "pnl": 177.044794,
+    "avg_trade": 7.895382,
+    "max_dd": 2.4007,
+    "in_market_pct": 91.75,
+    "buy_hold": -5.265288,
+    "equity_sha256": "84f1ae0d62c6be54df5c200e739dd73884622008eb9f939f9cb57c7f5c1492ad"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {
+    "deviation": 1.0,
+    "trail_stop": 1.0
+   },
+   "params_json": "{\"deviation\":1.0,\"trail_stop\":1.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 12,
+    "wins": 11,
+    "losses": 1,
+    "win_pct": 91.666667,
+    "profit_factor": 176.710243,
+    "realized": 187.197395,
+    "unrealized": 8.161404,
+    "pnl": 195.358798,
+    "avg_trade": 15.599783,
+    "max_dd": 2.031414,
+    "in_market_pct": 88.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "c402c3464bc37d406d0bf534d5097131ee43c1484b1e511665115e7527e05997"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {
+    "deviation": 1.0,
+    "trail_stop": 1.0
+   },
+   "params_json": "{\"deviation\":1.0,\"trail_stop\":1.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 14,
+    "wins": 10,
+    "losses": 4,
+    "win_pct": 71.428571,
+    "profit_factor": 50.420051,
+    "realized": 174.922358,
+    "unrealized": 13.494487,
+    "pnl": 188.416845,
+    "avg_trade": 12.494454,
+    "max_dd": 2.744056,
+    "in_market_pct": 91.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "2884f91c33b2e9caa1ca050a3d2ac912c35983367336e2c9b8f9811b7a8b26e7"
+   }
+  },
+  {
+   "robot": "envelop_trend",
+   "params": {
+    "deviation": 1.0,
+    "trail_stop": 1.0
+   },
+   "params_json": "{\"deviation\":1.0,\"trail_stop\":1.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 20,
+    "wins": 10,
+    "losses": 10,
+    "win_pct": 50.0,
+    "profit_factor": 24.992,
+    "realized": 155.420348,
+    "unrealized": 10.626602,
+    "pnl": 166.04695,
+    "avg_trade": 7.771017,
+    "max_dd": 3.589302,
+    "in_market_pct": 87.75,
+    "buy_hold": -5.265288,
+    "equity_sha256": "4d246bcb433992e7bd0f65e09976f6158f4ff9fa4d8c7c7c4e4ecd92497d873b"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {
+    "upline": 70.0,
+    "downline": 30.0
+   },
+   "params_json": "{\"downline\":30.0,\"upline\":70.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {
+    "upline": 70.0,
+    "downline": 30.0
+   },
+   "params_json": "{\"downline\":30.0,\"upline\":70.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {
+    "upline": 70.0,
+    "downline": 30.0
+   },
+   "params_json": "{\"downline\":30.0,\"upline\":70.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {
+    "rsi_length": 14
+   },
+   "params_json": "{\"rsi_length\":14}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {
+    "rsi_length": 14
+   },
+   "params_json": "{\"rsi_length\":14}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {
+    "rsi_length": 14
+   },
+   "params_json": "{\"rsi_length\":14}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_contrtrend",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 108.66899,
+    "unrealized": 6.478697,
+    "pnl": 115.147687,
+    "avg_trade": 12.074332,
+    "max_dd": 6.634771,
+    "in_market_pct": 87.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "da3a97ba02d5f321f5cef845881b87d70ab62f82d3406bc2e253cc41ee5db952"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 113.511261,
+    "unrealized": 10.31106,
+    "pnl": 123.822321,
+    "avg_trade": 12.612362,
+    "max_dd": 6.324128,
+    "in_market_pct": 89.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "5bb88eee2e160eb55a4058235c480ea98c74f716fbecc4dc5cea7996f438d6ea"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 112.317527,
+    "unrealized": 7.910376,
+    "pnl": 120.227903,
+    "avg_trade": 12.479725,
+    "max_dd": 4.362434,
+    "in_market_pct": 88.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "d7760f7c55ea7e9d247a21cbb99fa8f853cc3ff9711df0819127cca818aeb93b"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {
+    "upline": 70.0,
+    "downline": 30.0
+   },
+   "params_json": "{\"downline\":30.0,\"upline\":70.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 130.695914,
+    "unrealized": 6.637729,
+    "pnl": 137.333644,
+    "avg_trade": 14.521768,
+    "max_dd": 5.064924,
+    "in_market_pct": 87.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "a64ec53905290cbb07f4b05c1bb23d46075b61c2cf58d313c965114ec6873832"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {
+    "upline": 70.0,
+    "downline": 30.0
+   },
+   "params_json": "{\"downline\":30.0,\"upline\":70.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 127.069971,
+    "unrealized": 11.457321,
+    "pnl": 138.527291,
+    "avg_trade": 14.118886,
+    "max_dd": 5.450368,
+    "in_market_pct": 89.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "999e263d19ba41fe87b56ba78557b494a4e9602cbbf8e5fcb19c4d26807aa4a5"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {
+    "upline": 70.0,
+    "downline": 30.0
+   },
+   "params_json": "{\"downline\":30.0,\"upline\":70.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 110.583435,
+    "unrealized": 9.329787,
+    "pnl": 119.913222,
+    "avg_trade": 12.287048,
+    "max_dd": 7.284745,
+    "in_market_pct": 88.75,
+    "buy_hold": -5.265288,
+    "equity_sha256": "a5e3a2e3c51b2d6a8863908590ffc760888a2c445500f82507853d7097db48e4"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {
+    "rsi_length": 14
+   },
+   "params_json": "{\"rsi_length\":14}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 142.841124,
+    "unrealized": 7.69336,
+    "pnl": 150.534484,
+    "avg_trade": 15.871236,
+    "max_dd": 4.166161,
+    "in_market_pct": 88.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "983ae26d9d9d116fe3f8acd4d1ff1cb9bae0771349a11e156e89561c932bfc29"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {
+    "rsi_length": 14
+   },
+   "params_json": "{\"rsi_length\":14}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 126.91531,
+    "unrealized": 11.457321,
+    "pnl": 138.37263,
+    "avg_trade": 14.101701,
+    "max_dd": 7.969381,
+    "in_market_pct": 89.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "a649670e0c88adf91bb8a9d57833e9f6fedae89b1c4d6ca65d36afca012db763"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {
+    "rsi_length": 14
+   },
+   "params_json": "{\"rsi_length\":14}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 105.421001,
+    "unrealized": 10.241503,
+    "pnl": 115.662505,
+    "avg_trade": 11.713445,
+    "max_dd": 14.883844,
+    "in_market_pct": 88.75,
+    "buy_hold": -5.265288,
+    "equity_sha256": "98a8acb504f137c2301b110493e67f02dadd8510fe470062da284eff4c54beaf"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {
+    "upline": 60.0,
+    "downline": 40.0
+   },
+   "params_json": "{\"downline\":40.0,\"upline\":60.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 88.791189,
+    "unrealized": 5.50921,
+    "pnl": 94.3004,
+    "avg_trade": 9.865688,
+    "max_dd": 8.212497,
+    "in_market_pct": 86.75,
+    "buy_hold": 19.814415,
+    "equity_sha256": "939b73d877765e38d932a0a6438ebfb0e31baca2d2f0a8796aaebf2bda391ec6"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {
+    "upline": 60.0,
+    "downline": 40.0
+   },
+   "params_json": "{\"downline\":40.0,\"upline\":60.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 94.39717,
+    "unrealized": 8.679536,
+    "pnl": 103.076707,
+    "avg_trade": 10.488574,
+    "max_dd": 7.531394,
+    "in_market_pct": 88.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "572d1d4a451a4df14735a8536a30cc9c5d238fda547b219ca60ace277e4d291b"
+   }
+  },
+  {
+   "robot": "rsi_trade",
+   "params": {
+    "upline": 60.0,
+    "downline": 40.0
+   },
+   "params_json": "{\"downline\":40.0,\"upline\":60.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 88.243851,
+    "unrealized": 6.633228,
+    "pnl": 94.877079,
+    "avg_trade": 9.804872,
+    "max_dd": 6.016672,
+    "in_market_pct": 88.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "0a9f0374430c7275ddbda08ac999401765d2bce19a7e14f3c970bf324525f370"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 0,
+    "losses": 9,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -132.782233,
+    "unrealized": -5.50921,
+    "pnl": -138.291444,
+    "avg_trade": -14.753581,
+    "max_dd": 138.291444,
+    "in_market_pct": 71.5,
+    "buy_hold": 19.814415,
+    "equity_sha256": "f0ed687ce1ce2f7d8865ac4ad0326c3859ea77df3e06243d529b0768fc6b6928"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 0,
+    "losses": 10,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -132.312808,
+    "unrealized": -8.679536,
+    "pnl": -140.992344,
+    "avg_trade": -13.231281,
+    "max_dd": 140.992344,
+    "in_market_pct": 80.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "a1acdd81872b85ebe684abf44c6d6dd954005863a3fb83a7f86e71fb5fe7a548"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 8,
+    "wins": 0,
+    "losses": 8,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -108.066643,
+    "unrealized": -10.241503,
+    "pnl": -118.308146,
+    "avg_trade": -13.50833,
+    "max_dd": 118.308146,
+    "in_market_pct": 67.5,
+    "buy_hold": -5.265288,
+    "equity_sha256": "aba0768d7b28ff54aad626da28da50021d17f3255fedfd275c5202fc3705bf45"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {
+    "boll_length": 15
+   },
+   "params_json": "{\"boll_length\":15}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 0,
+    "losses": 9,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -142.796636,
+    "unrealized": -6.637729,
+    "pnl": -149.434365,
+    "avg_trade": -15.866293,
+    "max_dd": 149.553857,
+    "in_market_pct": 77.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "e14b402121b8ca1467d1d61b031bdb6e1cf0a48f8fdd1809a9526eb543257808"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {
+    "boll_length": 15
+   },
+   "params_json": "{\"boll_length\":15}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 0,
+    "losses": 10,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -148.904458,
+    "unrealized": -11.457321,
+    "pnl": -160.361779,
+    "avg_trade": -14.890446,
+    "max_dd": 160.361779,
+    "in_market_pct": 86.75,
+    "buy_hold": 5.776779,
+    "equity_sha256": "aec0b40d4c297ef171f6e2579a67bd7b2f8c472c0fefdceb39c4e3c31f7117e2"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {
+    "boll_length": 15
+   },
+   "params_json": "{\"boll_length\":15}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 0,
+    "losses": 10,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -137.038072,
+    "unrealized": -10.241503,
+    "pnl": -147.279575,
+    "avg_trade": -13.703807,
+    "max_dd": 147.279575,
+    "in_market_pct": 84.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "d984b9d3a63d246d3a190337c037f1fc011c1572b470382e6c19ed3ccb7036e9"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {
+    "boll_deviation": 2.5
+   },
+   "params_json": "{\"boll_deviation\":2.5}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 0,
+    "losses": 5,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -68.330697,
+    "unrealized": 0.0,
+    "pnl": -68.330697,
+    "avg_trade": -13.666139,
+    "max_dd": 70.495596,
+    "in_market_pct": 37.5,
+    "buy_hold": 19.814415,
+    "equity_sha256": "cfc87af1ab21aff0ca50bbf7c36cd3d570c7d9a7a408e5f69cc2ea3a38f8f901"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {
+    "boll_deviation": 2.5
+   },
+   "params_json": "{\"boll_deviation\":2.5}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 0,
+    "losses": 5,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -64.502563,
+    "unrealized": -7.577204,
+    "pnl": -72.079767,
+    "avg_trade": -12.900513,
+    "max_dd": 72.079767,
+    "in_market_pct": 38.75,
+    "buy_hold": 5.776779,
+    "equity_sha256": "f1715f85546adb4487519c1c225e9a36927c597c33e3a835f32457d23417f92b"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {
+    "boll_deviation": 2.5
+   },
+   "params_json": "{\"boll_deviation\":2.5}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 7,
+    "wins": 0,
+    "losses": 7,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -82.383182,
+    "unrealized": -9.329787,
+    "pnl": -91.712969,
+    "avg_trade": -11.769026,
+    "max_dd": 91.712969,
+    "in_market_pct": 56.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "b2381b64fe773c5cb5120762309a69eeffc3e06285c2e73285515e19e4fe0b28"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\"}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 4,
+    "wins": 0,
+    "losses": 4,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -63.311268,
+    "unrealized": -5.50921,
+    "pnl": -68.820478,
+    "avg_trade": -15.827817,
+    "max_dd": 68.820478,
+    "in_market_pct": 34.75,
+    "buy_hold": 19.814415,
+    "equity_sha256": "3e100691426343e53a2100d3b5106246eb8582a7e80e281f572e409d2193da72"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\"}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 0,
+    "losses": 5,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -56.476755,
+    "unrealized": -8.679536,
+    "pnl": -65.156291,
+    "avg_trade": -11.295351,
+    "max_dd": 65.156291,
+    "in_market_pct": 41.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "3bca95c8081eadff49a2b2baecd4421f6fed0631d294abb0816ff514b32cc4e9"
+   }
+  },
+  {
+   "robot": "bollinger",
+   "params": {
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\"}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 4,
+    "wins": 0,
+    "losses": 4,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -49.260537,
+    "unrealized": -10.241503,
+    "pnl": -59.50204,
+    "avg_trade": -12.315134,
+    "max_dd": 59.50204,
+    "in_market_pct": 34.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "5888936cd7e5cbd2db56e393bbac9ae4569ea4c8c9c63d833dbe9b905c3eba6a"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 0,
+    "losses": 10,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -133.593716,
+    "unrealized": -6.637729,
+    "pnl": -140.231445,
+    "avg_trade": -13.359372,
+    "max_dd": 140.231445,
+    "in_market_pct": 94.75,
+    "buy_hold": 19.814415,
+    "equity_sha256": "a92e7d1fbc949ebb948533c2fecd922e531de22fac755ea36c854fe193c458e9"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 0,
+    "losses": 10,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -123.256516,
+    "unrealized": -10.31106,
+    "pnl": -133.567576,
+    "avg_trade": -12.325652,
+    "max_dd": 133.567576,
+    "in_market_pct": 94.75,
+    "buy_hold": 5.776779,
+    "equity_sha256": "9c8fcd85a9e0ec6438e5e01c21f45b252da439110449927e85995d1ef8011bb0"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 0,
+    "losses": 10,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -112.443077,
+    "unrealized": -10.241503,
+    "pnl": -122.68458,
+    "avg_trade": -11.244308,
+    "max_dd": 122.68458,
+    "in_market_pct": 94.75,
+    "buy_hold": -5.265288,
+    "equity_sha256": "f72280950d674abcc984d95d6b79ba85e73d49853add1bd181f561575293a112"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {
+    "cci_length": 14
+   },
+   "params_json": "{\"cci_length\":14}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 0,
+    "losses": 10,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -163.134808,
+    "unrealized": -7.69336,
+    "pnl": -170.828167,
+    "avg_trade": -16.313481,
+    "max_dd": 170.828167,
+    "in_market_pct": 96.25,
+    "buy_hold": 19.814415,
+    "equity_sha256": "a71ac4dc033cab98591e1dee26d831137cc7d3fc6f07f473efa4a474e2e030eb"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {
+    "cci_length": 14
+   },
+   "params_json": "{\"cci_length\":14}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 0,
+    "losses": 10,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -147.0089,
+    "unrealized": -12.495367,
+    "pnl": -159.504268,
+    "avg_trade": -14.70089,
+    "max_dd": 159.504268,
+    "in_market_pct": 96.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "0a9c9caa3592ee8986c6bcb1d7ca6477b356be0fa456def3269093fa1f540156"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {
+    "cci_length": 14
+   },
+   "params_json": "{\"cci_length\":14}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 0,
+    "losses": 10,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -140.61465,
+    "unrealized": -10.874225,
+    "pnl": -151.488875,
+    "avg_trade": -14.061465,
+    "max_dd": 151.488875,
+    "in_market_pct": 96.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "7759cee8cea008524fd3dd4c2b93063f0eb726995021fd6e0f3342b0a8700ed5"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {
+    "up_line": 200.0,
+    "down_line": -200.0
+   },
+   "params_json": "{\"down_line\":-200.0,\"up_line\":200.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 0,
+    "losses": 5,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -51.777761,
+    "unrealized": -4.637063,
+    "pnl": -56.414824,
+    "avg_trade": -10.355552,
+    "max_dd": 61.191429,
+    "in_market_pct": 86.75,
+    "buy_hold": 19.814415,
+    "equity_sha256": "a4eeafcbee61c905c2ae1c2bd9744cd0160b27f0cf24f12af0e290299ddb0175"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {
+    "up_line": 200.0,
+    "down_line": -200.0
+   },
+   "params_json": "{\"down_line\":-200.0,\"up_line\":200.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 1,
+    "wins": 0,
+    "losses": 1,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -2.782601,
+    "unrealized": 1.449567,
+    "pnl": -1.333034,
+    "avg_trade": -2.782601,
+    "max_dd": 31.401793,
+    "in_market_pct": 88.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "342d04a12af2f7041588ca058ef8371a97ff4c7bf2e0f16073c9571232434f3a"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {
+    "up_line": 200.0,
+    "down_line": -200.0
+   },
+   "params_json": "{\"down_line\":-200.0,\"up_line\":200.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 0,
+    "losses": 5,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -42.827785,
+    "unrealized": -3.520558,
+    "pnl": -46.348343,
+    "avg_trade": -8.565557,
+    "max_dd": 57.57654,
+    "in_market_pct": 88.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "e89398bec65ce6e8dbc5fbebb2da545dbc1071e4ab9df2c8cb80b4f4402192d2"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 0,
+    "losses": 5,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -67.379965,
+    "unrealized": 0.0,
+    "pnl": -67.379965,
+    "avg_trade": -13.475993,
+    "max_dd": 70.917204,
+    "in_market_pct": 45.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "8d1adcd8c60b47b0c93c9a3915c3c76d94844ad11baad1a22d2ed4f0a4e58c24"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 0,
+    "losses": 5,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -68.514436,
+    "unrealized": 0.0,
+    "pnl": -68.514436,
+    "avg_trade": -13.702887,
+    "max_dd": 74.111055,
+    "in_market_pct": 47.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "8b9c69a24fc7b64836458dce174bd076999ccdef806363431dab2cf686c496d1"
+   }
+  },
+  {
+   "robot": "cci_trade",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 0,
+    "losses": 5,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": -66.934062,
+    "unrealized": 0.0,
+    "pnl": -66.934062,
+    "avg_trade": -13.386812,
+    "max_dd": 68.920336,
+    "in_market_pct": 48.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "514221be389d657574714b09a6ba326cd216714b25d083ca43f617cc722b8845"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_pct": 0.0,
+    "profit_factor": 0.0,
+    "realized": 0.0,
+    "unrealized": 0.0,
+    "pnl": 0.0,
+    "avg_trade": 0.0,
+    "max_dd": 0.0,
+    "in_market_pct": 0.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "471f59aee04286532d21f2a95800588a43526a7de001e1ae1f4f7d7957054561"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {
+    "step": 0.5
+   },
+   "params_json": "{\"step\":0.5}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 177.598043,
+    "unrealized": 8.4382,
+    "pnl": 186.036244,
+    "avg_trade": 17.759804,
+    "max_dd": 3.475718,
+    "in_market_pct": 96.5,
+    "buy_hold": 19.814415,
+    "equity_sha256": "7acd6fc0b4a7bb213559e135d5cc7008cf4479a1c1aa30048f0f5c121f1af409"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {
+    "step": 0.5
+   },
+   "params_json": "{\"step\":0.5}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 162.506452,
+    "unrealized": 13.663978,
+    "pnl": 176.17043,
+    "avg_trade": 16.250645,
+    "max_dd": 3.108563,
+    "in_market_pct": 96.5,
+    "buy_hold": 5.776779,
+    "equity_sha256": "fd7e0a386381c9f9dd1eb630d7cadd8c9320bac3de9c9052885acf027072e46f"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {
+    "step": 0.5
+   },
+   "params_json": "{\"step\":0.5}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 12,
+    "wins": 10,
+    "losses": 2,
+    "win_pct": 83.333333,
+    "profit_factor": 51.660999,
+    "realized": 147.963308,
+    "unrealized": 10.874225,
+    "pnl": 158.837533,
+    "avg_trade": 12.330276,
+    "max_dd": 5.298102,
+    "in_market_pct": 96.5,
+    "buy_hold": -5.265288,
+    "equity_sha256": "b97798dbdaddba7a5cac3df18e7ff00265201058a836d13999f5196e5454c928"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {
+    "step": 1.0
+   },
+   "params_json": "{\"step\":1.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 171.938382,
+    "unrealized": 7.69336,
+    "pnl": 179.631742,
+    "avg_trade": 17.193838,
+    "max_dd": 3.475718,
+    "in_market_pct": 96.5,
+    "buy_hold": 19.814415,
+    "equity_sha256": "989f86f567e09b7c8333d2ae3034551f80891f69667b99f098b5693bb0f8db6b"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {
+    "step": 1.0
+   },
+   "params_json": "{\"step\":1.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 158.782105,
+    "unrealized": 12.462747,
+    "pnl": 171.244852,
+    "avg_trade": 15.87821,
+    "max_dd": 3.186137,
+    "in_market_pct": 96.5,
+    "buy_hold": 5.776779,
+    "equity_sha256": "a5ec201b9626a92fdb24b8ca35a9dda9dcc9b9533216eddca16e696777fe847f"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {
+    "step": 1.0
+   },
+   "params_json": "{\"step\":1.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 148.54069,
+    "unrealized": 10.874225,
+    "pnl": 159.414915,
+    "avg_trade": 14.854069,
+    "max_dd": 4.303899,
+    "in_market_pct": 96.5,
+    "buy_hold": -5.265288,
+    "equity_sha256": "848d851dfdf3d56fc4c4fc402c75eabdcf83977c98165cabc99c0a200a87df0f"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {
+    "step": 2.0
+   },
+   "params_json": "{\"step\":2.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 162.461744,
+    "unrealized": 7.69336,
+    "pnl": 170.155104,
+    "avg_trade": 16.246174,
+    "max_dd": 3.975431,
+    "in_market_pct": 96.5,
+    "buy_hold": 19.814415,
+    "equity_sha256": "e3f7048a328f083ed60023b89df11de2cdcb7fa2823027170777a4fed2294231"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {
+    "step": 2.0
+   },
+   "params_json": "{\"step\":2.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 150.680488,
+    "unrealized": 12.495367,
+    "pnl": 163.175856,
+    "avg_trade": 15.068049,
+    "max_dd": 4.447799,
+    "in_market_pct": 96.5,
+    "buy_hold": 5.776779,
+    "equity_sha256": "800556c957af0fd8e1033fb056bc00fb278a414282fb9e0b6aca8ce8774ae4ce"
+   }
+  },
+  {
+   "robot": "bb_power",
+   "params": {
+    "step": 2.0
+   },
+   "params_json": "{\"step\":2.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 134.761144,
+    "unrealized": 9.329787,
+    "pnl": 144.090931,
+    "avg_trade": 13.476114,
+    "max_dd": 4.362434,
+    "in_market_pct": 96.5,
+    "buy_hold": -5.265288,
+    "equity_sha256": "d06e82badd1494407df9bb99a07fbdecbe7468d81ce09541100af016c7103cbf"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 2,
+    "losses": 8,
+    "win_pct": 20.0,
+    "profit_factor": 0.093447,
+    "realized": -76.80984,
+    "unrealized": -3.226488,
+    "pnl": -80.036328,
+    "avg_trade": -7.680984,
+    "max_dd": 89.14234,
+    "in_market_pct": 95.5,
+    "buy_hold": 19.814415,
+    "equity_sha256": "6d0623a23a9a8a98bb7be011290ade913c3730f3e4f99f096f2c0f933d6f33d9"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 12,
+    "wins": 2,
+    "losses": 10,
+    "win_pct": 16.666667,
+    "profit_factor": 0.057498,
+    "realized": -71.74124,
+    "unrealized": -2.06889,
+    "pnl": -73.810129,
+    "avg_trade": -5.978437,
+    "max_dd": 85.288614,
+    "in_market_pct": 95.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "d5f86c5e61a30f58e385de35f5be7a72d01d0c1ff2688b92042d2be4aca43e59"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 13,
+    "wins": 4,
+    "losses": 9,
+    "win_pct": 30.769231,
+    "profit_factor": 0.249357,
+    "realized": -47.153925,
+    "unrealized": -11.663276,
+    "pnl": -58.8172,
+    "avg_trade": -3.627225,
+    "max_dd": 70.411714,
+    "in_market_pct": 97.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "d59a69e31edf2f199b27e8ed66c4a0cd5310c79273e0916a5c8737e1f97eee3b"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {
+    "rvi_length": 9
+   },
+   "params_json": "{\"rvi_length\":9}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 6,
+    "losses": 4,
+    "win_pct": 60.0,
+    "profit_factor": 1.140456,
+    "realized": 4.568143,
+    "unrealized": -3.456209,
+    "pnl": 1.111934,
+    "avg_trade": 0.456814,
+    "max_dd": 28.740635,
+    "in_market_pct": 95.5,
+    "buy_hold": 19.814415,
+    "equity_sha256": "d17904f2e1c39041764379620e65668d01578aac65ff4a60d73d207681056e48"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {
+    "rvi_length": 9
+   },
+   "params_json": "{\"rvi_length\":9}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 5,
+    "losses": 4,
+    "win_pct": 55.555556,
+    "profit_factor": 1.224464,
+    "realized": 4.59016,
+    "unrealized": 8.601974,
+    "pnl": 13.192135,
+    "avg_trade": 0.510018,
+    "max_dd": 32.182138,
+    "in_market_pct": 93.75,
+    "buy_hold": 5.776779,
+    "equity_sha256": "2b5e2cb0b8871f642a6702157df2c813f1b63d230bdf74c8bd6c2383343d8bab"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {
+    "rvi_length": 9
+   },
+   "params_json": "{\"rvi_length\":9}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 5,
+    "losses": 5,
+    "win_pct": 50.0,
+    "profit_factor": 2.581793,
+    "realized": 29.516917,
+    "unrealized": -11.663276,
+    "pnl": 17.853641,
+    "avg_trade": 2.951692,
+    "max_dd": 30.401073,
+    "in_market_pct": 94.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "1f81d9ea6c47f5a3e686a2cc9f201ac6ecfdd769849aa62f7085e6a65d69d2ba"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {
+    "rvi_length": 14
+   },
+   "params_json": "{\"rvi_length\":14}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 9,
+    "losses": 1,
+    "win_pct": 90.0,
+    "profit_factor": 114.023841,
+    "realized": 121.870202,
+    "unrealized": -2.504762,
+    "pnl": 119.36544,
+    "avg_trade": 12.18702,
+    "max_dd": 8.748475,
+    "in_market_pct": 93.25,
+    "buy_hold": 19.814415,
+    "equity_sha256": "53170f926215b78b9845458cb2fbb9aa19c9e50f1bf19760189bae80fa425c08"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {
+    "rvi_length": 14
+   },
+   "params_json": "{\"rvi_length\":14}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 8,
+    "losses": 1,
+    "win_pct": 88.888889,
+    "profit_factor": 29.850657,
+    "realized": 88.076955,
+    "unrealized": 12.108663,
+    "pnl": 100.185618,
+    "avg_trade": 9.786328,
+    "max_dd": 11.322189,
+    "in_market_pct": 93.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "02559979c730ee2283640e7d3148a61d087b32294164918c6174d211aba3c15b"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {
+    "rvi_length": 14
+   },
+   "params_json": "{\"rvi_length\":14}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 70.517459,
+    "unrealized": 5.699724,
+    "pnl": 76.217183,
+    "avg_trade": 7.835273,
+    "max_dd": 14.58424,
+    "in_market_pct": 92.5,
+    "buy_hold": -5.265288,
+    "equity_sha256": "05c3642926c41fad83414ae41627f268d8a8c7847560eef8b96ff5c392483862"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 2,
+    "losses": 3,
+    "win_pct": 40.0,
+    "profit_factor": 0.18368,
+    "realized": -35.187416,
+    "unrealized": 0.0,
+    "pnl": -35.187416,
+    "avg_trade": -7.037483,
+    "max_dd": 48.07269,
+    "in_market_pct": 45.5,
+    "buy_hold": 19.814415,
+    "equity_sha256": "044595fd13c1df7677f39427e160e3d24440cc56c4a9ce1373985a5a29d7dbe9"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 6,
+    "wins": 1,
+    "losses": 5,
+    "win_pct": 16.666667,
+    "profit_factor": 0.012591,
+    "realized": -37.374107,
+    "unrealized": 0.0,
+    "pnl": -37.374107,
+    "avg_trade": -6.229018,
+    "max_dd": 50.972765,
+    "in_market_pct": 47.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "14f67b89aefa4dcc2f3d47bff295c4543826305d616b7bdf4d4178d1f02194bb"
+   }
+  },
+  {
+   "robot": "rvi_trade",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 7,
+    "wins": 2,
+    "losses": 5,
+    "win_pct": 28.571429,
+    "profit_factor": 0.237337,
+    "realized": -31.361709,
+    "unrealized": 0.0,
+    "pnl": -31.361709,
+    "avg_trade": -4.480244,
+    "max_dd": 39.39069,
+    "in_market_pct": 45.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "eae4c2e42592d9f9b5587b1f320a1d7149a628ec32e690b2113f57a90371d33c"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 184.287908,
+    "unrealized": 9.368062,
+    "pnl": 193.65597,
+    "avg_trade": 20.476434,
+    "max_dd": 3.310859,
+    "in_market_pct": 90.5,
+    "buy_hold": 19.814415,
+    "equity_sha256": "b1a3b0954daaef8506ee190471f546ec1c6b29b8ee89b64f86a67083ec2ebc7d"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 169.15168,
+    "unrealized": 15.027548,
+    "pnl": 184.179229,
+    "avg_trade": 18.794631,
+    "max_dd": 2.381711,
+    "in_market_pct": 91.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "88780e1911ff17956da0bf15f81a06870922b00cea327e01e88bc5cb4c9bbec1"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 159.117999,
+    "unrealized": 11.789317,
+    "pnl": 170.907316,
+    "avg_trade": 17.679778,
+    "max_dd": 4.303899,
+    "in_market_pct": 90.75,
+    "buy_hold": -5.265288,
+    "equity_sha256": "0720a79a820813746c5fda230c49c6ef094fcf6f24b8a9f6501ff45ee73fdd0f"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {
+    "fast": 8,
+    "slow": 21
+   },
+   "params_json": "{\"fast\":8,\"slow\":21}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 179.313414,
+    "unrealized": 8.622305,
+    "pnl": 187.935719,
+    "avg_trade": 19.923713,
+    "max_dd": 4.414252,
+    "in_market_pct": 92.25,
+    "buy_hold": 19.814415,
+    "equity_sha256": "3893b36bfaf389fc11b75493de2f1f505e4adba8fb497d1835450ce5206ef1f7"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {
+    "fast": 8,
+    "slow": 21
+   },
+   "params_json": "{\"fast\":8,\"slow\":21}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 170.577311,
+    "unrealized": 14.2774,
+    "pnl": 184.854711,
+    "avg_trade": 18.953035,
+    "max_dd": 3.264965,
+    "in_market_pct": 91.75,
+    "buy_hold": 5.776779,
+    "equity_sha256": "8eaa7d3f3b7bc1d5b1a12d3b52e5ff8e6ce37192556a89fc9ffd00a7ec37b009"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {
+    "fast": 8,
+    "slow": 21
+   },
+   "params_json": "{\"fast\":8,\"slow\":21}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 162.195017,
+    "unrealized": 11.732278,
+    "pnl": 173.927296,
+    "avg_trade": 18.021669,
+    "max_dd": 2.20202,
+    "in_market_pct": 92.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "4c0efb06126b5f3240d1af476dd6badb254662842252d7e11d133b55976edcd3"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {
+    "fast": 12,
+    "slow": 26,
+    "signal": 5
+   },
+   "params_json": "{\"fast\":12,\"signal\":5,\"slow\":26}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 179.903929,
+    "unrealized": 8.1828,
+    "pnl": 188.08673,
+    "avg_trade": 19.989325,
+    "max_dd": 3.181341,
+    "in_market_pct": 91.25,
+    "buy_hold": 19.814415,
+    "equity_sha256": "28e42184bd56e67971d4ef71d8f92bd45a05daf1225d2aac9b4b3630031d1f5c"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {
+    "fast": 12,
+    "slow": 26,
+    "signal": 5
+   },
+   "params_json": "{\"fast\":12,\"signal\":5,\"slow\":26}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 170.104374,
+    "unrealized": 14.346277,
+    "pnl": 184.45065,
+    "avg_trade": 18.900486,
+    "max_dd": 3.391992,
+    "in_market_pct": 91.5,
+    "buy_hold": 5.776779,
+    "equity_sha256": "7b3559c58124c4521eec143922bc5fce8527156d75986ca8166f01b3a15d6379"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {
+    "fast": 12,
+    "slow": 26,
+    "signal": 5
+   },
+   "params_json": "{\"fast\":12,\"signal\":5,\"slow\":26}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 160.847173,
+    "unrealized": 11.990709,
+    "pnl": 172.837882,
+    "avg_trade": 17.871908,
+    "max_dd": 2.489953,
+    "in_market_pct": 91.75,
+    "buy_hold": -5.265288,
+    "equity_sha256": "a1dc64397b6d40281ccc0c367852eed9111817a42e217f882ae78c7c5a0a7e03"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\"}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 5,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 97.877505,
+    "unrealized": 0.0,
+    "pnl": 97.877505,
+    "avg_trade": 19.575501,
+    "max_dd": 1.956593,
+    "in_market_pct": 45.75,
+    "buy_hold": 19.814415,
+    "equity_sha256": "39f1bbee73d744f47c91f58b9d94ed96b44252f683c52597baa891924380af93"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\"}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 5,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 96.410535,
+    "unrealized": 0.0,
+    "pnl": 96.410535,
+    "avg_trade": 19.282107,
+    "max_dd": 3.338183,
+    "in_market_pct": 49.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "a993b322d041936b57ff081fb1f1b855d692713f956db84a975f9cacf770764c"
+   }
+  },
+  {
+   "robot": "macd_revers",
+   "params": {
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\"}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 5,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 93.589016,
+    "unrealized": 0.0,
+    "pnl": 93.589016,
+    "avg_trade": 18.717803,
+    "max_dd": 2.377446,
+    "in_market_pct": 45.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "6148103a7aab5ca78036d2b1335494c8d43d906c844e64e4a583c4bd7ecd8ffa"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 15,
+    "wins": 12,
+    "losses": 3,
+    "win_pct": 80.0,
+    "profit_factor": 86.741653,
+    "realized": 169.095317,
+    "unrealized": 8.948923,
+    "pnl": 178.04424,
+    "avg_trade": 11.273021,
+    "max_dd": 2.306955,
+    "in_market_pct": 76.25,
+    "buy_hold": 19.814415,
+    "equity_sha256": "68640c27922ea5edf308002c5759f1692ea1eb83c7f557d1b4fd76bbeb27c354"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 16,
+    "wins": 14,
+    "losses": 2,
+    "win_pct": 87.5,
+    "profit_factor": 128.319411,
+    "realized": 160.788403,
+    "unrealized": 15.027548,
+    "pnl": 175.815951,
+    "avg_trade": 10.049275,
+    "max_dd": 1.790864,
+    "in_market_pct": 81.5,
+    "buy_hold": 5.776779,
+    "equity_sha256": "e4c04ad221f1534a25cb334590ee4664975ebb05c8694e1eee95260d2667ce8f"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 29,
+    "wins": 19,
+    "losses": 10,
+    "win_pct": 65.517241,
+    "profit_factor": 18.665429,
+    "realized": 121.092761,
+    "unrealized": 11.777836,
+    "pnl": 132.870597,
+    "avg_trade": 4.175612,
+    "max_dd": 2.608996,
+    "in_market_pct": 70.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "4359b3c6f49924c58154513eee95713940dd8b71a1c9992e11df4b0a6cf92121"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {
+    "trail_stop": 0.5
+   },
+   "params_json": "{\"trail_stop\":0.5}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 28,
+    "wins": 22,
+    "losses": 6,
+    "win_pct": 78.571429,
+    "profit_factor": 35.074826,
+    "realized": 153.342845,
+    "unrealized": 3.456209,
+    "pnl": 156.799055,
+    "avg_trade": 5.47653,
+    "max_dd": 3.076715,
+    "in_market_pct": 69.25,
+    "buy_hold": 19.814415,
+    "equity_sha256": "579e377e34fd2182031d3207dfc7ee8d259803ac19240ebbf8cc5e321a433275"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {
+    "trail_stop": 0.5
+   },
+   "params_json": "{\"trail_stop\":0.5}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 37,
+    "wins": 30,
+    "losses": 7,
+    "win_pct": 81.081081,
+    "profit_factor": 21.784666,
+    "realized": 99.549728,
+    "unrealized": 0.0,
+    "pnl": 99.549728,
+    "avg_trade": 2.690533,
+    "max_dd": 2.469007,
+    "in_market_pct": 57.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "0a61bed41f77b4875e3c4007709dbfe9650d98b2320b68f54ec166eacd71f1e0"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {
+    "trail_stop": 0.5
+   },
+   "params_json": "{\"trail_stop\":0.5}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 55,
+    "wins": 39,
+    "losses": 16,
+    "win_pct": 70.909091,
+    "profit_factor": 8.466236,
+    "realized": 73.003483,
+    "unrealized": 0.0,
+    "pnl": 73.003483,
+    "avg_trade": 1.327336,
+    "max_dd": 2.6793,
+    "in_market_pct": 54.5,
+    "buy_hold": -5.265288,
+    "equity_sha256": "8a1d77b8c7ddcaab1f95617d8f0a6d821b8838b2c2f06e1ffec3e9e36e10605d"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {
+    "trail_stop": 1.0
+   },
+   "params_json": "{\"trail_stop\":1.0}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 13,
+    "wins": 9,
+    "losses": 4,
+    "win_pct": 69.230769,
+    "profit_factor": 54.826622,
+    "realized": 173.219327,
+    "unrealized": 9.368062,
+    "pnl": 182.587389,
+    "avg_trade": 13.324564,
+    "max_dd": 2.940124,
+    "in_market_pct": 82.25,
+    "buy_hold": 19.814415,
+    "equity_sha256": "dc422d7d5f948f01d3ad5dbb3acaa363c220d05fe69557208525e6d218ab6842"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {
+    "trail_stop": 1.0
+   },
+   "params_json": "{\"trail_stop\":1.0}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 11,
+    "wins": 10,
+    "losses": 1,
+    "win_pct": 90.909091,
+    "profit_factor": 108.256608,
+    "realized": 168.661752,
+    "unrealized": 15.027548,
+    "pnl": 183.689301,
+    "avg_trade": 15.332887,
+    "max_dd": 1.964033,
+    "in_market_pct": 88.5,
+    "buy_hold": 5.776779,
+    "equity_sha256": "2a1155567a6dcc39ad0ece51c508d252176301ddfd6e1dc96fcd85f012ac262f"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {
+    "trail_stop": 1.0
+   },
+   "params_json": "{\"trail_stop\":1.0}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 19,
+    "wins": 15,
+    "losses": 4,
+    "win_pct": 78.947368,
+    "profit_factor": 38.560574,
+    "realized": 153.408281,
+    "unrealized": 11.777836,
+    "pnl": 165.186117,
+    "avg_trade": 8.07412,
+    "max_dd": 3.127983,
+    "in_market_pct": 84.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "551afdb351f2a68cadd66a03d5e3a06d619a8616a01831813e426c1a83f3179f"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 8,
+    "wins": 6,
+    "losses": 2,
+    "win_pct": 75.0,
+    "profit_factor": 40.219552,
+    "realized": 76.752424,
+    "unrealized": 8.948923,
+    "pnl": 85.701347,
+    "avg_trade": 9.594053,
+    "max_dd": 2.436909,
+    "in_market_pct": 38.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "92d69d7c21f71e9f029b113d59cb01af791395d525c840d7bf582dc88954138d"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 8,
+    "wins": 7,
+    "losses": 1,
+    "win_pct": 87.5,
+    "profit_factor": 1957.622045,
+    "realized": 66.229572,
+    "unrealized": 15.027548,
+    "pnl": 81.25712,
+    "avg_trade": 8.278696,
+    "max_dd": 1.526249,
+    "in_market_pct": 38.5,
+    "buy_hold": 5.776779,
+    "equity_sha256": "8ec0c3ba1225a92269f369160ffb99df8eaa1f67e0790e513a48b523248e7625"
+   }
+  },
+  {
+   "robot": "macd_trail",
+   "params": {
+    "regime": "OnlyLong"
+   },
+   "params_json": "{\"regime\":\"OnlyLong\"}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 16,
+    "wins": 9,
+    "losses": 7,
+    "win_pct": 56.25,
+    "profit_factor": 12.008956,
+    "realized": 55.40424,
+    "unrealized": 11.777836,
+    "pnl": 67.182077,
+    "avg_trade": 3.462765,
+    "max_dd": 2.71586,
+    "in_market_pct": 39.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "72ecd8ce1a9aa7119543603b0242cad3e624d67a4f5f68aba1068c6e3ca768ab"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 101.187965,
+    "unrealized": 5.50921,
+    "pnl": 106.697176,
+    "avg_trade": 11.243107,
+    "max_dd": 7.354351,
+    "in_market_pct": 87.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "208bf5c836db914d71b09d77dc707235deeeea36a66d70a954c124e1ed6e92b8"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 96.775155,
+    "unrealized": 8.679536,
+    "pnl": 105.454691,
+    "avg_trade": 9.677515,
+    "max_dd": 7.531394,
+    "in_market_pct": 94.5,
+    "buy_hold": 5.776779,
+    "equity_sha256": "66e24417eee3512373eb448ccf4e40388a9854f386bb1b52e109faf691327cf9"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 7,
+    "wins": 7,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 77.067187,
+    "unrealized": 6.61761,
+    "pnl": 83.684796,
+    "avg_trade": 11.009598,
+    "max_dd": 21.604789,
+    "in_market_pct": 88.5,
+    "buy_hold": -5.265288,
+    "equity_sha256": "8756f9ceed8394c74fcf53e116fc534c38159cd359910865a51ca617dd30b3d9"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {
+    "boll_length": 15
+   },
+   "params_json": "{\"boll_length\":15}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 120.716901,
+    "unrealized": 6.637729,
+    "pnl": 127.35463,
+    "avg_trade": 13.412989,
+    "max_dd": 8.945595,
+    "in_market_pct": 88.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "00e4bfa5c90d6b1261542ce87556a566adc36360c29278e44a0cc9be95903848"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {
+    "boll_length": 15
+   },
+   "params_json": "{\"boll_length\":15}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 127.495524,
+    "unrealized": 11.457321,
+    "pnl": 138.952845,
+    "avg_trade": 12.749552,
+    "max_dd": 7.531394,
+    "in_market_pct": 96.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "564741f98bf79dc0b57a99fd0277a2ed9bcc4685dd8bbe16e2bdfdc0d31ec588"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {
+    "boll_length": 15
+   },
+   "params_json": "{\"boll_length\":15}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 121.255564,
+    "unrealized": 10.241503,
+    "pnl": 131.497068,
+    "avg_trade": 12.125556,
+    "max_dd": 5.753317,
+    "in_market_pct": 96.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "7bbf8d255e4e39269249cbe8c1da3281bc48459f29bc3ba0f3a3134068059248"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {
+    "boll_deviation": 2.5
+   },
+   "params_json": "{\"boll_deviation\":2.5}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 4,
+    "wins": 4,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 40.969468,
+    "unrealized": 2.772869,
+    "pnl": 43.742337,
+    "avg_trade": 10.242367,
+    "max_dd": 25.474832,
+    "in_market_pct": 86.75,
+    "buy_hold": 19.814415,
+    "equity_sha256": "a030f8d545e8b8dc083b0d2752167c54894655a30b0db9efeb4f2fff96af5ea1"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {
+    "boll_deviation": 2.5
+   },
+   "params_json": "{\"boll_deviation\":2.5}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 3,
+    "wins": 2,
+    "losses": 1,
+    "win_pct": 66.666667,
+    "profit_factor": 17.05826,
+    "realized": 10.501452,
+    "unrealized": 7.577204,
+    "pnl": 18.078656,
+    "avg_trade": 3.500484,
+    "max_dd": 24.723764,
+    "in_market_pct": 88.25,
+    "buy_hold": 5.776779,
+    "equity_sha256": "ed851f03d5cac63b0d3ee398a5bd1e7cf0760f900cc9ebdddf7fbfc7a1bd1e5b"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {
+    "boll_deviation": 2.5
+   },
+   "params_json": "{\"boll_deviation\":2.5}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 5,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 42.827785,
+    "unrealized": 3.520558,
+    "pnl": 46.348343,
+    "avg_trade": 8.565557,
+    "max_dd": 23.455974,
+    "in_market_pct": 88.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "96c50238ff53ce72c7946f79fb69f33ed838531eed6d139565b28d93dccd0fd9"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\"}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 5,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 52.663259,
+    "unrealized": 0.0,
+    "pnl": 52.663259,
+    "avg_trade": 10.532652,
+    "max_dd": 6.584232,
+    "in_market_pct": 44.75,
+    "buy_hold": 19.814415,
+    "equity_sha256": "7e308217d407eb6970534b0a26f3eb62588eef909abaf264328e9e85f0819c82"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\"}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 5,
+    "wins": 5,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 55.184255,
+    "unrealized": 0.0,
+    "pnl": 55.184255,
+    "avg_trade": 11.036851,
+    "max_dd": 7.531394,
+    "in_market_pct": 47.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "7697c64cf5ec114547f0b3b34e0d1734fc72832fdcf5cd4afe51a569a806cfb4"
+   }
+  },
+  {
+   "robot": "bollinger_revers",
+   "params": {
+    "regime": "OnlyShort"
+   },
+   "params_json": "{\"regime\":\"OnlyShort\"}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 4,
+    "wins": 4,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 48.945214,
+    "unrealized": 0.0,
+    "pnl": 48.945214,
+    "avg_trade": 12.236304,
+    "max_dd": 4.948334,
+    "in_market_pct": 40.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "8cab541cf04f86946223f1983f0f31a1d8d82e132370d6763ecef7aed55f05e7"
+   }
+  },
+  {
+   "robot": "bollinger_trailing",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 9,
+    "wins": 9,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 109.673615,
+    "unrealized": 5.50921,
+    "pnl": 115.182825,
+    "avg_trade": 12.185957,
+    "max_dd": 5.862431,
+    "in_market_pct": 85.75,
+    "buy_hold": 19.814415,
+    "equity_sha256": "9615f40763db27b852d9a60af1ffd9edf840836a41ec4daafb2b6311b019eac2"
+   }
+  },
+  {
+   "robot": "bollinger_trailing",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 104.445378,
+    "unrealized": 8.679536,
+    "pnl": 113.124914,
+    "avg_trade": 10.444538,
+    "max_dd": 6.462616,
+    "in_market_pct": 94.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "86e9f366b5cdd07964e3aa5c453dca1e6e13981b9c85cedd0401da0c32e5ba3b"
+   }
+  },
+  {
+   "robot": "bollinger_trailing",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 8,
+    "wins": 8,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 89.982018,
+    "unrealized": 10.241503,
+    "pnl": 100.223522,
+    "avg_trade": 11.247752,
+    "max_dd": 7.97953,
+    "in_market_pct": 79.25,
+    "buy_hold": -5.265288,
+    "equity_sha256": "84da10f4f743d72a676fc80f19e624fd57affed853a075002694f083bb468bc3"
+   }
+  },
+  {
+   "robot": "sma_trend",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 9,
+    "losses": 1,
+    "win_pct": 90.0,
+    "profit_factor": 212.120184,
+    "realized": 74.018808,
+    "unrealized": 3.456209,
+    "pnl": 77.475018,
+    "avg_trade": 7.401881,
+    "max_dd": 6.584232,
+    "in_market_pct": 78.0,
+    "buy_hold": 19.814415,
+    "equity_sha256": "793f956fda4d53aeddc157823a0534ceef5943557e683148cebf13670e1d017b"
+   }
+  },
+  {
+   "robot": "sma_trend",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 9,
+    "losses": 1,
+    "win_pct": 90.0,
+    "profit_factor": 242.405423,
+    "realized": 73.011756,
+    "unrealized": 3.338729,
+    "pnl": 76.350485,
+    "avg_trade": 7.301176,
+    "max_dd": 7.239172,
+    "in_market_pct": 77.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "59187e56ab0f8d3897aa64d59d5f4a328b4cfa22390aecc11c8328e90fe9007b"
+   }
+  },
+  {
+   "robot": "sma_trend",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 11,
+    "wins": 9,
+    "losses": 2,
+    "win_pct": 81.818182,
+    "profit_factor": 118.404007,
+    "realized": 67.117823,
+    "unrealized": 5.24894,
+    "pnl": 72.366763,
+    "avg_trade": 6.10162,
+    "max_dd": 7.056399,
+    "in_market_pct": 78.0,
+    "buy_hold": -5.265288,
+    "equity_sha256": "9cc8fe1e027617a39770115a50e09f4ab2730a3e2a848606fbcb79ad5b3f1d01"
+   }
+  },
+  {
+   "robot": "pc_volatility",
+   "params": {},
+   "params_json": "{}",
+   "seed": 42,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 102.30116,
+    "unrealized": 4.899386,
+    "pnl": 107.200545,
+    "avg_trade": 10.230116,
+    "max_dd": 5.666948,
+    "in_market_pct": 89.75,
+    "buy_hold": 19.814415,
+    "equity_sha256": "68ce144c079784bbb9a44d247e332a16437d72c23a71680bb08b8ff10ca6556e"
+   }
+  },
+  {
+   "robot": "pc_volatility",
+   "params": {},
+   "params_json": "{}",
+   "seed": 7,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 98.678965,
+    "unrealized": 7.708704,
+    "pnl": 106.38767,
+    "avg_trade": 9.867897,
+    "max_dd": 6.363758,
+    "in_market_pct": 90.0,
+    "buy_hold": 5.776779,
+    "equity_sha256": "2e048a8bdeaf3226f42c1632598a2e9d741bea441f6b208a1c2283c67cbf46ed"
+   }
+  },
+  {
+   "robot": "pc_volatility",
+   "params": {},
+   "params_json": "{}",
+   "seed": 123,
+   "metrics": {
+    "bars": 400,
+    "trades": 10,
+    "wins": 10,
+    "losses": 0,
+    "win_pct": 100.0,
+    "profit_factor": "inf",
+    "realized": 94.13154,
+    "unrealized": 8.340916,
+    "pnl": 102.472456,
+    "avg_trade": 9.413154,
+    "max_dd": 7.325377,
+    "in_market_pct": 88.75,
+    "buy_hold": -5.265288,
+    "equity_sha256": "ffe176f3b176d18324c8e38a3971a25f0cfc056acd91a38bb26690792d683c23"
+   }
+  }
+ ]
+}
