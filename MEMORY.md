@@ -6,6 +6,14 @@
 
 ---
 
+## ⚠️⚠️ БАЗА ДАННЫХ — ЧИТАТЬ ПЕРВЫМ ДЕЛОМ (актуально с 2026-09-28)
+
+**Postgres крутится на машине .2 — `Denis@192.168.1.2`, ssh-пароль `0987`, В DOCKER.
+Подключение СО ВСЕХ машин сети: `deeptrading:deeptrading@192.168.1.2:5432/deeptrading`.
+На .3 базы больше НЕТ.** Каждая сессия/агент: подключаться только к .2.
+
+---
+
 ## 🚀 НАЧАЛО СЕССИИ — ОБЯЗАТЕЛЬНО ПРОЧИТАЙ (актуально 2026-09-09)
 
 **Сводка последней сессии (все результаты, изменения кода, карта, токены, статус live-бота):**
@@ -131,8 +139,8 @@ reconcile loop. НЕ реализовано: StreamingEnsemble (инкремен
 | Машина | IP | ОС | Роль | Что есть |
 |--------|-----|-----|------|----------|
 | **.7 (эта)** | 192.168.1.7 | macOS | код/opencode | правим код, SMB-шара на проект |
-| **.3 (сервер)** | 192.168.1.3 | macOS | **Postgres + backend + frontend + git-репо** | БД (:5432), uvicorn (:8000), vite (:5173), Docker, python .venv |
-| **.5** | 192.168.1.5 | Windows 10 | вычисления (бэктесты/Optuna) | Python 3.12, копия backend, **БД на .3 через сеть** |
+| **.3 (сервер)** | 192.168.1.3 | macOS | **backend + frontend + git-репо** (БД переехала на .2 — см. «Postgres крутится на .2» ниже) | uvicorn (:8000), vite (:5173), Docker, python .venv |
+| **.5** | 192.168.1.5 | Windows 10 | вычисления (бэктесты/Optuna) | Python 3.12, копия backend, **БД на .2 (Docker) через сеть** — см. «Postgres крутится на .2» выше |
 
 **SSH:**
 - .3: `sshpass -p '0987' ssh Denis@192.168.1.3` (иногда таймаутит — повторить; не задавать пароль в интерактиве)
@@ -152,10 +160,10 @@ reconcile loop. НЕ реализовано: StreamingEnsemble (инкремен
 - git-операции делаем на .3 (там .git), НЕ с .5.
 
 **База данных (как цепляться со всех машин):**
-- Postgres живёт ТОЛЬКО на .3: `deeptrading:deeptrading@192.168.1.3:5432/deeptrading`
-- С .7 (мак, opencode): код подключается через `app.database` → `get_settings().database_url`. Если локально `.env` нет — упадёт; тогда в `.env` прописать `postgres_host=192.168.1.3`.
-- С .5: в `C:\Users\nadts\Dev\backend\.env` уже прописан `postgres_host=192.168.1.3` → .5 ходит к БД .3 по сети. ⚠️ на .5 в `database.py` нужен `connect_args={'ssl': False}` (asyncpg/Windows), НЕ удалять.
-- Прямой SQL: `psql postgresql://deeptrading:deeptrading@192.168.1.3:5432/deeptrading` (psql есть на .3, на маке — через python/psycopg или установить).
+- **БАЗА (Postgres) КРУТИТСЯ НА .2, В DOCKER — `Denis@192.168.1.2`, ssh-пароль `0987`. Доступна СО ВСЕХ машин сети**: `deeptrading:deeptrading@192.168.1.2:5432/deeptrading` (раньше жила на .3 — не путаться).
+- С .7 (мак, opencode): код подключается через `app.database` → `get_settings().database_url`. Если локально `.env` нет — упадёт; тогда в `.env` прописать `postgres_host=192.168.1.2`.
+- С .5: в `C:\Users\nadts\Dev\backend\.env` уже прописан `postgres_host=192.168.1.2` → .5 ходит к БД .2 по сети. ⚠️ на .5 в `database.py` нужен `connect_args={'ssl': False}` (asyncpg/Windows), НЕ удалять.
+- Прямой SQL: `psql postgresql://deeptrading:deeptrading@192.168.1.2:5432/deeptrading` (сам контейнер — Docker на .2: `sshpass -p 0987 ssh Denis@192.168.1.2` → `docker exec`; на маках psql — через python/psycopg).
 - ⚠️ **Одна БД на всех** — не гонять параллельно тяжёлые БД-скрипты с .3 и .5 одновременно (перегруз).
 
 **Сервисы на .3 (живые сейчас):**

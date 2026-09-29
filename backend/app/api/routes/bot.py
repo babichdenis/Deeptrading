@@ -753,6 +753,8 @@ class ModeRequest(BaseModel):
     replay_end: str = ""
     replay_pace: str = "fast"
     test_engine: str = ""  # одиночный движок теста (mode=test): id из STRATEGY_REGISTRY (напр. ose_bollinger); пусто = ensemble_v4
+    test_interval: str = ""  # TF теста (mode=test): 5min|10min|15min; пусто = 1min
+    test_params: dict = Field(default_factory=dict)  # параметры движка теста, напр. {"quorum": 2}
 
 
 def _write_env_mode(mode: str, test_name: str = "", replay_start: str = "", replay_end: str = "",
@@ -868,6 +870,17 @@ async def bot_set_mode(req: ModeRequest) -> dict:
         _os.environ["TEST_ENGINE"] = _eng
     else:
         _os.environ.pop("TEST_ENGINE", None)
+    # TF и параметры одиночного движка теста (читает apply_test_overrides):
+    _tif = req.test_interval.strip().lower()
+    if _tif:
+        _os.environ["TEST_INTERVAL"] = _tif
+    else:
+        _os.environ.pop("TEST_INTERVAL", None)
+    if req.test_params:
+        import json as _pj
+        _os.environ["TEST_PARAMS"] = _pj.dumps(req.test_params, ensure_ascii=False)
+    else:
+        _os.environ.pop("TEST_PARAMS", None)
     _write_env_mode(mode, test_name=name, replay_start=req.replay_start.strip(),
                     replay_end=req.replay_end.strip(), replay_pace=pace)
     try:

@@ -23,6 +23,7 @@ from app.engine.ose.robots import (
     PriceChannelTrade,
     Regime,
     RsiContrtrend,
+    RsiTrade,
     Side,
     SmaStochastic,
     StrategyBollinger,
@@ -223,6 +224,93 @@ def test_rsi_contrtrend_only_long_blocks_short():
     robot = RsiContrtrend(tab, regime=Regime.ONLY_LONG)
     feed(robot, candles)
     assert tab.fills == []
+
+
+# --- RsiTrade ----------------------------------------------------------------
+
+
+def test_rsi_trade_crossover_short_then_reversal_cycle():
+    # Флэт даёт RSI 100 (квирк оригинала); первое падение — кросс Upline
+    # сверху вниз (100 → 20): шорт. Разгон вверх — кросс Upline вниз
+    # (87.58 → 63.38): закрытие и реверс в лонг той же свечой; откат —
+    # кросс Downline вверх (24.85 → 61.4): реверс в шорт; финальный
+    # отскок — снова лонг. Реверс выполняет LogicClosePosition, вход на
+    # баре закрытия позиции не дублируется (гейт по снимку позиций).
+    candles = make_candles(
+        [200.0] * 30
+        + [190.0, 192.0, 186.0, 188.0, 198.0, 208.0, 214.0, 220.0, 224.0,
+           216.0, 208.0, 200.0, 194.0, 188.0, 194.0, 202.0, 210.0]
+    )
+    tab = TesterTab()
+    robot = RsiTrade(tab, rsi_length=5)
+    feed(robot, candles)
+    assert_fills(
+        tab,
+        [
+            ("open_short", 192.0),
+            ("close", 198.0),
+            ("open_long", 198.0),
+            ("close", 216.0),
+            ("open_short", 216.0),
+            ("close", 194.0),
+            ("open_long", 194.0),
+        ],
+    )
+    assert tab.positions_open_all[-1].side is Side.BUY
+
+
+def test_rsi_trade_short_stays_open_without_downline_upcross():
+    # Скачок вверх с флэта (100 → 80 → 64) — кросс Upline вниз, шорт по 206.
+    # Монотонное падение держит RSI ниже Upline, но кросса Downline вверх
+    # (second <= 35 и first >= 35) нет — шорт остаётся открытым.
+    candles = make_candles(
+        [200.0] * 30 + [210.0, 208.0, 206.0, 204.0, 202.0, 200.0, 198.0, 196.0]
+    )
+    tab = TesterTab()
+    robot = RsiTrade(tab, rsi_length=5)
+    feed(robot, candles)
+    assert_fills(tab, [("open_short", 206.0)])
+    assert tab.positions_open_all[0].side is Side.SELL
+
+
+def test_rsi_trade_only_long_blocks_short_entry():
+    candles = make_candles(
+        [200.0] * 30 + [210.0, 208.0, 206.0, 204.0, 202.0, 200.0, 198.0, 196.0]
+    )
+    tab = TesterTab()
+    robot = RsiTrade(tab, rsi_length=5, regime=Regime.ONLY_LONG)
+    feed(robot, candles)
+    assert tab.fills == []
+
+
+def test_rsi_trade_only_close_position_closes_without_reversal():
+    # Режим переключается на лету, как смена BotTradeRegime в OsEngine:
+    # открытый шорт закрывается обратным кроссом Downline, реверса нет.
+    closes = [200.0] * 30 + [190.0, 192.0, 186.0, 188.0, 198.0, 208.0, 214.0]
+    candles = make_candles(closes)
+    tab = TesterTab()
+    robot = RsiTrade(tab, rsi_length=5)
+    feed(robot, candles[:33])  # шорт по 192.0 (кросс Upline вниз)
+    assert_fills(tab, [("open_short", 192.0)])
+    robot.regime = Regime.ONLY_CLOSE_POSITION
+    for i in range(34, len(candles) + 1):
+        tab.process_intrabar(candles[i - 1])
+        robot.on_candle_finished(candles[:i])
+    assert_fills(tab, [("open_short", 192.0), ("close", 198.0)])
+    assert tab.positions_open_all == []
+
+
+def test_rsi_trade_slippage_shifts_entry_exit_and_reversal():
+    candles = make_candles([200.0] * 30 + [190.0, 192.0, 186.0, 188.0, 198.0])
+    tab = TesterTab()
+    robot = RsiTrade(tab, rsi_length=5, slippage=0.5)
+    feed(robot, candles)
+    # Вход шорт по close - slippage; закрытие и реверс-лонг по close + slippage
+    assert_fills(
+        tab,
+        [("open_short", 191.5), ("close", 198.5), ("open_long", 198.5)],
+    )
+    assert tab.positions_open_all[-1].side is Side.BUY
 
 
 # --- StrategyBollinger -------------------------------------------------------

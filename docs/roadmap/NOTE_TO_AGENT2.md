@@ -7,7 +7,7 @@
 
 **Но для ML токен не нужен вообще:**
 - `scripts/ml_train_csv.py` — читает CSV (`uid;ts;open;close;high;low;volume;`) из файлов, сеть не трогает;
-- `scripts/run_v4_mltest.py` — читает свечи из БД (PostgreSQL на `192.168.1.3`), T-Invest не трогает.
+- `scripts/run_v4_mltest.py` — читает свечи из БД (PostgreSQL на **`192.168.1.2`** — Docker на .2, ssh `Denis@192.168.1.2`, пароль `0987`; на .3 базы больше нет), T-Invest не трогает.
 
 Запуск ML (без токена):
 ```bash

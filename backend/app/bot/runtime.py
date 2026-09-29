@@ -429,6 +429,20 @@ def apply_test_overrides(cfg) -> list[str]:
     if _engine:
         _src["strategy_id"] = _engine
         _src["use_ensemble"] = False
+    # TF теста: env TEST_INTERVAL=5min -> interval_name (реплей агрегирует 1m через Resampler).
+    _tf = str(_os.environ.get("TEST_INTERVAL", "") or "").strip().lower()
+    if _tf:
+        _src["interval_name"] = _tf
+    # Параметры одиночного движка: env TEST_PARAMS='{"quorum":2}' (JSON -> cfg.params).
+    _tp = str(_os.environ.get("TEST_PARAMS", "") or "").strip()
+    if _tp:
+        try:
+            import json as _json
+            _p = _json.loads(_tp)
+            if isinstance(_p, dict):
+                _src["params"] = _p
+        except Exception as _tp_e:
+            _audit_swallow('apply_test_overrides@test_params', _tp_e)
     for _k, _v in _src.items():
         try:
             setattr(cfg, _k, _v)

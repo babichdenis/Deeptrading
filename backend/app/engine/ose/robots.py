@@ -18,6 +18,7 @@ Robots/CounterTrend/*.cs (только чтение; лицензия OsEngine �
   снимаются и ставится трейлинг-стоп: активация up*(1-Trail%) для лонга,
   down*(1+Trail%) для шорта; перевыставляется каждым баром;
 - RsiContrtrend: контртренд с фильтром SMA, выход по обратному сигналу;
+- RsiTrade: кроссовер уровней RSI, выход с реверсом в той же свече;
 - StrategyBollinger: контртренд по полосам Боллинджера, выход по SMA,
   закрытие только при часе закрытия свечи ≤ 18.
 
@@ -57,6 +58,7 @@ __all__ = [
     "SmaStochastic",
     "EnvelopTrend",
     "RsiContrtrend",
+    "RsiTrade",
     "StrategyBollinger",
 ]
 
@@ -504,6 +506,77 @@ class RsiContrtrend(_Robot):
         elif pos.side is Side.SELL:
             if close > last_sma or last_rsi < self.downline:
                 self.tab.close_at_limit(pos, close + self.slippage, pos.volume)
+
+
+class RsiTrade(_Robot):
+    """Порт Robots/OnScriptIndicators/RsiTrade.cs.
+
+    Кроссовер уровней RSI (без фильтра тренда). Вход: Buy при пересечении
+    Downline снизу вверх (second < downline и first > downline), Sell при
+    пересечении Upline сверху вниз (second > upline и first < upline) —
+    лимитником по lastPrice ± slippage (в каркасе исполняется сразу).
+    Выход по обратному пересечению с реверсом в той же свече: Long — при
+    second >= upline и first <= upline, следом шорт (если режим не
+    OnlyLong/OnlyClosePosition); Short — при second <= downline и
+    first >= downline, следом лонг (если не OnlyShort/OnlyClosePosition).
+    Как в оригинале, вход на баре закрытия позиции не выполняется: гейт
+    входа смотрит на снимок позиций до закрытий — реверс ставит сама
+    LogicClosePosition, иначе был бы двойной ордер. Гейт оригинала
+    Values.Count < length + 5 покрыт прогревом rsi() (= None).
+    """
+
+    def __init__(self, tab: TesterTab, *, rsi_length: int = 20,
+                 upline: float = 65.0, downline: float = 35.0,
+                 slippage: float = 0.0, volume: float = 1.0,
+                 regime: Regime = Regime.ON) -> None:
+        super().__init__(tab)
+        self.rsi_length = rsi_length
+        self.upline = upline
+        self.downline = downline
+        self.slippage = slippage
+        self.volume = volume
+        self.regime = regime
+
+    def on_candle_finished(self, candles: Sequence[Candle]) -> None:
+        if self.regime is Regime.OFF or len(candles) < 2:
+            return
+        rsi_series = rsi(candles, self.rsi_length)
+        first_rsi = rsi_series[-1]
+        second_rsi = rsi_series[-2]
+        if first_rsi is None or second_rsi is None:
+            return
+        close = candles[-1].close
+        had_positions = bool(self.tab.positions_open_all)
+        for pos in list(self.tab.positions_open_all):
+            self._close_position(pos, close, first_rsi, second_rsi)
+        if self.regime is Regime.ONLY_CLOSE_POSITION:
+            return
+        if not had_positions:
+            self._open_position(close, first_rsi, second_rsi)
+
+    def _open_position(self, close: float, first_rsi: float,
+                       second_rsi: float) -> None:
+        if (second_rsi < self.downline and first_rsi > self.downline
+                and self.regime is not Regime.ONLY_SHORT):
+            self.tab.buy_at_limit(self.volume, close + self.slippage)
+        if (second_rsi > self.upline and first_rsi < self.upline
+                and self.regime is not Regime.ONLY_LONG):
+            self.tab.sell_at_limit(self.volume, close - self.slippage)
+
+    def _close_position(self, pos: Position, close: float,
+                        first_rsi: float, second_rsi: float) -> None:
+        if pos.side is Side.BUY:
+            if second_rsi >= self.upline and first_rsi <= self.upline:
+                self.tab.close_at_limit(pos, close - self.slippage, pos.volume)
+                if (self.regime is not Regime.ONLY_LONG
+                        and self.regime is not Regime.ONLY_CLOSE_POSITION):
+                    self.tab.sell_at_limit(self.volume, close - self.slippage)
+        elif pos.side is Side.SELL:
+            if second_rsi <= self.downline and first_rsi >= self.downline:
+                self.tab.close_at_limit(pos, close + self.slippage, pos.volume)
+                if (self.regime is not Regime.ONLY_SHORT
+                        and self.regime is not Regime.ONLY_CLOSE_POSITION):
+                    self.tab.buy_at_limit(self.volume, close + self.slippage)
 
 
 class StrategyBollinger(_Robot):

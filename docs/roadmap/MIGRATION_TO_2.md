@@ -28,7 +28,7 @@ ML-фильтр из v2-dev (уже влит), скрипты исследова
 |---|---|---|
 | Postgres | 16.15 (Docker `deeptrading-postgres`, postgres:16-alpine) | **не установлен** (ни Docker, ни Postgres) |
 | Размер БД | **5.4 ГБ** (candles 5.2 ГБ, signals 132 МБ, bot_logs 50 МБ) | хватит: C: 38 ГБ free, X: 65 ГБ free |
-| Подключение | 127.0.0.1:5432 | `postgres_host=127.0.0.1` (сейчас на .2 стоит `192.168.1.3`) |
+| Подключение | 127.0.0.1:5432 | ⚠️ **ИТОГ (2026-09-28): БД в Docker на .2, для всех машин `postgres_host=192.168.1.2` (порт 5432)** |
 
 **Установка на .2**: PostgreSQL 16 (native Windows, zip-архив EDB — без инсталлятора),
 `initdb` в `X:\pgdata` (больше места), сервис/задача автозапуска, база `deeptrading` + роль
@@ -44,7 +44,7 @@ pg_restore -U deeptrading -d deeptrading --no-owner -j 4 C:\...\deeptrading.dump
 
 ## 3. .env на .2 (что перенести)
 
-Сейчас на .2: `postgres_host=192.168.1.3`, `tinkoff_token=` (пусто), `BOT_MODE=test`.
+Сейчас на .2: `postgres_host=192.168.1.2` (**БД живёт в Docker на .2, обновлено 2026-09-28**), `tinkoff_token=` (пусто), `BOT_MODE=test`.
 Перенести с .3 (значения не печатать):
 - `TINKOFF_TOKEN` (используется и как feed/live: `feed_token = live or token`);
 - `SANDBOX_ACCOUNT`, `LIVE_ACCOUNT`;
@@ -78,7 +78,7 @@ MCP: `.venv-mcp` + `mcp_server/bot_server.py` + opencode config (`deeptrading-bo
 9. [ ] Убедиться, что бот на .3 ОСТАНОВЛЕН (один токен — нельзя два бота одновременно!).
 10. [ ] Утром — контроль первой сессии: входы/выходы, guard, AI-гейт, логи.
 
-**Откат**: вернуть на .2 `POSTGRES_HOST=192.168.1.3`, остановить uvboot, запустить бота на .3.
+**Откат** (устарело — план до переезда, НЕ применять к БД): вернуть на .2 `POSTGRES_HOST=192.168.1.3`, остановить uvboot, запустить бота на .3. ⚠️ Актуально с 2026-09-28: Postgres живёт в Docker НА .2 (`Denis@192.168.1.2`, пароль `0987`), доступен СО ВСЕХ машин — на .3 базы нет и не будет.
 
 ## 6. Риски
 

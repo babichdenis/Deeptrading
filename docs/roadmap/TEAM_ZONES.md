@@ -10,7 +10,7 @@
 | `nadts@192.168.1.2` (Windows) | **ТЕСТ-стенд** | `v2-dev` | Здесь можно ломать. Бэкенд: `.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000` |
 
 - Общий bare-репо: `Denis@192.168.1.3:~/Dev/Deeptrading-central.git` (ветки `master`/`second`/`v2-dev`).
-- БД одна: `192.168.1.3:5432 deeptrading`.
+- БД одна: **`192.168.1.2:5432 deeptrading` — Postgres в Docker на .2 (`Denis@192.168.1.2`, ssh-пароль `0987`), доступна СО ВСЕХ машин. На .3 базы больше нет (с 2026-09-28).**
 - GitHub: `https://github.com/babichdenis/Deeptrading.git` (ветка `second`).
 
 ## Зоны ответственности

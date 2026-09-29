@@ -801,3 +801,472 @@ INDICATORS = {
 и `CandleHub` сам понимает, какие состояния нужно создать при `ADD_SYMBOL`.
 
 **Это сейчас, на мой взгляд, одна из самых важных частей всей архитектуры Deeptrading.** Потому что после этого и OsEngine-подобный Screener, и hot-add инструментов, и ML features, и live/replay parity начинают строиться поверх одного источника истины, а не каждый со своей свечной логикой.
+
+
+Да, **основная архитектура правильная**, но я бы сейчас остановил выполнение на одном месте и **обязательно уточнил модель таймфреймов**. Иначе есть риск построить хороший `IndicatorHub`, который потом придётся переделывать.
+
+Главный принцип:
+
+> **Индикатор всегда принадлежит конкретной паре `(instrument, timeframe)` и считается по свечам именно этого timeframe.**
+
+То есть не существует просто `RSI(SBER)`. Существуют:
+
+```text
+RSI(SBER, 1m, 14)
+RSI(SBER, 5m, 14)
+RSI(SBER, 10m, 14)
+RSI(SBER, 15m, 14)
+RSI(SBER, 1h, 14)
+```
+
+И это **разные индикаторы с разным состоянием**.
+
+---
+
+# Что я бы сейчас скорректировал
+
+В плане написано:
+
+> состояние `(figi, tf, name, params)`
+
+**Это правильно. Оставляем.**
+
+Но надо явно определить, откуда берётся `tf`.
+
+```text
+1m candles
+   ↓
+Resampler
+   ├── 5m
+   ├── 10m
+   ├── 15m
+   ├── 30m
+   └── 1h
+        ↓
+IndicatorHub
+   ├── RSI(5m)
+   ├── ATR(5m)
+   ├── EMA(5m)
+   │
+   ├── RSI(15m)
+   ├── ATR(15m)
+   ├── EMA(15m)
+   │
+   └── RSI(1h)
+```
+
+То есть **IndicatorHub не должен брать 1m и сам решать, как сделать 15m**.
+
+Это уже обязанность `Resampler/CandleHub`.
+
+---
+
+# Как я бы сделал архитектуру
+
+```text
+                    T-Invest
+                       │
+                       ▼
+                 raw 1m candles
+                       │
+                       ▼
+                 ┌───────────┐
+                 │ CandleHub │
+                 └─────┬─────┘
+                       │
+                 ┌─────▼─────┐
+                 │ Resampler │
+                 └─────┬─────┘
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+         1m           5m           15m
+          │            │            │
+          ▼            ▼            ▼
+     IndicatorHub IndicatorHub IndicatorHub
+          │            │            │
+          ▼            ▼            ▼
+       RSI/ATR/...  RSI/ATR/...  RSI/ATR/...
+```
+
+Фактически можно иметь **один IndicatorHub**, но внутри него состояние разделяется по:
+
+```python
+(figi, timeframe, indicator, params)
+```
+
+---
+
+# Очень важный момент: не все индикаторы надо считать на всех TF
+
+Вот здесь я бы **не разрешал текущему плану автоматически создать 30 индикаторов × каждый TF × каждый инструмент**.
+
+Например, если у нас:
+
+```text
+500 инструментов
+× 6 TF
+× 30 индикаторов
+```
+
+это:
+
+**90 000 состояний индикаторов.**
+
+В RAM это ещё не обязательно катастрофа, но вычислительно и архитектурно это уже бессмысленно, если стратегии используют 12 из них.
+
+Нужен **declarative indicator subscription/registry**.
+
+Например:
+
+```python
+indicator_config = {
+    "1m": [
+        "atr14",
+        "volume_sma20",
+    ],
+    "5m": [
+        "rsi14",
+        "atr14",
+        "ema20",
+        "ema50",
+        "macd",
+    ],
+    "15m": [
+        "rsi14",
+        "atr14",
+        "ema20",
+        "adx14",
+    ],
+    "1h": [
+        "ema50",
+        "ema200",
+        "adx14",
+    ],
+}
+```
+
+Тогда добавили инструмент:
+
+```text
+SBER
+```
+
+и CandleHub говорит:
+
+```text
+SBER 1m  → нужные индикаторы
+SBER 5m  → нужные индикаторы
+SBER 15m → нужные индикаторы
+SBER 1h  → нужные индикаторы
+```
+
+А не создаёт весь зоопарк.
+
+---
+
+# И ещё важнее — стратегия должна сама объявлять зависимости
+
+Я бы вообще сделал следующим этапом:
+
+```python
+Strategy:
+    requires = {
+        "5m": ["rsi14", "atr14", "ema20"],
+        "15m": ["ema50", "adx14"],
+        "1h": ["ema200"],
+    }
+```
+
+Тогда:
+
+```text
+Strategy
+   ↓
+Indicator requirements
+   ↓
+IndicatorHub
+   ↓
+CandleHub subscriptions
+```
+
+Это будет очень мощно.
+
+Например стратегия `MACD + RSI` требует:
+
+```text
+5m:
+    RSI14
+    MACD(9,29,12)
+    ATR14
+```
+
+А другая стратегия:
+
+```text
+15m:
+    EMA50
+    ADX14
+```
+
+И CandleHub автоматически знает, что для конкретного инструмента нужно поддерживать.
+
+---
+
+# Что считать на каком timeframe?
+
+Для Deeptrading я бы **не фиксировал сейчас один универсальный набор**.
+
+Сделал бы возможность:
+
+### 1m
+
+Микроструктура:
+
+```text
+ATR
+volume
+relative volume
+returns
+range
+wick/body
+```
+
+### 5m
+
+Основной trading TF:
+
+```text
+RSI
+ATR
+EMA
+MACD
+Bollinger
+VWAP
+volume
+Donchian
+```
+
+### 10m
+
+Тот же набор, если стратегия работает на 10m.
+
+### 15m
+
+Trend / regime:
+
+```text
+EMA
+ADX
+RSI
+ATR
+MACD
+Bollinger
+```
+
+### 1h
+
+Более медленный context:
+
+```text
+EMA20/50/200
+ADX
+ATR
+RSI
+trend
+volatility
+```
+
+Но это **не правило стратегии**. Это просто пример организации.
+
+---
+
+# А теперь про `preview / commit`
+
+Это тоже правильно, но я бы изменил контракт.
+
+Не:
+
+```python
+indicator.preview(forming)
+indicator.commit(closed)
+```
+
+для всех индикаторов автоматически.
+
+А:
+
+```text
+CandleHub
+    │
+    ├── CANDLE_FORMING
+    │       ↓
+    │    preview
+    │
+    └── CANDLE_CLOSED
+            ↓
+         commit
+```
+
+При этом **stateful state изменяется только через `commit()`**.
+
+Например:
+
+```text
+RSI internal avg_gain/avg_loss
+ATR rolling state
+EMA state
+MACD state
+```
+
+не должны изменяться от каждого forming update.
+
+Иначе мы опять можем получить ту же проблему, которую уже ловили в тестовом контуре.
+
+---
+
+# Warmup тоже должен зависеть от TF
+
+Вот это очень важно.
+
+Например:
+
+```text
+RSI(14) 5m
+```
+
+нужны минимум 14 закрытых 5m свечей.
+
+А:
+
+```text
+EMA(200) 1h
+```
+
+нужно минимум 200 закрытых часовых свечей.
+
+Поэтому:
+
+```python
+warmup(
+    figi,
+    timeframe,
+    required_indicators
+)
+```
+
+должен сам определить необходимое количество **закрытых свечей**.
+
+И если источник canonical = 1m:
+
+```text
+EMA200 / 1h
+        ↓
+200 × 60
+        ↓
+12 000 1m candles
+```
+
+примерно столько 1m истории нужно для прогрева.
+
+---
+
+# Ещё одна вещь, которую я бы добавил сейчас
+
+## `IndicatorDefinition`
+
+Не просто registry:
+
+```python
+"rsi"
+"atr"
+"ema"
+```
+
+а описание:
+
+```text
+IndicatorDefinition
+├── name
+├── category
+├── parameters
+├── timeframe
+├── warmup_period
+├── dependencies
+├── stateful
+├── supports_preview
+└── calculate/commit
+```
+
+Например:
+
+```text
+RSI
+├── period = 14
+├── warmup = 14+
+├── stateful = true
+├── preview = true
+└── input = close
+```
+
+Это потом сильно упростит ML/strategy dependency graph.
+
+---
+
+# И последнее: я бы НЕ делал сейчас весь список из 40+ индикаторов
+
+Вот это единственное, что меня в текущем плане немного напрягает.
+
+Сначала сделать **ядро**, которое реально используется Deeptrading:
+
+```text
+EMA
+SMA
+RSI
+ATR
+MACD
+Bollinger
+VWAP
+ADX
+Stochastic
+Donchian
+volume SMA
+relative volume
+returns
+rolling high/low
+range
+body/wicks
+```
+
+Проверить:
+
+```text
+1m → 5m → 10m → 15m → 1h
+             ↓
+        IndicatorHub
+             ↓
+        live/replay parity
+```
+
+И только потом добавлять HMA, CCI, Williams %R, OBV, Keltner и т.д.
+
+---
+
+## Я бы прямо сейчас дал worker'у такую корректировку
+
+Главное изменение:
+
+> **IndicatorHub не имеет фиксированного единого timeframe. Каждый indicator state является `(figi, timeframe, name, params)`. CandleHub/Resampler отвечает за формирование свечей каждого timeframe. IndicatorHub подписывается только на требуемые `(figi, timeframe)` и считает индикаторы только на закрытых свечах соответствующего timeframe. Не создавать весь набор индикаторов для каждого TF автоматически; использовать declarative registry/requirements. Warmup рассчитывать отдельно для каждого TF и индикатора. Forming candle допускается только через non-mutating preview, commit выполняется один раз на закрытии.**
+
+И ещё я бы добавил обязательный тест:
+
+```text
+SBER
+1m → RSI14
+5m → RSI14
+15m → RSI14
+```
+
+и проверить, что это **три независимых состояния**, а значения `RSI(5m)` получаются исключительно из последовательности закрытых 5m свечей, а не из прямого обновления RSI 1m.
+
+**Вот это я бы сделал обязательным acceptance test для IndicatorHub.**
