@@ -13,6 +13,10 @@ import os
 
 import pytest
 
+
+pytestmark = pytest.mark.artifact  # требует локальные research-артефакты backend/reports (см. аудит P0.4)
+
+
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORTS = os.path.join(BACKEND, "reports")
 

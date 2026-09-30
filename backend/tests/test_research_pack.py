@@ -10,6 +10,8 @@ import re
 
 import pytest
 
+pytestmark = pytest.mark.integration  # требует живых данных БД (свечи/MTM), см. аудит P0.4
+
 from app.services.research_pack import (
     SCHEMA_VERSION,
     build_research_pack,

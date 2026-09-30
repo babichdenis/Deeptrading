@@ -58,5 +58,6 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
       - name: Run tests
-        # Тесты, не требующие T-Invest API (эндпойнты мокаются/кэшируются).
-        run: pytest -q --tb=short -x
+        # Hermetic-контур: без research-артефактов backend/reports (маркер artifact)
+        # и без живых данных БД live-стенда (маркер integration).
+        run: pytest -q --tb=short -m "not artifact and not integration"

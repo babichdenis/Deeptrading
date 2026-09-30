@@ -495,10 +495,10 @@ class TestCatalog:
 
     def test_waves_and_timeframes(self):
         for card in STRATEGY_CATALOG.values():
-            assert card.wave in (1, 3, 4, 5), card.id
+            assert card.wave in (1, 3, 4, 5, 6), card.id
             assert isinstance(card.timeframes, tuple) and card.timeframes, card.id
             for tf in card.timeframes:
-                assert tf in ("1min", "5min", "15min", "hour", "day"), (card.id, tf)
+                assert tf in ("1min", "5min", "10min", "15min", "hour", "day"), (card.id, tf)
 
     def test_status_values(self):
         for card in STRATEGY_CATALOG.values():
