@@ -752,6 +752,253 @@ class EnvelopTrendHubStrategy:
 
 
 @dataclass(frozen=True)
+class WilliamsRangeHubParams:
+    wr_length: int = 14        # Period WilliamsRange
+    upline: float = -20.0      # Overbought (C# default)
+    downline: float = -80.0    # Oversold (C# default)
+
+
+class WilliamsRangeHubStrategy:
+    """Логика OsEngine WilliamsRangeTrade (CounterTrend) на каноническом %R.
+
+    %R = -100*(HH-C)/(HH-LL) за окно wr_length, round(2) — Scripts/WilliamsRange.cs
+    (в C# на прогреве 0, здесь None — семантика канона, как у rsi_trade_hub).
+    Вход — момент входа в зону (крест уровня): state-условие C#
+    (_lastWr < downline) спамило бы сигнал каждый бар, крест = первый бар в зоне:
+      %R пересёк downline сверху вниз → BUY; %R пересёк upline снизу вверх → SELL.
+    Выход/реверс разруливает SignalPolicy раннера (как rsi_trade_hub).
+    """
+    strategy_id = "williams_range_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: WilliamsRangeHubParams | None = None):
+        self.p = params or WilliamsRangeHubParams()
+
+    def reset(self) -> None:
+        self._prev_wr = None
+
+    def warmup_bars(self) -> int:
+        return int(self.p.wr_length) + 2
+
+    @staticmethod
+    def _wr_tail(candles: Sequence[Candle], length: int) -> float | None:
+        n = len(candles)
+        if length <= 0 or n < length:
+            return None
+        window = candles[n - length:]
+        hh = max(c.high for c in window)
+        ll = min(c.low for c in window)
+        if hh == ll:
+            return 0.0
+        return round(-100.0 * (hh - candles[-1].close) / (hh - ll), 2)
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        L = int(self.p.wr_length)
+        if len(candles) < L + 2:
+            return None
+        cur = self._wr_tail(candles, L)
+        prev = self._wr_tail(candles[:-1], L)
+        if cur is None or prev is None:
+            return None
+        self._prev_wr = cur
+        last = candles[-1]
+        if prev >= self.p.downline > cur:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=last.ts,
+                          reason="wr_enter_oversold", features={"wr": cur})
+        if prev <= self.p.upline < cur:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=last.ts,
+                          reason="wr_enter_overbought", features={"wr": cur})
+        return None
+
+
+@dataclass(frozen=True)
+class MomentumMacdHubParams:
+    momentum_length: int = 5   # Length Momentum, точка Close, ×100 (C# default)
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+
+
+def _hub_macd_incremental(owner, candles: Sequence[Candle],
+                          fast: int, slow: int, signal: int):
+    """Инкрементальный MACD по канону IndicatorHub._macd: state на owner,
+    добирает только новые бары; возврат (macd_line, signal_line) последнего
+    бара или (None, None), пока ряд не созрел (нужно slow+signal-1 баров)."""
+    state = getattr(owner, "_hub_macd_state", None)
+    n = len(candles)
+    if state is None or state["n"] > n or state["k"] != (fast, slow, signal):
+        state = {"n": 0, "k": (fast, slow, signal), "ef": None, "es": None,
+                 "vals": [], "sig": None, "macd_last": None}
+        owner._hub_macd_state = state
+    af, asl = 2.0 / (fast + 1), 2.0 / (slow + 1)
+    sg = 2.0 / (signal + 1)
+    for i in range(state["n"], n):
+        c = float(candles[i].close)
+        if i == fast - 1:
+            state["ef"] = sum(float(x.close) for x in candles[:fast]) / fast
+        elif i >= fast:
+            state["ef"] = c * af + state["ef"] * (1 - af)
+        if i == slow - 1:
+            state["es"] = sum(float(x.close) for x in candles[:slow]) / slow
+        elif i >= slow:
+            state["es"] = c * asl + state["es"] * (1 - asl)
+        if state["ef"] is not None and state["es"] is not None:
+            m = state["ef"] - state["es"]
+            vals = state["vals"]
+            vals.append(m)
+            if len(vals) > signal:
+                del vals[0]
+            if len(vals) == signal and state["sig"] is None:
+                state["sig"] = sum(vals) / signal
+            elif state["sig"] is not None:
+                state["sig"] = m * sg + state["sig"] * (1 - sg)
+            state["macd_last"] = m
+        state["n"] = i + 1
+    return state["macd_last"], state["sig"]
+
+
+class MomentumMacdHubStrategy:
+    """Логика OsEngine MomentumMacd (Trend) на канонических MACD и Momentum.
+
+    C#: Buy — MACD-линия > сигнальной И Momentum(Close, len) > 100;
+    Sell — зеркально. Условия state-овые → сигнал на переход условия
+    из False в True (иначе спам каждый бар).
+    Выход/реверс — SignalPolicy раннера (как rsi_trade_hub).
+    """
+    strategy_id = "momentum_macd_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: MomentumMacdHubParams | None = None):
+        self.p = params or MomentumMacdHubParams()
+        self.reset()
+
+    def reset(self) -> None:
+        self._hub_macd_state = None
+        self._prev_long = None
+        self._prev_short = None
+
+    def warmup_bars(self) -> int:
+        return max(int(self.p.macd_slow) + int(self.p.macd_signal) - 1,
+                   int(self.p.momentum_length) + 1) + 1
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        p = self.p
+        L = int(p.momentum_length)
+        if len(candles) < max(int(p.macd_slow), L + 1) + 1:
+            return None
+        macd, sig = _hub_macd_incremental(self, candles, int(p.macd_fast),
+                                          int(p.macd_slow), int(p.macd_signal))
+        if macd is None or sig is None:
+            return None
+        div = candles[-1 - L].close
+        mom = float(candles[-1].close) / float(div) * 100.0 if div else 0.0
+        long_now = macd > sig and mom > 100.0
+        short_now = macd < sig and mom < 100.0
+        was_long, was_short = self._prev_long, self._prev_short
+        self._prev_long, self._prev_short = long_now, short_now
+        last = candles[-1]
+        feat = {"mom": round(mom, 4), "macd": round(macd, 8), "signal": round(sig, 8)}
+        if long_now and not was_long:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=last.ts,
+                          reason="mom_macd_long", features=feat)
+        if short_now and not was_short:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=last.ts,
+                          reason="mom_macd_short", features=feat)
+        return None
+
+
+@dataclass(frozen=True)
+class ParabolicSarHubParams:
+    af: float = 0.02       # Parabolic Af (C# default)
+    max_af: float = 0.2    # Parabolic Max Af (C# default)
+
+
+def _psar_step(candles: Sequence[Candle], i: int, up: bool, ep: float, cur: float,
+               accel: float, af: float, max_af: float):
+    """Один шаг Wilder Parabolic SAR (канон _parabolic_sar в indicatorhub)."""
+    cur = cur + accel * (ep - cur)
+    if up:
+        lo1 = float(candles[i - 1].low)
+        cur = min(cur, lo1, float(candles[i - 2].low) if i >= 2 else lo1)
+        if cur > float(candles[i].low):
+            return False, float(candles[i].low), ep, af
+        if float(candles[i].high) > ep:
+            ep, accel = float(candles[i].high), min(accel + af, max_af)
+    else:
+        hi1 = float(candles[i - 1].high)
+        cur = max(cur, hi1, float(candles[i - 2].high) if i >= 2 else hi1)
+        if cur < float(candles[i].high):
+            return True, float(candles[i].high), ep, af
+        if float(candles[i].low) < ep:
+            ep, accel = float(candles[i].low), min(accel + af, max_af)
+    return up, ep, cur, accel
+
+
+def _hub_psar_trend(owner, candles: Sequence[Candle], af: float, max_af: float):
+    """Инкрементальный Parabolic SAR: state на owner, добирает новые бары.
+    Возврат (trend, sar) последнего закрытого бара или (None, None).
+    Реплей (len меньше обработанного) → полный пересчёт с нуля."""
+    state = getattr(owner, "_hub_psar_state", None)
+    n = len(candles)
+    if state is None or state["n"] > n or state["k"] != (af, max_af):
+        state = {"n": 1, "k": (af, max_af), "up": None, "ep": 0.0,
+                 "cur": 0.0, "accel": af}
+        owner._hub_psar_state = state
+    if n < 2:
+        return None, None
+    if state["up"] is None:
+        up = candles[1].close >= candles[0].close
+        state.update(up=up,
+                     ep=float(candles[0].high if up else candles[0].low),
+                     cur=float(candles[0].low if up else candles[0].high),
+                     accel=af, n=1)
+    for i in range(max(state["n"], 1), n):
+        up, ep, cur, accel = _psar_step(candles, i, state["up"], state["ep"],
+                                        state["cur"], state["accel"], af, max_af)
+        state.update(up=up, ep=ep, cur=cur, accel=accel, n=i + 1)
+    return (1.0 if state["up"] else -1.0), state["cur"]
+
+
+class ParabolicSarHubStrategy:
+    """Логика OsEngine ParabolicSarTrade (Trend) на каноническом SAR.
+
+    C#: Buy — цена > SAR, Sell — цена < SAR (state-условие) → сигнал на флип
+    тренда SAR (крест), иначе спам каждый бар.
+    Выход/реверс — SignalPolicy раннера (как rsi_trade_hub).
+    """
+    strategy_id = "parabolic_sar_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: ParabolicSarHubParams | None = None):
+        self.p = params or ParabolicSarHubParams()
+        self.reset()
+
+    def reset(self) -> None:
+        self._hub_psar_state = None
+        self._prev_trend = None
+
+    def warmup_bars(self) -> int:
+        return 3
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        trend, sar = _hub_psar_trend(self, candles,
+                                     float(self.p.af), float(self.p.max_af))
+        if trend is None:
+            return None
+        prev, self._prev_trend = self._prev_trend, trend
+        if prev is None:
+            return None
+        last = candles[-1]
+        if prev < 0 < trend:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=last.ts,
+                          reason="psar_flip_up", features={"sar": round(sar, 6)})
+        if prev > 0 > trend:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=last.ts,
+                          reason="psar_flip_down", features={"sar": round(sar, 6)})
+        return None
+
+
+@dataclass(frozen=True)
 class CanonEnsembleParams:
     members: str = "rsi_trade_hub"  # CSV strategy_id реестра (параметры — дефолтные)
     quorum: int = 1
@@ -837,6 +1084,9 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "rsi_trade_hub": RsiTradeHubStrategy,
     "rsi_mtf_hub": RsiMtfHubStrategy,
     "envelop_trend_hub": EnvelopTrendHubStrategy,
+    "williams_range_hub": WilliamsRangeHubStrategy,
+    "momentum_macd_hub": MomentumMacdHubStrategy,
+    "parabolic_sar_hub": ParabolicSarHubStrategy,
     "canon_ensemble": CanonEnsembleStrategy,
     "long_ensemble": LongEnsembleStrategy,
     "short_ensemble": ShortEnsembleStrategy,
@@ -872,6 +1122,9 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "rsi_trade_hub": RsiTradeHubParams,
     "rsi_mtf_hub": RsiMtfHubParams,
     "envelop_trend_hub": EnvelopTrendHubParams,
+    "williams_range_hub": WilliamsRangeHubParams,
+    "momentum_macd_hub": MomentumMacdHubParams,
+    "parabolic_sar_hub": ParabolicSarHubParams,
     "canon_ensemble": CanonEnsembleParams,
     "long_ensemble": LongEnsembleParams,
     "short_ensemble": ShortEnsembleParams,

@@ -441,6 +441,39 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "quorum": {"type": "int", "default": 1, "min": 1, "max": 9},
         },
     ),
+    "williams_range_hub": StrategyCard(
+        id="williams_range_hub", name="Williams %R Trade (hub-канон)", family="momentum", wave=6,
+        long_rule="%R пересёк downline (-80) сверху вниз (OsEngine WilliamsRangeTrade)",
+        short_rule="%R пересёк upline (-20) снизу вверх",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "wr_length": {"type": "int", "default": 14, "min": 2, "max": 100},
+            "upline": {"type": "float", "default": -20.0, "min": -50.0, "max": -5.0},
+            "downline": {"type": "float", "default": -80.0, "min": -95.0, "max": -50.0},
+        },
+    ),
+    "momentum_macd_hub": StrategyCard(
+        id="momentum_macd_hub", name="Momentum + MACD (hub-канон)", family="momentum", wave=6,
+        long_rule="MACD > signal и Momentum(Close, len) > 100 — переход условия в True",
+        short_rule="MACD < signal и Momentum < 100 — переход условия в True",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "momentum_length": {"type": "int", "default": 5, "min": 1, "max": 50},
+            "macd_fast": {"type": "int", "default": 12, "min": 2, "max": 50},
+            "macd_slow": {"type": "int", "default": 26, "min": 3, "max": 100},
+            "macd_signal": {"type": "int", "default": 9, "min": 1, "max": 50},
+        },
+    ),
+    "parabolic_sar_hub": StrategyCard(
+        id="parabolic_sar_hub", name="Parabolic SAR Trade (hub-канон)", family="trend", wave=6,
+        long_rule="SAR-тренд перевернулся вверх (цена выше SAR; OsEngine ParabolicSarTrade)",
+        short_rule="SAR-тренд перевернулся вниз (цена ниже SAR)",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "af": {"type": "float", "default": 0.02, "min": 0.01, "max": 0.1},
+            "max_af": {"type": "float", "default": 0.2, "min": 0.05, "max": 0.5},
+        },
+    ),
 }
 
 

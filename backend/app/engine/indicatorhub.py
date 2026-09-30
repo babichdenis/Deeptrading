@@ -498,6 +498,81 @@ def _vwap(candles: Sequence[Candle], length: int) -> list[Number]:
     return result
 
 
+def _williams_r(candles: Sequence[Candle], length: int) -> list[Number]:
+    """Williams %R (OSE Scripts/WilliamsRange.cs, дефолт 14).
+
+    -100 * (HH - C) / (HH - LL) за окно length, округление 2 знака.
+    Первый валидный индекс — length (в C# на прогреве 0, здесь None —
+    семантика канона проекта, как у rsi_trade_hub); HH == LL → 0.0.
+    """
+    n = len(candles)
+    result: list[Number] = [None] * n
+    if length <= 0 or n < length + 1:
+        return result
+    for i in range(length, n):
+        window = candles[i - length + 1 : i + 1]
+        hh = max(c.high for c in window)
+        ll = min(c.low for c in window)
+        if hh == ll:
+            result[i] = 0.0
+        else:
+            result[i] = round(-100.0 * (hh - candles[i].close) / (hh - ll), 2)
+    return result
+
+
+def _momentum(candles: Sequence[Candle], length: int) -> list[Number]:
+    """Momentum (OSE Scripts/Momentum.cs, дефолт 5, точка Close).
+
+    C / C[length назад] * 100; без округления (в C# его нет).
+    Первый валидный индекс — length; делитель 0 → 0.0 (как в C#).
+    """
+    n = len(candles)
+    result: list[Number] = [None] * n
+    if length <= 0 or n < length + 1:
+        return result
+    for i in range(length, n):
+        divider = candles[i - length].close
+        result[i] = candles[i].close / divider * 100.0 if divider != 0 else 0.0
+    return result
+
+
+def _parabolic_sar(candles: Sequence[Candle], af: float, max_af: float) -> Rows:
+    """Parabolic SAR (Wilder; OSE Scripts/ParabolicSAR.cs, Af 0.02 / MaxAf 0.2).
+
+    rows: sar — уровень стопа (round 6), trend — +1/-1 (направление).
+    Реверс: SAR = предыдущий EP; ускорение растёт на новых экстремумах,
+    кап на max_af; SAR не проходит через low/high двух предыдущих баров.
+    """
+    n = len(candles)
+    sar: list[Number] = [None] * n
+    trend_row: list[Number] = [None] * n
+    if n < 2 or af <= 0 or max_af < af:
+        return {"sar": sar, "trend": trend_row}
+    up = candles[1].close >= candles[0].close
+    ep = candles[0].high if up else candles[0].low
+    cur = candles[0].low if up else candles[0].high
+    accel = af
+    for i in range(1, n):
+        cur = cur + accel * (ep - cur)
+        if up:
+            lo1 = candles[i - 1].low
+            cur = min(cur, lo1, candles[i - 2].low if i >= 2 else lo1)
+            if cur > candles[i].low:
+                up, cur, ep, accel = False, ep, candles[i].low, af
+            elif candles[i].high > ep:
+                ep, accel = candles[i].high, min(accel + af, max_af)
+        else:
+            hi1 = candles[i - 1].high
+            cur = max(cur, hi1, candles[i - 2].high if i >= 2 else hi1)
+            if cur < candles[i].high:
+                up, cur, ep, accel = True, ep, candles[i].high, af
+            elif candles[i].low < ep:
+                ep, accel = candles[i].low, min(accel + af, max_af)
+        sar[i] = round(cur, 6)
+        trend_row[i] = 1.0 if up else -1.0
+    return {"sar": sar, "trend": trend_row}
+
+
 def _length(params: dict) -> int:
     return int(params["length"])
 
@@ -674,6 +749,31 @@ INDICATORS: dict[str, IndicatorDefinition] = {
         calculate=lambda c, p: {"value": _range(c)},
         warmup=lambda p: 1,
         stateful=False,
+    ),
+    "williams_r": IndicatorDefinition(
+        name="williams_r",
+        category="momentum",
+        parameters=(_spec("length", int, 14, minimum=1),),
+        calculate=lambda c, p: {"value": _williams_r(c, _length(p))},
+        warmup=lambda p: _length(p) + 1,
+    ),
+    "momentum": IndicatorDefinition(
+        name="momentum",
+        category="momentum",
+        parameters=(_spec("length", int, 5, minimum=1),),
+        calculate=lambda c, p: {"value": _momentum(c, _length(p))},
+        warmup=lambda p: _length(p) + 1,
+    ),
+    "parabolic_sar": IndicatorDefinition(
+        name="parabolic_sar",
+        category="trend",
+        parameters=(
+            _spec("af", float, 0.02, minimum=0.01),
+            _spec("max_af", float, 0.2, minimum=0.02),
+        ),
+        calculate=lambda c, p: _parabolic_sar(c, float(p["af"]), float(p["max_af"])),
+        warmup=lambda p: 2,
+        primary="sar",
     ),
 }
 

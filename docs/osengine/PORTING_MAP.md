@@ -106,12 +106,14 @@ FundBalanceDivergenceBot (индикатор FBD = внешние данные �
 в оригинале баг: stopPrice/profitPrice считаются от 0 — НЕ переносить,
 использовать activation-цены).
 
-### Волна C — Trend (8) + CounterTrend (2) — TODO
-BreakLinearRegressionChannel, MomentumMacd, ParabolicBollinger,
-ParabolicPriceChannel, ParabolicSarTrade, PriceChannelTrade,
-StrategyBillWilliams, TwoTimeFramesBot, ClusterCountertrend, WilliamsRangeTrade.
-Нужно: BuyAtStopCancel (есть), индикаторы parabolic, regression-канал,
-fractal, williams, momentum, stochastic — проверить/допортить.
+### Волна C — Trend (8) + CounterTrend (2) — 3/10 готово (hub-канон)
+- [x] MomentumMacd → `momentum_macd_hub` (strategies.py): MACD>signal И Momentum>100 — крест state-условия; зеркально SELL.
+- [x] ParabolicSarTrade → `parabolic_sar_hub` (strategies.py): флип SAR-тренда (Wilder, Af 0.02 / MaxAf 0.2).
+- [x] WilliamsRangeTrade → `williams_range_hub` (strategies.py): %R(14) крест downline -80 → BUY, крест upline -20 → SELL.
+Индикаторы IndicatorHub: williams_r, momentum, parabolic_sar; каталожные карточки wave=6.
+- [ ] BreakLinearRegressionChannel, ParabolicBollinger, ParabolicPriceChannel,
+PriceChannelTrade, StrategyBillWilliams, TwoTimeFramesBot, ClusterCountertrend — TODO.
+Нужно: regression-канал, fractal (BillWilliams); price_channel/bollinger/parabolic — есть.
 
 ### Волна D — Patterns (7) + Monitors (4) — TODO
 CandlePatternBoost, CustomCandlesImpulseTrader, PinBarTrade, PivotPointsRobot,
