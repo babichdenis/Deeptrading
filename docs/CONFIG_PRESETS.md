@@ -71,9 +71,9 @@
 ## Роадмап
 
 - [x] v1: схема, `tags`, `to-spec`, `replay` (+сайдкар, уникальные имена).
-- [ ] Применение `runtime`-блока одной кнопкой: расширить `/bot/mode` полем `preset`
-      (env `TEST_PRESET`) и whitelist-применение полей в `apply_test_overrides` (сессии,
-      overnight, деньги, SL/TP, гейты, bias/кворум) — сейчас payload несёт только
-      engine/interval/params, остальное живёт в сейве/envi.
-- [ ] `preset.py live` — выдача/применение live-настроек (отдельный осторожный этап).
+- [x] Применение `runtime`-блока: `/bot/mode` поле `preset` → env `TEST_PRESET` → whitelist в
+      `apply_test_overrides` (сессии/overnight/деньги/выходы/вход/гейты/режимы). Гейты — полный
+      список включённых (остальные выключаются); явные поля перекрывают гейты; `regimes:"all"`
+      не трогает. Тесты: `tests/test_test_preset.py`.
+      Не покрыто (следующее): bias-блок (живёт в `ensemble_config`) и live-применение.
 - [ ] Пре-флайт валидация пресета (схема + сверка с карточками каталога).

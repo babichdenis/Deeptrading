@@ -484,6 +484,68 @@ TEST_VARIANTS: dict = {
 }
 
 
+_PRESET_FIELD_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("sessions", ("sessions",)),
+    ("margin_sessions", ("margin_sessions",)),
+    ("overnight", ("overnight",)),
+    ("eod_close_min_before", ("eod_close_min_before",)),
+    ("initial_cash", ("money", "initial_cash")),
+    ("qty_per_trade", ("money", "qty_per_trade")),
+    ("pos_pct", ("money", "pos_pct")),
+    ("max_positions", ("money", "max_positions")),
+    ("max_exposure_pct", ("money", "max_exposure_pct")),
+    ("sl_mode", ("exits", "sl_mode")),
+    ("atr_period", ("exits", "atr_period")),
+    ("atr_multiplier", ("exits", "atr_multiplier")),
+    ("atr_risk_reward", ("exits", "atr_risk_reward")),
+    ("initial_sl_atr", ("exits", "initial_sl_atr")),
+    ("stop_pct", ("exits", "stop_pct")),
+    ("target_pct", ("exits", "target_pct")),
+    ("trail_activation_comm_mult", ("exits", "trail_activation_comm_mult")),
+    ("trail_distance_atr", ("exits", "trail_distance_atr")),
+    ("reentry_cooldown_bars", ("entry", "cooldown_bars")),
+    ("confirm_flip", ("entry", "confirm_flip")),
+    ("trade_regimes", ("regimes",)),
+)
+_MISS = object()
+
+
+def _runtime_preset_overrides(rt: dict) -> dict:
+    """runtime-блок пресета («ветки») -> оверрайды cfg (только whitelist).
+
+    Семантика: гейты задаются СПИСКОМ включённых (имена как в TEST_GATES_ON) —
+    всё остальное из TEST_GATES_OFF выключается; затем явные поля (деньги/выходы/
+    вход/режимы) перекрывают значения из гейтов. None у exits применяется как
+    «выключено» (напр. trail_activation_comm_mult: null). «regimes: all» — не трогаем.
+    """
+    out: dict = {}
+    entry = rt.get("entry")
+    if isinstance(entry, dict) and isinstance(entry.get("gates"), list):
+        out.update(TEST_GATES_OFF)
+        for g in entry["gates"]:
+            if g in TEST_GATES_ON:
+                out[g] = TEST_GATES_ON[g]
+    for field, path in _PRESET_FIELD_PATHS:
+        cur = rt
+        for k in path:
+            if not isinstance(cur, dict) or k not in cur:
+                cur = _MISS
+                break
+            cur = cur[k]
+        if cur is _MISS:
+            continue
+        if field == "trade_regimes":
+            if isinstance(cur, str) and cur.strip().lower() in ("all", "", "any"):
+                continue
+            if not isinstance(cur, (list, tuple)):
+                continue
+        if field in ("sessions", "margin_sessions"):
+            if not isinstance(cur, list) or not cur:
+                continue
+        out[field] = cur
+    return out
+
+
 def apply_test_overrides(cfg) -> list[str]:
     """Применить тестовые оверрайды (mode=test). Возвращает список применённых.
 
@@ -516,6 +578,20 @@ def apply_test_overrides(cfg) -> list[str]:
                 _src["params"] = _p
         except Exception as _tp_e:
             _audit_swallow('apply_test_overrides@test_params', _tp_e)
+    # Пресет («ветка») конфигурации: env TEST_PRESET='{"runtime": {...}}' — whitelist
+    # полей (сессии/overnight/деньги/выходы/вход/гейты/режимы), раньше живших в .env/сейве.
+    _tps = str(_os.environ.get("TEST_PRESET", "") or "").strip()
+    if _tps:
+        try:
+            import json as _json2
+            _pres = _json2.loads(_tps)
+            _rt = _pres.get("runtime") if isinstance(_pres, dict) else None
+            if isinstance(_rt, dict):
+                for _pk, _pv in _runtime_preset_overrides(_rt).items():
+                    _src[_pk] = _pv
+                applied.append("preset=runtime")
+        except Exception as _tpr_e:
+            _audit_swallow('apply_test_overrides@test_preset', _tpr_e)
     for _k, _v in _src.items():
         try:
             setattr(cfg, _k, _v)

@@ -922,6 +922,7 @@ class ModeRequest(BaseModel):
     test_engine: str = ""  # одиночный движок теста (mode=test): id из STRATEGY_REGISTRY (напр. ose_bollinger); пусто = ensemble_v4
     test_interval: str = ""  # TF теста (mode=test): 5min|10min|15min; пусто = 1min
     test_params: dict = Field(default_factory=dict)  # параметры движка теста, напр. {"quorum": 2}
+    preset: dict = Field(default_factory=dict)  # «ветка»-пресет: runtime-блок применится к cfg (env TEST_PRESET)
     replay_log_persist: bool = False  # писать логи теста в bot_logs
 
 
@@ -1053,6 +1054,11 @@ async def bot_set_mode(req: ModeRequest) -> dict:
         _os.environ["TEST_PARAMS"] = _pj.dumps(req.test_params, ensure_ascii=False)
     else:
         _os.environ.pop("TEST_PARAMS", None)
+    if getattr(req, "preset", None):
+        import json as _pj2
+        _os.environ["TEST_PRESET"] = _pj2.dumps(req.preset, ensure_ascii=False)
+    else:
+        _os.environ.pop("TEST_PRESET", None)
     _write_env_mode(mode, test_name=name, replay_start=req.replay_start.strip(),
                     replay_end=req.replay_end.strip(), replay_pace=pace,
                     replay_log_persist=bool(req.replay_log_persist))

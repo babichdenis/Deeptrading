@@ -108,6 +108,7 @@ def replay_payload(p: dict) -> tuple[dict, str]:
         "test_engine": engine,
         "test_interval": interval,
         "test_params": params,
+        "preset": p,  # runtime-блок применится в apply_test_overrides (TEST_PRESET)
     }
     return payload, test_name
 
