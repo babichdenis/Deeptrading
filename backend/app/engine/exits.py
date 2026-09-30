@@ -48,6 +48,7 @@ class AtrTrailingPolicy(ExitPolicy):
         bars: Sequence[Candle],
         qty: int | None = None,
         commission: float | None = None,
+        peak_price: float | None = None,
     ) -> float | None:
         if len(bars) < 3:
             return current_stop
@@ -57,13 +58,13 @@ class AtrTrailingPolicy(ExitPolicy):
         if not cur_atr:
             return current_stop
         if side is Side.BUY:
-            highest = max(b.high for b in window)
+            highest = float(peak_price) if peak_price is not None else max(b.high for b in window)
             move = highest - entry_price
             if move < self.activation_atr * cur_atr:
                 return current_stop
             candidate = highest - self.trail_distance_atr * cur_atr
             return max(current_stop or candidate, candidate)
-        lowest = min(b.low for b in window)
+        lowest = float(peak_price) if peak_price is not None else min(b.low for b in window)
         move = entry_price - lowest
         if move < self.activation_atr * cur_atr:
             return current_stop

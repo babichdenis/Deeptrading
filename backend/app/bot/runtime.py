@@ -6196,6 +6196,7 @@ class PaperBotRuntime:
                         _tpol = _dc_replace(policy, trail_activation_comm_mult=_ti_cfg)
                     _tact = getattr(_tpol, "trailing_activated", None)
                     _tupd = getattr(_tpol, "update_stop", None)
+                    _born_this_bar = False
                     if not _ti.get("active"):
                         # Этап активации: как бы включился трейлинг (info).
                         try:
@@ -6205,6 +6206,7 @@ class PaperBotRuntime:
                             if _activated:
                                 _ti["active"] = True
                                 _ti["act_track"] = self._trail_stop.get(figi)
+                                _born_this_bar = True
                                 self._log(f"ИНФО-ТРЕЙЛ ВКЛ. {figi[-6:]} pnl>=комиссия×{_ti_cfg}")
                         except Exception as _tie:
                             self._log(f"инфо-трейл activate error {figi[-6:]}: {_tie}")
@@ -6212,6 +6214,19 @@ class PaperBotRuntime:
                     if _ti.get("active") and _tupd is not None:
                         try:
                             _prev = _ti.get("act_track")
+                            # Срабатывание — по стопу, действовавшему НА НАЧАЛО бара
+                            # (и не проверяем на баре рождения стопа): стоп, созданный
+                            # в этом баре, не мог быть «пробит гэпом» его же открытия
+                            # (баг YDEX 11.09.2026: open 3806 ≥ стоп 3782.97 → −0₽).
+                            if (_prev is not None and not _born_this_bar
+                                    and not _ti.get("hit_ts")):
+                                _ti_price, _ti_reason = _ibe(c, state, float(_prev), None, close_based=True)
+                                if _ti_price is not None:
+                                    _ti["hit_ts"] = c.ts.isoformat()
+                                    _ti["hit_price"] = float(_ti_price)
+                                    _ti["hit_reason"] = _ti_reason or "TRAIL"
+                                    self._log(f"ИНФО-ТРЕЙЛ СРАБОТАЛ БЫ {figi[-6:]} цена={_ti_price:.2f} "
+                                              f"({_ti_reason}) стоп={_prev:.2f} текущий_стоп={stop if stop is not None else '-'}")
                             _pk_i = None
                             try:
                                 _pk_i = float((self._peak_pnl.get(figi) or {}).get("price")) or None
@@ -6247,21 +6262,12 @@ class PaperBotRuntime:
         price, reason = _ibe(c, state, stop, tp, close_based=bool(trail_active))
         if price is None:
             return False
-        # Выход «по лучшей»: внутри минуты порядок движения цены неизвестен.
-        # Если на баре выхода цена доходила до лучшего уровня (high для LONG,
-        # low для SHORT), считаем выход по нему — а не по стопу/закрытию бара.
+        # Выход — строго по цене intrabar_exit (стоп/гэп/close/target), БЕЗ подмены
+        # на «лучшую» цену бара. Прежнее правило («выход по лучшей») превращало
+        # реальные стоп-убытки в прибыли, если бар задевал и хороший экстремум:
+        # YDEX 11.09.2026 — SHORT-стоп 3843.29 дал бы −74.6₽, а был записан выход
+        # по low бара 3758.75 → +86.20₽ (владелец заметил «SL с плюсом»).
         _exit_best = False
-        try:
-            _rl = str(reason or "").lower()
-            if _rl and ("stop" in _rl or "trail" in _rl):
-                _best_px = float(c.high) if state == PositionState.LONG else float(c.low)
-                if ((state == PositionState.LONG and _best_px > float(price))
-                        or (state == PositionState.SHORT and _best_px < float(price))):
-                    price = _best_px
-                    _exit_best = True
-        except Exception as _bp_e:
-            _audit_swallow('_step_exit@best_px', _bp_e)  # audit silent-except
-            pass
         # Захватываем флаг трейлинга ДО _clear_exit_state (иначе диагностика врёт).
         _was_trail = bool(trail_active or self._trail_active.get(figi, False))
         # Проскальзывание на выходе (adverse), как в бэктесте (fill_price).
