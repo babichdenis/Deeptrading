@@ -1,0 +1,29 @@
+{
+  "preset": {
+    "id": "ref-001b-runtime",
+    "name": "REF-001b — engine↔runtime parity (SBER 10m, signal-only)",
+    "created": "2026-09-30",
+    "notes": "Сверка контуров: тот же сценарий, что REF-001 (EngineRunner), прогоняется проектным replay. Гейты выключены, сессии все, overnight держим, стопы ~бесконечные (1000×ATR) — эмуляция signal-only."
+  },
+  "harness": {
+    "robots": [{"robot": "rsi_trade_hub", "params": {}}],
+    "timeframe": "10min",
+    "universe": ["SBER"],
+    "period": ["2026-09-01", "2026-09-08"],
+    "costs": {"commission": 0.0005, "slippage_bps": 2.0, "qty": 1, "capital": 100000},
+    "exits": ["x07"],
+    "filters": {"min_trades": 0, "min_net_pnl": -1000000000},
+    "wf": {}
+  },
+  "runtime": {
+    "sessions": ["morning", "day", "evening"],
+    "overnight": true,
+    "money": {"initial_cash": 100000, "qty_per_trade": 1, "pos_pct": 0.4, "max_positions": 5},
+    "exits": {"sl_mode": "atr", "atr_period": 14, "atr_multiplier": 1000.0, "initial_sl_atr": 1000.0,
+              "trail_activation_comm_mult": null},
+    "entry": {"gates": [], "cooldown_bars": 0, "confirm_flip": 0, "last_hour_block": false},
+    "bias": {"enabled": false},
+    "regimes": "all"
+  },
+  "targets": {"replay": {"engine": "rsi_trade_hub", "interval": "10min", "pace": "fast"}}
+}
