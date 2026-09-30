@@ -59,7 +59,19 @@
 2. [ ] Зафиксировать канон явно (доки + пометки LEGACY/ADAPTER в шапках модулей).
 3. [x] **REF-001 — Reference Run**: `configs/reference/REF-001.json` +
    `scripts/reference_run.py --write/--check` + `tests/test_reference_run.py`.
-   Дальше: прогнать тот же сценарий через Replay/Runtime и сверить ledger.
+   **REF-001b (сверка EngineRunner ↔ Runtime replay) — вскрыто и зафиксировано:**
+   - **НАЙДЕНО (крупное):** харнесс строил ТФ через `candlehub.build_tf` (метка бара по
+     ЗАКРЫТИЮ бакета, `bucket_close`), а replay/live — через `marketdata.Resampler` (метка по
+     НАЧАЛУ бакета): у границ сессий ряды расходились **203/203**. ФИКС:
+     `ose_exit_matrix._bars_tf_canonical` — харнесс переведён на канонический Resampler;
+     REF-001 перебазирован (fingerprint `8a703fe9…`, 4 сделки). Внимание: все харнесс-цифры
+     до 30.09 считались на старой сетке (кэш переразметится по data_hash сам).
+   - **ОСТАЛОСЬ (следующие шаги REF-001b):** (а) **прогрев** — runtime прогревает стратегию
+     историей до окна, движок стартует холодным: сигналы контуров сходятся начиная с 20:00
+     09-01 (флип-бар совпал в цене); нужна явная warmup-политика в REF-спеке; (б) семантика
+     после выхода — бот после signal_exit на противоположном сигнале не открыл обратную
+     позицию (сверить flip/entry-after-exit с EngineRunner); (в) прочие research-скрипты
+     (labeling/calibrate/trades_split) всё ещё на `build_tf` — выровнять на канон.
 4. [ ] Regime convergence: потребители `regime_strategies` → канонический RegimeDetector
    (адаптер на переходный период).
 5. [ ] StrategyCatalog: единый каталог (id/family/version/warmup/params/signal semantics/

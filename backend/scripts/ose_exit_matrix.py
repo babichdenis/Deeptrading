@@ -240,6 +240,45 @@ def _resolve_figis(eng, args) -> list[tuple[str, str]]:
         return [(f, tk.get(f) or f[-6:]) for f in figis]
 
 
+class _RBar:
+    """Мини-бар для канонического Resampler (ему нужен атрибут figi)."""
+    __slots__ = ("figi", "ts", "open", "high", "low", "close", "volume")
+
+    def __init__(self, figi=None, ts=None, open=None, high=None, low=None, close=None,
+                 volume=None, **_kw):
+        self.figi = figi
+        self.ts = ts
+        self.open = open
+        self.high = high
+        self.low = low
+        self.close = close
+        self.volume = volume
+
+
+def _bars_tf_canonical(raw: list[Candle], tf_s: int) -> list[Candle]:
+    """Старший ТФ через КАНОНИЧЕСКИЙ Resampler (та же семантика, что ReplayFeed/live).
+
+    REF-001b: раньше здесь был candlehub.build_tf (сетка с меткой по ЗАКРЫТИЮ бакета) —
+    расходилось с Resampler (метка по НАЧАЛУ бакета) у границ сессий: харнесс и replay
+    торговали разные бары. Теперь единая агрегация у обоих контуров.
+    """
+    from app.marketdata.resampler import Resampler
+
+    inv = {300: "5min", 600: "10min", 900: "15min", 1800: "30min", 3600: "hour"}
+    rs = Resampler(inv[tf_s])
+    out: list[Candle] = []
+    for b in raw:
+        o = rs.feed(_RBar(figi="x", ts=b.ts, open=b.open, high=b.high, low=b.low,
+                          close=b.close, volume=b.volume or 0))
+        if o is not None:
+            out.append(Candle(ts=o.ts, open=o.open, high=o.high, low=o.low,
+                              close=o.close, volume=o.volume or 0))
+    for o in (rs.flush() or []):
+        out.append(Candle(ts=o.ts, open=o.open, high=o.high, low=o.low,
+                          close=o.close, volume=o.volume or 0))
+    return out
+
+
 def _load_tf_cached(figi: str, dfrom: str, dto: str, tf_s: int):
     """Свечи целевого TF для фиги (кэш на процесс-воркер: одна загрузка на фигу)."""
     key = (figi, dfrom, dto, tf_s)
@@ -248,7 +287,7 @@ def _load_tf_cached(figi: str, dfrom: str, dto: str, tf_s: int):
         return got
     eng = _engine_sync()
     raw = _load_1m(eng, figi, f"{dfrom} 00:00:00+00", f"{dto} 23:59:59+00")
-    bars = build_tf(raw, tf_s) if tf_s != 60 else raw
+    bars = _bars_tf_canonical(raw, tf_s) if tf_s != 60 else raw
     _CANDLE_CACHE[key] = (len(raw), bars)
     return _CANDLE_CACHE[key]
 
