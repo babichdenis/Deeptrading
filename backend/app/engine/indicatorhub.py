@@ -208,6 +208,25 @@ def _atr(candles: Sequence[Candle], length: int) -> list[Number]:
     return result
 
 
+def _efficiency_ratio(candles: Sequence[Candle], length: int) -> list[Number]:
+    """EfficiencyRatio Кауфмана: |C[t]-C[t-n]| / Σ|ΔC| за n шагов (0..1).
+
+    «Прямота» движения: низкое = шум/боковик, высокое = устойчивый тренд.
+    Плоский ряд (знаменатель 0) → 0.0. Первый валидный индекс — i = length.
+    """
+    n = len(candles)
+    result: list[Number] = [None] * n
+    if length <= 0 or n < length + 1:
+        return result
+    for i in range(length, n):
+        change = abs(candles[i].close - candles[i - length].close)
+        volatility = 0.0
+        for j in range(i - length + 1, i + 1):
+            volatility += abs(candles[j].close - candles[j - 1].close)
+        result[i] = (change / volatility) if volatility > 0 else 0.0
+    return result
+
+
 def _rsi(candles: Sequence[Candle], length: int) -> list[Number]:
     n = len(candles)
     result: list[Number] = [None] * n
@@ -532,6 +551,13 @@ INDICATORS: dict[str, IndicatorDefinition] = {
         category="momentum",
         parameters=(_spec("length", int, 14, minimum=1),),
         calculate=lambda c, p: {"value": _rsi(c, _length(p))},
+        warmup=lambda p: _length(p) + 1,
+    ),
+    "efficiency_ratio": IndicatorDefinition(
+        name="efficiency_ratio",
+        category="trend",
+        parameters=(_spec("length", int, 10, minimum=1),),
+        calculate=lambda c, p: {"value": _efficiency_ratio(c, _length(p))},
         warmup=lambda p: _length(p) + 1,
     ),
     "stochastic": IndicatorDefinition(
