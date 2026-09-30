@@ -403,6 +403,20 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "downline": {"type": "float", "default": 35.0, "min": 5.0, "max": 50.0},
         },
     ),
+    "rsi_mtf_hub": StrategyCard(
+        id="rsi_mtf_hub", name="RSI MTF (1h режим → 10m вход)", family="momentum", wave=5,
+        long_rule="RSI_h ≥ 50+gap и RSI_10m пересёк downline снизу вверх",
+        short_rule="RSI_h ≤ 50−gap и RSI_10m пересёк upline сверху вниз",
+        timeframes=("10min", "15min"), status="AVAILABLE",
+        params_schema={
+            "rsi_length": {"type": "int", "default": 20, "min": 5, "max": 100},
+            "upline": {"type": "float", "default": 65.0, "min": 50.0, "max": 95.0},
+            "downline": {"type": "float", "default": 35.0, "min": 5.0, "max": 50.0},
+            "bias_length": {"type": "int", "default": 20, "min": 5, "max": 100},
+            "bias_tf_min": {"type": "int", "default": 60, "min": 10, "max": 240},
+            "bias_gap": {"type": "float", "default": 2.0, "min": 0.0, "max": 20.0},
+        },
+    ),
     "envelop_trend_hub": StrategyCard(
         id="envelop_trend_hub", name="Envelop Trend (hub-канон)", family="trend", wave=5,
         long_rule="касание верхнего конверта (канон IndicatorHub) + трейлинг",

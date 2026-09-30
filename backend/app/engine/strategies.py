@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Sequence
 
 from app.engine.models import Candle, Signal, Side
@@ -595,6 +596,90 @@ class RsiTradeHubStrategy:
 
 
 @dataclass(frozen=True)
+class RsiMtfHubParams:
+    rsi_length: int = 20       # RSI на ТФ входа
+    upline: float = 65.0
+    downline: float = 35.0
+    bias_length: int = 20      # RSI старшего ТФ (детектор режима/направления)
+    bias_tf_min: int = 60      # старший ТФ в минутах (1h)
+    bias_gap: float = 2.0      # мёртвая зона вокруг 50
+
+
+class _RsiStateShim:
+    """Носитель отдельного RSI-стейта для _hub_rsi_incremental (второй RSI)."""
+
+
+class RsiMtfHubStrategy:
+    """RsiTrade + старший ТФ: RSI(1h) — детектор направления, входы 10m по нему.
+
+    Bias считается по ЗАКРЫТЫМ старшим барам (агрегируются из бара входа,
+    границы бакетов по эпохе — как Resampler; look-ahead нет):
+      RSI_h > 50+gap → разрешены только LONG-кресты 10m;
+      RSI_h < 50−gap → только SHORT-кресты;
+      мёртвая зона   → входов нет.
+    Выход/реверс разруливает SignalPolicy раннера (как rsi_trade_hub).
+    """
+    strategy_id = "rsi_mtf_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: RsiMtfHubParams | None = None):
+        self.p = params or RsiMtfHubParams()
+        self.reset()
+
+    def reset(self) -> None:
+        self._hub_rsi_state = None
+        self._bias_owner = _RsiStateShim()
+        self._bias_bars: list[Candle] = []
+        self._bkt_ts = None
+        self._bkt = None  # {"o","h","l","c","v"} текущего (незакрытого) старшего бакета
+
+    def warmup_bars(self) -> int:
+        per = max(1, int(self.p.bias_tf_min) // 10)
+        return (int(self.p.bias_length) + 2) * per + int(self.p.rsi_length) + 2
+
+    def _close_bucket(self) -> None:
+        if self._bkt is not None and self._bkt_ts is not None:
+            self._bias_bars.append(Candle(
+                ts=self._bkt_ts, open=self._bkt["o"], high=self._bkt["h"],
+                low=self._bkt["l"], close=self._bkt["c"], volume=self._bkt["v"]))
+        self._bkt = None
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        last = candles[-1]
+        bmin = max(1, int(self.p.bias_tf_min))
+        ep = int(last.ts.timestamp()) // 60
+        b0 = (ep // bmin) * bmin
+        b0_ts = datetime.fromtimestamp(b0 * 60, tz=last.ts.tzinfo or timezone.utc)
+        if self._bkt_ts is None or b0_ts != self._bkt_ts:
+            self._close_bucket()
+            self._bkt_ts = b0_ts
+            self._bkt = {"o": last.open, "h": last.high, "l": last.low,
+                         "c": last.close, "v": float(last.volume or 0)}
+        else:
+            self._bkt["h"] = max(self._bkt["h"], last.high)
+            self._bkt["l"] = min(self._bkt["l"], last.low)
+            self._bkt["c"] = last.close
+            self._bkt["v"] += float(last.volume or 0)
+        bias = None
+        if len(self._bias_bars) >= int(self.p.bias_length) + 1:
+            rb = _hub_rsi_incremental(self._bias_owner, self._bias_bars, int(self.p.bias_length))
+            bias = rb[-1] if rb else None
+        r = _hub_rsi_incremental(self, candles, int(self.p.rsi_length))
+        if len(r) < 2 or r[-1] is None or r[-2] is None or bias is None:
+            return None
+        prev, cur = r[-2], r[-1]
+        long_ok = bias >= 50.0 + float(self.p.bias_gap)
+        short_ok = bias <= 50.0 - float(self.p.bias_gap)
+        if prev < self.p.downline < cur and long_ok:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=last.ts,
+                          reason="rsi_mtf_up", features={"rsi": round(cur, 2), "bias": round(bias, 2)})
+        if prev > self.p.upline > cur and short_ok:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=last.ts,
+                          reason="rsi_mtf_dn", features={"rsi": round(cur, 2), "bias": round(bias, 2)})
+        return None
+
+
+@dataclass(frozen=True)
 class EnvelopTrendHubParams:
     length: int = 10
     deviation: float = 0.3
@@ -750,6 +835,7 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "trend_down": TrendDownStrategy,
     "range_reversion": RangeReversionStrategy,
     "rsi_trade_hub": RsiTradeHubStrategy,
+    "rsi_mtf_hub": RsiMtfHubStrategy,
     "envelop_trend_hub": EnvelopTrendHubStrategy,
     "canon_ensemble": CanonEnsembleStrategy,
     "long_ensemble": LongEnsembleStrategy,
@@ -784,6 +870,7 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "trend_down": TrendDownParams,
     "range_reversion": RangeReversionParams,
     "rsi_trade_hub": RsiTradeHubParams,
+    "rsi_mtf_hub": RsiMtfHubParams,
     "envelop_trend_hub": EnvelopTrendHubParams,
     "canon_ensemble": CanonEnsembleParams,
     "long_ensemble": LongEnsembleParams,
