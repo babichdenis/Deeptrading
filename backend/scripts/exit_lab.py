@@ -85,6 +85,9 @@ def parse_args():
     p.add_argument("--slippage-bps", type=float, default=2.0)
     p.add_argument("--qty", type=int, default=1)
     p.add_argument("--capital", type=float, default=100000.0)
+    p.add_argument("--artifacts", action="store_true",
+                   help="писать trades_detail (для срезов по сессиям/режимам через trades_split)")
+    p.add_argument("--only", default="", help="имена выходов через запятую (пусто = вся сетка)")
     p.add_argument("--out", default="")
     return p.parse_args()
 
@@ -97,6 +100,9 @@ def main() -> int:
         code = f"el_{name}"
         oem.EXITS[code] = (label, factory)
         codes.append(code)
+    only = {c.strip() for c in a.only.split(",") if c.strip()}
+    if only:
+        codes = [c for c in codes if c[3:] in only]
     tickers = [t.strip().upper() for t in a.tickers.split(",") if t.strip()]
     eng = create_engine(get_settings().database_url.replace("+asyncpg", ""), pool_pre_ping=True)
     with eng.connect() as c:
@@ -111,7 +117,7 @@ def main() -> int:
             tasks.append({
                 "sid": a.robot, "xc": code, "figi": f, "ticker": tk,
                 "params": None, "robot_kwargs": None,
-                "label": f"{a.robot}@{code}", "artifacts": False, "cache": True, "code_sha": "",
+                "label": f"{a.robot}@{code}", "artifacts": bool(a.artifacts), "cache": True, "code_sha": "",
                 "dfrom": a.dfrom, "dto": a.dto, "tf_s": tf_s,
                 "qty": a.qty, "commission": a.commission,
                 "slippage_bps": a.slippage_bps, "capital": a.capital,

@@ -674,3 +674,45 @@ Warehouse(конструктор) → Lab(валидатор пула) → Бо�
   2 свечей, все 7 голосов + SL/TP + volume, сессии утро/день/вечер, режимы отдельно,
   20 акций × 10k с накоплением); июньский прогон эталона — повторить с большим
   таймаутом.
+
+
+## Вкладка Analytics — прогоны из reports/ — 2026-09-30 ✅
+
+- ✅ Таблицы `report_runs/report_rows/report_trades/report_slices` (`app/models/reports.py`),
+  создаются `Base.metadata.create_all` в lifespan; `experiments`/`experiment_trades`/
+  `sandbox_trades` не тронуты (это отдельный контур).
+- ✅ `app/services/report_slices.py` — ядро срезов (сессия МСК, режим ADX, ER, час, weekday,
+  тикер). Переиспользуется `scripts/trades_split.py`, импортёром и API — один источник правды.
+  `ordered_buckets` для фиксированных измерений отдаёт ВЕСЬ канонический набор бакетов,
+  чтобы у разных роботов колонки не разъезжались («пусто» ≠ «нет в выдаче»).
+- ✅ `scripts/import_reports.py` — kinds real/wf/matrix/exp, идемпотентность по sha256
+  (`content_hash`), `--force/--dry-run/--no-enrich`; обогащение сделок: сессия, ADX-режим,
+  ER входа, SL/TP из `EXITS` политик прогона (`ose_exit_matrix.py`), MAE/MFE в ATR по свечам.
+  `--force` снимает детей вручную: у SQLite `PRAGMA foreign_keys=OFF` → каскад не работает.
+  Импорт: **70 файлов → 70 прогонов, 2369 строк, 39770 сделок, 3554 среза** (20.7с),
+  повторный запуск — «новых 0, пропущено 70».
+- ✅ API `app/api/routes/analysis_reports.py` → `/api/v1/analysis/…`:
+  `reports`, `reports/{id}`, `reports/{id}/slices?dim=`, `reports/{id}/trades`,
+  `market/leaders?window=`. Зарегистрирован в `main.py`; конфликта путей с
+  старым `/api/analysis/{figi}` нет. В ответах на первый план вынесены количество сделок
+  и gross W/L **в штуках и рублях** (методология владельца), не net.
+- ✅ UI: в «Анализе» две подвкладки — «Живая» (прежнее поведение) и «Прогоны (reports/)»:
+  список прогонов слева (вид + поиск), заголовок прогона со сводкой, вкладки
+  «Роботы» (сортировка по сделкам, НЕ по net по умолчанию), «Срезы» (6 измерений × робот,
+  подсветка лучшего по net бакета при ≥3 сделках), «Сделки» (фильтры, карточки
+  min/max SL/TP, MAE/MFE,WR/PF/Exp, пагинация по 200), «Рынок» (лидеры/аутсайдеры
+  день/неделя/месяц). Изменены `frontend/index.html`, `frontend/src/style.css`,
+  `frontend/src/main.ts`.
+  ⚠️ **править надо `frontend/index.html`** — `frontend/src/index.html` это несервируемая
+  копия (vite отдаёт корневой `index.html`), правки в неё в UI не попадают.
+- ✅ Проверено: 25 новых pytest (`backend/tests/test_report_analytics.py`, sqlite+aiosqlite);
+  весь suite **886 passed / 5 failed** — эти 5 падали и до правок (пустая локальная БД .7
+  для `test_research_pack`, «10min» не входит в список ТФ каталога OSE для
+  `test_engine_units`); ruff по новым файлам чисто (остались только штатные B008);
+  `tsc -b` и `vite build` зелёные; ручной прогон в headless Chrome (CDP): 70 прогонов,
+  приёмочный `bt_ose_real_20260930_0145` (run #15) открывается, роботы/срезы/сделки
+  считаются, «Живая» панель не сломана, возврат между подвкладками работает.
+- ⚠️ SL/TP, ADX/ER и панель «Рынок» на машине .7 пустые: локальная БД без свечей
+  (`instruments`/`candles` = 0 строк), `192.168.1.2:5432` сейчас недоступен.
+  На живой БД обогащение заполняется — логика подтверждена тестами на синтетических свечах.
+  Запуск для просмотра: `uvicorn app.main:app :8000` (backend) + `npx vite --port 5174` (фронт).
