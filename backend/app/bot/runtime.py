@@ -4824,7 +4824,7 @@ class PaperBotRuntime:
         _now_end = c.ts + timedelta(seconds=STEP_SEC.get(self.config.interval_name, 300))
         if (not _closed and figi not in self._swing
                 and _should_force_close(_now_end, self.config.sessions, self.config.overnight)):
-            if self._sessions_allowed(c.ts, self.config.sessions):
+            if _sessions_allowed(c.ts, self.config.sessions):
                 trade = await self.broker.close_position(figi, float(c.close), "overnight_force_close")
                 self._held.discard(figi)
                 self._opposite_count.pop(figi, None)
