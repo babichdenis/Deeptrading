@@ -4815,12 +4815,17 @@ class PaperBotRuntime:
         # overnight=True  = держать позиции через ночь (не закрывать)
         # overnight=False = закрывать на конец торгового дня, но клиринг day→evening
         #                   и активные сессии всегда выдерживаются
-        # ВАЖНО: решаем по ТЕКУЩЕМУ времени (бот-нау), а не по ts свечи: при рестарте
-        # стрим отдаёт бэклог (ночные свечи) и позиции ложно закрывались как overnight.
+        # Решаем по КОНЦУ бара (ts + шаг TF): последний вечерний бар (23:00–24:00 МСК)
+        # закрывает позиции по цене закрытия часа (~23:50 МСК) — как live закрывает
+        # на EOD-окне. По началу бара окно 23:40–23:50 не ловится: часовые бары
+        # прыгают 23:00 → 07:00 следующего дня, и позиции уходили через ночь.
+        # Рестарт-защита: бэклоговые ночные свечи не должны ложно закрывать —
+        # поэтому закрываем, только если начало бара ещё в разрешённой сессии.
+        _now_end = c.ts + timedelta(seconds=STEP_SEC.get(self.config.interval_name, 300))
         if (not _closed and figi not in self._swing
-                and _should_force_close(self._bot_now(), self.config.sessions, self.config.overnight)):
-            if self._in_trading_session():
-                trade = await self.broker.close_position(figi, float(c.open), "overnight_force_close")
+                and _should_force_close(_now_end, self.config.sessions, self.config.overnight)):
+            if self._sessions_allowed(c.ts, self.config.sessions):
+                trade = await self.broker.close_position(figi, float(c.close), "overnight_force_close")
                 self._held.discard(figi)
                 self._opposite_count.pop(figi, None)
                 self._last_exit_bar[figi] = self._bar_counter
