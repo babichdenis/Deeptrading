@@ -1,0 +1,32 @@
+{
+  "id": "REF-001",
+  "name": "canonical engine · rsi_trade_hub 10m SBER · signal-only exits",
+  "dataset": {
+    "source": "db",
+    "ticker": "SBER",
+    "interval": "10min",
+    "period": [
+      "2026-09-01",
+      "2026-09-08"
+    ]
+  },
+  "strategy": {
+    "engine": "rsi_trade_hub",
+    "params": {}
+  },
+  "exit": {
+    "policy": "signal_only"
+  },
+  "execution": {
+    "qty": 1,
+    "commission": 0.0005,
+    "slippage_bps": 2.0
+  },
+  "expected": {
+    "data_hash": "03257cbd7b85e79e",
+    "bars": 836,
+    "trades": 5,
+    "net": 0.9616,
+    "fingerprint": "91fbeed83698ae43af2030d29bc752925a53b5c1d23fd14baa2038c1e072f9dc"
+  }
+}
