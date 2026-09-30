@@ -326,6 +326,8 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "sma_stoch_step_pct": {"type": "float", "default": 1.0, "min": 0.0, "max": 10.0},
             "members": {"type": "str", "default": "",
                         "desc": "CSV роботов (пусто = все 15); напр. price_channel,rsi_trade"},
+            "er_length": {"type": "int", "default": 10, "min": 1, "max": 100},
+            "er_min": {"type": "float", "default": 0.0, "min": 0.0, "max": 1.0},
         },
     ),
     "ose_price_channel": StrategyCard(

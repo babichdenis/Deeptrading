@@ -165,6 +165,25 @@ def test_ose_all_quorum_four_blocks_three_votes():
     assert strat._last_skip is not None and "vote_skip" in strat._last_skip
 
 
+def test_ose_all_er_filter_blocks_choppy_breakout():
+    # Пила ±1 у флэта, затем пробой: ER за окно ~0.3 — при er_min=0.6 входы блокируются.
+    closes = [99.0 if i % 2 else 101.0 for i in range(52)] + [110.0] * 4
+
+    def high(i):
+        if i < 52:
+            return 101.5 if i % 2 else 99.5
+        return 112.0 if i == 52 else 110.0
+
+    def low(i):
+        return 98.5 if i < 52 else (109.0 if i == 52 else 110.0)
+
+    candles = make_candles(closes, high=high, low=low)
+    base = OseAllStrategy(OseAllParams(members=_WA_MEMBERS))
+    gated = OseAllStrategy(OseAllParams(members=_WA_MEMBERS, er_min=0.6))
+    assert drive(base, candles), "базовый ансамбль на этой серии должен голосовать"
+    assert drive(gated, candles) == [], "ER-фильтр должен заблокировать пилу"
+
+
 def test_decide_quorum_rules():
     assert _decide(1, 0, 1) is Side.BUY
     assert _decide(0, 1, 1) is Side.SELL

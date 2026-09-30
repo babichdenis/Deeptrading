@@ -73,6 +73,8 @@ class OseAllParams:
     quorum: int = 1
     sma_stoch_step_pct: float = 1.0
     members: str = ""  # CSV имён роботов; пусто = все (_ROBOT_ORDER)
+    er_length: int = 10  # EfficiencyRatio (Кауфман) — длина окна
+    er_min: float = 0.0  # 0 = фильтр выключен; вход только при ER >= er_min
 
 
 @dataclass(frozen=True)
@@ -280,6 +282,17 @@ class OseAllStrategy:
             self._last_skip = (f"vote_skip({len(buy_members)}B/{len(sell_members)}S "
                                f"quorum={self.p.quorum})")
             return None
+        _er = None
+        if float(self.p.er_min) > 0.0:
+            # ER-фильтр (Кауфман): «торгуй только в тренде». Считается по закрытым
+            # барам, без look-ahead; 0 = выключен.
+            from app.engine.indicatorhub import _efficiency_ratio
+            _er_series = _efficiency_ratio(candles, int(self.p.er_length))
+            _er = _er_series[-1] if _er_series else None
+            if _er is None or float(_er) < float(self.p.er_min):
+                self._last_skip = (f"er_filter(er={'-' if _er is None else round(_er, 3)}"
+                                   f" < {self.p.er_min})")
+                return None
         self._last_skip = None
         _reason = (f"ose_vote {side.value}: {len(buy_members)}B/{len(sell_members)}S "
                    f"({';'.join(details) or '-'})")
@@ -323,6 +336,7 @@ class OseAllStrategy:
                 "buy_members": ",".join(buy_members),
                 "sell_members": ",".join(sell_members),
                 "vote_detail": ",".join(details),
+                "er": (round(float(_er), 3) if _er is not None else None),
             },
         )
 
