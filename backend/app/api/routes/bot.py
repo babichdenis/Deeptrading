@@ -1,5 +1,4 @@
 import logging
-from zoneinfo import ZoneInfo
 import os
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
@@ -1302,148 +1301,6 @@ _HM_CACHE: dict = {}
 _MSC = ZoneInfo("Europe/Moscow")
 
 
-def _tz_utc():
-    from datetime import timezone
-    return timezone.utc
-
-
-def _dt_now_utc():
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc)
-
-
-def _bias_from_daily(closes_by_date: dict[str, float]) -> dict[str, int]:
-    """Направление по EMA(50) дневных закрытий (ключ — МСК-дата), как compute_bias."""
-    items = sorted(closes_by_date.items())
-    dates = [d for d, _ in items]
-    closes = [c for _, c in items]
-    if len(closes) < 3:
-        return {}
-    _alpha = 2 / (50 + 1)
-    emas = [closes[0]]
-    for v in closes[1:]:
-        emas.append(_alpha * v + (1 - _alpha) * emas[-1])
-    out: dict[str, int] = {}
-    for i in range(1, len(closes)):
-        out[dates[i]] = 1 if closes[i - 1] >= emas[i - 1] else -1
-    return out
-
-
-async def _hm_compute_meta(db, bb: str, frm) -> (dict[str, dict], float, int):
-    """bias (daily по МСК-датам) + regime (H1) для тикера.
-
-    Берём 1м за ~32 кал. дня — для прогрева EMA(50) bias и warmup (64+) H1 regime.
-    Возвращает (by_hour, last_close, days_ok): by_hour — {iso час: {b, r}}.
-    """
-    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-    from sqlalchemy import text as _t
-    from app.engine.models import Candle as _EC
-    from app.services.regime import compute_regime as _CR
-    _cut = _dt.now(_tz.utc) - _td(minutes=1)
-    _frm36 = _cut - _td(days=32)
-    _rows1 = (await db.execute(_t(
-        "SELECT ts, open, high, low, close, volume FROM candles "
-        "WHERE figi = :f AND interval = '1' AND ts >= :frm ORDER BY ts"
-    ), {"f": bb, "frm": _frm36})).all()
-    if len(_rows1) < 400:
-        return {}, 0.0, 0
-    _c1m = [_EC(ts=r[0], open=float(r[1]), high=float(r[2]), low=float(r[3]),
-                close=float(r[4]), volume=float(r[5] or 0.0)) for r in _rows1]
-    _st, _tl, _h1 = _CR(_c1m, 3600)  # (states, timeline, bars=EngineCandle)
-    _tl = _tl or []
-    from app.services.ensemble import compute_bias as _cb
-    _bh = _cb(_h1, 50, 3600)  # bias часового ТФ: {bucket: 1|-1}
-    _rmap: dict[int, str] = {}
-    for _rr in (_st or []):
-        _rrts = _rr["ts"]
-        if getattr(_rrts, "tzinfo", None) is None:
-            _rrts = _rrts.replace(tzinfo=_tz_utc())
-        _rmap[int(_rrts.timestamp()) // 3600] = _rr["state"]
-    # дневные закрытия из 1м по МСК-датам (маппинг без гэпов смещения дня)
-    _daily: dict[str, float] = {}
-    _last_close = 0.0
-    for _c in _c1m:
-        _ct = _c.ts if getattr(_c.ts, "tzinfo", None) else _c.ts.replace(tzinfo=_tz_utc())
-        _d = _ct.astimezone(_MSC).date().isoformat()
-        _daily[_d] = float(_c.close)
-    _biasd = _bias_from_daily(_daily)
-    out: dict[str, dict] = {}
-    _days_ok = 0
-    for _hb in _h1:
-        _hbt = _hb.ts
-        if getattr(_hbt, "tzinfo", None) is None:
-            _hbt = _hbt.replace(tzinfo=_tz_utc())
-        _d = _hbt.astimezone(_MSC).date().isoformat()
-        _hk = int(_hbt.timestamp()) // 3600
-        if _hbt >= frm:
-            out[_hbt.isoformat()] = {"b": _biasd.get(_d, 0),
-                                     "bh": _bh.get(_hk, 0),
-                                     "r": _rmap.get(_hk, "NEUTRAL")}
-            _days_ok += 1
-        _last_close = float(_hb.close)
-    return out, _last_close, _days_ok
-
-
-@router.get("/heatmap")
-async def bot_heatmap(days: int = 5, meta: int = 0, figi: str | None = None) -> dict:
-    """Часовые бары ВСЕХ акций universe за N дней — для heatmap на вкладке «Анализ».
-
-    Берём 1м-свечи из БД (candles, interval='1') и ресемплим в часы (date_trunc).
-    Возвращаем по каждому тикеру только закрытые часовые бары (ts, close).
-    При meta=1 в каждый бар добавляем b (bias дневного ТФ: +1/-1/0) и r (режим H1).
-    figi=X — ограничить одним тикером (принимает и tcs-figi, и bbg-код) — для карточки сделки.
-    """
-    days = max(1, min(int(days), 10))
-    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-    from sqlalchemy import text as _t
-    from app.database import SessionLocal as _DB
-    univ = list(runtime.universe or [])
-    _frm = _dt.now(_tz.utc) - _td(days=days)
-    _map = runtime.tcs_to_bbg or {}
-    if figi:
-        _want_bb = _map.get(figi, figi)
-        univ = [u for u in univ if str(u.get("figi") or "") in (figi, _want_bb)]
-    _want_meta = bool(meta)
-    _replay = str(getattr(runtime.config, "feed", "")) == "replay"
-
-    _now = _dt.now(_tz.utc)
-    _ck = ("hm", days, _want_meta, figi or "")
-    _cached = _HM_CACHE.get(_ck)
-    if not _replay and _cached and (_now - _cached[0]).total_seconds() < 60:
-        return _cached[1]
-
-    out = []
-    async with _DB() as db:
-        for u in univ:
-            f0 = str(u.get("figi") or "")
-            if not f0:
-                continue
-            bb = _map.get(f0, f0)
-            rows = (await db.execute(_t(
-                """SELECT date_trunc('hour', ts) AS h,
-                          (array_agg(open ORDER BY ts ASC))[1] AS o,
-                          (array_agg(close ORDER BY ts DESC))[1] AS close
-                   FROM candles WHERE figi = :f AND interval = '1' AND ts >= :frm
-                   GROUP BY 1 ORDER BY 1"""
-            ), {"f": bb, "frm": _frm})).all()
-            bars = [{"h": r.h.isoformat(), "o": float(r.o), "c": float(r.close)}
-                    for r in rows if r.h is not None]
-            if _want_meta and bars:
-                _meta, _lc, _dok = await _hm_compute_meta(db, bb, _frm)
-                for b in bars:
-                    _m = _meta.get(b["h"])
-                    if _m:
-                        b["b"], b["bh"], b["r"] = _m["b"], _m["bh"], _m["r"]
-            if bars:
-                out.append({"figi": bb,
-                            "ticker": str(u.get("ticker") or "").upper(),
-                            "lot": int(u.get("lot") or 1),
-                            "bars": bars})
-    _res = {"ok": True, "days": days, "count": len(out), "all": len(univ),
-            "tickers": out}
-    if not _replay:
-        _HM_CACHE[_ck] = (_now, _res)
-    return _res
 
 
 @router.get("/portfolio_summary")
@@ -2370,10 +2227,6 @@ async def bot_tests_compare(names: str = "") -> dict:
                 "by_exit_reason": _map(by_exit),
             }
     return {"tests": out}
-
-
-_HM_CACHE: dict = {}
-_MSC = ZoneInfo("Europe/Moscow")
 
 
 def _tz_utc():

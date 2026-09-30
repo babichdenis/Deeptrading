@@ -355,8 +355,8 @@ async def main():
     for v in ("h1_ema", "daily_x_h1", "oracle"):
         r = results[v]
         print(f"{v}: лучший день {r['best_day']}, худший {r['worst_day']}")
-        print(f"   топ-5 тикеров: {[(t, round(x)) for t, x in r['top5_tickers]]}")
-        print(f"   дно-5 тикеров: {[(t, round(x)) for t, x in r['bottom5_tickers]]}")
+        print(f"   топ-5 тикеров: {[(t, round(x)) for t, x in r['top5_tickers']]}")
+        print(f"   дно-5 тикеров: {[(t, round(x)) for t, x in r['bottom5_tickers']]}")
 
     out = {
         "params": {
