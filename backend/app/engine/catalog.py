@@ -474,6 +474,40 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "max_af": {"type": "float", "default": 0.2, "min": 0.05, "max": 0.5},
         },
     ),
+    "price_channel_hub": StrategyCard(
+        id="price_channel_hub", name="Price Channel Trade (hub-канон)", family="trend", wave=6,
+        long_rule="High пробил верх канала (L=21, сдвиг [-2]); предыдущий бар не пробивал (OsEngine PriceChannelTrade)",
+        short_rule="Low пробил низ канала; предыдущий бар не пробивал",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "length_up": {"type": "int", "default": 21, "min": 2, "max": 200},
+            "length_down": {"type": "int", "default": 21, "min": 2, "max": 200},
+        },
+    ),
+    "parabolic_bollinger_hub": StrategyCard(
+        id="parabolic_bollinger_hub", name="Parabolic Bollinger (hub-канон)", family="trend", wave=6,
+        long_rule="Крест касания верхней BB-границы при параболике P строго внутри полос (OsEngine ParabolicBollinger)",
+        short_rule="Крест касания нижней BB-границы при P внутри полос",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "bb_length": {"type": "int", "default": 28, "min": 5, "max": 200},
+            "deviation": {"type": "float", "default": 2.0, "min": 0.5, "max": 5.0},
+            "averaging": {"type": "int", "default": 15, "min": 2, "max": 100},
+            "vol_mult": {"type": "float", "default": 0.2, "min": 0.01, "max": 2.0},
+        },
+    ),
+    "parabolic_price_channel_hub": StrategyCard(
+        id="parabolic_price_channel_hub", name="Parabolic Price Channel (hub-канон)", family="trend", wave=6,
+        long_rule="Крест касания верхней границы канала при параболике P строго внутри (OsEngine ParabolicPriceChannel)",
+        short_rule="Крест касания нижней границы канала при P внутри",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "length_up": {"type": "int", "default": 21, "min": 2, "max": 200},
+            "length_down": {"type": "int", "default": 21, "min": 2, "max": 200},
+            "averaging": {"type": "int", "default": 15, "min": 2, "max": 100},
+            "vol_mult": {"type": "float", "default": 0.1, "min": 0.01, "max": 2.0},
+        },
+    ),
 }
 
 

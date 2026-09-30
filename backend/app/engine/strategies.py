@@ -999,6 +999,294 @@ class ParabolicSarHubStrategy:
 
 
 @dataclass(frozen=True)
+class PriceChannelHubParams:
+    length_up: int = 21
+    length_down: int = 21
+
+
+class PriceChannelHubStrategy:
+    """Логика OsEngine PriceChannelTrade (Trend) на каноническом канале.
+
+    Канал читается со сдвигом (уровень предыдущего бара, как в ose-порте
+    [-2]): High текущего > верх канала за length_up предыдущих баров → BUY;
+    Low < низ → SELL. Бар, пробивший обе стороны, входа не даёт. Условие
+    state-овое → сигнал на крест (предыдущий бар не пробивал), иначе спам
+    каждый бар на тренде. Выход/реверс — SignalPolicy раннера.
+    """
+    strategy_id = "price_channel_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: PriceChannelHubParams | None = None):
+        self.p = params or PriceChannelHubParams()
+
+    def reset(self) -> None:
+        pass
+
+    def warmup_bars(self) -> int:
+        return max(int(self.p.length_up), int(self.p.length_down)) + 2
+
+    @staticmethod
+    def _channel_tail(candles: Sequence[Candle], length: int,
+                      end: int) -> tuple[float | None, float | None]:
+        """max High / min Low за length баров до end включительно."""
+        if length <= 0 or end + 1 < length:
+            return None, None
+        window = candles[end + 1 - length:end + 1]
+        return max(c.high for c in window), min(c.low for c in window)
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        lu, ld = int(self.p.length_up), int(self.p.length_down)
+        n = len(candles)
+        if n < max(lu, ld) + 2:
+            return None
+        i = n - 1
+        up_prev, _ = self._channel_tail(candles, lu, i - 1)
+        _, down_prev = self._channel_tail(candles, ld, i - 1)
+        up_pp, _ = self._channel_tail(candles, lu, i - 2)
+        _, down_pp = self._channel_tail(candles, ld, i - 2)
+        if None in (up_prev, down_prev, up_pp, down_pp):
+            return None
+        cur, prev = candles[i], candles[i - 1]
+        broke_up = cur.high > up_prev
+        broke_down = cur.low < down_prev
+        if broke_up and not broke_down and prev.high <= up_pp:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=cur.ts,
+                          reason="pc_break_up",
+                          features={"ch_up": round(up_prev, 6),
+                                    "ch_down": round(down_prev, 6)})
+        if broke_down and not broke_up and prev.low >= down_pp:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=cur.ts,
+                          reason="pc_break_down",
+                          features={"ch_up": round(up_prev, 6),
+                                    "ch_down": round(down_prev, 6)})
+        return None
+
+
+def _hub_parabolic(owner, candles: Sequence[Candle], key: str,
+                   up_rows: list, down_rows: list,
+                   averaging: int, mult: float, vol_days: float = 1.0,
+                   touch_eq: bool = False):
+    """Инкрементальная параболическая линия P — общая для ParabolicBollinger
+    и ParabolicPriceChannel (OsEngine *_indicator.cs).
+
+    Волатильность бара = (max High - min Low) за vol_days суток до бара;
+    шаг P = среднее последних averaging значений (в оригинале volMult
+    применяется в среднем второй раз — квирк сохранён). Пробой верхней
+    границы → P перескакивает к нижней и растёт, пробой нижней → к верхней
+    и убывает, всегда внутри границ. Возвращает (up, down, p, p_prev)
+    последнего бара; p/p_prev = None, пока границ нет."""
+    from datetime import timedelta
+    state = getattr(owner, key, None)
+    n = len(candles)
+    if state is None or state["n"] > n or state["k"] != (averaging, mult, vol_days, touch_eq):
+        state = {"n": 0, "k": (averaging, mult, vol_days, touch_eq),
+                 "p": None, "below": None, "vols": [], "prow": []}
+        setattr(owner, key, state)
+    for i in range(state["n"], n):
+        c = candles[i]
+        up_i, down_i = up_rows[i], down_rows[i]
+        if up_i is None or down_i is None:
+            state.update(p=None, below=None, n=i + 1)
+            state["prow"].append(None)
+            continue
+        t = c.ts - timedelta(days=vol_days)
+        hi, lo = c.high, c.low
+        j = i - 1
+        while j >= 0 and candles[j].ts >= t:
+            if candles[j].high > hi:
+                hi = candles[j].high
+            if candles[j].low < lo:
+                lo = candles[j].low
+            j -= 1
+        vols = state["vols"]
+        vols.append((hi - lo) * mult)
+        if len(vols) > averaging:
+            del vols[0]
+        if len(vols) <= averaging:
+            avg = vols[-1]
+        else:  # квирк C#: среднее значений, УЖЕ умноженных на mult, снова ×mult
+            avg = sum(v * mult for v in vols[-averaging:]) / averaging
+        below = state["below"]
+        if touch_eq:
+            if c.high >= up_i:
+                below = True
+            if c.low <= down_i:
+                below = False
+        else:
+            if c.high > up_i:
+                below = True
+            if c.low < down_i:
+                below = False
+        change = below != state["below"]
+        if below:
+            p = down_i if (change or state["p"] is None) \
+                else min(max(state["p"] + avg, down_i), up_i)
+        else:
+            p = up_i if (change or state["p"] is None) \
+                else min(max(state["p"] - avg, down_i), up_i)
+        state.update(p=p, below=below, n=i + 1)
+        state["prow"].append(p)
+    prow = state["prow"]
+    p_prev = prow[-2] if len(prow) >= 2 else None
+    return up_rows[n - 1], down_rows[n - 1], state["p"], p_prev
+
+
+@dataclass(frozen=True)
+class ParabolicBollingerHubParams:
+    bb_length: int = 28
+    deviation: float = 2.0
+    averaging: int = 15
+    vol_mult: float = 0.2
+
+
+class ParabolicBollingerHubStrategy:
+    """Логика OsEngine ParabolicBollinger (Trend) на канонических полосах.
+
+    BB(bb_length, deviation) + параболическая линия P (_hub_parabolic).
+    C#: BuyAtStop на верхней границе (close < up), SellAtStop на нижней —
+    при P строго внутри полос → канон: крест касания границы (high >= up
+    впервые после бара без касания) при P предыдущего бара внутри полос.
+    Std: делитель length-1 при length > 30, иначе length (квирк C#).
+    Выход — трейлинг по P в C#; здесь отдаётся раннеру (SignalPolicy).
+    """
+    strategy_id = "parabolic_bollinger_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: ParabolicBollingerHubParams | None = None):
+        self.p = params or ParabolicBollingerHubParams()
+        self.reset()
+
+    def reset(self) -> None:
+        self._pb_state = None
+        self._bb_cache = None
+
+    def warmup_bars(self) -> int:
+        return int(self.p.bb_length) + 3
+
+    def _bb_rows(self, candles: Sequence[Candle]) -> tuple[list, list]:
+        """Ряды границ BB; кэш дополняется новыми барами (BB детерминирован)."""
+        L, dev = int(self.p.bb_length), float(self.p.deviation)
+        n = len(candles)
+        cache = self._bb_cache
+        if cache is None or cache[0] > n:
+            cache = (0, [], [])
+        rows_n, up, down = cache
+        for i in range(rows_n, n):
+            if i + 1 < L:
+                up.append(None)
+                down.append(None)
+                continue
+            window = [float(c.close) for c in candles[i + 1 - L:i + 1]]
+            sma = sum(window) / L
+            div = (L - 1) if L > 30 else L
+            sd = (sum((x - sma) ** 2 for x in window) / div) ** 0.5
+            up.append(round(sma + sd * dev, 6))
+            down.append(round(sma - sd * dev, 6))
+        self._bb_cache = (n, up, down)
+        return up, down
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        p = self.p
+        if len(candles) < int(p.bb_length) + 2:
+            return None
+        up_rows, down_rows = self._bb_rows(candles)
+        up_i, down_i, _par, par_prev = _hub_parabolic(
+            self, candles, "_pb_state", up_rows, down_rows,
+            int(p.averaging), float(p.vol_mult), 1.0, touch_eq=False)
+        up_prev, down_prev = up_rows[-2], down_rows[-2]
+        if None in (up_i, down_i, par_prev, up_prev, down_prev):
+            return None
+        if not (up_prev > par_prev > down_prev):
+            return None
+        cur, prev = candles[-1], candles[-2]
+        if cur.high >= up_i and prev.high < up_prev and prev.close < up_prev:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=cur.ts,
+                          reason="pb_touch_up",
+                          features={"up": round(up_i, 6), "down": round(down_i, 6),
+                                    "p_prev": round(par_prev, 6)})
+        if cur.low <= down_i and prev.low > down_prev and prev.close > down_prev:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=cur.ts,
+                          reason="pb_touch_down",
+                          features={"up": round(up_i, 6), "down": round(down_i, 6),
+                                    "p_prev": round(par_prev, 6)})
+        return None
+
+
+@dataclass(frozen=True)
+class ParabolicPriceChannelHubParams:
+    length_up: int = 21
+    length_down: int = 21
+    averaging: int = 15
+    vol_mult: float = 0.1
+
+
+class ParabolicPriceChannelHubStrategy:
+    """Логика OsEngine ParabolicPriceChannel (Trend) на каноническом канале.
+
+    Канал max/min за length баров + параболическая линия P (_hub_parabolic,
+    touch_eq: пробой по >=/<=, как в C#-индикаторе). C#: BuyAtStop на верхней
+    границе (close <= up), SellAtStop на нижней — при P строго внутри канала
+    → канон: крест касания границы при P предыдущего бара внутри канала.
+    Выход — трейлинг по P в C#; здесь отдаётся раннеру (SignalPolicy).
+    """
+    strategy_id = "parabolic_price_channel_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: ParabolicPriceChannelHubParams | None = None):
+        self.p = params or ParabolicPriceChannelHubParams()
+        self.reset()
+
+    def reset(self) -> None:
+        self._ppc_state = None
+        self._pc_cache = None
+
+    def warmup_bars(self) -> int:
+        return max(int(self.p.length_up), int(self.p.length_down)) + 3
+
+    def _channel_rows(self, candles: Sequence[Candle]) -> tuple[list, list]:
+        lu, ld = int(self.p.length_up), int(self.p.length_down)
+        n = len(candles)
+        cache = self._pc_cache
+        if cache is None or cache[0] > n:
+            cache = (0, [], [])
+        rows_n, up, down = cache
+        for i in range(rows_n, n):
+            if i + 1 < max(lu, ld):
+                up.append(None)
+                down.append(None)
+                continue
+            up.append(max(c.high for c in candles[i + 1 - lu:i + 1]))
+            down.append(min(c.low for c in candles[i + 1 - ld:i + 1]))
+        self._pc_cache = (n, up, down)
+        return up, down
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        if len(candles) < self.warmup_bars():
+            return None
+        up_rows, down_rows = self._channel_rows(candles)
+        up_i, down_i, _par, par_prev = _hub_parabolic(
+            self, candles, "_ppc_state", up_rows, down_rows,
+            int(self.p.averaging), float(self.p.vol_mult), 1.0, touch_eq=True)
+        up_prev, down_prev = up_rows[-2], down_rows[-2]
+        if None in (up_i, down_i, par_prev, up_prev, down_prev):
+            return None
+        if not (up_prev > par_prev > down_prev):
+            return None
+        cur, prev = candles[-1], candles[-2]
+        if cur.high >= up_i and prev.high < up_prev and prev.close <= up_prev:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=cur.ts,
+                          reason="ppc_touch_up",
+                          features={"ch_up": round(up_i, 6), "ch_down": round(down_i, 6),
+                                    "p_prev": round(par_prev, 6)})
+        if cur.low <= down_i and prev.low > down_prev and prev.close >= down_prev:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=cur.ts,
+                          reason="ppc_touch_down",
+                          features={"ch_up": round(up_i, 6), "ch_down": round(down_i, 6),
+                                    "p_prev": round(par_prev, 6)})
+        return None
+
+
+@dataclass(frozen=True)
 class CanonEnsembleParams:
     members: str = "rsi_trade_hub"  # CSV strategy_id реестра (параметры — дефолтные)
     quorum: int = 1
@@ -1087,6 +1375,9 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "williams_range_hub": WilliamsRangeHubStrategy,
     "momentum_macd_hub": MomentumMacdHubStrategy,
     "parabolic_sar_hub": ParabolicSarHubStrategy,
+    "price_channel_hub": PriceChannelHubStrategy,
+    "parabolic_bollinger_hub": ParabolicBollingerHubStrategy,
+    "parabolic_price_channel_hub": ParabolicPriceChannelHubStrategy,
     "canon_ensemble": CanonEnsembleStrategy,
     "long_ensemble": LongEnsembleStrategy,
     "short_ensemble": ShortEnsembleStrategy,
@@ -1125,6 +1416,9 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "williams_range_hub": WilliamsRangeHubParams,
     "momentum_macd_hub": MomentumMacdHubParams,
     "parabolic_sar_hub": ParabolicSarHubParams,
+    "price_channel_hub": PriceChannelHubParams,
+    "parabolic_bollinger_hub": ParabolicBollingerHubParams,
+    "parabolic_price_channel_hub": ParabolicPriceChannelHubParams,
     "canon_ensemble": CanonEnsembleParams,
     "long_ensemble": LongEnsembleParams,
     "short_ensemble": ShortEnsembleParams,
