@@ -12,6 +12,7 @@ from app.models.sandbox_trade import SandboxTrade
 from app.models.bot_log import BotLog
 from app.models.bot_setting import BotSetting
 from app.models.instrument import Instrument
+from app.models.reports import ReportRow, ReportRun, ReportSlice, ReportTrade
 from app.models.signals import RunDependency, SignalDecision, StrategyRun, StrategySignal
 
 __all__ = [
@@ -31,6 +32,10 @@ __all__ = [
     "PaperAccount",
     "PaperPosition",
     "PaperTrade",
+    "ReportRun",
+    "ReportRow",
+    "ReportTrade",
+    "ReportSlice",
     "RunDependency",
     "SignalDecision",
     "StrategyRun",

@@ -21,22 +21,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import create_engine, text  # noqa: E402
-
 from app.config import get_settings  # noqa: E402
 from app.engine.candlehub import build_tf  # noqa: E402
 from app.engine.indicatorhub import _adx  # noqa: E402
 from app.engine.models import Candle  # noqa: E402
+from app.services.report_slices import (  # noqa: E402
+    SESSIONS,
+    adx_regime_bucket,
+    session_bucket,
+)
+from sqlalchemy import create_engine, text  # noqa: E402
 
 TF = {"1min": 60, "5min": 300, "10min": 600, "15min": 900, "30min": 1800, "1h": 3600, "hour": 3600}
-SESSIONS = [("утро 10-14", 7, 11), ("день 14-19", 11, 16), ("вечер 19-24", 16, 21)]  # часы UTC
-
-
-def _session(ts: datetime) -> str:
-    for name, a, b in SESSIONS:
-        if a <= ts.hour < b:
-            return name
-    return "вне сессий"
 
 
 def parse():
@@ -99,15 +95,8 @@ def main() -> int:
             ts_list = ts_by_tk.get(tk) or []
             idx = bisect.bisect_right(ts_list, ts) - 1
             ax = adx_by_tk[tk][idx] if 0 <= idx < len(adx_by_tk.get(tk) or []) else None
-            if ax is None:
-                rname = "нет данных"
-            elif ax >= a.trend_thr:
-                rname = "тренд"
-            elif ax >= a.range_thr:
-                rname = "переход"
-            else:
-                rname = "диапазон"
-            for agg, key in ((agg_s, _session(ts)), (agg_r, rname)):
+            rname = adx_regime_bucket(ax, trend_thr=a.trend_thr, range_thr=a.range_thr)
+            for agg, key in ((agg_s, session_bucket(ts)), (agg_r, rname)):
                 agg[key][0] += 1
                 agg[key][1] += 1 if t["net_pnl"] > 0 else 0
                 agg[key][2] += t["net_pnl"]

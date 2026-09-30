@@ -306,6 +306,12 @@
             </div>
           </section>
             <section class="page" id="page-analytics">
+              <div class="an-tabs">
+                <button class="an-tab active" data-antab="live">📈 Живая</button>
+                <button class="an-tab" data-antab="reports">📊 Прогоны (reports/)</button>
+              </div>
+
+              <div class="an-tabpane" id="an-pane-live">
               <div class="an-head">
                 <div class="an-title">📊 Анализ</div>
                 <span class="an-sub" id="stats-test">—</span>
@@ -336,6 +342,62 @@
               <div class="an-movers" id="an-movers"></div>
               <div class="an-portfolio" id="an-portfolio"></div>
               <div class="stats-body" id="stats-body"></div>
+              </div>
+
+              <div class="an-tabpane hidden" id="an-pane-reports">
+                <div class="an-head">
+                  <div class="an-title">📊 Прогоны</div>
+                  <span class="an-sub" id="rep-sub">—</span>
+                  <select id="rep-kind" class="rep-select" title="Вид прогона">
+                    <option value="">все виды</option>
+                    <option value="real">real — харнесс</option>
+                    <option value="wf">wf — walk-forward</option>
+                    <option value="matrix">matrix</option>
+                    <option value="exp">exp — эксперименты</option>
+                  </select>
+                  <input type="search" id="rep-query" class="rep-search" placeholder="поиск файла…" />
+                  <button class="btn-secondary btn-xs" id="rep-refresh" title="Перечитать список прогонов">⟳ Обновить</button>
+                </div>
+
+                <div class="rep-layout">
+                  <aside class="rep-list" id="rep-list"><span class="mini-hint">загрузка…</span></aside>
+
+                  <div class="rep-main">
+                    <div class="rep-runhead" id="rep-runhead"><span class="mini-hint">выбери прогон слева</span></div>
+
+                    <div class="rep-subtabs">
+                      <button class="rep-subtab active" data-reptab="strategies">🤖 Роботы</button>
+                      <button class="rep-subtab" data-reptab="slices">🔪 Срезы</button>
+                      <button class="rep-subtab" data-reptab="trades">🧾 Сделки</button>
+                      <button class="rep-subtab" data-reptab="market">📈 Рынок</button>
+                    </div>
+
+                    <div class="rep-pane" id="rep-pane-strategies"></div>
+
+                    <div class="rep-pane hidden" id="rep-pane-slices">
+                      <div class="rep-dims" id="rep-dims"></div>
+                      <div class="rep-table-wrap" id="rep-slices"></div>
+                    </div>
+
+                    <div class="rep-pane hidden" id="rep-pane-trades">
+                      <div class="rep-filters" id="rep-trades-filters"></div>
+                      <div class="rep-cards" id="rep-trades-summary"></div>
+                      <div class="rep-table-wrap" id="rep-trades"></div>
+                      <div class="rep-more" id="rep-trades-more"></div>
+                    </div>
+
+                    <div class="rep-pane hidden" id="rep-pane-market">
+                      <div class="rep-filters" id="rep-market-filters">
+                        <button class="btn-secondary btn-xs" data-repwin="day">день</button>
+                        <button class="btn-secondary btn-xs active" data-repwin="week">неделя</button>
+                        <button class="btn-secondary btn-xs" data-repwin="month">месяц</button>
+                        <span class="mini-hint">доход/волатильность тикеров за окно — рыночный контекст для оценки роботов</span>
+                      </div>
+                      <div id="rep-market"><span class="mini-hint">—</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </section>
           </div>
         </div>
