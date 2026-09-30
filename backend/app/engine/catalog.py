@@ -317,15 +317,15 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
         },
     ),
     "ose_all": StrategyCard(
-        id="ose_all", name="OSEngine All Robots (6 votes)", family="ose", wave=5,
+        id="ose_all", name="OSEngine All Robots (15 votes)", family="ose", wave=5,
         long_rule="голос любого робота за лонг (quorum, дефолт 1)",
         short_rule="голос любого робота за шорт",
-        timeframes=("1min", "5min"), status="AVAILABLE",
+        timeframes=("1min", "5min", "10min"), status="AVAILABLE",
         params_schema={
-            "quorum": {"type": "int", "default": 1, "min": 1, "max": 6},
+            "quorum": {"type": "int", "default": 1, "min": 1, "max": 15},
             "sma_stoch_step_pct": {"type": "float", "default": 1.0, "min": 0.0, "max": 10.0},
             "members": {"type": "str", "default": "",
-                        "desc": "CSV роботов (пусто = все 6); напр. price_channel,rsi_trade"},
+                        "desc": "CSV роботов (пусто = все 15); напр. price_channel,rsi_trade"},
         },
     ),
     "ose_price_channel": StrategyCard(

@@ -457,7 +457,7 @@ def _spec_normalize(spec: dict) -> dict:
     _src = ([spec["robot"]] if spec.get("robot") else []) + list(spec.get("robots") or [])
     for r in _src:
         name = str(r.get("name") or r.get("robot") or "").strip()
-        if name.startswith("ose_"):
+        if name.startswith("ose_") and name[4:] in ROBOTS:
             name = name[4:]
         out["robots"].append({
             "robot": name,

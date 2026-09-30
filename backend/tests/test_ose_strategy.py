@@ -128,10 +128,14 @@ def test_ose_sma_stoch_huge_step_blocks_entry():
 # --- композит ose_all --------------------------------------------------------
 
 
+# Волна A: фиксированный состав для сценариев кворума (механика, не дефолт)
+_WA_MEMBERS = "price_channel,sma_stoch,envelop_trend,rsi_contrtrend,bollinger,rsi_trade"
+
+
 def test_ose_all_one_vote_quorum_counts_members():
     # Бар 46 (110, high 112): BUY у price_channel, sma_stoch, envelop_trend;
     # SELL у bollinger; RSI не голосует (нет SMA 50). Кворум 1 → BUY.
-    strat = OseAllStrategy()
+    strat = OseAllStrategy(OseAllParams(members=_WA_MEMBERS))
     sigs = drive(strat, breakout_candles())
     assert len(sigs) == 1
     i, sig = sigs[0]
@@ -149,13 +153,13 @@ def test_ose_all_one_vote_quorum_counts_members():
 def test_ose_all_no_repeat_while_positions_held():
     candles = breakout_candles() + make_candles([110.0] * 5,
                                                 start=_T0 + timedelta(minutes=46))
-    strat = OseAllStrategy()
+    strat = OseAllStrategy(OseAllParams(members=_WA_MEMBERS))
     sigs = drive(strat, candles)
     assert [i for i, _ in sigs] == [46]
 
 
 def test_ose_all_quorum_four_blocks_three_votes():
-    strat = OseAllStrategy(OseAllParams(quorum=4))
+    strat = OseAllStrategy(OseAllParams(quorum=4, members=_WA_MEMBERS))
     sigs = drive(strat, breakout_candles())
     assert sigs == []
     assert strat._last_skip is not None and "vote_skip" in strat._last_skip
@@ -202,11 +206,12 @@ def test_ose_all_params_defaults_and_validation():
     assert strat.p.sma_stoch_step_pct == 1.0
     strat = build_strategy("ose_all", {"quorum": 3})
     assert strat.p.quorum == 3
-    # 29.09: в кворуме шесть роботов (подключён RsiTrade) — 6 валиден
-    strat = build_strategy("ose_all", {"quorum": 6})
-    assert strat.p.quorum == 6
+    # 30.09: в кворуме 15 роботов (Wave A 6 + Wave B 9) — валидны 1..15
+    strat = build_strategy("ose_all", {"quorum": 15})
+    assert strat.p.quorum == 15
+    assert len(strat._order) == 15
     with pytest.raises(ParamValidationError):
-        build_strategy("ose_all", {"quorum": 7})
+        build_strategy("ose_all", {"quorum": 16})
     with pytest.raises(ParamValidationError):
         build_strategy("ose_all", {"unknown_param": 1})
 
@@ -232,7 +237,7 @@ def test_ose_all_through_engine_runner():
         low=lambda i: 100.0 if i < 52 else (109.0 if i == 52 else 110.0),
     )
     runner = EngineRunner(
-        strategy=OseAllStrategy(),
+        strategy=OseAllStrategy(OseAllParams(members=_WA_MEMBERS)),
         exit_policy=FixedSlTpPolicy(stop_pct=0.05, target_pct=0.10),
         config=EngineConfig(figi="TEST"),
     )

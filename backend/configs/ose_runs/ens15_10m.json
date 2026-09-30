@@ -1,0 +1,22 @@
+{
+  "experiment": {"name": "ens15_10m"},
+  "robots": [
+    {"robot": "ose_all", "params": {"quorum": 1}},
+    {"robot": "ose_all", "params": {"quorum": 2}},
+    {"robot": "ose_all", "params": {"quorum": 3}},
+    {"robot": "ose_all", "params": {"quorum": 4}},
+    {"robot": "ose_all", "params": {"quorum": 5}},
+    {"robot": "ose_all", "params": {"quorum": 6}},
+    {"robot": "rsi_mtf_hub", "params": {}}
+  ],
+  "timeframe": "10min",
+  "universe": ["SBER", "ROSN", "T", "GAZP", "LKOH", "NVTK", "AFLT", "SMLT", "SNGSP", "TRNFP",
+               "MAGN", "GMKN", "RUAL", "MTSS", "NLMK", "CHMF", "ASTR", "SFIN", "YDEX", "MVID",
+               "VKCO", "TATN", "ALRS", "PLZL", "RNFT", "OZON", "VTBR", "SIBN", "AFKS", "PHOR"],
+  "period": ["2026-09-01", "2026-09-24"],
+  "costs": {"commission": 0.0005, "slippage_bps": 2.0, "qty": 1, "capital": 100000},
+  "execution": {"jobs": 3, "cache": true},
+  "filters": {"min_trades": 0, "min_net_pnl": -1000000},
+  "exits": ["x07"],
+  "outputs": {"dir": "reports/experiments"}
+}

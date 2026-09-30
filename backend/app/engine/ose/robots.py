@@ -418,7 +418,7 @@ class PriceChannelTrade(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self.regime is Regime.OFF or len(candles) < 2:
             return
-        channel = price_channel(candles, self.length_up, self.length_down)
+        channel = price_channel(candles, self.length_up, self.length_down, owner=self)
         ch_up = channel["up"][-2]
         ch_down = channel["down"][-2]
         if ch_up is None or ch_down is None:
@@ -491,8 +491,8 @@ class SmaStochastic(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self.regime is Regime.OFF or len(candles) < 2:
             return
-        sma_series = sma(candles, self.sma_length)
-        k_series = stochastic(candles, self.period1, self.period2, self.period3)["k"]
+        sma_series = sma(candles, self.sma_length, owner=self)
+        k_series = stochastic(candles, self.period1, self.period2, self.period3, owner=self)["k"]
         first = k_series[-1]
         second = k_series[-2]
         last_sma = sma_series[-1]
@@ -571,7 +571,7 @@ class EnvelopTrend(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self.regime is not Regime.ON or len(candles) < 2:
             return
-        bands = envelops(candles, self.length, self.deviation)
+        bands = envelops(candles, self.length, self.deviation, owner=self)
         up = bands["up"][-1]
         down = bands["down"][-1]
         if up is None or down is None:
@@ -616,7 +616,7 @@ class RsiContrtrend(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self.regime is Regime.OFF or len(candles) < 2:
             return
-        sma_series = sma(candles, self.sma_length)
+        sma_series = sma(candles, self.sma_length, owner=self)
         rsi_series = _rsi_series_incremental(self, candles, self.rsi_length)
         last_sma = sma_series[-1]
         last_rsi = rsi_series[-1]
@@ -761,7 +761,7 @@ class CciTrade(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self._regime is Regime.OFF:
             return
-        last_cci = cci(candles, self._cci_length)[-1]
+        last_cci = cci(candles, self._cci_length, owner=self)[-1]
         if last_cci is None:
             return
         close = candles[-1].close
@@ -820,8 +820,8 @@ class BbPowerTrade(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self._regime is Regime.OFF:
             return
-        bulls = bulls_power(candles, self._bulls_length)
-        bears = bears_power(candles, self._bears_length)
+        bulls = bulls_power(candles, self._bulls_length, owner=self)
+        bears = bears_power(candles, self._bears_length, owner=self)
         if bulls[-1] is None or bears[-1] is None:
             return
         power = bulls[-1] + bears[-1]
@@ -876,7 +876,7 @@ class RviTrade(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self._regime is Regime.OFF:
             return
-        series = rvi(candles, self._rvi_length)
+        series = rvi(candles, self._rvi_length, owner=self)
         last_rvi, last_sig = series["rvi"][-1], series["signal"][-1]
         if last_rvi is None or last_sig is None:
             return
@@ -935,7 +935,7 @@ class MacdRevers(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self._regime is Regime.OFF:
             return
-        m = macd(candles, self._fast, self._slow, self._signal_len)
+        m = macd(candles, self._fast, self._slow, self._signal_len, owner=self)
         up, down = m["macd"][-1], m["signal"][-1]
         if up is None or down is None:
             return
@@ -990,7 +990,7 @@ class MacdTrail(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self._regime is Regime.OFF:
             return
-        m = macd(candles, self._fast, self._slow, self._signal_len)
+        m = macd(candles, self._fast, self._slow, self._signal_len, owner=self)
         up, down = m["macd"][-1], m["signal"][-1]
         if up is None or down is None:
             return
@@ -1034,7 +1034,7 @@ class BollingerRevers(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self._regime is Regime.OFF:
             return
-        b = bollinger(candles, self._boll_length, self._boll_deviation)
+        b = bollinger(candles, self._boll_length, self._boll_deviation, owner=self)
         up, down = b["up"][-1], b["down"][-1]
         if up is None or down is None:
             return
@@ -1087,7 +1087,7 @@ class BollingerTrailing(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self._regime is Regime.OFF:
             return
-        b = bollinger(candles, self._boll_length, self._boll_deviation)
+        b = bollinger(candles, self._boll_length, self._boll_deviation, owner=self)
         up, down = b["up"][-1], b["down"][-1]
         if up is None or down is None:
             return
@@ -1136,8 +1136,8 @@ class SmaTrendSample(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self._regime is Regime.OFF:
             return
-        last_sma = sma(candles, self._sma_length, "close")[-1]
-        env = envelops(candles, self._env_length, self._env_deviation)
+        last_sma = sma(candles, self._sma_length, "close", owner=self)[-1]
+        env = envelops(candles, self._env_length, self._env_deviation, owner=self)
         up, down = env["up"][-1], env["down"][-1]
         if last_sma is None or up is None or down is None:
             return
@@ -1204,9 +1204,9 @@ class PriceChannelVolatility(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self._regime is Regime.OFF:
             return
-        pc = price_channel(candles, self._length_up, self._length_down)
+        pc = price_channel(candles, self._length_up, self._length_down, owner=self)
         up, down = pc["up"][-1], pc["down"][-1]
-        a = atr(candles, self._atr_length)[-1]
+        a = atr(candles, self._atr_length, owner=self)[-1]
         if up is None or down is None or a is None:
             return
         open_positions = list(self.tab.positions_open_all)
@@ -1262,10 +1262,10 @@ class StrategyBollinger(_Robot):
     def on_candle_finished(self, candles: Sequence[Candle]) -> None:
         if self.regime is Regime.OFF or len(candles) < 2:
             return
-        bands = bollinger(candles, self.boll_length, self.boll_deviation)
+        bands = bollinger(candles, self.boll_length, self.boll_deviation, owner=self)
         boll_up = bands["up"][-1]
         boll_down = bands["down"][-1]
-        sma_series = sma(candles, self.sma_length)
+        sma_series = sma(candles, self.sma_length, owner=self)
         last_sma = sma_series[-1]
         if boll_up is None or boll_down is None or last_sma is None:
             return

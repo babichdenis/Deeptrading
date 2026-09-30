@@ -35,12 +35,21 @@ from typing import Sequence
 from app.engine.models import Candle, Signal, Side
 
 from .robots import (
+    BbPowerTrade,
+    BollingerRevers,
+    BollingerTrailing,
+    CciTrade,
     EnvelopTrend,
+    MacdRevers,
+    MacdTrail,
     PriceChannelTrade,
+    PriceChannelVolatility,
     RsiContrtrend,
     RsiTrade,
+    RviTrade,
     Side as RobotSide,
     SmaStochastic,
+    SmaTrendSample,
     StrategyBollinger,
     TesterTab,
 )
@@ -101,6 +110,15 @@ _OSE_ROBOT_CLASSES = {
     "rsi_contrtrend": RsiContrtrend,
     "rsi_trade": RsiTrade,
     "bollinger": StrategyBollinger,
+    "cci_trade": CciTrade,
+    "bb_power": BbPowerTrade,
+    "rvi_trade": RviTrade,
+    "macd_revers": MacdRevers,
+    "macd_trail": MacdTrail,
+    "bollinger_revers": BollingerRevers,
+    "bollinger_trailing": BollingerTrailing,
+    "sma_trend": SmaTrendSample,
+    "pc_volatility": PriceChannelVolatility,
 }
 
 
@@ -183,17 +201,27 @@ _WARMUP = {
     "rsi_contrtrend": 52,     # SMA 50 + пара
     "rsi_trade": 25,          # RSI 20 + гейт оригинала Values.Count < length+5
     "bollinger": 23,          # BB 21 + пара
+    "cci_trade": 30,          # CCI 25 + SMA
+    "bb_power": 30,           # Bulls/Bears + SMA 13
+    "rvi_trade": 45,          # RVI 10 + сигнальная
+    "macd_revers": 45,        # MACD 26+9
+    "macd_trail": 45,         # MACD 26+9
+    "bollinger_revers": 30,   # BB 21
+    "bollinger_trailing": 30,  # BB 21
+    "sma_trend": 30,          # SMA + конверты
+    "pc_volatility": 30,      # канал 21 + ATR 14
 }
 
-# OseAll голосует всеми шестью роботами: пять пилотов + RsiTrade (Волна B).
-# До 2026-09-29 RsiTrade стоял вне кворума; по решению владельца подключён
-# шестым голосом (отдельная стратегия ose_rsi_trade остаётся в реестре).
+# OseAll голосует всеми 15 роботами OnScriptIndicators (Wave A 6 + Wave B 9);
+# каждый робот — один голос; членство ограничивается members, порог — quorum.
 _ROBOT_ORDER = ("price_channel", "sma_stoch", "envelop_trend",
-                "rsi_contrtrend", "bollinger", "rsi_trade")
+                "rsi_contrtrend", "bollinger", "rsi_trade",
+                "cci_trade", "bb_power", "rvi_trade", "macd_revers", "macd_trail",
+                "bollinger_revers", "bollinger_trailing", "sma_trend", "pc_volatility")
 
 
 class OseAllStrategy:
-    """Все 6 роботов голосуют; при quorum=1 вход даёт один голос."""
+    """Все 15 роботов голосуют; при quorum=1 вход даёт один голос."""
 
     strategy_id = "ose_all"
     version = "1.0.0"
