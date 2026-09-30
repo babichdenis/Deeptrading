@@ -180,8 +180,35 @@ reconcile loop. НЕ реализовано: StreamingEnsemble (инкремен
 
 **Прочее:**
 - Проект на .7: рабочая папка `~/Documents/Default Project` — только заметки/артефакты сессии, НЕ код.
-- Тесты движка: `cd ~/Dev/Deeptrading/backend && .venv/bin/python3 -m pytest tests/ -q` (~206 зелёных).
+- Тесты движка: `cd ~/Dev/Deeptrading/backend && .venv/bin/python3 -m pytest tests/ -q` (~942 зелёных; 4 флака `test_research_pack.py` зависят от живых данных БД .2 — свечи/MTM, не чинить).
 - БД: часовой пояс ВСЁ по Москве (UTC+3). ts в БД = UTC, метка бара = закрытие.
+
+---
+
+## 🧱 СЛОЙ UNIVERSE 2.0 (2026-09-30) — measure/screener/selection рядом с legacy
+
+Параллельный чистый слой в `backend/app/bot/universe/` (legacy НЕ рефакторится,
+работает как эталон; удаление — отдельным этапом). Подробности и семантика —
+`docs/architecture/UNIVERSE_SCREENER_SELECTION_REBALANCE.md` §16.
+
+- **Universe = полный допустимый рынок** (доступность), без ATR/Top-N/тренда.
+- **VolatilityMeasure** (`volatility.py`): `compute_volatility_features`, ATR —
+  canonical из `app.engine.indicatorhub._atr` (единый источник), ATR%/realized/range.
+- **TrendMeasure** (`trend.py`): `compute_trend_features` — slope/ATR,
+  direction UP/DOWN/FLAT (`FLAT_THRESHOLD=0.0`, фикс −0.0), strength.
+- **MarketFeatures** (`features.py`): `compute_market_features[_many]` = vol+trend, `.valid`.
+- **StrategyScreener** (`screener.py`): `TrendStrengthScreener` /
+  `MeanReversionScreener`; принимают готовые MarketFeatures, не считают внутри.
+- **Selection** (`selection.py`): `rank_candidates`/`select_top_n` на уже
+  отфильтрованных, внешний score, детерминизм (score DESC, ticker ASC).
+- **SectorMembership** (`sectors.py`): metadata/группировка, не фильтр.
+- Все measure принимают `as_of` и видят только `bar.time <= as_of` (look-ahead
+  дисциплина), без БД/брокера/HTTP. One Universe → обе стратегии (e2e-тест).
+- Тесты: `tests/test_universe_v2_*.py` (7 файлов, 56 passed) + ATR parity
+  (`test_atr_canon_parity.py`). Legacy-контур зелёный (147 passed).
+- **Live-DB parity** new==legacy eligible universe отложена (нет автотеста с
+  живой БД); 🔜 миграция: runtime, бэктест-скрипты, `vol_carousel`,
+  `select_volatile_universe`, raw-SQL select, legacy Universe/top_n.
 
 ---
 

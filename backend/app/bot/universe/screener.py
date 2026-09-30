@@ -7,8 +7,11 @@ legacy-функциях app.bot.universe. Ни ATR, ни ранжировани�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol, Sequence
 
 from .domain import (
+    InstrumentRef,
+    MarketFeatures,
     ScreenItem,
     ScreenReason,
     ScreenResult,
@@ -116,3 +119,114 @@ def screen_reasons(
         if not result.eligible and result.reason is not None:
             out.append((item, result.reason))
     return out
+
+
+# ── Параллельный слой Universe 2.0: StrategyScreener ─────────────────────────
+# Концептуальное разделение (план §17): EligibilityScreener выше решает «есть
+# данные/достаточно истории/валидные цены/blacklisted», StrategyScreener — 
+# «подходит ли инструмент КОНКРЕТНОЙ стратегии» по MarketFeatures + параметрам.
+# Здесь НЕ реализуются полноценные стратегии — только domain API, позволяющий
+# им существовать независимо от Universe.
+
+
+class StrategyScreener(Protocol):
+    """Интерфейс скринера стратегии: принимает MarketFeatures, возвращает вердикт.
+
+    Чистая и детерминированная: никакого I/O, никакого мутабельного состояния.
+    """
+
+    name: str
+
+    def accepts(self, features: MarketFeatures) -> StrategyScreenResult: ...
+
+
+@dataclass(frozen=True)
+class StrategyScreenResult:
+    """Вердикт скринера стратегии для одного инструмента.
+
+    accepted — подходит ли кандидат стратегии; score — степень соответствия
+    (для ранжирования внутри стратегии); reason — человекочитаемая причина.
+    НЕ решение о тратке и не ордер: это ещё только вход в Selection.
+    """
+
+    instrument: InstrumentRef
+    accepted: bool
+    score: float = 0.0
+    reason: str = ""
+
+
+class TrendStrengthScreener:
+    """Trend-скринер: берёт инструменты с достаточно сильным направленным движением.
+
+    score — strength из TrendFeatures (0..1). Порог никак не «магический» —
+    он приходит в конструткоре и принадлежит стратегии, а не Universe.
+    """
+
+    name = "trend_strength"
+
+    def __init__(self, min_strength: float):
+        if not 0.0 <= min_strength <= 1.0:
+            raise ValueError("min_strength должен быть в [0, 1]")
+        self.min_strength = min_strength
+
+    def accepts(self, features: MarketFeatures) -> StrategyScreenResult:
+        if features.trend is None or not features.trend.valid:
+            return StrategyScreenResult(
+                instrument=features.instrument,
+                accepted=False,
+                reason="trend_invalid",
+            )
+        strength = features.trend.strength
+        return StrategyScreenResult(
+            instrument=features.instrument,
+            accepted=strength >= self.min_strength,
+            score=strength,
+            reason=(
+                "ok"
+                if strength >= self.min_strength
+                else f"strength {strength:.3f} < {self.min_strength}"
+            ),
+        )
+
+
+class MeanReversionScreener:
+    """Mean-reversion скринер: берёт инструменты со слабым направленным движением.
+
+    score = (1 - strength) — чем слабее тренд, тем более кандидат подходит
+    отскоку. Порог принадлежит стратегии, не Universe.
+    """
+
+    name = "mean_reversion"
+
+    def __init__(self, max_strength: float):
+        if not 0.0 <= max_strength <= 1.0:
+            raise ValueError("max_strength должен быть в [0, 1]")
+        self.max_strength = max_strength
+
+    def accepts(self, features: MarketFeatures) -> StrategyScreenResult:
+        if features.trend is None or not features.trend.valid:
+            return StrategyScreenResult(
+                instrument=features.instrument,
+                accepted=False,
+                reason="trend_invalid",
+            )
+        strength = features.trend.strength
+        accepted = strength <= self.max_strength
+        return StrategyScreenResult(
+            instrument=features.instrument,
+            accepted=accepted,
+            score=1.0 - strength,
+            reason="ok" if accepted else f"strength {strength:.3f} > {self.max_strength}",
+        )
+
+
+def screen_by_strategy(
+    features: Sequence[MarketFeatures],
+    screener: StrategyScreener,
+) -> tuple[StrategyScreenResult, ...]:
+    """Прогоняет MarketFeatures через скринер стратегии, сохраняя порядок входа.
+
+    Новый слой: результаты независимы от Universe/eligibility — одни и те же
+    MarketFeatures можно прогнать через несколько разных стратегий.
+    """
+    return tuple(screener.accepts(f) for f in features)
