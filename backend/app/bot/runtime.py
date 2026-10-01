@@ -471,6 +471,11 @@ TEST_GATES_OFF: dict = {
     "entry_confirm_closes": 0,
     "rank_enabled": False,
     "queue_enabled": False,
+    # Гейты стакана и L/S-баланса (найдены Signal Trace 01.10: глушили половину
+    # входов в тест-прогонах; 0 = гейт выключен — см. gates.gate_orderbook/ls_balance).
+    "entry_ob_imbalance_max": 0.0,
+    "entry_ob_spread_max": 0.0,
+    "max_short_share": 0.0,
 }
 
 
@@ -5150,6 +5155,8 @@ class PaperBotRuntime:
                         side=sig.side.value, kind=str(getattr(sig, "kind", "entry")),
                         reason=str(getattr(sig, "reason", "") or ""),
                         features=dict(sig.features or {}),
+                        context={"regime": (self._regimes.get(figi) or None),
+                                 "hour_utc": sig.time.hour},
                     ))
                 except Exception:
                     pass
