@@ -32,7 +32,12 @@ Selection/Allocation/Rebalance/Policy — исследовательский API
 """
 from __future__ import annotations
 
-from .bars import load_all_bars, load_bars, resample_1m_to_5m
+from .bars import (
+    load_all_bars,
+    load_bars,
+    load_bars_bulk_bounded,
+    resample_1m_to_5m,
+)
 from .allocation import (
     AllocationPolicy,
     EqualWeightAllocation,
@@ -58,11 +63,13 @@ from .compat import (
     utc_now,
 )
 from .discovery import (
+    DEFAULT_LOT,
     LIQUID_TICKERS,
     count_bars_by_figi,
     discover_eligible_universe,
     discover_liquid_universe,
     discover_tradeable_universe,
+    fetch_lot_by_figi,
 )
 from .domain import (
     AllocationInput,
@@ -157,8 +164,11 @@ __all__ = [
     "discover_tradeable_universe",
     "discover_liquid_universe",
     "count_bars_by_figi",
+    "fetch_lot_by_figi",
+    "DEFAULT_LOT",
     "load_bars",
     "load_all_bars",
+    "load_bars_bulk_bounded",
     "resample_1m_to_5m",
     "atr_pct",
     "average_turnover",

@@ -9,7 +9,9 @@ ATR — КАНОНИЧЕСКИЙ (app.engine.indicatorhub._atr), второго 
 parity-блок в tests/test_universe_v2_volatility.py).
 
 Принципы:
-    * только бары с ts <= as_of (никакого look-ahead);
+    * только бары с ts <= as_of (граница P1.3 зафиксирована в
+      test_universe_v2_as_of_boundary.py; строгая граница ts + TF <= as_of
+      готова в bars.bar_is_visible, но смена семантики — решение владельца);
     * детерминированность: одинаковые входы -> одинаковый результат;
     * недостаток/невалидность данных -> valid=False с понятной причиной;
     * внутри measure нет обращения к DB/Broker/HTTP и скрытых настроек —

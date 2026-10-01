@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select, text
+from sqlalchemy import String, bindparam, func, select, text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .domain import InstrumentRef, UniverseEntry, UniverseSnapshot, UniverseSource
@@ -145,3 +146,26 @@ async def count_bars_by_figi(
         )
     ).scalars().all()
     return set(rows)
+
+
+async def fetch_lot_by_figi(db: AsyncSession, figis: list[str]) -> dict[str, int]:
+    """Реальный размер лота из instrument_info для переданных FIGI.
+
+    Нужен там, где источник Universe не несёт лот (ликвидный список задан
+    тикерами, а не выборкой из БД) — иначе в выдаче оказывался хардкод 10.
+    FIGI без строки в instrument_info не попадает в результат: вызывающий код
+    решает, чем заменить неизвестный лот (DEFAULT_LOT), молчаливого нуля нет.
+    """
+    wanted = sorted({f.strip() for f in figis if f and f.strip()})
+    if not wanted:
+        return {}
+
+    rows = (
+        await db.execute(
+            text("SELECT figi, lot FROM instrument_info WHERE figi = ANY(:figis)").bindparams(
+                bindparam("figis", type_=ARRAY(String))
+            ),
+            {"figis": wanted},
+        )
+    ).all()
+    return {figi: _as_int(lot) for figi, lot in rows if figi}
