@@ -64,7 +64,7 @@ START (эпоха/floor) vs END (ceil):
 1. **Канон конвенции = START** (совпадает с T-Invest, SQL `date_bin`, `Resampler`).
 2. Старое допущение `candle_cache` «метка = закрытие, как у T-Invest» — **ошибка** (уже исправлено на START).
 3. **Корпус ТФ-таблиц в БД построен старой END-сеткой** (10m: 4.36M строк с 2024 по 43 фигам; 5m: 3.86M; hour: 1.6M; 2h/4h/week/month…) → **требует пересбора** (`scripts/rebuild_tf_tables.py`).
-4. **✅ 02.10: конвергенция завершена** — `candlehub` (build_tf/CandleSeries, коммит 6ac09ed) и `services.ensemble`/`ensemble_ctx` (b367bcc) переведены на START; полный unit-контур 907 зелёных, заморозка агрегаторов без xfail.
+4. **✅ 01.10: конвергенция завершена** — `candlehub` (build_tf/CandleSeries, коммит 6ac09ed) и `services.ensemble`/`ensemble_ctx` (b367bcc) переведены на START; полный unit-контур 907 зелёных, заморозка агрегаторов без xfail.
 5. Инвариант-тест: `tests/test_db_tf_parity.py` — ТФ-строки БД == канонический Resampler.
 
 ## Инвентарь агрегаторов старших ТФ (находка REF-001b, 30.09)
@@ -85,7 +85,7 @@ START (эпоха/floor) vs END (ceil):
 Соглашение «CandleHub — источник правды» относилось к **владению 1m-рядами и событиями**,
 но агрегация ТФ размножилась по контурам и разошлась по конвенции.
 
-**План конвергенции (по одному, с тестами) — ВЫПОЛНЕН 02.10:**
+**План конвергенции (по одному, с тестами) — ВЫПОЛНЕН 01.10:**
 1. [x] Конвенция — **START/эпоха** (доказано против T-Invest: 102/102).
 2. [x] `candlehub.build_tf`/`CandleSeries` → START (6ac09ed; мгновенная финализация границы убрана).
 3. [x] `services.ensemble.resample`/`ensemble_ctx` → START, batch+incremental согласованы (b367bcc).
