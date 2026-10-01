@@ -239,6 +239,16 @@ class SqlTraceWriter:
             "CAST(:context AS JSON), CAST(:error AS JSON)) ON CONFLICT (event_id) DO NOTHING"
         )
         async with SessionLocal() as db:
+            def _dt(value: Any) -> Any:
+                if not value:
+                    return None
+                if hasattr(value, "isoformat") and not isinstance(value, str):
+                    return value
+                try:
+                    return datetime.fromisoformat(str(value))
+                except ValueError:
+                    return None
+
             for d in docs:
                 sig = d.get("signal") or {}
                 dec = d.get("decision") or {}
@@ -250,7 +260,7 @@ class SqlTraceWriter:
                 }
                 await db.execute(sql, {
                     "event_id": d["event_id"], "run_id": d["run"]["run_id"], "seq": d["seq"],
-                    "ts_bar": d.get("ts_bar"), "ts_wall": d.get("ts_wall"),
+                    "ts_bar": _dt(d.get("ts_bar")), "ts_wall": _dt(d.get("ts_wall")),
                     "figi": d.get("figi") or "", "ticker": d.get("ticker") or "",
                     "stage": d["event"], "status": d["status"],
                     "signal_id": sig.get("signal_id"), "parent_event_id": d.get("parent_event_id"),
