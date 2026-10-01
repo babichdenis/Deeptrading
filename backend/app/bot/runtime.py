@@ -3270,6 +3270,41 @@ class PaperBotRuntime:
         except Exception:
             pass
 
+    async def _candle_preflight(self) -> None:
+        """Watchdog 1m-данных окна теста: check (+докачка T-Invest).
+
+        env CANDLE_PREFLIGHT=off|warn|fill|strict; default — fill для mode=test/feed=replay.
+        """
+        import os as _os
+        mode = str(_os.environ.get("CANDLE_PREFLIGHT", "") or "").strip().lower()
+        if not mode:
+            mode = "fill" if (str(getattr(self.config, "feed", "")) == "replay"
+                              and str(getattr(self.config, "mode", "")) == "test") else "off"
+        if mode == "off":
+            return
+        try:
+            from app.services.candle_integrity import preflight_universe
+            figis = [u.get("figi") for u in (self.universe or []) if u.get("figi")]
+            if not figis:
+                return
+            warm = 10 if bool(getattr(self.config, "use_ensemble", False)) else 3
+            start = self._replay_from or self._bot_now()
+            end = self._replay_to or start
+            rep = await preflight_universe(figis, start - timedelta(days=warm), end + timedelta(days=1),
+                                           fix=(mode in ("fill", "strict")))
+            bad = [r for r in rep if r["status"] in ("DEFICIT_DAY", "MISMATCH")]
+            self._log(f"CANDLE-PREFLIGHT({mode}): фиг {len(figis)}, проблем {len(bad)}"
+                      + (" (докачка при необходимости)" if mode in ("fill", "strict") else ""))
+            for r in bad[:10]:
+                self._log(f"  {r['status']} {r['figi'][-6:]} {r['day']} "
+                          f"rows={r['rows']} missing={r['missing_active']}")
+            if bad and mode == "strict":
+                raise RuntimeError(f"CANDLE-PREFLIGHT strict: {len(bad)} проблемных (figi,day)")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            self._log(f"⚠ CANDLE-PREFLIGHT: {type(e).__name__}: {str(e)[:120]}")
+
     async def _startup(self, cfg: BotConfig) -> None:
         await self._init_signal_trace(cfg)
         try:
@@ -3344,6 +3379,9 @@ class PaperBotRuntime:
             # Инициализируем диагностику карусели
             self.carousel_diag["eligible_count"] = len(self.stream_universe)
             self.carousel_diag["active_count"] = len(self.universe)
+
+            # --- Watchdog целостности свечей: preflight окна теста (CANDLE_PREFLIGHT) ---
+            await self._candle_preflight()
 
             from app.engine.models import Candle as EC
 

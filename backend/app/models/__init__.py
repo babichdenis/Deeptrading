@@ -1,5 +1,6 @@
 from app.models.ai_decision import AiDecision
 from app.models.candle import Candle
+from app.models.candle_integrity import CandleIntegrity
 from app.models.configurations import Configuration
 from app.services.eventbus import EventLog  # noqa: F401
 from app.models.ensemble_runs import EnsembleRun
