@@ -305,11 +305,11 @@ def test_ensemble_m5_ignores_forming_bucket(monkeypatch):
     c5 = captured.get("c5")
     assert c5 and len(c5) >= 210
     last_1m_min = int((candles[-1].ts - T0).total_seconds() // 60)   # 1059
-    last_5m_min = int((c5[-1].ts - T0).total_seconds() // 60)        # 1055
-    assert last_5m_min == 1055
+    last_5m_min = int((c5[-1].ts - T0).total_seconds() // 60)        # 1050
+    assert last_5m_min == 1050
     assert last_5m_min < last_1m_min
-    # следующий бакет (1060) закрыт не был — его в голосовании нет
-    assert math.ceil(last_1m_min / 300) * 300 > last_5m_min
+    # формирующийся бакет (1055) закрыт не был — его в голосовании нет
+    assert (last_1m_min // 5) * 5 > last_5m_min
     u = int(c5[-1].ts.timestamp())
     assert u % 300 == 0
 

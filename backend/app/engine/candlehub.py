@@ -142,18 +142,18 @@ def _unix(ts: datetime) -> int:
     return int(ts.timestamp())
 
 
-def bucket_close(ts: datetime, tf_seconds: int) -> datetime:
-    """Правая граница (close) tf-бакета, которому принадлежит свеча с close=ts.
+def bucket_start(ts: datetime, tf_seconds: int) -> datetime:
+    """Начало tf-бакета, которому принадлежит 1m-свеча с ts — КАНОН START (floor).
 
-    ceil-семантика: ts, кратный tf, сам является границей СВОЕГО бакета —
-    минута, закрывающаяся в 10:05, входит в 5m-бар с close 10:05
-    (интервал (10:00, 10:05]). Совпадает с resample_from_1m в candle_cache.
-    MSK = UTC+3 без перехода на летнее время, поэтому UTC-сетка бакетов
-    совпадает с настенной Москвой.
+    Бакет = [start, start+tf): минутный бар ts=10:05 входит в 5m-бар с ts 10:05
+    (интервал [10:05,10:10)). Совпадает с marketdata.Resampler, нативными
+    TF-свечами T-Invest (проверено 102/102, REF-001b) и новым
+    candle_cache.resample_from_1m. MSK = UTC+3 без перехода, UTC-сетка совпадает
+    с настенной Москвой.
     """
     u = _unix(ts)
-    bc = (u + tf_seconds - 1) // tf_seconds * tf_seconds
-    return datetime.fromtimestamp(bc, tz=timezone.utc)
+    bs = u - (u % tf_seconds)
+    return datetime.fromtimestamp(bs, tz=timezone.utc)
 
 
 class CandleSeries:
@@ -247,10 +247,11 @@ class CandleSeries:
                       проигнорирована;
           "reject"  — свеча забракована валидатором (наркоз на ряд не влияет).
 
-        tf=60: свеча сразу уходит в историю. tf>60: копится в partial, пока не
-        придёт минута, закрывающаяся на границе бакета (ts == bucket_close) —
-        тогда бар финализируется немедленно; либо пока не начнётся следующий
-        бакет (гэп внутри кадра → короткий бар).
+        tf=60: свеча сразу уходит в историю. tf>60: копится в partial; бар
+        закрывается, когда приходит первая минута СЛЕДУЮЩЕГО бакета (канон
+        START/floor, как marketdata.Resampler и нативные свечи T-Invest);
+        гэп внутри кадра даёт короткий бар. Хвостовой неполный бакет эмитится
+        только flush/finalize (в реплее — конец потока).
         """
         reason = validate_candle(candle)
         if reason is not None:
@@ -294,7 +295,7 @@ class CandleSeries:
             self._append_closed(candle, source=source, fire=fire)
             return "append"
 
-        bts = bucket_close(ts, self.tf_seconds)
+        bts = bucket_start(ts, self.tf_seconds)
         p = self._partial
         if p is None or bts > p.ts:
             # новый бакет: предыдущий (если был) закрываем как есть
@@ -321,9 +322,6 @@ class CandleSeries:
             self._n_skipped += 1
             return "dup"
 
-        if ts == bts:
-            # пришла последняя возможная минута бакета — бар полон, закрываем
-            self._finalize_partial(fire=fire)
         return "append"
 
     def merge_1m(self, candles: Iterable[Candle], *, source: str = "db",

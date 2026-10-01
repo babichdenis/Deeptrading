@@ -25,7 +25,7 @@ from app.engine.candlehub import (
     SOURCE_PRIORITY,
     CandleHub,
     CandleSeries,
-    bucket_close,
+    bucket_start,
     build_tf,
     source_rank,
     tf_to_seconds,
@@ -54,7 +54,7 @@ def _c(i, o=100.0, h=None, lo=None, c=100.0, v=10.0, t0=None):
 
 
 # ============================================================
-# tf_to_seconds / bucket_close — арифметика бакетов (v1)
+# tf_to_seconds / bucket_start — арифметика бакетов (канон START/floor)
 # ============================================================
 class TestBucketMath:
     def test_tf_to_seconds(self):
@@ -68,18 +68,18 @@ class TestBucketMath:
         with pytest.raises(ValueError):
             tf_to_seconds(30)
 
-    def test_boundary_is_own_bucket_close(self):
-        # ts, кратный tf, — правая граница СВОЕГО бакета (ceil-семантика)
+    def test_boundary_is_own_bucket_start(self):
+        # ts, кратный tf, — НАЧАЛО СВОЕГО бакета (канон START/floor)
         t = datetime(2026, 9, 1, 10, 5, tzinfo=U)
-        assert bucket_close(t, 300) == t
+        assert bucket_start(t, 300) == t
 
-    def test_non_boundary_rounds_up(self):
-        t = datetime(2026, 9, 1, 10, 5, 1, tzinfo=U)
-        assert bucket_close(t, 300) == datetime(2026, 9, 1, 10, 10, tzinfo=U)
+    def test_non_boundary_rounds_down(self):
+        t = datetime(2026, 9, 1, 10, 4, 59, tzinfo=U)
+        assert bucket_start(t, 300) == datetime(2026, 9, 1, 10, 0, tzinfo=U)
 
     def test_naive_treated_as_utc(self):
         t = datetime(2026, 9, 1, 10, 4)  # без tzinfo
-        assert bucket_close(t, 300) == datetime(2026, 9, 1, 10, 5, tzinfo=U)
+        assert bucket_start(t, 300) == datetime(2026, 9, 1, 10, 0, tzinfo=U)
 
 
 # ============================================================
@@ -153,50 +153,47 @@ class TestBuildTf:
         out = build_tf(cs, "5min")
         assert len(out) == 1
         b = out[0]
-        assert b.ts == T0 + timedelta(minutes=5)
-        assert (b.open, b.high, b.low, b.close) == (100.0, 105.0, 99.0, 104.5)
-        assert b.volume == 150.0
+        assert b.ts == T0  # канон START: минуты 10:01–10:04 → бакет 10:00
+        assert (b.open, b.high, b.low, b.close) == (100.0, 104.0, 99.0, 103.5)
+        assert b.volume == 100.0
 
-    def test_close_time_convention(self):
-        # минута, закрывающаяся ровно в 10:05, входит в бар 10:05, а не 10:10
+    def test_start_time_convention(self):
+        # канон START: минута 10:05 открывает бакет 10:05; минуты 10:01–10:04 — бакет 10:00
         cs = [_c(i, c=float(i)) for i in range(1, 11)]  # close 10:01..10:10
         out = build_tf(cs, 300)
-        assert [b.ts for b in out] == [
-            T0 + timedelta(minutes=5),
-            T0 + timedelta(minutes=10),
-        ]
-        assert out[0].close == 5.0
-        assert out[1].close == 10.0
+        assert [b.ts for b in out] == [T0, T0 + timedelta(minutes=5)]
+        assert out[0].close == 4.0
+        assert out[1].close == 9.0
 
     def test_last_partial_dropped_by_default(self):
         cs = [_c(i, c=float(i)) for i in range(1, 8)]  # 10:01..10:07
         out = build_tf(cs, "5min")
-        # бар 10:05 закрыт границей (10:05); бар 10:10 из 2 минут — нет
+        # бакет 10:00 закрыт приходом минуты 10:05; бакет 10:05 из 3 минут — хвост
         assert len(out) == 1
-        assert out[0].ts == T0 + timedelta(minutes=5)
+        assert out[0].ts == T0
 
     def test_last_partial_included_on_demand(self):
         cs = [_c(i, c=float(i)) for i in range(1, 8)]
         out = build_tf(cs, "5min", include_partial=True)
         assert len(out) == 2
-        assert out[1].ts == T0 + timedelta(minutes=10)
+        assert out[1].ts == T0 + timedelta(minutes=5)
         assert out[1].close == 7.0
-        assert out[1].volume == 20.0  # 2 минуты × v=10
+        assert out[1].volume == 30.0  # 3 минуты × v=10
 
     def test_duplicates_and_late_do_not_double_count(self):
         cs = [_c(1, v=10), _c(2, v=10), _c(2, v=10), _c(1, v=10)]
         cs += [_c(3, v=10), _c(4, v=10), _c(5, v=10)]
         out = build_tf(cs, "5min")
         assert len(out) == 1
-        assert out[0].volume == 50.0  # 5 минут, дубли не задвоили объём
+        assert out[0].volume == 40.0  # 4 полные минуты бакета 10:00; дубли не задвоили
 
     def test_gap_makes_short_bar(self):
-        # пропуск 10:03–10:05: бар 10:05 собран из 2 минут и закрыт
-        # приходом первой свечи следующего бакета
+        # пропуск 10:03–10:05: бакет 10:00 собрал 2 минуты и закрыт
+        # приходом первой свечи следующего бакета (10:06)
         cs = [_c(1, v=10), _c(2, v=10), _c(6, v=10), _c(7, v=10)]
         out = build_tf(cs, "5min")
         assert len(out) == 1
-        assert out[0].ts == T0 + timedelta(minutes=5)
+        assert out[0].ts == T0
         assert out[0].volume == 20.0  # честно короткий бар
 
     def test_session_junction_no_cross_merge(self):
@@ -209,13 +206,16 @@ class TestBuildTf:
         eve = [_c(i, o=200, h=200 + i, lo=200, c=200 + i, v=1, t0=eve_t0)
                for i in range(1, 6)]
         out = build_tf(day + eve, "5min")
-        # ровно два бара: 15:45 и 16:05; пустые бакеты 15:50–16:00 не существуют
+        # бары: 15:40 (минуты 15:41–15:44), 15:45 (одна минута, закрыт приходом 16:01),
+        # 16:00 (минуты 16:01–16:04); пустые бакеты не существуют
         assert [b.ts for b in out] == [
+            datetime(2026, 9, 1, 15, 40, tzinfo=U),
             datetime(2026, 9, 1, 15, 45, tzinfo=U),
-            datetime(2026, 9, 1, 16, 5, tzinfo=U),
+            datetime(2026, 9, 1, 16, 0, tzinfo=U),
         ]
-        assert out[0].close == 105.0 and out[0].high == 105.0  # вечер не подмешался
-        assert out[1].open == 200.0
+        assert out[0].close == 104.0 and out[0].high == 104.0  # вечер не подмешался
+        assert out[1].close == 105.0 and out[1].volume == 1.0
+        assert out[2].open == 200.0
 
     def test_invalid_candles_skipped_by_validator(self):
         # v2: битые свечи бракуются валидатором и не портят бар
@@ -223,24 +223,23 @@ class TestBuildTf:
               _c(4, v=10), _c(5, v=10)]
         out = build_tf(cs, "5min")
         assert len(out) == 1
-        assert out[0].volume == 40.0  # 4 здоровые минуты
+        assert out[0].volume == 30.0  # 3 здоровые минуты полного бакета 10:00
 
 
 # ============================================================
 # CandleSeries — события, дедуп, maxlen (v1)
 # ============================================================
 class TestCandleSeries:
-    def test_boundary_minute_closes_bar_immediately(self):
+    def test_next_bucket_minute_closes_bar(self):
         s = CandleSeries("F", 300)
         closed = []
         s.on_closed.append(closed.append)
         for i in range(1, 6):
             s.push_1m(_c(i))
-        # пятая минута (close 10:05 == граница бакета) закрыла бар сразу,
-        # не дожидаясь свечи 10:06 (стык сессий/EOD без отдельного флаша)
+        # минута 10:05 открывает новый бакет — предыдущий [10:00,10:05) закрыт
         assert len(closed) == 1
-        assert closed[0].ts == T0 + timedelta(minutes=5)
-        assert s.partial is None
+        assert closed[0].ts == T0
+        assert s.partial is not None and s.partial.ts == T0 + timedelta(minutes=5)
         assert len(s) == 1
 
     def test_on_updated_stream(self):
@@ -250,7 +249,7 @@ class TestCandleSeries:
         s.push_1m(_c(1, c=1.0))
         s.push_1m(_c(2, c=2.0))
         assert len(updated) == 2
-        assert s.partial.ts == T0 + timedelta(minutes=5)
+        assert s.partial.ts == T0
         assert updated[-1].close == 2.0
         assert updated[-1] == s.partial
 
@@ -280,8 +279,8 @@ class TestCandleSeries:
         assert s.snapshot(0) == []
 
     def test_daily_bar_needs_finalize(self):
-        # граница day-бакета (00:00 UTC) не совпадает с последней минутой
-        # торгов (20:50 UTC) — день закрывается только явным finalize
+        # day-бакет метится НАЧАЛОМ суток (00:00 UTC, канон START) и закрывается
+        # только явным finalize — торговые минуты заканчиваются раньше границы
         s = CandleSeries("F", 86400)
         t0 = datetime(2026, 9, 1, 20, 40, tzinfo=U)
         for i in range(1, 11):  # 20:41..20:50 UTC — хвост вечерней сессии
@@ -289,7 +288,7 @@ class TestCandleSeries:
         assert len(s) == 0 and s.partial is not None
         s.finalize()
         assert len(s) == 1
-        assert s.last.ts == datetime(2026, 9, 2, 0, 0, tzinfo=U)
+        assert s.last.ts == datetime(2026, 9, 1, 0, 0, tzinfo=U)
 
 
 # ============================================================
@@ -396,15 +395,15 @@ class TestCandleHub:
         assert [c.ts for c in closed1] == [
             T0 + timedelta(minutes=i) for i in range(1, 11)
         ]
-        # 5m-ряд: два закрытых бара, по одному on_updated на каждую минуту
+        # 5m-ряд: два закрытых бара (10:00, 10:05), по одному on_updated на минуту
         assert [c.ts for c in closed5] == [
+            T0,
             T0 + timedelta(minutes=5),
-            T0 + timedelta(minutes=10),
         ]
-        assert closed5[0].close == 5.0 and closed5[1].close == 10.0
+        assert closed5[0].close == 4.0 and closed5[1].close == 9.0
         assert len(updated5) == 10
         assert s5.snapshot() == closed5
-        assert s5.partial is None
+        assert s5.partial is not None and s5.partial.ts == T0 + timedelta(minutes=10)
 
     def test_auto_creates_1m_series(self):
         hub = CandleHub()
@@ -423,7 +422,8 @@ class TestCandleHub:
         s5.on_closed.append(ev.append)
         hub.seed_1m("F", [_c(i, c=float(i)) for i in range(1, 6)])
         assert ev == []  # прогрев молчит
-        assert len(s5) == 1 and s5.partial is None  # бакет 10:05 закрыт границей
+        assert len(s5) == 1 and s5.partial is not None  # бакет 10:00 закрыт; 10:05 формируется
+        assert s5.partial.close == 5.0
         hub.ingest_1m("F", _c(6, c=6.0))
         hub.ingest_1m("F", _c(7, c=7.0))
         assert ev == []  # новый бакет ещё формируется
@@ -437,15 +437,15 @@ class TestCandleHub:
     def test_finalize_midframe(self):
         hub = CandleHub()
         s5 = hub.series("F", "5min")
-        # поток оборвался на 3-й минуте бакета 10:10 (гэп данных/конец реплея)
+        # поток оборвался на 3-й минуте бакета 10:05 (гэп данных/конец реплея)
         for i in (6, 7, 8):
             hub.ingest_1m("F", _c(i, v=10.0))
         assert len(s5) == 0 and s5.partial is not None
         closed = hub.finalize("F")
         assert len(s5) == 1
-        assert s5.last.ts == T0 + timedelta(minutes=10)
+        assert s5.last.ts == T0 + timedelta(minutes=5)
         assert s5.last.volume == 30.0  # 3 минуты из 5 — бар короткий, но закрыт
-        assert [c.ts for c in closed] == [T0 + timedelta(minutes=10)]
+        assert [c.ts for c in closed] == [T0 + timedelta(minutes=5)]
 
     def test_figis_are_independent(self):
         hub = CandleHub()
@@ -465,7 +465,7 @@ class TestCandleHub:
         assert len(s5) == 0
         # прогрев историей: старые ряды пропустят дубли, новый построится
         hub.seed_1m("F", [_c(i, c=float(i)) for i in range(1, 6)])
-        assert len(s5) == 1 and s5.last.close == 5.0
+        assert len(s5) == 1 and s5.last.close == 4.0
 
 
 # ============================================================
@@ -479,11 +479,11 @@ class TestHubIngestV2:
         s5.on_rebuilt.append(lambda: rebuilt.append(1))
         for i in range(1, 6):
             hub.ingest_1m("F", _c(i, o=float(i), c=float(i)), source="db")
-        assert len(s5) == 1 and s5.last.close == 5.0 and s5.last.high == 5.0
+        assert len(s5) == 1 and s5.last.close == 4.0 and s5.last.high == 4.0
         assert rebuilt == []  # обычный append не перестраивает историю
         # минута 3 от live (довереннее db) с другими значениями — замена
         assert hub.ingest_1m("F", _c(3, o=300.0, c=300.0), source="live") == "replace"
-        assert s5.last.close == 5.0    # close бара не изменился
+        assert s5.last.close == 4.0    # close бара не изменился
         assert s5.last.high == 300.0   # а high пересчитан
         assert rebuilt == [1] and s5.rebuilds == 1
         # 1m-ряд видит исправленную минуту
@@ -494,11 +494,11 @@ class TestHubIngestV2:
         s5 = hub.series("F", "5min")
         for i in (1, 2, 4, 5):
             hub.ingest_1m("F", _c(i, c=float(i)))
-        # бар 10:05 собран из 4 минут (дыра на 10:03)
-        assert len(s5) == 1 and s5.last.volume == 40.0
+        # бакет 10:00 собран из 3 минут (дыра на 10:03); минута 10:05 — в partial
+        assert len(s5) == 1 and s5.last.volume == 30.0
         # опоздавшая минута 3 закрывает дыру — производный ТФ перестроен
         assert hub.ingest_1m("F", _c(3, c=3.0)) == "insert"
-        assert s5.last.volume == 50.0
+        assert s5.last.volume == 40.0
         assert s5.rebuilds == 1
 
     def test_reject_does_not_touch_series(self):
@@ -576,9 +576,9 @@ class TestMerge:
         s5 = hub.series("F", "5min")
         for i in (1, 2, 4, 5):
             hub.ingest_1m("F", _c(i, c=float(i)))
-        assert s5.last.volume == 40.0  # дыра на минуте 3
+        assert s5.last.volume == 30.0  # дыра на минуте 3
         hub.seed_1m("F", [_c(3, c=3.0)], source="db")
-        assert s5.last.volume == 50.0
+        assert s5.last.volume == 40.0
         assert s5.rebuilds == 1
 
     def test_seed_idempotent(self):

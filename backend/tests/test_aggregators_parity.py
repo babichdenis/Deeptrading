@@ -81,14 +81,18 @@ def test_start_camp_identical():
     assert canon == uni == ml, "START-лагерь агрегаторов разошёлся (заморозка нарушена)"
 
 
-@pytest.mark.xfail(reason="END-сетка (ceil/bucket_close) — к конвергенции на START (REF-001b)",
-                   strict=True)
-def test_end_camp_converged_to_start():
+def test_candlehub_build_tf_converged_to_start():
+    """candlehub переведён на START (REF-001b): build_tf == канон."""
     rows = _rows()
     ecs = _engine_candles(rows)
     from app.engine.candlehub import build_tf
+    assert _series(build_tf(ecs, 300, include_partial=True)) == _start_camp(rows)
+
+
+@pytest.mark.xfail(reason="services.ensemble.resample ещё END (ceil) — к конвергенции на START",
+                   strict=True)
+def test_ensemble_resample_converged_to_start():
+    rows = _rows()
+    ecs = _engine_candles(rows)
     from app.services.ensemble import resample
-    canon = _start_camp(rows)
-    ens = _series(resample(ecs, 300))
-    ch = _series(build_tf(ecs, 300))
-    assert ens == canon and ch == canon, "END-лагерь ещё не на START-сетке"
+    assert _series(resample(ecs, 300)) == _start_camp(rows)

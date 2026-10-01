@@ -1,8 +1,9 @@
 """Parity двух CandleHub на одной синтетической ленте.
 
 app.engine.candlehub принимает уже закрытые 1m и сам собирает 5min
-(ts бара = close бакета). app.marketdata.hub принимает бары таймфрейма
-подписки и держит последний FORMING, пока не придёт следующий ts.
+(ts бара = НАЧАЛО бакета, канон START). app.marketdata.hub принимает
+бары таймфрейма подписки и держит последний FORMING, пока не придёт
+следующий ts.
 
 Лента одна и та же (ts + OHLCV). Сверяем контракт, который уже должен
 совпадать: набор ts закрытых 5m-свечей, число CLOSED, forming-обновления
@@ -15,8 +16,9 @@ app.engine.candlehub принимает уже закрытые 1m и сам с�
 - опоздавшая 1m с новым ts: engine вставляет её в 1m-ряд и пересобирает
   5m на месте (тот же ts бакета, OHLCV может измениться, нового CLOSED нет).
   marketdata такой бар дропает (out_of_order) и закрытые бары не переписывает;
-- engine закрывает 1m сразу, marketdata держит последний бар forming;
-- forming.ts у engine — правая граница бакета (10:30), у marketdata — ts
+- engine держит последний бакет forming, пока не придёт минута следующего
+  бакета (как Resampler); marketdata закрывает forming при любом новом ts;
+- forming.ts у engine — начало бакета (10:25), у marketdata — ts
   события (10:26);
 - дыру engine отдаёт только через gap_report(), marketdata шлёт CANDLE_GAP.
   Пустые бакеты не создаёт ни один.
@@ -73,7 +75,7 @@ def test_hub_parity_on_shared_tape():
         )
         return action
 
-    # Нормальный ряд: три закрытых 5m-бакета по границе (10:05, 10:10, 10:15).
+    # Нормальный ряд: два закрытых 5m-бакета (10:05, 10:10), forming 10:15.
     assert push(5, 100.0) == "append"
     assert push(10, 101.0) == "append"
     assert push(15, 102.0) == "append"
@@ -90,36 +92,38 @@ def test_hub_parity_on_shared_tape():
     assert len(series_5) == bars_before
     assert sum(1 for event in md_closed if event.ts == _at(10)) == 1
 
-    # Out-of-order: минута 10:07 внутри уже закрытого бакета 10:10.
+    # Out-of-order: минута 10:07 внутри уже закрытого бакета 10:05.
     # 5m-набор ts не растёт ни у одного хаба.
     assert push(7, 103.0, volume=7.0) == "insert"
-    assert [c.ts for c in series_5.snapshot()] == [_at(5), _at(10), _at(15)]
+    assert [c.ts for c in series_5.snapshot()] == [_at(5), _at(10)]
     assert [event.ts for event in md_closed] == [_at(5), _at(10)]
 
     # Gap: 10:25, бакета 10:20 нет.
     assert push(25, 104.0) == "append"
 
-    # Первая свеча следующего бакета закрывает 10:25 у marketdata
-    # (engine закрыл 10:25 сразу, потому что ts на границе) и открывает forming.
+    # Минута 10:25 закрывает бакет 10:15 у engine и forming 10:15 у marketdata,
+    # но engine держит forming 10:25 до минуты 10:30, а marketdata закрывает
+    # 10:25 уже на 10:26.
     assert push(26, 105.0, volume=3.0) == "append"
-    expected = [_at(5), _at(10), _at(15), _at(25)]
-    assert [c.ts for c in eng_closed] == expected
-    assert [c.ts for c in series_5.snapshot()] == expected
-    assert [event.ts for event in md_closed] == expected
+    eng_expected = [_at(5), _at(10), _at(15)]
+    md_expected = [_at(5), _at(10), _at(15), _at(25)]
+    assert [c.ts for c in eng_closed] == eng_expected
+    assert [c.ts for c in series_5.snapshot()] == eng_expected
+    assert [event.ts for event in md_closed] == md_expected
     store = md.get_store(FIGI, TF)
     assert store is not None
-    assert [c.ts for c in store.get()] == expected
+    assert [c.ts for c in store.get()] == md_expected
 
     # 20 обновлений forming внутри бакета (10:25, 10:30]. CLOSED не растёт.
     seq_at_forming = state.sequence
     for i in range(20):
         assert push(26, 110.0 + i, volume=20.0 + i) == "dup"
-    assert len(eng_closed) == len(expected)
-    assert len(md_closed) == len(expected)
-    assert [c.ts for c in series_5.snapshot()] == expected
-    assert [c.ts for c in store.get()] == expected
+    assert len(eng_closed) == len(eng_expected)
+    assert len(md_closed) == len(md_expected)
+    assert [c.ts for c in series_5.snapshot()] == eng_expected
+    assert [c.ts for c in store.get()] == md_expected
     assert state.sequence == seq_at_forming
-    assert series_5.partial is not None and series_5.partial.ts == _at(30)
+    assert series_5.partial is not None and series_5.partial.ts == _at(25)
     assert store.forming() is not None and store.forming().ts == _at(26)
     # engine оставил close первого тика 10:26, marketdata — close последнего апдейта
     assert series_5.partial.close == 105.0

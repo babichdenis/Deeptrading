@@ -529,8 +529,8 @@ def test_market_data_hub_commits_only_on_closed_bar():
 
     md.ingest_1m("SBER", candles[4])
     assert len(series) == 1
-    assert series.last.ts == candles[4].ts
-    assert md.get("SBER", "5min", "sma", params) == candles[4].close
+    assert series.last.ts == datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+    assert md.get("SBER", "5min", "sma", params) == candles[3].close
 
 
 def test_market_data_hub_late_subscribe_builds_timeframe_from_history():
