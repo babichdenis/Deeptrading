@@ -10,6 +10,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 REF = ROOT / "configs" / "reference" / "REF-001.json"
 
+pytestmark = pytest.mark.integration
+
 
 def _load_mod():
     spec = importlib.util.spec_from_file_location("reference_run", ROOT / "scripts" / "reference_run.py")
@@ -25,7 +27,7 @@ def test_reference_001_matches():
     ref = json.loads(REF.read_text(encoding="utf-8"))
     try:
         got = mod.run_reference(ref)
-    except Exception as e:  # нет БД/данных на этой машине
+    except BaseException as e:  # нет БД/данных на этой машине (SystemExit тоже не Exception)
         pytest.skip(f"нет данных: {type(e).__name__}: {str(e)[:80]}")
     exp = ref["expected"]
     assert got["data_hash"] == exp["data_hash"], "data_hash: данные изменились"
