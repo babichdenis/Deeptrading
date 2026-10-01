@@ -3251,6 +3251,20 @@ class PaperBotRuntime:
             self._trace = None
             self._trace_writer = None
 
+    def _trace_order_reject(self, figi: str, ticker: str, action: str, side: str,
+                            reason_code: str, note: str = "", error: dict | None = None,
+                            ts_bar=None) -> None:
+        """Signal Trace: ордер принят, но не исполнен (FILL/REJECTED + причина)."""
+        if self._trace is None:
+            return
+        try:
+            from app.engine.trace import Stage, Status, TraceEvent
+            self._trace.emit(TraceEvent(stage=Stage.FILL, status=Status.REJECTED, ts_bar=ts_bar,
+                                        figi=figi, ticker=ticker, action=action, side=side,
+                                        reason=note or None, reason_code=reason_code, error=error or {}))
+        except Exception:
+            pass
+
     async def _startup(self, cfg: BotConfig) -> None:
         await self._init_signal_trace(cfg)
         try:
@@ -5751,6 +5765,7 @@ class PaperBotRuntime:
             lot_cost = price * lot
             if price <= 0 or lot <= 0 or lot_cost <= 0:
                 self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] price_lot — цена={price} лот={lot}")
+                self._trace_order_reject(figi, ticker, action, side, "sizing_price_lot", "цена/лот <= 0")
                 return
             own_per_lot = lot_cost  # divide: позиция = бюджет (свои = бюджет / плечо)
             # Ранняя проверка достаточности бюджета. В divide-режиме плечо НЕ
@@ -5761,6 +5776,7 @@ class PaperBotRuntime:
             # может спасти лот (own_per_lot = lot_cost/lev) — идём в блок MARGIN.
             if budget < lot_cost and str(cfg.margin_sizing).lower() != "multiply":
                 self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] budget — бюджет {budget:.0f} < стоимость лота {lot_cost:.0f} (divide)")
+                self._trace_order_reject(figi, ticker, action, side, "sizing_budget_divide", "бюджет < лота")
                 return
             # --- Маржинальное плечо: запрашиваем у брокера ДО входа, ответ в лог ---
             if isinstance(self.broker, (LiveBroker, PaperBroker)):
@@ -5817,6 +5833,7 @@ class PaperBotRuntime:
                     self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed at cfg.leverage={lev:.1f}")
             if budget < own_per_lot:
                 self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] budget — бюджет {budget:.0f} < стоимость лота {own_per_lot:.0f}")
+                self._trace_order_reject(figi, ticker, action, side, "sizing_budget", "бюджет < своих на лот")
                 return
             qty = max(1, int(budget / own_per_lot))
             _used_lev = lev
@@ -5847,6 +5864,8 @@ class PaperBotRuntime:
                     _lim_kind = "свои деньги (без плеча, потолок марж. лимита)"
                 if max_lots <= 0:
                     self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] margin_limit — лимит ({_lim_kind}) = 0")
+                    self._trace_order_reject(figi, ticker, action, side, "sizing_margin_limit",
+                                             f"лимит ({_lim_kind}) = 0")
                     return
                 if qty > max_lots:
                     self._log(f"QTY CAP {ticker}: {qty} → {max_lots} ({_lim_kind}, {_tss or '—'})")
@@ -5985,6 +6004,7 @@ class PaperBotRuntime:
                               f"(пропущено сигналов: {_nn})")
                 self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker, reason="AI_REJECT_COOLDOWN")
                 self._log_no_trade(figi, "ai_reject_cooldown")
+                self._trace_order_reject(figi, ticker, action, side, "ai_reject_cooldown")
                 return
             order.status = "PENDING_APPROVAL"
             self._approvals_since[order.id] = _time.monotonic()
@@ -6051,6 +6071,9 @@ class PaperBotRuntime:
                 self._log(f"AI-ГЕЙТ: вход {order.ticker} ОТКЛОНЁН — {_why}")
                 self.events.log("AI_APPROVAL_REJECTED", figi=figi, ticker=order.ticker,
                                 order_id=order.id, reason=(order.meta or {}).get("ai_reason"))
+                self._trace_order_reject(figi, order.ticker, order.action, str(order.side),
+                                         "ai_approval_rejected", _why,
+                                         ts_bar=getattr(c, "ts", None))
                 return False
             self._approvals_since.pop(order.id, None)
         if order.action == "close":
@@ -6178,6 +6201,10 @@ class PaperBotRuntime:
                       f"qty={order.qty}: {type(_e).__name__}: {str(_e)[:140]}")
             self.events.log("ORDER_REJECTED", figi=figi, ticker=order.ticker,
                             order_id=order.id, action="open", error=str(_e)[:200])
+            self._trace_order_reject(figi, order.ticker, "open", str(order.side),
+                                     "broker_reject", f"{type(_e).__name__}: {str(_e)[:140]}",
+                                     error={"type": type(_e).__name__, "message": str(_e)[:200]},
+                                     ts_bar=getattr(c, "ts", None))
             return False
         entry_px = actual_entry if actual_entry and actual_entry > 0 else c.open
         order.status = "FILLED"
