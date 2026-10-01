@@ -82,9 +82,9 @@ StrategyStateSnapshot`.
 ```
 1m source → Canonical Resampler → TF bars → IndicatorHub → RegimeDetector → Strategy
 ```
-- Инвариант: **DB-TF бары == Resampler TF бары** (тест; после фикса `candle_cache` → START).
-- Пересобрать ТФ-таблицы всех фиг (сейчас SBER пересобран вручную; остальные — старая END-сетка).
-- Research-скрипты (labeling/calibrate/trades_split) на `build_tf` → канонический Resampler.
+- Инвариант: **DB-TF бары == Resampler TF бары** (`tests/test_db_tf_parity.py`; SBER 2 passed).
+- [в процессе] Пересбор ТФ-таблиц всех фиг (`scripts/rebuild_tf_tables.py`, фон 02.10; SBER готов).
+- [x] Research-скрипты: `build_tf` переведён на START (6ac09ed) — скрипты автоматически на каноне; БД-разметку (labels/ideal_trades) пересчитать после пересбора ТФ.
 
 ## 5. Выводы Этапа A
 

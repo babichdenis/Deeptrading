@@ -64,7 +64,7 @@ START (эпоха/floor) vs END (ceil):
 1. **Канон конвенции = START** (совпадает с T-Invest, SQL `date_bin`, `Resampler`).
 2. Старое допущение `candle_cache` «метка = закрытие, как у T-Invest» — **ошибка** (уже исправлено на START).
 3. **Корпус ТФ-таблиц в БД построен старой END-сеткой** (10m: 4.36M строк с 2024 по 43 фигам; 5m: 3.86M; hour: 1.6M; 2h/4h/week/month…) → **требует пересбора** (`scripts/rebuild_tf_tables.py`).
-4. `candlehub::CandleSeries/bucket_close` и `services.ensemble.resample/cached_resample`, `ensemble_ctx` (END) — к конвергенции на START (по одному потребителю, с тестами).
+4. **✅ 02.10: конвергенция завершена** — `candlehub` (build_tf/CandleSeries, коммит 6ac09ed) и `services.ensemble`/`ensemble_ctx` (b367bcc) переведены на START; полный unit-контур 907 зелёных, заморозка агрегаторов без xfail.
 5. Инвариант-тест: `tests/test_db_tf_parity.py` — ТФ-строки БД == канонический Resampler.
 
 ## Инвентарь агрегаторов старших ТФ (находка REF-001b, 30.09)
@@ -76,23 +76,21 @@ START (эпоха/floor) vs END (ceil):
 | `marketdata/resampler.py::Resampler` | **START** (эпоха, floor) — КАНОН | ReplayFeed (runtime replay), `universe/bars`, харнесс (после фикса REF-001b) |
 | `ml_ensemble_filter.resample_to_5m` | START (floor) | ML-фильтр |
 | `candle_cache.resample_from_1m` (SQL→БД) | **был END** (ceil, «как T-Invest») → **ИСПРАВЛЕН на START** (эпоха) | запасённые ТФ-свечи; прогрев бота (preload) |
-| `engine/candlehub.py::CandleSeries/bucket_close` (+`build_tf`) | **END** (ceil) | CandleHub (markethub, marketdata hub/adapter/orchestrator, ensemble_v2 M5); ранее — харнесс |
-| `services/ensemble.py::resample/cached_resample` | **END** (ceil; докстрока: «совпадает с bucket_close») | bias/regime, routes, research_pack |
-| `ensemble_ctx.py::DataContext.resample` (`_bucket_of`) | **END** (ceil) | ctx-контур ансамбля |
+| `engine/candlehub.py::CandleSeries/bucket_start` (+`build_tf`) | **был END** (ceil, `bucket_close`) → **ИСПРАВЛЕН на START** (6ac09ed) | CandleHub (markethub, marketdata hub/adapter/orchestrator, ensemble_v2 M5); ранее — харнесс |
+| `services/ensemble.py::resample/cached_resample` | **был END** (ceil) → **ИСПРАВЛЕН на START** (b367bcc, вместе с `_bar_stats_1m`) | bias/regime, routes, research_pack |
+| `ensemble_ctx.py::DataContext.resample` (`_bucket_of`) | **был END** (ceil) → **ИСПРАВЛЕН на START** (b367bcc; batch `_resample_batch` уже был floor) | ctx-контур ансамбля |
 
 **Почему так:** два контура — порт OsEngine (CandleManager → `candlehub`, метка по закрытию,
 как в OsEngine) и проектный marketdata (`Resampler`, метка по началу, совпадает с БД `date_bin`).
 Соглашение «CandleHub — источник правды» относилось к **владению 1m-рядами и событиями**,
 но агрегация ТФ размножилась по контурам и разошлась по конвенции.
 
-**План конвергенции (по одному, с тестами):**
-1. Выбрать единую конвенцию — предложение: **START/эпоха** (совпадает с БД/date_bin, UI, replay).
-2. `candlehub.build_tf`/`CandleSeries` → делегирование каноническому агрегатору (или явный
-   legacy-статус для OsEngine-parity потребителей).
-3. `services.ensemble.resample`/`ensemble_ctx` → тонкие обёртки над каноном (поведенческие
-   изменения bias/regime — проверять тестами по одному потребителю).
-4. `ml_ensemble_filter.resample_to_5m` → обёртка; `candle_cache` SQL — сверить и выровнять.
-5. Parity-тест «все агрегаторы дают идентичный ряд» + заморозка инвентаря (новый агрегатор — запрещён).
+**План конвергенции (по одному, с тестами) — ВЫПОЛНЕН 02.10:**
+1. [x] Конвенция — **START/эпоха** (доказано против T-Invest: 102/102).
+2. [x] `candlehub.build_tf`/`CandleSeries` → START (6ac09ed; мгновенная финализация границы убрана).
+3. [x] `services.ensemble.resample`/`ensemble_ctx` → START, batch+incremental согласованы (b367bcc).
+4. [x] `ml_ensemble_filter.resample_to_5m` уже START; `candle_cache` SQL выровнен (305139e).
+5. [x] Parity-тест «все агрегаторы дают идентичный ряд» + заморозка (`tests/test_aggregators_parity.py`; END-лагерь схлопнут, xfail снят).
 
 ## План (приоритет — сверху)
 
