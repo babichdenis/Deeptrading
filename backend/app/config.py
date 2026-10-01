@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     bot_test_pace: str = "fast"  # fast | wall (wall = поминутно, реальное время)
     bot_test_log_persist: bool = False  # тест: писать логи реплея в bot_logs (BOT_TEST_LOG_PERSIST=1)
     bot_test_variant: str = ""   # вариант тестового набора: data/ensemble_config.test.<variant>.json
+    universe_mode: str = ""      # research/test: v2_trend | v2_meanrev — универс через StrategyScreener (пусто = legacy)
     log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR
     log_debug_engine: bool = False  # подробные debug-логи движка (hot path)
     api_token: str = ""  # Bearer-токен для write-эндпойнтов API (пусто = auth отключена)

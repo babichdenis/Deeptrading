@@ -548,6 +548,19 @@ def _runtime_preset_overrides(rt: dict) -> dict:
     return out
 
 
+def _universe_v2_mode() -> str:
+    """research/test: UNIVERSE_MODE=v2_trend|v2_meanrev (.env → settings).
+
+    Пусто = legacy-отбор (compat). Действует только в тест-контуре
+    (см. ветку выбора универса в _startup).
+    """
+    try:
+        from app.config import get_settings as _gs
+        return str(getattr(_gs(), "universe_mode", "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
 def apply_test_overrides(cfg) -> list[str]:
     """Применить тестовые оверрайды (mode=test). Возвращает список применённых.
 
@@ -3183,15 +3196,30 @@ class PaperBotRuntime:
 
             from app.bot.universe import select_eligible_universe, select_volatile_universe
 
-            async with SessionLocal() as db:
-                if cfg.use_ensemble:
-                    # Берём ВСЕ eligible-тикеры сразу (без ограничения top_n),
-                    # чтобы не было «горячего» добора через HOT-ADD.
-                    self.universe = await select_eligible_universe(db, top_n=9999)
-                else:
-                    self.universe = await select_volatile_universe(
-                        db, figi_by_ticker, top_n=cfg.top_n
+            _umode = _universe_v2_mode()
+            if _umode in ("v2_trend", "v2_meanrev") and str(cfg.mode) == "test":
+                from app.bot.universe.runtime_select import select_screened_universe
+
+                async with SessionLocal() as db:
+                    self.universe = await select_screened_universe(
+                        db, figi_by_ticker, mode=_umode, top_n=cfg.top_n,
+                        as_of=self._replay_from or self._bot_now(),
                     )
+                self._log(
+                    f"UNIVERSE-V2 ({_umode}): {len(self.universe)} бумаг — "
+                    f"{', '.join(u.get('ticker', '?') for u in self.universe) or 'пусто'}",
+                    level="warn" if not self.universe else "info",
+                )
+            else:
+                async with SessionLocal() as db:
+                    if cfg.use_ensemble:
+                        # Берём ВСЕ eligible-тикеры сразу (без ограничения top_n),
+                        # чтобы не было «горячего» добора через HOT-ADD.
+                        self.universe = await select_eligible_universe(db, top_n=9999)
+                    else:
+                        self.universe = await select_volatile_universe(
+                            db, figi_by_ticker, top_n=cfg.top_n
+                        )
             if not self.universe:
                 raise RuntimeError("universe is empty")
             # Лог отбора: сколько тикеров и с какой волатильностью (ATR%).
