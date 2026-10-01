@@ -1,5 +1,11 @@
 # Project State
 
+> ⚠️ **АРХИВНЫЙ ДОКУМЕНТ (обновлён 2026-08-27).** Не является каноном текущего
+> состояния проекта. Канон: **`MEMORY.md`** (единая память, читается первым),
+> план — `ROADMAP.md`, разбор — `docs/roadmap/PROJECT_AUDIT_2026-09-30.md`.
+> Актуальные решения — `docs/adr/`. Историческая переписка — `chat.md`.
+> Правки этого файла для актуализации не делать: он описывает состояние на 27.08.
+
 Updated: 2026-08-27
 Owner: My3 (research lead) + DeepSeek (executor) — утверждает человек
 Mode: AUDIT / DISCOVERY / EXPERIMENT_DESIGN (GLOBAL_DISCOVERY завершён)
