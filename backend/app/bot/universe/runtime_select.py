@@ -28,6 +28,7 @@ from .discovery import (
     discover_liquid_universe,
     discover_tradeable_universe,
 )
+from .domain import InstrumentRef
 from .features import compute_market_features_many
 from .screener import MeanReversionScreener, TrendStrengthScreener, screen_by_strategy
 from .selection import rank_candidates
@@ -63,21 +64,25 @@ async def _load_snapshot_bars(
     """
     if _is_all_market(mode):
         snapshot = await discover_tradeable_universe(db)
-        figi_list = [e.ref.figi for e in snapshot.entries]
+        # instrument_info.figi может быть TCS-фигой, а свечи в БД — по BBG (как
+        # в runtime): резолвим ticker → BBG через figi_by_ticker, fallback — своя фига.
+        resolved: list[tuple] = []
+        for entry in snapshot.entries:
+            bb = figi_by_ticker.get((entry.ref.ticker or "").upper()) or entry.ref.figi
+            resolved.append((entry, bb))
         has_data = await count_bars_by_figi(
-            db, figi_list, interval=_SOURCE_INTERVAL_TRADEABLE, min_bars=_MIN_BARS
+            db, [bb for _, bb in resolved],
+            interval=_SOURCE_INTERVAL_TRADEABLE, min_bars=_MIN_BARS,
         )
         bars_by: dict[str, list] = {}
         refs = []
-        for entry in snapshot.entries:
-            if entry.ref.figi not in has_data:
+        for entry, bb in resolved:
+            if bb not in has_data:
                 continue
             # Вся история: фичи сами отсекают бары позже as_of (limit «последних N
             # от сейчас» брал бы бары ПОСЛЕ старта реплея и ломал as_of-дисциплину).
-            bars_by[entry.ref.figi] = await load_all_bars(
-                db, entry.ref.figi, interval=_SOURCE_INTERVAL_TRADEABLE
-            )
-            refs.append(entry.ref)
+            bars_by[bb] = await load_all_bars(db, bb, interval=_SOURCE_INTERVAL_TRADEABLE)
+            refs.append(InstrumentRef(ticker=entry.ref.ticker, figi=bb))
         return refs, bars_by
 
     snapshot = discover_liquid_universe(figi_by_ticker)
