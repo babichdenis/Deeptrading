@@ -20,7 +20,8 @@
     "overnight": true,
     "money": {"initial_cash": 100000, "qty_per_trade": 1, "pos_pct": 0.05, "max_positions": 50, "max_exposure_pct": 100.0},
     "exits": {"stop_pct": 10.0, "target_pct": 10.0, "trail_activation_comm_mult": null},
-    "entry": {"gates": [], "cooldown_bars": 0, "confirm_flip": 0, "last_hour_block": false},
+    "entry": {"gates": [], "cooldown_bars": 0, "confirm_flip": 0, "last_hour_block": false,
+              "volatility_max_mult": 0.0},
     "bias": {"enabled": false},
     "regimes": "all"
   },

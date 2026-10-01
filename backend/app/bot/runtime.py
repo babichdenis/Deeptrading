@@ -506,6 +506,7 @@ _PRESET_FIELD_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("reentry_cooldown_bars", ("entry", "cooldown_bars")),
     ("confirm_flip", ("entry", "confirm_flip")),
     ("entry_last_hour_block", ("entry", "last_hour_block")),
+    ("entry_volatility_max_mult", ("entry", "volatility_max_mult")),
     ("trade_regimes", ("regimes",)),
 )
 _MISS = object()
