@@ -3,7 +3,7 @@
     "id": "ref-001b-runtime",
     "name": "REF-001b — engine↔runtime parity (SBER 10m, signal-only)",
     "created": "2026-09-30",
-    "notes": "Сверка контуров: тот же сценарий, что REF-001 (EngineRunner), прогоняется проектным replay. Гейты выключены, сессии все, overnight держим, стопы ~бесконечные (1000×ATR) — эмуляция signal-only."
+    "notes": "Сверка контуров: тот же сценарий, что REF-001 (EngineRunner), прогоняется проектным replay. Гейты выключены, сессии все, overnight держим. Signal-only эмулируется через stop_pct/target_pct=10.0 (1000%): одиночный тест-движок (use_ensemble=false) строит выходы FixedSlTpPolicy по процентам и поля exits.sl_mode/atr_* не читает (проверено 01.10)."
   },
   "harness": {
     "robots": [{"robot": "rsi_trade_hub", "params": {}}],
@@ -19,8 +19,7 @@
     "sessions": ["morning", "day", "evening"],
     "overnight": true,
     "money": {"initial_cash": 100000, "qty_per_trade": 1, "pos_pct": 0.4, "max_positions": 5},
-    "exits": {"sl_mode": "atr", "atr_period": 14, "atr_multiplier": 1000.0, "initial_sl_atr": 1000.0,
-              "trail_activation_comm_mult": null},
+    "exits": {"stop_pct": 10.0, "target_pct": 10.0, "trail_activation_comm_mult": null},
     "entry": {"gates": [], "cooldown_bars": 0, "confirm_flip": 0, "last_hour_block": false},
     "bias": {"enabled": false},
     "regimes": "all"
