@@ -22,7 +22,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .bars import load_all_bars, load_bars
+from .bars import load_all_bars
 from .discovery import (
     count_bars_by_figi,
     discover_liquid_universe,
@@ -41,7 +41,6 @@ UNIVERSE_MODES = (
 )
 
 _SOURCE_INTERVAL_TRADEABLE = 5  # как в compat: фичи считаются по 5m барам
-_BARS_LIMIT = 200               # как TRADEABLE_BARS_LIMIT в compat
 _MIN_BARS = 30                  # как TRADEABLE_MIN_BARS в compat
 
 
@@ -58,8 +57,9 @@ async def _load_snapshot_bars(
 ) -> tuple[list, dict[str, list]]:
     """(список ref'ов, bars_by_figi) для выбранного источника универса.
 
-    Для полного рынка — предфильтр count_bars_by_figi(min_bars), бары limit=200;
-    для ликвидного списка — вся доступная история (как compat).
+    Для полного рынка — предфильтр count_bars_by_figi(min_bars), затем полная
+    история (as_of-отсечение делает features); для ликвидного списка — вся
+    доступная история (как compat).
     """
     if _is_all_market(mode):
         snapshot = await discover_tradeable_universe(db)
@@ -72,8 +72,10 @@ async def _load_snapshot_bars(
         for entry in snapshot.entries:
             if entry.ref.figi not in has_data:
                 continue
-            bars_by[entry.ref.figi] = await load_bars(
-                db, entry.ref.figi, interval=_SOURCE_INTERVAL_TRADEABLE, limit=_BARS_LIMIT
+            # Вся история: фичи сами отсекают бары позже as_of (limit «последних N
+            # от сейчас» брал бы бары ПОСЛЕ старта реплея и ломал as_of-дисциплину).
+            bars_by[entry.ref.figi] = await load_all_bars(
+                db, entry.ref.figi, interval=_SOURCE_INTERVAL_TRADEABLE
             )
             refs.append(entry.ref)
         return refs, bars_by
