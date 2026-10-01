@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.engine.models import Candle
 from app.services.data_context import DataContext
 from app.services.entry_gates import rsi_map
@@ -84,8 +86,11 @@ def test_ema_matches_batch():
     closes = [b.close for b in bars]
     st = EmaState(20)
     ref = ema(closes, 20)
+    # Инкрементальный EMA и batch-EMA идут по разным формулам накопления
+    # (рекуррентная vs взвешенная сумма), поэтому float совпадает не точно:
+    # расхождение порядка 1e-14 — это арифметика порядка, не регресс.
     for i, c in enumerate(closes):
-        assert st.update(c) == ref[i], f"i={i}"
+        assert st.update(c) == pytest.approx(ref[i], rel=1e-9, abs=1e-12), f"i={i}"
 
 
 def test_closed_forming_composition_via_data_context():

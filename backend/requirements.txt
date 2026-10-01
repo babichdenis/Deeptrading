@@ -1,11 +1,2 @@
---extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
-
-fastapi>=0.115,<1.0
-uvicorn[standard]>=0.30,<1.0
-sqlalchemy[asyncio]>=2.0.30,<2.1
-asyncpg>=0.29,<1.0
-pydantic-settings>=2.3,<3.0
-numpy>=1.26,<3.0
-pandas>=2.0,<3.0
-joblib>=1.3,<2.0
-t-tech-investments
+-r requirements-core.txt
+-r requirements-broker.txt

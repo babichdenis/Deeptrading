@@ -9,6 +9,8 @@ BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORTS = os.path.join(BACKEND, "reports")
 RUN_DIR = os.path.join(REPORTS, "5b44f3b383df")
 
+pytestmark = pytest.mark.artifact
+
 
 @pytest.fixture(scope="module")
 def report() -> dict:

@@ -7,6 +7,8 @@ import pytest
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPORTS = os.path.join(BACKEND, "reports")
 
+pytestmark = pytest.mark.artifact
+
 
 @pytest.fixture(scope="module")
 def report() -> dict:

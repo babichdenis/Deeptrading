@@ -21,10 +21,45 @@ jobs:
       - name: Compile check (синтаксис)
         run: |
           python -m compileall -q app scripts
-      - name: Ruff check
-        # Линт не блокирует (в легаси-кодpе есть долг); это сигнал.
+      - name: Ruff check (полный, информационный)
+        # Полный Ruff остаётся информационным: в легаси-коде ~4.4k diagnostics.
         continue-on-error: true
         run: python -m ruff check app scripts
+
+  ruff-changed:
+    # Блокирующий минимум на ИЗМЕНЁННЫХ файлах: F (undefined name, unused import,
+    # redefinition), E9 (syntax). Не даёт новому коду растить долг, не требуя
+    # разбирать легаси-backlog.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install "ruff>=0.9,<1"
+      - name: Diff changed Python files vs origin/master
+        id: changed
+        run: |
+          BASE=$(git rev-parse --verify origin/master 2>/dev/null || git rev-parse HEAD~1)
+          git fetch --no-tags --depth=1 origin "$BASE" 2>/dev/null || true
+          {
+            echo "base=$BASE"
+            git diff --name-only "$BASE"...HEAD -- '*.py' || true
+          } >> "$GITHUB_OUTPUT"
+          echo "Changed py files:"; cat "$GITHUB_OUTPUT" | grep -v '^base=' || echo "  (none)"
+      - name: Blocking ruff on changed files
+        if: steps.changed.outputs.base != ''
+        run: |
+          FILES=$(git diff --name-only "${{ steps.changed.outputs.base }}...HEAD" -- '*.py' | sed 's|^backend/||' | grep -v '^$' || true)
+          if [ -z "$FILES" ]; then echo "No changed Python files — skip"; exit 0; fi
+          echo "$FILES"
+          python -m ruff check --select F,E9 --isolated $FILES
 
   test:
     runs-on: ubuntu-latest
@@ -55,9 +90,40 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install deps
+        # Broker SDK лежит на private index T-Bank; его сертификат не входит в
+        # системный CA ubuntu-образов (openssl: verify code 21), поэтому pip
+        # требует --trusted-host. Версия SDK зафиксирована, чтобы новый релиз
+        # private-пакета не менял baseline без коммита.
+        # requirements-core.txt / requirements-broker.txt разделены:
+        # core — engine/API/test, broker — коннектор к T-Invest.
         run: |
           pip install -r requirements-dev.txt
       - name: Run tests
         # Hermetic-контур: без research-артефактов backend/reports (маркер artifact)
         # и без живых данных БД live-стенда (маркер integration).
         run: pytest -q --tb=short -m "not artifact and not integration"
+
+  frontend:
+    # P0.3: изменения frontend/src/*.ts попадали в master без tsc/Vite проверки.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install deps
+        run: npm ci
+      - name: Build (tsc + vite)
+        run: npm run build
+      - name: Bundle stats
+        if: always()
+        run: |
+          if [ -d dist ]; then
+            echo "Bundle sizes:"
+            find dist -name '*.js' -o -name '*.css' | xargs ls -lh 2>/dev/null || true
+          fi
