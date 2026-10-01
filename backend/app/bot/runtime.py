@@ -6309,7 +6309,18 @@ class PaperBotRuntime:
         self._exit_plans[figi] = exit_policy
         self._exit_side[figi] = "LONG" if order.side == "BUY" else "SHORT"
         self._exit_entry_px[figi] = float(entry_px)
-        _lot_entry = next((u.get("lot") for u in self.universe if u.get("figi") == figi), 1) or 1
+        # Лот — из БД (Instrument.lot), как в _st_open: order.qty приходит в ЛОТАХ,
+        # а _exit_qty должен быть в ШТУКАХ. Раньше искали ключ "lot" в словарях
+        # универса, где ключ "lot_size" → лот=1 → qty занижен в разы (max_pnl/MAE
+        # в карточке меньше реальных, найдено 02.10 на MTSS: 2.70₽ вместо 27.0₽).
+        _lot_entry = 1
+        try:
+            from app.models.instrument import Instrument as _Instr
+            async with SessionLocal() as _db_lot:
+                _lot_entry = int((await _db_lot.execute(
+                    select(_Instr.lot).where(_Instr.figi == figi))).scalar_one_or_none() or 1)
+        except Exception:
+            _lot_entry = 1
         self._exit_qty[figi] = int(order.qty) * int(_lot_entry)
         self._pos_leverage[figi] = max(1.0, float((order.meta or {}).get("leverage") or 1.0))
         self._trail_active[figi] = False
