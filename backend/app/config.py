@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     bot_test_variant: str = ""   # вариант тестового набора: data/ensemble_config.test.<variant>.json
     universe_mode: str = ""      # research/test: v2_trend | v2_meanrev — универс через StrategyScreener (пусто = legacy)
     signal_trace: bool = False   # Signal Trace P0: JSONL-журнал сигналов (reports/signal_trace/<run>.jsonl)
+    signal_trace_db: bool = False  # Signal Trace фаза 1: писать события ещё и в БД (signal_trace_runs/events)
     signal_trace_dir: str = ""   # переопределить каталог артефактов (пусто = backend/reports/signal_trace)
     log_level: str = "INFO"  # DEBUG | INFO | WARNING | ERROR
     log_debug_engine: bool = False  # подробные debug-логи движка (hot path)

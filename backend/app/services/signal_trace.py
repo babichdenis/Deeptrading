@@ -1,11 +1,10 @@
-"""Signal Trace — эмиттер и JSONL-sink (P0). См. DECISIONS.md 2026-10-01 17:30.
+"""Signal Trace — эмиттер, JSONL-sink и DB-sink (P0 + фаза 1). См. DECISIONS.md 2026-10-01 17:30.
 
 Hot path: emit() собирает документ и кладёт в deque — без IO и await.
-Фоновый таск дренирует очередь и пишет JSONL в reports/signal_trace/<run_key>.jsonl
-(один файл на прогон — параллельные сессии не смешиваются). seq монотонный,
-при переполнении — явный dropped (gap-детект по seq), close() — финальный флаш.
-
-Это первый sink будущего контура (фаза 1: те же события в signal_events).
+Фоновый таск дренирует очередь батчами: пишет JSONL в reports/signal_trace/<run_key>.jsonl
+(один файл на прогон) и, если задан db_writer, отдаёт тот же батч в БД (SqlTraceWriter,
+INSERT ... ON CONFLICT DO NOTHING). seq монотонный, при переполнении — явный dropped,
+close() — финальный флаш.
 """
 from __future__ import annotations
 
@@ -16,11 +15,13 @@ import re
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from app.engine.trace import SCHEMA_VERSION, RunInfo, TraceEvent, event_id
 
 DEFAULT_DIR = Path(__file__).resolve().parents[2] / "reports" / "signal_trace"
+
+DbWriter = Callable[[list[dict[str, Any]]], Awaitable[None]]
 
 
 def short_hash(data: Any, *, length: int = 12) -> str:
@@ -33,7 +34,7 @@ def _safe_name(name: str) -> str:
 
 
 class SignalTraceEmitter:
-    """Асинхронный JSONL-эмиттер. Один экземпляр на прогон."""
+    """Асинхронный эмиттер. Один экземпляр на прогон."""
 
     def __init__(
         self,
@@ -43,12 +44,14 @@ class SignalTraceEmitter:
         max_queue: int = 20000,
         flush_every: float = 0.5,
         flush_batch: int = 256,
+        db_writer: DbWriter | None = None,
     ) -> None:
         self.run = run
         self.directory = Path(directory) if directory else DEFAULT_DIR
         self.max_queue = int(max_queue)
         self.flush_every = float(flush_every)
         self.flush_batch = int(flush_batch)
+        self.db_writer = db_writer
         self.seq = 0
         self.events = 0
         self.errors = 0
@@ -72,21 +75,35 @@ class SignalTraceEmitter:
             self._fh = open(self.path, "a", encoding="utf-8")  # noqa: SIM115
         return self._fh
 
-    def _drain(self, max_batch: int) -> int:
-        if not self._q:
-            return 0
+    def _take_batch(self, max_batch: int) -> list[dict[str, Any]]:
+        batch: list[dict[str, Any]] = []
+        while self._q and len(batch) < max_batch:
+            batch.append(self._q.popleft())
+        return batch
+
+    def _write_file(self, batch: list[dict[str, Any]]) -> None:
+        if not batch:
+            return
         fh = self._file()
-        n = 0
-        while self._q and n < max_batch:
-            fh.write(json.dumps(self._q.popleft(), ensure_ascii=False) + "\n")
-            n += 1
+        for doc in batch:
+            fh.write(json.dumps(doc, ensure_ascii=False) + "\n")
         fh.flush()
-        return n
+
+    async def _flush_once(self) -> None:
+        batch = self._take_batch(self.flush_batch)
+        if not batch:
+            return
+        self._write_file(batch)
+        if self.db_writer is not None:
+            try:
+                await self.db_writer(batch)
+            except Exception:
+                self.errors += len(batch)
 
     async def _flush_loop(self) -> None:
         while True:
             await asyncio.sleep(self.flush_every)
-            self._drain(self.flush_batch)
+            await self._flush_once()
             if self._closed and not self._q:
                 break
 
@@ -164,11 +181,11 @@ class SignalTraceEmitter:
             "errors": self.errors,
             "max_seq": self.seq,
             "pending": len(self._q),
-            "path": str(self.path) if self._path is not None or self.directory else "",
+            "path": str(self._path or ""),
         }
 
     async def aclose(self) -> dict[str, Any]:
-        """Финальный флаш и остановка фонового таска."""
+        """Финальный флаш (файл + БД) и остановка фонового таска."""
         self._closed = True
         if self._task is not None:
             try:
@@ -176,7 +193,8 @@ class SignalTraceEmitter:
             except Exception:
                 self._task.cancel()
         try:
-            self._drain(self.max_queue)
+            while self._q:
+                await self._flush_once()
         finally:
             if self._fh is not None:
                 try:
@@ -184,3 +202,77 @@ class SignalTraceEmitter:
                 finally:
                     self._fh = None
         return self.summary()
+
+
+class SqlTraceWriter:
+    """DB-sink фазы 1: run-строка + батч событий (ON CONFLICT DO NOTHING)."""
+
+    def __init__(self, run: RunInfo) -> None:
+        self.run = run
+
+    async def start(self) -> None:
+        from sqlalchemy import text
+
+        from app.database import SessionLocal
+        async with SessionLocal() as db:
+            await db.execute(text(
+                "INSERT INTO signal_trace_runs (run_id, run_key, contour, mode, feed, test_name, "
+                "strategy_id, interval, replay_from, replay_to, config_hash, preset_hash, dataset_version) "
+                "VALUES (:run_id, :run_key, :contour, :mode, :feed, :test_name, :strategy_id, :interval, "
+                ":replay_from, :replay_to, :config_hash, :preset_hash, :dataset_version) "
+                "ON CONFLICT (run_id) DO NOTHING"
+            ), self.run.to_dict())
+            await db.commit()
+
+    async def write(self, docs: list[dict[str, Any]]) -> None:
+        if not docs:
+            return
+        from sqlalchemy import text
+
+        from app.database import SessionLocal
+        sql = text(
+            "INSERT INTO signal_trace_events (event_id, run_id, seq, ts_bar, ts_wall, figi, ticker, "
+            "stage, status, signal_id, parent_event_id, side, kind, reason, reason_code, action, "
+            "order_id, price, qty, context, error) VALUES "
+            "(:event_id, :run_id, :seq, :ts_bar, :ts_wall, :figi, :ticker, :stage, :status, :signal_id, "
+            ":parent_event_id, :side, :kind, :reason, :reason_code, :action, :order_id, :price, :qty, "
+            "CAST(:context AS JSON), CAST(:error AS JSON)) ON CONFLICT (event_id) DO NOTHING"
+        )
+        async with SessionLocal() as db:
+            for d in docs:
+                sig = d.get("signal") or {}
+                dec = d.get("decision") or {}
+                order = d.get("order") or {}
+                ctx = {
+                    "eval": d.get("eval"),
+                    "context": d.get("context"),
+                    "features": sig.get("features"),
+                }
+                await db.execute(sql, {
+                    "event_id": d["event_id"], "run_id": d["run"]["run_id"], "seq": d["seq"],
+                    "ts_bar": d.get("ts_bar"), "ts_wall": d.get("ts_wall"),
+                    "figi": d.get("figi") or "", "ticker": d.get("ticker") or "",
+                    "stage": d["event"], "status": d["status"],
+                    "signal_id": sig.get("signal_id"), "parent_event_id": d.get("parent_event_id"),
+                    "side": d.get("side") or sig.get("side") or "",
+                    "kind": d.get("kind") or sig.get("kind") or "",
+                    "reason": d.get("reason") or "", "reason_code": d.get("reason_code") or "",
+                    "action": dec.get("action") or order.get("action") or "",
+                    "order_id": order.get("order_id") or "", "price": order.get("price"),
+                    "qty": order.get("qty"),
+                    "context": json.dumps(ctx, ensure_ascii=False, default=str),
+                    "error": json.dumps(d.get("error") or {}, ensure_ascii=False, default=str),
+                })
+            await db.commit()
+
+    async def close(self, summary: dict[str, Any]) -> None:
+        from sqlalchemy import text
+
+        from app.database import SessionLocal
+        async with SessionLocal() as db:
+            await db.execute(text(
+                "UPDATE signal_trace_runs SET closed_at = now(), stats = CAST(:stats AS JSON) "
+                "WHERE run_id = :run_id"
+            ), {"run_id": self.run.run_id,
+                "stats": json.dumps(summary, ensure_ascii=False, default=str)})
+            await db.commit()

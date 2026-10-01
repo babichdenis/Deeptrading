@@ -58,3 +58,32 @@ def test_drop_counter_on_overflow(tmp_path):
     em.emit(ev)
     assert em.events == 1 and em.dropped == 2 and em.seq == 3
     asyncio.run(em.aclose())
+
+
+def test_db_writer_receives_batches(tmp_path):
+    written = []
+
+    async def writer(docs):
+        written.extend(docs)
+
+    async def body():
+        em = SignalTraceEmitter(_run("db-run"), directory=tmp_path, flush_every=0.01,
+                                flush_batch=10, db_writer=writer)
+        em.start()
+        em.emit(TraceEvent(stage=Stage.RUN_OPEN, status=Status.CREATED))
+        em.emit(TraceEvent(stage=Stage.RAW, status=Status.CREATED, figi="F",
+                           signal_id="s1", side="BUY"))
+        return await em.aclose()
+
+    summ = asyncio.run(body())
+    assert summ["events"] == 2
+    assert len(written) == 2
+    assert written[0]["event"] == "RUN_OPEN"
+    assert written[1]["signal"]["signal_id"] == "s1"
+
+
+def test_models_registered():
+    from app.models.signal_trace import SignalTraceEvent, SignalTraceOutcome, SignalTraceRun
+    assert SignalTraceRun.__tablename__ == "signal_trace_runs"
+    assert SignalTraceEvent.__tablename__ == "signal_trace_events"
+    assert SignalTraceOutcome.__tablename__ == "signal_trace_outcomes"

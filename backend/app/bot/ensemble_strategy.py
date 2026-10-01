@@ -229,6 +229,18 @@ class EnsembleV4Strategy:
             _qc = int(_fun.get("quorum_unique", 0))
             _gp = int(_fun.get("accepted_decisions", 0))
             _votes_last = _st5.get("votes_last", {}) or {}
+            _em = getattr(self, "_trace_emitter", None)
+            if _em is not None and (_raw or _votes_last):
+                try:
+                    from app.engine.trace import Stage, Status, TraceEvent
+                    _em.emit(TraceEvent(
+                        stage=Stage.FILTER, status=Status.CREATED, ts_bar=last.ts,
+                        ticker=str(getattr(self, "_tag", "") or ""), reason_code="funnel",
+                        context={"raw": _raw, "quorum": _qc, "gate": _gp,
+                                 "votes_last": (_votes_last if isinstance(_votes_last, dict) else {})},
+                    ))
+                except Exception:
+                    pass
             _bkey = last.ts.strftime("%Y-%m-%d %H:%M") if hasattr(last.ts, "strftime") else str(last.ts)
             if self._last_5m_key != _bkey:
                 self._last_5m_key = _bkey
