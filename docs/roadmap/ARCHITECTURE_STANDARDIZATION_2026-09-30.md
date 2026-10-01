@@ -53,6 +53,20 @@
   комиссии/next_open/конфликты/шорт/жизненный цикл. Здесь `test_engine_golden.py`.
 - **L4 Experiment/Research** — dataset+strategy+WF/OOS/robustness → Analytics (PnL/PF/DD/срезы).
 
+## ДОКАЗАНО эмпирически (30.09): T-Invest метит свечи по НАЧАЛУ (START)
+
+Проба на живой API (SBER, 24.09.2026): нативные 10m/1h свечи T-Invest сверены с агрегацией 1m
+START (эпоха/floor) vs END (ceil):
+- **10min: START 102/102 · END 0/102**
+- **hour: START 18/18 · END 0/18**
+
+Следствия:
+1. **Канон конвенции = START** (совпадает с T-Invest, SQL `date_bin`, `Resampler`).
+2. Старое допущение `candle_cache` «метка = закрытие, как у T-Invest» — **ошибка** (уже исправлено на START).
+3. **Корпус ТФ-таблиц в БД построен старой END-сеткой** (10m: 4.36M строк с 2024 по 43 фигам; 5m: 3.86M; hour: 1.6M; 2h/4h/week/month…) → **требует пересбора** (`scripts/rebuild_tf_tables.py`).
+4. `candlehub::CandleSeries/bucket_close` и `services.ensemble.resample/cached_resample`, `ensemble_ctx` (END) — к конвергенции на START (по одному потребителю, с тестами).
+5. Инвариант-тест: `tests/test_db_tf_parity.py` — ТФ-строки БД == канонический Resampler.
+
 ## Инвентарь агрегаторов старших ТФ (находка REF-001b, 30.09)
 
 Де-факто **6 реализаций** агрегации 1m → старший ТФ в **двух конвенциях метки бара**:
