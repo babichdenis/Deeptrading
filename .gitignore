@@ -251,3 +251,9 @@ backend/tg-orchestrator/
 
 # бэкапы .env (секреты) — не коммитить
 backend/.env.pre-champion.*
+
+# временные одноразовые скрипты и бэкапы (аудит P1.4)
+backend/tmp_*.py
+backend/_tmp_*.py
+*.jsonl.old
+*.jsonl.bak
