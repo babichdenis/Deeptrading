@@ -151,6 +151,24 @@ async def upsert_candles(db: AsyncSession, rows: list[dict]) -> int:
         )
         await db.execute(stmt)
         saved += len(batch)
+    try:
+        from datetime import timezone as _tz
+
+        from app.services.candle_integrity import invalidate as _inv
+        _figs = sorted({r.get("figi") for r in rows if r.get("figi")})
+        _ivals = sorted({int(r.get("interval") or 1) for r in rows})
+        _days = set()
+        for _r in rows:
+            _ts = _r.get("ts")
+            if _ts is None:
+                continue
+            if getattr(_ts, "tzinfo", None) is None:
+                _ts = _ts.replace(tzinfo=_tz.utc)
+            _days.add((_ts + timedelta(hours=3)).date())
+        for _iv in _ivals:
+            await _inv(db, _figs, _iv, sorted(_days))
+    except Exception:
+        pass
     await db.commit()
     return saved
 

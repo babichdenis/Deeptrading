@@ -4695,6 +4695,16 @@ class PaperBotRuntime:
                     for f, ts, o, h, l, cl, v in batch5:
                         await db.execute(sql5, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
                     await db.commit()
+                    # Watchdog: изменённые минутки инвалидируют baseline затронутых дней
+                    try:
+                        from app.services.candle_integrity import invalidate as _inv
+                        for _batch, _iv in ((batch, 1), (batch5, 5)):
+                            _figs = sorted({x[0] for x in _batch})
+                            _days = sorted({(x[1] + timedelta(hours=3)).date() for x in _batch})
+                            if _figs and _days:
+                                await _inv(db, _figs, _iv, _days)
+                    except Exception:
+                        pass
                 _pt = (_time.perf_counter() - _tp0) * 1000
                 self.metrics["persist_ms_total"] += _pt
                 self.metrics["persist_ms_n"] += 1

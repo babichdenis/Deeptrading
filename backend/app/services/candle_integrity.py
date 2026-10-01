@@ -254,3 +254,18 @@ async def preflight_universe(figis: list[str], dfrom: datetime, dto: datetime, *
             await repair(db, figis, interval, dfrom, dto, report=rep)
             rep = await check(db, figis, interval, dfrom, dto)
         return rep
+
+
+async def invalidate(db: AsyncSession, figis: list[str], interval: int, days: list) -> int:
+    """Сбросить baseline затронутых (figi, day) после записи свечей (писатели).
+
+    См. DECISIONS 2026-10-01 20:30, п.2: mismatch после правок не должен выглядеть
+    как порча — при следующей проверке это будет NO_BASELINE (перезапись).
+    """
+    if not figis or not days:
+        return 0
+    res = await db.execute(text(
+        "DELETE FROM candle_integrity WHERE figi = ANY(:f) AND interval = :i "
+        "AND (day)::date = ANY(:d)"
+    ), {"f": list(figis), "i": int(interval), "d": list(days)})
+    return int(res.rowcount or 0)
