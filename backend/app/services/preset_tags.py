@@ -130,10 +130,11 @@ def tag_groups(p: dict) -> list[dict]:
         ]},
     ]
     robots = _robots(p)
-    if robots or t.get("engine"):
-        items = [{"k": "движок", "v": _fmt(t.get("engine"))}] if t.get("engine") else []
-        items += robots
-        groups.append({"group": "Роботы", "items": items})
+    engine = str(t.get("engine") or "")
+    if engine and (not robots or engine not in {r_["k"] for r_ in robots}):
+        robots = [{"k": "движок", "v": engine}] + robots
+    if robots:
+        groups.append({"group": "Роботы", "items": robots})
     groups.append({"group": "Период", "items": [
         {"k": "период", "v": "..".join(str(x) for x in period) if period else "—"},
         {"k": "ТФ", "v": _fmt(h.get("timeframe") or t.get("interval"))},
@@ -142,7 +143,7 @@ def tag_groups(p: dict) -> list[dict]:
     ]})
     groups.append({"group": "Сессии", "items": [
         {"k": "вход", "v": sessions},
-        {"k": "overnight", "v": r.get("overnight")},
+        {"k": "overnight", "v": _fmt(r.get("overnight"))},
     ]})
     ex_items = [
         {"k": "режим SL", "v": _fmt(rt_ex.get("sl_mode"))},
@@ -168,7 +169,7 @@ def tag_groups(p: dict) -> list[dict]:
         {"k": "регимы", "v": _fmt(regimes) if regimes is not None else "—"},
     ]})
     groups.append({"group": "Bias", "items": [
-        {"k": "bias", "v": bias.get("enabled")},
+        {"k": "bias", "v": _fmt(bias.get("enabled"))},
         {"k": "ТФ/период", "v": f"{_fmt(bias.get('tf'))}/{_fmt(bias.get('period'))}"},
     ]})
     groups.append({"group": "Гейты", "items": [

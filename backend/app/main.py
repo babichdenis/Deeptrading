@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app import models  # noqa: F401
-from app.api.routes import analysis, analysis_reports, bot as bot_routes, catalog, candles, candlehub, instruments, lab, ml as ml_routes, news as news_routes, orchestrator_route, quorum, research, sandbox, screener, signals, test as test_routes, warehouse, ws
+from app.api.routes import analysis, analysis_reports, analysis_replays, bot as bot_routes, catalog, candles, candlehub, instruments, lab, ml as ml_routes, news as news_routes, orchestrator_route, quorum, research, sandbox, screener, signals, test as test_routes, warehouse, ws
 from app.config import get_settings
 from app.database import Base, engine
 from app.logging_setup import setup_logging
@@ -246,6 +246,7 @@ def create_app() -> FastAPI:
     app.include_router(candlehub.router)
     app.include_router(analysis.router)
     app.include_router(analysis_reports.router)
+    app.include_router(analysis_replays.router)
     app.include_router(catalog.router)
     app.include_router(research.router)
     app.include_router(orchestrator_route.router)

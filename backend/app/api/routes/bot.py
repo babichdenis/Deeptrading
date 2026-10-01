@@ -2044,17 +2044,120 @@ async def bot_test_trades(name: str) -> dict:
 
 @router.delete("/tests/{name}")
 async def bot_test_delete(name: str) -> dict:
-    """Удалить прогон теста (все сделки mode='paper' с этим test_name)."""
-    from sqlalchemy import delete as _delete
+    """Удалить прогон теста: сделки mode='paper', окно bot_test_runs, сайдкар пресета."""
+    return await _delete_test_runs([name])
+
+
+class TestsDeleteRequest(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=500)
+
+
+@router.post("/tests/delete")
+async def bot_tests_delete(req: TestsDeleteRequest) -> dict:
+    """Массовое удаление прогонов тестов."""
+    details = await _delete_test_runs(req.names)
+    return {"deleted": sum(d["trades"] for d in details), "tests": len(details), "details": details}
+
+
+async def _delete_test_runs(names: list[str]) -> list[dict]:
+    from sqlalchemy import delete as _delete, text as _text
     from app.database import SessionLocal as _DB
     from app.models.sandbox_trade import SandboxTrade
+    from app.services.preset_tags import remove_sidecar
+    details = []
     async with _DB() as db:
-        r = await db.execute(
-            _delete(SandboxTrade)
-            .where(SandboxTrade.mode == "paper", SandboxTrade.test_name == name)
-        )
+        for name in names:
+            r = await db.execute(
+                _delete(SandboxTrade)
+                .where(SandboxTrade.mode == "paper", SandboxTrade.test_name == name)
+            )
+            runs = 0
+            try:
+                rr = await db.execute(_text("DELETE FROM bot_test_runs WHERE name = :n"), {"n": name})
+                runs = int(rr.rowcount or 0)
+            except Exception:
+                pass
+            sc = remove_sidecar(name)
+            details.append({"name": name, "trades": int(r.rowcount or 0), "windows": runs,
+                            "sidecar": sc})
         await db.commit()
-        return {"deleted": int(r.rowcount or 0)}
+    return details
+
+
+class TestRestartResponse(BaseModel):
+    old_name: str
+    test_name: str
+    restarted: bool = False
+
+
+@router.post("/tests/{name}/restart")
+async def bot_test_restart(name: str) -> TestRestartResponse:
+    """Перезапустить прогон под НОВЫМ именем (<base> <YYYYMMDD-HHMM>).
+
+    Старый тест остаётся нетронутым (история сохраняется). Конфиг берётся из
+    сайдкара пресета, а при его отсутствии — текущий окно из bot_test_runs.
+    """
+    import re
+    from datetime import datetime, timezone
+    from app.database import SessionLocal as _DB
+    from app.services.preset_tags import load_sidecar
+    from sqlalchemy import text as _text
+
+    sidecar = load_sidecar(name)
+    payload = (sidecar or {}).get("payload") or {}
+    window: dict = {}
+    if not payload.get("replay_start"):
+        try:
+            async with _DB() as db:
+                row = (await db.execute(
+                    _text("SELECT replay_start, replay_end FROM bot_test_runs WHERE name = :n"),
+                    {"n": name})).first()
+            if row:
+                window = {"replay_start": _iso_dt(row[0]), "replay_end": _iso_dt(row[1])}
+        except Exception:
+            window = {}
+    if not payload.get("replay_start") and not window.get("replay_start"):
+        raise HTTPException(400, f"у теста {name!r} нет ни сайдкара, ни окна в bot_test_runs")
+
+    base = re.sub(r"\s+\d{8}-\d{4}(-\d+)?$", "", name).strip() or name
+    existing = set()
+    try:
+        async with _DB() as db:
+            rows = (await db.execute(_text("SELECT name FROM bot_test_runs"))).all()
+            existing = {str(r[0]) for r in rows}
+    except Exception:
+        existing = set()
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    suffix = 1
+    while True:
+        cand = (f"{base} {ts}" if suffix == 1 else f"{base} {ts}-{suffix}")[:48]
+        if cand != name and cand not in existing:
+            break
+        suffix += 1
+        if suffix > 30:
+            raise HTTPException(409, "не удалось подобрать свободное имя теста")
+
+    req = ModeRequest(
+        mode="test",
+        test_name=cand,
+        replay_start=str(payload.get("replay_start") or window.get("replay_start") or ""),
+        replay_end=str(payload.get("replay_end") or window.get("replay_end") or ""),
+        replay_pace=str(payload.get("replay_pace") or "fast"),
+        test_engine=str(payload.get("test_engine") or ""),
+        test_interval=str(payload.get("test_interval") or ""),
+        test_params=payload.get("test_params") or {},
+        preset=payload.get("preset") or {},
+        replay_log_persist=bool(payload.get("replay_log_persist", False)),
+    )
+    out = await bot_set_mode(req)
+    return TestRestartResponse(old_name=name, test_name=str(out.get("test_name") or cand),
+                                restarted=bool(out.get("restarted")))
+
+
+def _iso_dt(value) -> str:
+    if value is None:
+        return ""
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
 def _agg(trades: list) -> dict:

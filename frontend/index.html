@@ -308,7 +308,7 @@
             <section class="page" id="page-analytics">
               <div class="an-tabs">
                 <button class="an-tab active" data-antab="live">📈 Живая</button>
-                <button class="an-tab" data-antab="reports">📊 Прогоны (reports/)</button>
+                <button class="an-tab" data-antab="reports">📊 Прогоны</button>
               </div>
 
               <div class="an-tabpane" id="an-pane-live">
@@ -348,6 +348,10 @@
                 <div class="an-head">
                   <div class="an-title">📊 Прогоны</div>
                   <span class="an-sub" id="rep-sub">—</span>
+                  <select id="rep-source" class="rep-select" title="Откуда прогоны">
+                    <option value="harness">Харнесс (reports/)</option>
+                    <option value="replay">Реплеи (тесты бота)</option>
+                  </select>
                   <select id="rep-kind" class="rep-select" title="Вид прогона">
                     <option value="">все виды</option>
                     <option value="real">real — харнесс</option>
@@ -364,6 +368,7 @@
 
                   <div class="rep-main">
                     <div class="rep-runhead" id="rep-runhead"><span class="mini-hint">выбери прогон слева</span></div>
+                    <div class="rep-actions hidden" id="rep-actions"></div>
 
                     <div class="rep-subtabs">
                       <button class="rep-subtab active" data-reptab="strategies">🤖 Роботы</button>

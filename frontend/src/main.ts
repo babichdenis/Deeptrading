@@ -4445,10 +4445,14 @@ async function initMainChart(): Promise<void> {
   await loadEmbedChart({ figi, ticker: "", trade: null, trades: [] });
 }
 
-// ============ Вкладка «Анализ» → подвкладка «Прогоны»: report_runs / report_rows / report_trades ============
+// ============ Вкладка «Анализ» → подвкладка «Прогоны»: report_runs / report_rows / report_trades
+// + источник «Реплеи» — живые тесты бота из /api/v1/analysis/replays ============
+
+type RepId = number | string;
+type RepSource = "harness" | "replay";
 
 interface RepRun {
-  id: number;
+  id: RepId;
   file_name: string;
   kind: string;
   name: string | null;
@@ -4462,6 +4466,12 @@ interface RepRun {
   gl: number;
   net: number;
   detail_trades: number;
+  pf?: number | null;
+  winrate?: number | null;
+  open?: number;
+  preset_id?: string | null;
+  has_sidecar?: boolean;
+  updated_at?: string | null;
 }
 
 interface RepMetrics {
@@ -4508,9 +4518,26 @@ interface RepDim {
   table: RepSliceTable[];
 }
 
+interface RepTagItem {
+  k: string;
+  v: string | boolean | number | null;
+}
+
+interface RepTagGroup {
+  group: string;
+  items: RepTagItem[];
+}
+
+interface RepConfigTags {
+  has_sidecar: boolean;
+  preset_id: string | null;
+  notes: string;
+  groups: RepTagGroup[];
+}
+
 interface RepDetail {
   run: {
-    id: number;
+    id: RepId;
     file_name: string;
     kind: string;
     name: string | null;
@@ -4520,11 +4547,12 @@ interface RepDetail {
     commission?: number | null;
     slippage_bps?: number | null;
   };
-  summary: RepMetrics & { strategies: number; tickers: number };
+  summary: RepMetrics & { strategies: number; tickers: number; open_positions?: number };
   strategies: RepStrategy[];
   rows: RepRow[];
   dims: string[];
   dim_labels: Record<string, string>;
+  config_tags?: RepConfigTags;
 }
 
 interface RepTrade {
@@ -4578,15 +4606,16 @@ interface RepLeadersResp {
 type RepTab = "strategies" | "slices" | "trades" | "market";
 type RepWin = "day" | "week" | "month";
 
-const REP_DIM_ORDER = ["session", "regime_adx", "er", "hour", "weekday", "ticker"];
+const REP_DIM_ORDER = ["session", "regime", "regime_adx", "er", "hour", "weekday", "side", "exit", "entry", "ticker"];
 const REP_KIND_LABEL: Record<string, string> = {
-  real: "real", wf: "wf", matrix: "matrix", exp: "exp",
+  real: "real", wf: "wf", matrix: "matrix", exp: "exp", replay: "replay",
 };
 const REP_PAGE = 200;
 
 let repLoaded = false;
+let repSource: RepSource = "harness";
 let repRuns: RepRun[] = [];
-let repRunId: number | null = null;
+let repRunId: RepId | null = null;
 let repDetail: RepDetail | null = null;
 let repTab: RepTab = "strategies";
 let repDim = "session";
@@ -4637,24 +4666,38 @@ function repCard(key: string, value: string, cls = ""): string {
     `<span class="rep-c-v ${cls}">${value}</span></div>`;
 }
 
+function repListUrl(): string {
+  if (repSource === "replay") return `/api/v1/analysis/replays`;
+  const kind = (document.getElementById("rep-kind") as HTMLSelectElement | null)?.value ?? "";
+  return `/api/v1/analysis/reports` + (kind ? `?kind=${encodeURIComponent(kind)}` : "");
+}
+
+function repRunApi(suffix: string): string {
+  if (repRunId === null) return "";
+  return repSource === "replay"
+    ? `/api/v1/analysis/replays/${encodeURIComponent(String(repRunId))}${suffix}`
+    : `/api/v1/analysis/reports/${repRunId}${suffix}`;
+}
+
 async function loadRepRuns(): Promise<void> {
   const list = $("rep-list");
   if (list) list.innerHTML = `<span class="mini-hint">загрузка…</span>`;
   try {
-    const kind = (document.getElementById("rep-kind") as HTMLSelectElement | null)?.value ?? "";
     const q = ((document.getElementById("rep-query") as HTMLInputElement | null)?.value ?? "").trim().toLowerCase();
-    const url = `/api/v1/analysis/reports` + (kind ? `?kind=${encodeURIComponent(kind)}` : "");
-    const resp = await fetchJSON<{ runs: RepRun[]; count: number }>(url);
+    const resp = await fetchJSON<{ runs: RepRun[]; count: number }>(repListUrl());
     repRuns = resp.runs.filter((r) =>
       !q || r.file_name.toLowerCase().includes(q) || (r.name ?? "").toLowerCase().includes(q));
     setText("rep-sub", `${repRuns.length} из ${resp.count}`);
     if (list) list.innerHTML = "";
     if (!repRuns.length) {
-      if (list) list.innerHTML = `<span class="mini-hint">нет прогонов${
-        kind || q ? " по фильтру" : " — запусти scripts/import_reports.py"}</span>`;
+      if (list) list.innerHTML = `<span class="mini-hint">${
+        repSource === "replay"
+          ? "нет реплей-тестов — запусти тест (страница Бот) или preset.py replay --start"
+          : (q ? "нет прогонов по фильтру" : "нет прогонов — запусти scripts/import_reports.py")}</span>`;
       repRunId = null;
       repDetail = null;
       renderRepRunHead();
+      renderRepActions();
       return;
     }
     if (repRunId === null || !repRuns.some((r) => r.id === repRunId)) repRunId = repRuns[0].id;
@@ -4670,15 +4713,22 @@ function renderRepList(): void {
   if (!list) return;
   list.innerHTML = repRuns.map((r) => {
     const kindCls = REP_KIND_LABEL[r.kind] ?? r.kind;
-    return `<div class="rep-item ${r.id === repRunId ? "active" : ""}" data-run="${r.id}" title="${esc(r.file_name)}">` +
-      `<div class="rep-i-name"><span class="rep-kind ${esc(kindCls)}">${esc(r.kind)}</span> ${esc(r.file_name)}</div>` +
-      `<div class="rep-i-meta"><span>${repTs(r.created_at)}</span><span>сделок ${repN(r.trades)}</span>` +
-      `<span>роботов ${repN(r.robots)}</span>` +
-      `<span class="${repSignCls(r.net)}">net ${repRub(r.net)}</span></div></div>`;
+    const meta = repSource === "replay"
+      ? `<span>${repTs(r.created_at)}</span><span>сделок ${repN(r.trades)}</span>` +
+        (r.open ? `<span>открытых ${repN(r.open)}</span>` : "") +
+        `<span class="${repSignCls(r.net)}">net ${repRub(r.net)}</span>`
+      : `<span>${repTs(r.created_at)}</span><span>сделок ${repN(r.trades)}</span>` +
+        `<span>роботов ${repN(r.robots)}</span>` +
+        `<span class="${repSignCls(r.net)}">net ${repRub(r.net)}</span>`;
+    const preset = r.preset_id
+      ? `<span class="rep-preset" title="пресет">${esc(r.preset_id)}</span>` : "";
+    return `<div class="rep-item ${r.id === repRunId ? "active" : ""}" data-run="${esc(String(r.id))}" title="${esc(r.file_name)}">` +
+      `<div class="rep-i-name"><span class="rep-kind ${esc(kindCls)}">${esc(r.kind)}</span> ${esc(r.file_name)} ${preset}</div>` +
+      `<div class="rep-i-meta">${meta}</div></div>`;
   }).join("");
 }
 
-async function selectRepRun(id: number): Promise<void> {
+async function selectRepRun(id: RepId): Promise<void> {
   repRunId = id;
   repDetail = null;
   repTrades = [];
@@ -4688,13 +4738,15 @@ async function selectRepRun(id: number): Promise<void> {
   repSlicesCache = {};
   repDim = "session";
   renderRepList();
+  renderRepActions();
   const head = $("rep-runhead");
-  if (head) head.innerHTML = `<span class="mini-hint">загрузка прогона #${id}…</span>`;
+  if (head) head.innerHTML = `<span class="mini-hint">загрузка прогона ${esc(String(id))}…</span>`;
   try {
-    repDetail = await fetchJSON<RepDetail>(`/api/v1/analysis/reports/${id}`);
+    repDetail = await fetchJSON<RepDetail>(repRunApi(""));
     const dims = repDetail.dims;
     repDim = REP_DIM_ORDER.find((d) => dims.includes(d)) ?? dims[0] ?? "session";
     renderRepRunHead();
+    renderRepActions();
     renderRepStrategies();
     renderRepDims();
     renderRepPane();
