@@ -14,16 +14,16 @@ import argparse
 import json
 import sys
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from bt_ose_sweep import ROBOTS  # noqa: E402
-
 from app.services.preset_tags import sanitize, save_sidecar, tags  # noqa: E402
+
+from bt_ose_sweep import ROBOTS  # noqa: E402
 
 
 def to_spec(p: dict) -> dict:
@@ -56,7 +56,7 @@ def replay_payload(p: dict) -> tuple[dict, str]:
     period = h.get("period") or ["", ""]
     d0 = period[0] if len(period) > 0 else ""
     d1 = period[1] if len(period) > 1 else ""
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     test_name = sanitize(f"{pr.get('id', 'preset')} {ts}")
     payload = {
         "mode": "test",

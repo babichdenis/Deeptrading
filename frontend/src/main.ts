@@ -827,48 +827,328 @@ function bindHmToggle(): void {
   });
 }
 
+interface BotTestRow {
+  name: string;
+  replay_start: string;
+  replay_end: string;
+  created_at: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  gross_win: number;
+  gross_loss: number;
+  net: number;
+  pf: number;
+  winrate: number;
+  positions_open: number;
+}
+
+interface TestTradeRow {
+  figi: string;
+  ticker: string;
+  side: string;
+  qty: number;
+  entry_price: number;
+  exit_price: number | null;
+  entry_time: string;
+  ts: string | null;
+  stop_loss: number | null;
+  take_profit: number | null;
+  commission: number;
+  net_pnl: number | null;
+  exit_reason: string;
+  entry_reason: string;
+  test_name: string | null;
+}
+
+let botTestRows: BotTestRow[] = [];
+let botTestSort = { k: "created_at", dir: -1 };
+let botTestQuery = "";
+const botTestSelected = new Set<string>();
+let botTestDrawerName = "";
+
+function botTestFiltered(): BotTestRow[] {
+  const q = botTestQuery.trim().toLowerCase();
+  const rows = botTestRows.filter((t) => !q || t.name.toLowerCase().includes(q));
+  const k = botTestSort.k;
+  const dir = botTestSort.dir;
+  return rows.sort((a, b) => {
+    const av = (a as unknown as Record<string, string | number>)[k];
+    const bv = (b as unknown as Record<string, string | number>)[k];
+    if (typeof av === "string" || typeof bv === "string") {
+      return String(av ?? "").localeCompare(String(bv ?? "")) * dir;
+    }
+    return (Number(av ?? 0) - Number(bv ?? 0)) * dir;
+  });
+}
+
+function renderTests(): void {
+  const tbody = document.querySelector("#bot-tests-table tbody");
+  if (!tbody) return;
+  const rows = botTestFiltered();
+  tbody.innerHTML = "";
+  for (const t of rows) {
+    const tr = document.createElement("tr");
+    tr.dataset.testId = t.name;
+    tr.classList.toggle("selected", botTestSelected.has(t.name));
+    tr.classList.toggle("active", botTestDrawerName === t.name);
+    const netCls = t.net >= 0 ? "pos" : "neg";
+    const period = `${repTs(t.replay_start || t.created_at)}${t.replay_end ? " → " + repTs(t.replay_end) : ""}`;
+    tr.innerHTML = `
+      <td class="tcheck"><input type="checkbox" data-test-check="${esc(t.name)}"
+        ${botTestSelected.has(t.name) ? "checked" : ""} /></td>
+      <td class="test-name">${esc(t.name)}</td>
+      <td>${period}</td>
+      <td>${t.trades}</td>
+      <td>${t.wins}</td>
+      <td>${t.losses}</td>
+      <td class="pos">+${money(t.gross_win)}</td>
+      <td class="neg">-${money(t.gross_loss)}</td>
+      <td class="${netCls}">${t.net >= 0 ? "+" : ""}${money(t.net)}</td>
+      <td>${(t.pf ?? 0).toFixed(2)}</td>
+      <td>${(t.winrate ?? 0).toFixed(1)}%</td>
+      <td>${t.positions_open || "—"}</td>
+      <td class="row-actions">
+        <button class="btn-sm" data-action="restart" data-test-id="${esc(t.name)}"
+          title="Новый прогон тем же конфигом (старый сохраняется)">↻</button>
+        <button class="btn-sm btn-danger" data-action="delete" data-test-id="${esc(t.name)}"
+          title="Удалить тест (сделки + окно + сайдкар)">🗑</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+  const cnt = $("bot-test-count");
+  if (cnt) cnt.textContent = `${rows.length} из ${botTestRows.length}`;
+  const del = $("btn-test-delete-selected") as HTMLButtonElement | null;
+  if (del) del.disabled = botTestSelected.size === 0;
+  const sel = $("bot-test-selcount");
+  if (sel) sel.textContent = String(botTestSelected.size);
+  const checkall = $("bot-test-checkall") as HTMLInputElement | null;
+  if (checkall) checkall.checked = rows.length > 0 && rows.every((r) => botTestSelected.has(r.name));
+  document.querySelectorAll<HTMLTableCellElement>("#bot-tests-table thead th[data-k]").forEach((th) => {
+    const k = th.dataset.k;
+    th.classList.toggle("sorted", k === botTestSort.k);
+    const base = th.textContent?.replace(/[ ↑↓]+$/, "") ?? "";
+    th.textContent = base + (k === botTestSort.k ? (botTestSort.dir < 0 ? " ↓" : " ↑") : "");
+  });
+}
+
 async function pollTests(): Promise<void> {
   try {
-    const data = await fetchJSON<{ tests: Array<{
-      id: string; name: string; period: string; trades: number; wins: number; losses: number;
-      gross_win: number; gross_loss: number; net: number; pf: number; wr: number;
-    }> }>("/api/v1/bot/tests");
-    const tbody = document.querySelector("#bot-tests-table tbody");
-    if (!tbody) return;
-    tbody.innerHTML = "";
-    for (const t of data.tests) {
-      const tr = document.createElement("tr");
-      tr.dataset.testId = t.id;
-      const netCls = t.net >= 0 ? "pos" : "neg";
-      tr.innerHTML = `
-        <td>${t.name}</td>
-        <td>${t.period}</td>
-        <td>${t.trades}</td>
-        <td>${t.wins}</td>
-        <td>${t.losses}</td>
-        <td class="pos">+${money(t.gross_win)}</td>
-        <td class="neg">-${money(t.gross_loss)}</td>
-        <td class="${netCls}">${t.net >= 0 ? "+" : ""}${money(t.net)}</td>
-        <td>${(t.pf ?? 0).toFixed(2)}</td>
-        <td>${(t.wr ?? 0).toFixed(1)}%</td>
-        <td><button class="btn-sm" data-action="replay" data-test-id="${t.id}">▶ Реплей</button></td>
-      `;
-      tbody.appendChild(tr);
+    const data = await fetchJSON<{ tests: BotTestRow[] }>("/api/v1/bot/tests");
+    botTestRows = data.tests ?? [];
+    for (const n of [...botTestSelected]) {
+      if (!botTestRows.some((t) => t.name === n)) botTestSelected.delete(n);
     }
-    tbody.querySelectorAll<HTMLButtonElement>("button[data-action=replay]").forEach(btn => {
-      btn.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        const testId = btn.dataset.testId;
-        if (!testId) return;
-        btn.disabled = true; btn.textContent = "...";
-        try { await fetchJSON(`/api/v1/bot/tests/${testId}/replay`, { method: "POST" }); }
-        catch (err) { alert("Ошибка реплея: " + err); }
-        finally { btn.disabled = false; btn.textContent = "▶ Реплей"; }
-      });
-    });
+    renderTests();
+    if (botTestDrawerName && !botTestRows.some((t) => t.name === botTestDrawerName)) closeTestDrawer();
   } catch (e) {
     console.warn("pollTests error", e);
   }
+}
+
+async function deleteTests(names: string[]): Promise<void> {
+  if (!names.length) return;
+  const label = names.length === 1 ? `«${names[0]}»` : `${names.length} тестов`;
+  if (!confirm(`Удалить ${label}? Сделки, окна и сайдкары будут стёрты безвозвратно.`)) return;
+  try {
+    if (names.length === 1) {
+      await fetchJSON(`/api/v1/bot/tests/${encodeURIComponent(names[0])}`, { method: "DELETE" });
+    } else {
+      await fetchJSON("/api/v1/bot/tests/delete", {
+        method: "POST", body: JSON.stringify({ names }),
+      });
+    }
+    for (const n of names) {
+      botTestSelected.delete(n);
+      if (botTestDrawerName === n) closeTestDrawer();
+    }
+    await pollTests();
+  } catch (e) {
+    alert("Ошибка удаления: " + e);
+  }
+}
+
+async function restartTest(name: string, btn?: HTMLElement): Promise<void> {
+  if (btn) { btn.setAttribute("disabled", "true"); btn.textContent = "…"; }
+  try {
+    const out = await fetchJSON<{ test_name: string }>(
+      `/api/v1/bot/tests/${encodeURIComponent(name)}/restart`, { method: "POST" });
+    await pollTests();
+    const hint = `Создан новый тест «${out.test_name}» (старый «${name}» сохранён)`;
+    setText("bot-test-count", hint);
+    setTimeout(() => renderTests(), 4000);
+  } catch (e) {
+    alert("Ошибка перезапуска: " + e);
+  } finally {
+    if (btn) { btn.removeAttribute("disabled"); btn.textContent = "↻"; }
+  }
+}
+
+function closeTestDrawer(): void {
+  botTestDrawerName = "";
+  $("bot-test-drawer")?.classList.add("hidden");
+  renderTests();
+}
+
+async function openTestDrawer(name: string): Promise<void> {
+  botTestDrawerName = name;
+  $("bot-test-drawer")?.classList.remove("hidden");
+  setText("btd-title", name);
+  setText("btd-sub", "загрузка сделок…");
+  const cards = $("btd-cards");
+  if (cards) cards.innerHTML = "";
+  const body = $("btd-body");
+  if (body) body.innerHTML = `<div class="rep-empty">загрузка сделок…</div>`;
+  renderTests();
+  try {
+    const d = await fetchJSON<{ test_name: string; trades: TestTradeRow[] }>(
+      `/api/v1/bot/tests/${encodeURIComponent(name)}`);
+    if (botTestDrawerName !== name) return;
+    const closed = d.trades.filter((t) => t.ts && t.net_pnl !== null);
+    const open = d.trades.filter((t) => !t.ts);
+    const wins = closed.filter((t) => (t.net_pnl ?? 0) > 0);
+    const losses = closed.filter((t) => (t.net_pnl ?? 0) <= 0);
+    const gw = wins.reduce((s, t) => s + (t.net_pnl ?? 0), 0);
+    const gl = Math.abs(losses.reduce((s, t) => s + (t.net_pnl ?? 0), 0));
+    const net = gw - gl;
+    const wr = closed.length ? (wins.length / closed.length) * 100 : null;
+    const pf = gl > 0 ? gw / gl : (gw > 0 ? 999 : null);
+    const exp = closed.length ? net / closed.length : null;
+    setText("btd-sub", `${closed.length} закрытых · открытых ${open.length}`);
+    if (cards) {
+      cards.innerHTML =
+        repCardFrom("Сделок", closed.length) +
+        repCardFrom("Открытых", open.length) +
+        repCardFrom("Wins", wins.length) +
+        repCardFrom("Losses", losses.length) +
+        repCardFrom("WR%", wr, 2) +
+        repCardFrom("Gross W ₽", gw, 2, true) +
+        repCardFrom("Gross L ₽", gl, 2, true) +
+        repCardFrom("Net ₽", net, 2, true) +
+        repCardFrom("PF", pf, 3) +
+        repCardFrom("Exp ₽", exp, 2, true);
+    }
+    if (body) {
+      if (!d.trades.length) {
+        body.innerHTML = `<div class="rep-empty">у теста пока нет сделок</div>`;
+        return;
+      }
+      const cols = ["Вход", "Выход", "Тикер", "Side", "Qty", "Вход ₽", "Выход ₽",
+        "SL", "TP", "Net ₽", "Комис", "Причина выхода", "Вход (голоса)"];
+      const head = cols.map((c, i) => `<th class="${i >= 4 && i <= 10 ? "n" : ""}">${esc(c)}</th>`).join("");
+      const rows = d.trades.map((t) =>
+        `<tr>` +
+        `<td>${repTs(t.entry_time)}</td><td>${repTs(t.ts)}</td>` +
+        `<td>${esc(t.ticker)}</td><td>${esc(t.side)}</td><td class="n">${t.qty}</td>` +
+        `<td class="n">${t.entry_price == null ? "—" : repN(t.entry_price, 2)}</td>` +
+        `<td class="n">${t.exit_price == null ? "—" : repN(t.exit_price, 2)}</td>` +
+        `<td class="n">${t.stop_loss == null ? "—" : repN(t.stop_loss, 2)}</td>` +
+        `<td class="n">${t.take_profit == null ? "—" : repN(t.take_profit, 2)}</td>` +
+        `<td class="n ${repSignCls(t.net_pnl)}">${t.net_pnl == null ? "открыта" : repRub(t.net_pnl)}</td>` +
+        `<td class="n">${repRub(t.commission ?? 0)}</td>` +
+        `<td>${esc(t.exit_reason || "—")}</td>` +
+        `<td>${esc(t.entry_reason || "—")}</td>` +
+        `</tr>`).join("");
+      body.innerHTML = `<table class="stats-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+    }
+  } catch (e) {
+    if (body) body.innerHTML = `<div class="rep-empty">ошибка: ${esc(String(e))}</div>`;
+  }
+}
+
+let testPresets: Record<string, Record<string, unknown>> = {};
+
+async function loadTestPresets(): Promise<void> {
+  const sel = $("ts-preset") as HTMLSelectElement | null;
+  if (!sel) return;
+  if (sel.dataset.loaded === "1") return;
+  try {
+    const d = await fetchJSON<{ presets: Array<{ id: string; name: string; preset: Record<string, unknown> }> }>(
+      "/api/v1/bot/presets");
+    for (const p of d.presets ?? []) {
+      testPresets[p.id] = p.preset;
+      const o = document.createElement("option");
+      o.value = p.id;
+      o.textContent = `${p.id} — ${p.name}`;
+      sel.appendChild(o);
+    }
+    sel.dataset.loaded = "1";
+  } catch (e) {
+    console.warn("presets load error", e);
+  }
+}
+
+function initTestsBlock(): void {
+  $("bot-test-search")?.addEventListener("input", (ev) => {
+    botTestQuery = (ev.target as HTMLInputElement).value;
+    renderTests();
+  });
+  $("btn-test-refresh")?.addEventListener("click", () => { void pollTests(); });
+  $("bot-test-checkall")?.addEventListener("change", (ev) => {
+    const on = (ev.target as HTMLInputElement).checked;
+    for (const t of botTestFiltered()) {
+      if (on) botTestSelected.add(t.name);
+      else botTestSelected.delete(t.name);
+    }
+    renderTests();
+  });
+  $("btn-test-delete-selected")?.addEventListener("click", () => {
+    void deleteTests([...botTestSelected]);
+  });
+  document.querySelector("#bot-tests-table thead")?.addEventListener("click", (ev) => {
+    const th = (ev.target as HTMLElement | null)?.closest<HTMLElement>("th[data-k]");
+    const k = th?.dataset.k;
+    if (!k) return;
+    if (botTestSort.k === k) botTestSort.dir = -botTestSort.dir;
+    else { botTestSort.k = k; botTestSort.dir = k === "name" ? 1 : -1; }
+    renderTests();
+  });
+  document.querySelector("#bot-tests-table tbody")?.addEventListener("click", (ev) => {
+    const el = ev.target as HTMLElement;
+    const check = el.closest<HTMLElement>("input[data-test-check]");
+    if (check instanceof HTMLInputElement) {
+      const n = check.dataset.testCheck;
+      if (n) {
+        if (check.checked) botTestSelected.add(n);
+        else botTestSelected.delete(n);
+        renderTests();
+      }
+      ev.stopPropagation();
+      return;
+    }
+    const btn = el.closest<HTMLElement>("button[data-action]");
+    if (btn) {
+      const n = btn.dataset.testId;
+      if (!n) return;
+      if (btn.dataset.action === "delete") void deleteTests([n]);
+      else if (btn.dataset.action === "restart") void restartTest(n, btn);
+      ev.stopPropagation();
+      return;
+    }
+    const row = el.closest<HTMLElement>("tr[data-test-id]");
+    const name = row?.dataset.testId;
+    if (name) void openTestDrawer(name);
+  });
+  $("btd-close")?.addEventListener("click", () => closeTestDrawer());
+  $("btd-open-analysis")?.addEventListener("click", () => {
+    const name = botTestDrawerName;
+    if (!name) return;
+    repSource = "replay";
+    repRunId = name;
+    repDetail = null;
+    repLoaded = false;
+    repSlicesCache = {};
+    repTrades = [];
+    repTradesTotal = 0;
+    const src = document.getElementById("rep-source") as HTMLSelectElement | null;
+    if (src) src.value = "replay";
+    const kindSel = document.getElementById("rep-kind");
+    if (kindSel) kindSel.classList.add("hidden");
+    showPage("analytics");
+    document.querySelector<HTMLButtonElement>('#page-analytics .an-tab[data-antab="reports"]')?.click();
+  });
+  void loadTestPresets();
 }
 
 let sidebarRendered = false;
@@ -1308,6 +1588,7 @@ function initBotTab(): void {
   if (botTabInit) { startBotPolling(); return; }
   botTabInit = true;
   initSessChips();
+  initTestsBlock();
   const btn = $("btn-bot-toggle");
   $("btn-bot-settings")?.addEventListener("click", () => { void fillBotSettings(); showModal("bot-modal-overlay"); });
   $("btn-bot-pause")?.addEventListener("click", () => void doPause());
@@ -1330,21 +1611,42 @@ function initBotTab(): void {
   btn?.addEventListener("click", toggleBot);
   $("bs-close")?.addEventListener("click", () => hideModal("bot-modal-overlay"));
   $("bot-pill-top")?.addEventListener("click", () => showModal("bot-modal-overlay"));
-  $("btn-test-new")?.addEventListener("click", () => showModal("test-modal-overlay"));
+  $("btn-test-new")?.addEventListener("click", () => {
+    void loadTestPresets();
+    showModal("test-modal-overlay");
+  });
   $("ts-close")?.addEventListener("click", () => hideModal("test-modal-overlay"));
   $("ts-run")?.addEventListener("click", async () => {
     const name = ($("ts-name") as HTMLInputElement)?.value?.trim();
     const start = ($("ts-start") as HTMLInputElement)?.value;
     const end = ($("ts-end") as HTMLInputElement)?.value;
     const logdb = ($("ts-logdb") as HTMLInputElement)?.checked ?? false;
-    if (!name || !start) { alert("Укажите название теста и начало периода"); return; }
+    const presetId = ($("ts-preset") as HTMLSelectElement)?.value ?? "";
+    const preset = presetId ? testPresets[presetId] : undefined;
+    if (!start) { alert("Укажите начало периода"); return; }
+    let finalName = name;
+    if (preset) {
+      const stamp = new Date();
+      const p2 = (n: number) => String(n).padStart(2, "0");
+      const ts = `${stamp.getFullYear()}${p2(stamp.getMonth() + 1)}${p2(stamp.getDate())}` +
+        `-${p2(stamp.getHours())}${p2(stamp.getMinutes())}`;
+      if (!finalName) finalName = `${presetId} ${ts}`;
+    }
+    if (!finalName) { alert("Укажите название теста"); return; }
     const btn = $("ts-run") as HTMLButtonElement;
     btn.disabled = true; btn.textContent = "Запускаю…";
     try {
-      await fetchJSON("/api/v1/bot/mode", { method: "POST", body: JSON.stringify({ mode: "test", test_name: name, replay_start: toUTCISO(start), replay_end: end ? toUTCISO(end) : "", replay_log_persist: logdb }) });
+      const payload: Record<string, unknown> = {
+        mode: "test", test_name: finalName,
+        replay_start: toUTCISO(start), replay_end: end ? toUTCISO(end) : "",
+        replay_log_persist: logdb,
+      };
+      if (preset) payload.preset = preset;
+      await fetchJSON("/api/v1/bot/mode", { method: "POST", body: JSON.stringify(payload) });
       _setActiveModeBtn("test");
       hideModal("test-modal-overlay");
       await pollBotStatus();
+      await pollTests();
     } catch (e) { alert("Ошибка запуска теста: " + e); }
     finally { btn.disabled = false; btn.textContent = "Запустить"; }
   });
@@ -4755,6 +5057,23 @@ async function selectRepRun(id: RepId): Promise<void> {
   }
 }
 
+function repTagValue(v: RepTagItem["v"]): string {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "boolean") return v ? "вкл" : "выкл";
+  return String(v);
+}
+
+function renderRepTags(tags: RepConfigTags): string {
+  if (!tags.has_sidecar || !tags.groups.length) {
+    return `<div class="rep-tags"><span class="mini-hint">⚠ нет сайдкара пресета — настройки теста неизвестны (запускай через preset.py replay или выбери пресет в модалке)</span></div>`;
+  }
+  return `<div class="rep-tags">` + tags.groups.map((g) =>
+    `<div class="rep-tag-row"><span class="rep-tag-g">${esc(g.group)}</span>` +
+    g.items.map((i) =>
+      `<span class="td-chip" title="${esc(g.group)}: ${esc(String(i.k))}">${esc(String(i.k))}: ${esc(repTagValue(i.v))}</span>`
+    ).join("") + `</div>`).join("") + `</div>`;
+}
+
 function renderRepRunHead(): void {
   const head = $("rep-runhead");
   if (!head) return;
@@ -4775,12 +5094,31 @@ function renderRepRunHead(): void {
     `<span>роботов ${repN(s.strategies)}</span>` +
     `<span>тикеров ${repN(s.tickers)}</span>` +
     `<span>сделок ${repN(s.trades)}</span>` +
+    (s.open_positions ? `<span>открытых ${repN(s.open_positions)}</span>` : "") +
     `<span>Gross W <span class="rep-pos">${repRub(s.gw)}</span></span>` +
     `<span>Gross L <span class="rep-neg">${repRub(s.gl)}</span></span>` +
     `<span class="${repSignCls(s.net)}">net ${repRub(s.net)}</span>` +
     `<span>WR ${s.wr === null ? "—" : s.wr + "%"}</span>` +
     `<span>PF ${s.pf === null ? "—" : s.pf}</span>` +
-    `</div>`;
+    `</div>` +
+    (d.config_tags ? renderRepTags(d.config_tags) : "");
+}
+
+function renderRepActions(): void {
+  const box = $("rep-actions");
+  if (!box) return;
+  const show = repSource === "replay" && repDetail !== null && repRunId !== null;
+  box.classList.toggle("hidden", !show);
+  if (!show) {
+    box.innerHTML = "";
+    return;
+  }
+  const preset = repDetail?.config_tags?.preset_id;
+  box.innerHTML =
+    `<button class="btn-secondary btn-xs" data-repact="restart" title="Тот же конфиг и окно, новое имя">↻ Перезапустить как новый</button>` +
+    `<button class="btn-secondary btn-xs btn-danger" data-repact="delete">🗑 Удалить тест</button>` +
+    (preset ? `<span class="mini-hint">пресет ${esc(preset)} · перезапуск не трогает историю старого теста</span>`
+            : `<span class="mini-hint">без пресета — конфиг возьмётся из текущих настроек бота</span>`);
 }
 
 const REP_SORT: Record<string, (s: RepStrategy) => number | string> = {
@@ -4868,7 +5206,8 @@ function renderRepDims(): void {
   if (!box) return;
   const d = repDetail;
   if (!d || !d.dims.length) {
-    box.innerHTML = `<span class="mini-hint">срезы не посчитаны (нужен импорт с trades_detail)</span>`;
+    box.innerHTML = `<span class="mini-hint">${
+      repSource === "replay" ? "по этому прогону измерений нет" : "срезы не посчитаны (нужен импорт с trades_detail)"}</span>`;
     return;
   }
   box.innerHTML = d.dims
@@ -4895,7 +5234,7 @@ async function loadRepSlices(): Promise<void> {
   box.innerHTML = `<div class="rep-empty">загрузка среза…</div>`;
   try {
     const resp = await fetchJSON<{ dims: RepDim[] }>(
-      `/api/v1/analysis/reports/${repRunId}/slices?dim=${encodeURIComponent(repDim)}`);
+      repRunApi(`/slices?dim=${encodeURIComponent(repDim)}`));
     repSlicesCache[key] = resp.dims;
     if (repRunId === null || `${repRunId}:${repDim}` !== key) return;
     renderRepSlices(resp.dims);
@@ -4972,8 +5311,7 @@ async function loadRepTrades(reset: boolean): Promise<void> {
   q.set("limit", String(REP_PAGE));
   q.set("offset", String(repTradesOffset));
   try {
-    const resp = await fetchJSON<RepTradesResp>(
-      `/api/v1/analysis/reports/${repRunId}/trades?${q.toString()}`);
+    const resp = await fetchJSON<RepTradesResp>(repRunApi(`/trades?${q.toString()}`));
     if (repRunId === null) return;
     repTrades = reset ? resp.items : repTrades.concat(resp.items);
     repTradesTotal = resp.total;
@@ -5134,11 +5472,61 @@ function initAnalyticsTabs(): void {
   $("rep-refresh")?.addEventListener("click", () => { void loadRepRuns(); });
   document.getElementById("rep-kind")?.addEventListener("change", () => { void loadRepRuns(); });
   document.getElementById("rep-query")?.addEventListener("input", () => { void loadRepRuns(); });
+  document.getElementById("rep-source")?.addEventListener("change", (ev) => {
+    const v = (ev.target as HTMLSelectElement).value;
+    repSource = v === "replay" ? "replay" : "harness";
+    const kindSel = document.getElementById("rep-kind");
+    if (kindSel) kindSel.classList.toggle("hidden", repSource === "replay");
+    repRunId = null;
+    repDetail = null;
+    repSlicesCache = {};
+    repTrades = [];
+    repTradesTotal = 0;
+    void loadRepRuns();
+  });
+
+  $("rep-actions")?.addEventListener("click", (ev) => {
+    const btn = (ev.target as HTMLElement | null)?.closest<HTMLElement>("[data-repact]");
+    const act = btn?.dataset.repact;
+    if (!act || repRunId === null) return;
+    const name = String(repRunId);
+    if (act === "delete") {
+      if (!confirm(`Удалить тест «${name}»? Сделки, окно и сайдкар будут стёрты безвозвратно.`)) return;
+      if (btn) btn.setAttribute("disabled", "true");
+      void (async () => {
+        try {
+          await fetchJSON(`/api/v1/bot/tests/${encodeURIComponent(name)}`, { method: "DELETE" });
+          repRunId = null;
+          repDetail = null;
+          await loadRepRuns();
+        } catch (e) {
+          alert(`Ошибка удаления: ${String(e)}`);
+          if (btn) btn.removeAttribute("disabled");
+        }
+      })();
+      return;
+    }
+    if (act === "restart") {
+      if (btn) btn.setAttribute("disabled", "true");
+      void (async () => {
+        try {
+          const out = await fetchJSON<{ test_name: string }>(
+            `/api/v1/bot/tests/${encodeURIComponent(name)}/restart`, { method: "POST" });
+          repRunId = out.test_name;
+          await loadRepRuns();
+        } catch (e) {
+          alert(`Ошибка перезапуска: ${String(e)}`);
+          if (btn) btn.removeAttribute("disabled");
+        }
+      })();
+    }
+  });
 
   $("rep-list")?.addEventListener("click", (ev) => {
     const item = (ev.target as HTMLElement | null)?.closest<HTMLElement>(".rep-item");
     const id = item?.dataset.run;
-    if (id) void selectRepRun(Number(id));
+    if (!id) return;
+    void selectRepRun(repSource === "replay" ? id : Number(id));
   });
 
   $("rep-dims")?.addEventListener("click", (ev) => {

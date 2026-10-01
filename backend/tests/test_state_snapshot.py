@@ -33,8 +33,9 @@ def test_roundtrip_and_fingerprint_stable():
 
 
 def test_fingerprint_changes_with_state():
+    from dataclasses import replace
     a = _snap()
-    b = EngineStateSnapshot(**{**a._payload(), "as_of": datetime(2026, 9, 24, 4, 10, tzinfo=timezone.utc)})
+    b = replace(a, as_of=datetime(2026, 9, 24, 4, 10, tzinfo=timezone.utc))
     assert a.fingerprint() != b.fingerprint()
 
 

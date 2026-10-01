@@ -296,13 +296,46 @@
             <div class="bot-test-block" id="bot-test-block">
               <div class="bot-test-head">
                 <h3 class="pg-h3" style="margin:16px 0 0">🧪 Результаты тестов</h3>
+                <input type="search" id="bot-test-search" class="rep-search" placeholder="поиск теста…" />
+                <button class="btn-secondary btn-sm" id="btn-test-refresh" title="Обновить список">⟳</button>
+                <button class="btn-secondary btn-sm btn-danger" id="btn-test-delete-selected" disabled
+                        title="Удалить отмеченные тесты">🗑 Удалить выбранные (<span id="bot-test-selcount">0</span>)</button>
                 <button class="btn-secondary btn-sm" id="btn-test-new" title="Запустить новый тест">+ Новый тест</button>
               </div>
+              <div class="bot-test-tools">
+                <label class="mini-hint"><input type="checkbox" id="bot-test-checkall" /> все</label>
+                <span class="mini-hint" id="bot-test-count">—</span>
+                <span class="mini-hint">клик по строке — все сделки этого теста; ↻ — новый прогон тем же конфигом (история старого сохраняется)</span>
+              </div>
               <table class="runs-table" id="bot-tests-table">
-                <thead><tr><th>Тест</th><th>Период (входы)</th><th>Сделок</th><th>Wins</th><th>Losses</th><th>Gross Win</th><th>Gross Loss</th><th>Net</th><th>PF</th><th>WR%</th><th></th></tr></thead>
+                <thead><tr>
+                  <th class="tcheck"></th>
+                  <th data-k="name">Тест</th>
+                  <th data-k="created_at">Период (входы)</th>
+                  <th data-k="trades" class="n">Сделок</th>
+                  <th data-k="wins" class="n">Wins</th>
+                  <th data-k="losses" class="n">Losses</th>
+                  <th data-k="gross_win" class="n">Gross Win</th>
+                  <th data-k="gross_loss" class="n">Gross Loss</th>
+                  <th data-k="net" class="n">Net</th>
+                  <th data-k="pf" class="n">PF</th>
+                  <th data-k="winrate" class="n">WR%</th>
+                  <th class="n">Открыт</th>
+                  <th>Действия</th>
+                </tr></thead>
                 <tbody></tbody>
               </table>
-              <div class="mini-hint" style="margin-top:6px">Клик по тесту = реальный replay-прогон через движок; сделки появятся в таблицах «Открытые позиции» и «Последние сделки» выше, как при Live.</div>
+              <div class="mini-hint" style="margin-top:6px">Прогон = replay через движок (сделки — в «Открытых позициях»/«Последних сделках»). Полная карточка с настройками и срезами — во вкладке «Анализ → Прогоны → Реплеи».</div>
+              <div class="bot-test-drawer hidden" id="bot-test-drawer">
+                <div class="btd-head">
+                  <b id="btd-title">—</b>
+                  <span class="mini-hint" id="btd-sub"></span>
+                  <button class="btn-secondary btn-xs" id="btd-open-analysis" title="Открыть в Аналитике (теги настроек, срезы)">📊 В аналитику</button>
+                  <button class="btn-secondary btn-xs" id="btd-close">✕ Закрыть</button>
+                </div>
+                <div class="rep-cards" id="btd-cards"></div>
+                <div class="rep-table-wrap" id="btd-body"><div class="rep-empty">—</div></div>
+              </div>
             </div>
           </section>
             <section class="page" id="page-analytics">
@@ -586,6 +619,12 @@
       <div class="bs-section">
         <div class="bs-section-title">Параметры прогона</div>
         <label class="bs-field">
+          <span>Пресет (ветка конфига — пишет сайдкар для аналитики)</span>
+          <select id="ts-preset">
+            <option value="">без пресета (текущие настройки бота)</option>
+          </select>
+        </label>
+        <label class="bs-field">
           <span>Название теста</span>
           <input id="ts-name" type="text" placeholder="напр. июль_main" autocomplete="off" />
         </label>
@@ -597,10 +636,14 @@
           <span>Конец периода (пусто = до конца данных)</span>
           <input id="ts-end" type="datetime-local" step="60" />
         </label>
+        <label class="bs-field bs-check" title="Логи теста сохраняются в bot_logs (история после рестарта)">
+          <input id="ts-logdb" type="checkbox" />
+          <span>Писать логи теста в БД</span>
+        </label>
         <div class="mini-hint bs-hint">
-          Тот же движок, что в Live/Sandbox, но свечи берутся из БД (никаких реальных заявок),
-          выход — paper-заглушка. Результат сохраняется под этим именем.
-          Время вводится по вашему часовому поясу и конвертируется в UTC.
+          С пресетом имя будет «&lt;id пресета&gt; &lt;время&gt;» (перезапуск = новый тест, история
+          сохраняется), рядом кладётся сайдкар с настройками — их видно тегами в Анализе.
+          Тот же движок, что в Live/Sandbox, но свечи из БД; время — ваш часовой пояс, уходит в UTC.
         </div>
       </div>
     </div>

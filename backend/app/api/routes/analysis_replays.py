@@ -104,10 +104,11 @@ def _tf_minutes(sidecar: dict | None) -> int | None:
 
 
 async def _windows(db: AsyncSession) -> dict[str, tuple]:
+    """name -> (replay_start, replay_end, updated_at) в ISO; в sqlite это str, в PG — datetime."""
     try:
         rows = (await db.execute(text(
             "SELECT name, replay_start, replay_end, updated_at FROM bot_test_runs"))).all()
-        return {str(r[0]): (r[1], r[2], r[3]) for r in rows}
+        return {str(r[0]): (_iso(r[1]), _iso(r[2]), _iso(r[3])) for r in rows}
     except Exception:
         return {}
 
@@ -195,23 +196,24 @@ async def list_replays(db: AsyncSession = Depends(get_db)) -> dict:
         w = windows.get(name)
         sc_info = sidecars.get(name) or {}
         period = [
-            (w[0].isoformat() if w and w[0] else m["first_entry"]),
-            (w[1].isoformat() if w and w[1] else m["last_exit"]),
+            (w[0] if w and w[0] else m["first_entry"]),
+            (w[1] if w and w[1] else m["last_exit"]),
         ] if (w and w[0]) or m["first_entry"] else None
-        created = (w[2].isoformat() if w and w[2] else m["first_entry"])
+        created = (w[2] if w and w[2] else m["first_entry"])
         out.append({
             "id": name,
             "file_name": name,
             "kind": "replay",
             "name": sc_info.get("preset_id"),
             "created_at": created,
-            "mtime": (w[2].isoformat() if w and w[2] else None),
-            "updated_at": (w[2].isoformat() if w and w[2] else m["last_exit"]),
+            "mtime": (w[2] if w and w[2] else None),
+            "updated_at": (w[2] if w and w[2] else m["last_exit"]),
             "period": period,
             "interval": None,
             "robots": 1 if a else 0,
             "trades": m["trades"],
             "wins": m["wins"],
+            "losses": m["losses"],
             "gw": m["gw"],
             "gl": m["gl"],
             "net": m["net"],
@@ -229,7 +231,8 @@ async def list_replays(db: AsyncSession = Depends(get_db)) -> dict:
 # ------------------------------------------------------------------ run detail
 
 async def _require(db: AsyncSession, name: str) -> dict:
-    traded = name in set(await _names(db)) or name in await _windows(db)
+    windows = await _windows(db)
+    traded = name in set(await _names(db)) or name in windows
     if not traded:
         raise HTTPException(404, f"тест {name!r} не найден")
     sidecar = load_sidecar(name)
@@ -239,7 +242,7 @@ async def _require(db: AsyncSession, name: str) -> dict:
     )).one())
     m["strategies"] = 1
     return {"sidecar": sidecar, "m": m, "engine": _engine_label(sidecar, name),
-            "tf_minutes": _tf_minutes(sidecar)}
+            "tf_minutes": _tf_minutes(sidecar), "w": windows.get(name)}
 
 
 @router.get("/replays/{name}")
@@ -260,7 +263,7 @@ async def get_replay(name: str, db: AsyncSession = Depends(get_db)) -> dict:
     )).all()
 
     rows = []
-    for ticker, total, wins, gw, gl, closed_n in by_ticker:
+    for ticker, _total, wins, gw, gl, closed_n in by_ticker:
         r = _fill({"strategy": engine, "exit": "", "ticker": ticker or "?",
                    "trades": int(closed_n or 0), "wins": int(wins or 0),
                    "gw": float(gw or 0.0), "gl": float(gl or 0.0),
@@ -283,12 +286,17 @@ async def get_replay(name: str, db: AsyncSession = Depends(get_db)) -> dict:
     })
 
     tag_info = tag_groups(sidecar.get("preset") or {}) if sidecar else []
+    w = ctx.get("w")
+    period = [(w[0] if w and w[0] else m["first_entry"]),
+              (w[1] if w and w[1] else m["last_exit"])]
+    if not any(period):
+        period = None
     return {
         "run": {
             "id": name, "file_name": name, "kind": "replay",
             "name": ((sidecar or {}).get("preset") or {}).get("preset", {}).get("name") if sidecar else None,
-            "created_at": m["first_entry"],
-            "period": [m["first_entry"], m["last_exit"]],
+            "created_at": (w[2] if w and w[2] else m["first_entry"]),
+            "period": period,
             "interval": None,
             "commission": m["commission"],
             "slippage_bps": None,

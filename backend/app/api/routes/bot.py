@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -162,6 +163,8 @@ from app.engine.strategies import ParamValidationError, build_strategy
 from app.models.paper import PaperAccount, PaperPosition, PaperTrade
 
 router = APIRouter(prefix="/api/v1/bot", tags=["bot"])
+
+PRESETS_DIR = Path(__file__).resolve().parents[3] / "configs" / "presets"
 
 
 class StartRequest(BaseModel):
@@ -1013,6 +1016,28 @@ def _build_autostart_cfg(mode: str, test_name: str = "", replay_start: str = "",
     )
 
 
+def _save_test_sidecar(name: str, req: ModeRequest, pace: str) -> bool:
+    """Сайдкар пресета рядом с прогоном (см. app.services.preset_tags).
+
+    Источник тегов настроек в Analytics; без preset — тишина (bool = что-то записали).
+    """
+    if not getattr(req, "preset", None):
+        return False
+    from app.services.preset_tags import save_sidecar
+    try:
+        save_sidecar(name, req.preset, {
+            "mode": "test", "test_name": name,
+            "replay_start": req.replay_start.strip(), "replay_end": req.replay_end.strip(),
+            "replay_pace": pace, "test_engine": req.test_engine.strip(),
+            "test_interval": req.test_interval.strip(), "test_params": req.test_params,
+            "replay_log_persist": bool(req.replay_log_persist), "preset": req.preset,
+        })
+    except OSError:
+        logger.warning("sidecar write failed for %s", name)
+        return False
+    return True
+
+
 @router.post("/mode")
 async def bot_set_mode(req: ModeRequest) -> dict:
     """Переключить контур sandbox/live/test: обновить .env, перезапустить бота."""
@@ -1026,10 +1051,9 @@ async def bot_set_mode(req: ModeRequest) -> dict:
             raise HTTPException(400, "test_name обязателен для mode=test")
         if not req.replay_start:
             raise HTTPException(400, "replay_start обязателен для mode=test")
-        # Имена тестов — ключ для идентификации прогона в БД.
-        from pathlib import Path
-        _bad = set("\\/?%*:|\"<>")
-        name = "".join(c if c not in _bad else "_" for c in name).strip()[:48]
+        # Имена тестов — ключ для идентификации прогона в БД (единый sanitize = preset_tags).
+        from app.services.preset_tags import sanitize
+        name = sanitize(name)
         if not name:
             raise HTTPException(400, "test_name пуст после нормализации")
     else:
@@ -1059,18 +1083,8 @@ async def bot_set_mode(req: ModeRequest) -> dict:
         _os.environ["TEST_PRESET"] = _pj2.dumps(req.preset, ensure_ascii=False)
     else:
         _os.environ.pop("TEST_PRESET", None)
-    if mode == "test" and getattr(req, "preset", None):
-        from app.services.preset_tags import save_sidecar
-        try:
-            save_sidecar(name, req.preset, {
-                "mode": mode, "test_name": name,
-                "replay_start": req.replay_start.strip(), "replay_end": req.replay_end.strip(),
-                "replay_pace": pace, "test_engine": req.test_engine.strip(),
-                "test_interval": req.test_interval.strip(), "test_params": req.test_params,
-                "replay_log_persist": bool(req.replay_log_persist), "preset": req.preset,
-            })
-        except OSError:
-            logger.warning("sidecar write failed for %s", name)
+    if mode == "test":
+        _save_test_sidecar(name, req, pace)
     _write_env_mode(mode, test_name=name, replay_start=req.replay_start.strip(),
                     replay_end=req.replay_end.strip(), replay_pace=pace,
                     replay_log_persist=bool(req.replay_log_persist))
@@ -1944,78 +1958,117 @@ class TestRunInfo(BaseModel):
     positions_open: int = 0
 
 
+@router.get("/presets")
+async def bot_presets() -> dict:
+    """Пресеты («ветки», configs/presets/*.json) — для модалки запуска теста.
+
+    Выбранный пресет уходит в /bot/mode.preset (env TEST_PRESET) и в сайдкар
+    `reports/presets/<test_name>.json` — аналитика рисует настройки тегами.
+    """
+    import json as _pj
+    out = []
+    if PRESETS_DIR.is_dir():
+        for f in sorted(PRESETS_DIR.glob("*.json")):
+            try:
+                p = _pj.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(p, dict):
+                continue
+            head = p.get("preset") or {}
+            out.append({"id": str(head.get("id") or f.stem),
+                        "name": str(head.get("name") or f.stem),
+                        "file": f.name, "preset": p})
+    return {"presets": out}
+
+
 @router.get("/tests")
 async def bot_tests() -> dict:
-    """Список всех прогонов тестов (mode='paper' + test_name) со статистикой."""
+    """Список всех прогонов тестов (mode='paper' + test_name) со статистикой.
+
+    Сделки агрегируются SQL-ом (не выбираются построчно) — список не должен
+    тормозить при сотнях тестов.
+    """
+    from sqlalchemy import and_, case, func
+    from sqlalchemy import text as _t
+
     from app.database import SessionLocal as _DB
     from app.models.sandbox_trade import SandboxTrade
-    from sqlalchemy import select as _sel
-    from sqlalchemy import func as _fn
+
+    closed = and_(SandboxTrade.exit_time.is_not(None), SandboxTrade.net_pnl.is_not(None))
     async with _DB() as db:
-        r = await db.execute(
-            _sel(SandboxTrade.test_name)
-            .where(SandboxTrade.mode == "paper", SandboxTrade.test_name.is_not(None))
-            .distinct()
-        )
-        names = [x[0] for x in r.all() if x[0]]
+        agg_rows = (await db.execute(
+            select(
+                SandboxTrade.test_name,
+                func.count(SandboxTrade.id),
+                func.sum(case((closed, 1), else_=0)),
+                func.sum(case((and_(closed, SandboxTrade.net_pnl > 0), 1), else_=0)),
+                func.sum(case((and_(closed, SandboxTrade.net_pnl > 0), SandboxTrade.net_pnl), else_=0.0)),
+                func.sum(case((and_(closed, SandboxTrade.net_pnl < 0), -SandboxTrade.net_pnl), else_=0.0)),
+                func.sum(case((SandboxTrade.exit_time.is_(None), 1), else_=0)),
+                func.min(SandboxTrade.entry_time),
+                func.max(SandboxTrade.exit_time),
+            ).where(SandboxTrade.mode == "paper", SandboxTrade.test_name.is_not(None))
+            .group_by(SandboxTrade.test_name)
+        )).all()
+    agg = {str(r[0]): r[1:] for r in agg_rows}
+
     # Истинные окна прогонов (пишет runtime при старте реплея). Fallback — по сделкам.
     windows: dict[str, tuple] = {}
+
+    def _w_iso(v):
+        return v.isoformat() if hasattr(v, "isoformat") else (str(v) if v else "")
+
     try:
-        from sqlalchemy import text as _t
         async with _DB() as db:
             wr = await db.execute(_t(
                 "SELECT name, replay_start, replay_end, updated_at FROM bot_test_runs"))
             for _n, _s, _e, _u in wr.all():
-                windows[str(_n)] = (_s, _e, _u)
+                windows[str(_n)] = (_w_iso(_s), _w_iso(_e), _w_iso(_u))
     except Exception:
         windows = {}
-    # Идущий прогон появляется в списке сразу, даже до первой сделки.
-    for _wn in windows:
-        if _wn not in names:
-            names.append(_wn)
+
+    names = sorted(set(agg) | set(windows))
     items = []
     for name in names:
-        async with _DB() as db:
-            rows = (await db.execute(
-                _sel(SandboxTrade)
-                .where(SandboxTrade.mode == "paper", SandboxTrade.test_name == name)
-            )).scalars().all()
-        closed = [t for t in rows if t.exit_time is not None and t.net_pnl is not None]
-        open_rows = [t for t in rows if t.exit_time is None]
-        wins = [t for t in closed if t.net_pnl >= 0]
-        losses = [t for t in closed if t.net_pnl < 0]
-        gw = sum(float(t.net_pnl) for t in wins)
-        gl = abs(sum(float(t.net_pnl) for t in losses))
-        net = sum(float(t.net_pnl) for t in closed)
+        a = agg.get(name)
+        _total = int(a[0] or 0) if a else 0
+        closed_n = int(a[1] or 0) if a else 0
+        wins = int(a[2] or 0) if a else 0
+        gw = float(a[3] or 0.0) if a else 0.0
+        gl = float(a[4] or 0.0) if a else 0.0
+        open_n = int(a[5] or 0) if a else 0
+        first = a[6] if a else None
+        last = a[7] if a else None
         pf = (gw / gl) if gl > 0 else (gw if gw else 0.0)
-        entries = [t.entry_time for t in rows if t.entry_time]
-        exits = [t.exit_time for t in rows if t.exit_time]
         _w = windows.get(name)
         items.append(TestRunInfo(
             name=name,
-            replay_start=(_w[0].isoformat() if _w and _w[0] else
-                          (min(entries).isoformat() if entries else "")),
-            replay_end=(_w[1].isoformat() if _w and _w[1] else
-                        (max(entries).isoformat() if entries else "")),
-            created_at=(_w[2].isoformat() if _w and _w[2] else
-                        (min(entries).isoformat() if entries else "")),
-            trades=len(closed),
-            wins=len(wins), losses=len(losses),
+            replay_start=(_w[0] if _w and _w[0] else
+                          (first.isoformat() if first else "")),
+            replay_end=(_w[1] if _w and _w[1] else
+                        (last.isoformat() if last else "")),
+            created_at=(_w[2] if _w and _w[2] else
+                        (first.isoformat() if first else "")),
+            trades=closed_n,
+            wins=wins, losses=closed_n - wins,
             gross_win=round(gw, 2), gross_loss=round(gl, 2),
-            net=round(net, 2),
+            net=round(gw - gl, 2),
             pf=round(pf, 3) if pf else 0.0,
-            winrate=round(100.0 * len(wins) / len(closed), 1) if closed else 0.0,
-            positions_open=len(open_rows),
+            winrate=round(100.0 * wins / closed_n, 1) if closed_n else 0.0,
+            positions_open=open_n or _total - closed_n,
         ).model_dump())
-    return {"tests": sorted(items, key=lambda x: x["created_at"], reverse=True)}
+    items.sort(key=lambda x: x["created_at"], reverse=True)
+    return {"tests": items}
 
 
 @router.get("/tests/{name}")
 async def bot_test_trades(name: str) -> dict:
     """Сделки конкретного теста."""
+    from sqlalchemy import select as _sel
+
     from app.database import SessionLocal as _DB
     from app.models.sandbox_trade import SandboxTrade
-    from sqlalchemy import select as _sel
     async with _DB() as db:
         rows = (await db.execute(
             _sel(SandboxTrade)
@@ -2045,7 +2098,8 @@ async def bot_test_trades(name: str) -> dict:
 @router.delete("/tests/{name}")
 async def bot_test_delete(name: str) -> dict:
     """Удалить прогон теста: сделки mode='paper', окно bot_test_runs, сайдкар пресета."""
-    return await _delete_test_runs([name])
+    details = await _delete_test_runs([name])
+    return {"tests": 1, "details": details}
 
 
 class TestsDeleteRequest(BaseModel):
@@ -2060,7 +2114,9 @@ async def bot_tests_delete(req: TestsDeleteRequest) -> dict:
 
 
 async def _delete_test_runs(names: list[str]) -> list[dict]:
-    from sqlalchemy import delete as _delete, text as _text
+    from sqlalchemy import delete as _delete
+    from sqlalchemy import text as _text
+
     from app.database import SessionLocal as _DB
     from app.models.sandbox_trade import SandboxTrade
     from app.services.preset_tags import remove_sidecar
@@ -2098,10 +2154,12 @@ async def bot_test_restart(name: str) -> TestRestartResponse:
     сайдкара пресета, а при его отсутствии — текущий окно из bot_test_runs.
     """
     import re
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
+
+    from sqlalchemy import text as _text
+
     from app.database import SessionLocal as _DB
     from app.services.preset_tags import load_sidecar
-    from sqlalchemy import text as _text
 
     sidecar = load_sidecar(name)
     payload = (sidecar or {}).get("payload") or {}
@@ -2127,7 +2185,7 @@ async def bot_test_restart(name: str) -> TestRestartResponse:
             existing = {str(r[0]) for r in rows}
     except Exception:
         existing = set()
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     suffix = 1
     while True:
         cand = (f"{base} {ts}" if suffix == 1 else f"{base} {ts}-{suffix}")[:48]
@@ -2382,6 +2440,12 @@ async def _hm_compute_meta(db, bb: str, frm) -> (dict[str, dict], float, int):
 
     Берём 1м за ~32 кал. дня — для прогрева EMA(50) bias и warmup (64+) H1 regime.
     Возвращает (by_hour, last_close, days_ok): by_hour — {iso час: {b, r}}.
+
+    Почему без персистентного закрепления: значения bias/regime выводятся из 1м-бара,
+    который может измениться задним числом (докачка дыр через ensure_candles, пересмотр
+    баров биржей, сплиты). Кэш без версии алгоритма в ключе отдавал бы устаревшие значения
+    молча, а после правки формулы — закрепил бы их навсегда. Поэтому считаем на лету,
+    а ускорение — ручное обновление: см. bot_heatmap(refresh=1).
     """
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     from sqlalchemy import text as _t
@@ -2446,13 +2510,21 @@ async def _hm_compute_meta(db, bb: str, frm) -> (dict[str, dict], float, int):
 
 
 @router.get("/heatmap")
-async def bot_heatmap(days: int = 5, meta: int = 0, figi: str | None = None) -> dict:
+async def bot_heatmap(days: int = 5, meta: int = 0, figi: str | None = None,
+                      refresh: int = 0) -> dict:
     """Часовые бары ВСЕХ акций universe за N дней — для heatmap на вкладке «Анализ».
 
     Берём 1м-свечи из БД (candles, interval='1') и ресемплим в часы (date_trunc).
     Возвращаем по каждому тикеру только закрытые часовые бары (ts, close).
     При meta=1 в каждый бар добавляем b (bias дневного ТФ: +1/-1/0) и r (режим H1).
     figi=X — ограничить одним тикером (принимает и tcs-figi, и bbg-код) — для карточки сделки.
+
+    РУЧНОЕ ОБНОВЛЕНИЕ (refresh=1): bias/regime пересчитываются на лету, без закрепления
+    в БД, поэтому 60-секундный кэш ответа НЕ мешает. refresh=1 принудительно его
+    перезаписывает — вызывайте вручную, если значения устарели: докачали свечи за
+    прошлые дни (ensure_candles закрыл дыру задним числом), биржа пересмотрела бары,
+    изменилась формула compute_bias/compute_regime или состав universe.
+    Пример: curl ".../api/v1/bot/heatmap?days=5&meta=1&refresh=1"
     """
     days = max(1, min(int(days), 10))
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
@@ -2470,7 +2542,8 @@ async def bot_heatmap(days: int = 5, meta: int = 0, figi: str | None = None) -> 
     _now = _dt.now(_tz.utc)
     _ck = ("hm", days, _want_meta, figi or "")
     _cached = _HM_CACHE.get(_ck)
-    if not _replay and _cached and (_now - _cached[0]).total_seconds() < 60:
+    _force = bool(refresh) and not _replay
+    if not _force and not _replay and _cached and (_now - _cached[0]).total_seconds() < 60:
         return _cached[1]
 
     out = []

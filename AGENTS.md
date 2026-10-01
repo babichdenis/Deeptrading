@@ -15,7 +15,7 @@
 |---|---|---|
 | MacBook «код» | 192.168.1.7 | Здесь правим код (opencode) |
 | MacBook «сервер» | 192.168.1.3 | FastAPI backend + Vite frontend |
-| **БД (Postgres в Docker)** | **192.168.1.2** | **База живёт ЗДЕСЬ, в Docker; ssh `Denis@192.168.1.2`, пароль `0987`; доступна СО ВСЕХ машин: `192.168.1.2:5432`** |
+| **БД (Postgres 14, Homebrew)** | **192.168.1.7 (эта машина)** | **БД переехала СЮДА (2026-10-01): `deeptrading:deeptrading@127.0.0.1:5432/deeptrading`, слушает ТОЛЬКО localhost → с других машин напрямую не доступна. Старая БД на .2 (Docker) — не источник. Данные ещё не перелиты (`instruments=0`, `instrument_info` нет → запуск бота/реплея падает).** |
 
 Папка проекта `/Volumes/Dev/Deeptrading` — это сетевой диск с машины .3.
 **Правила:**
@@ -27,7 +27,7 @@
 
 ## Стек
 
-- Backend: Python 3.11, FastAPI, SQLAlchemy 2 async, asyncpg, PostgreSQL 16 (.3:5432)
+- Backend: Python 3.11, FastAPI, SQLAlchemy 2 async, asyncpg, PostgreSQL 14 (.7: localhost:5432)
 - SDK: `t-tech-investments` → импорт `from t_tech.invest import Client` (НЕ tinkoff.invest!)
 - Frontend: Vite + TypeScript + lightweight-charts v5
 

@@ -716,3 +716,56 @@ Warehouse(конструктор) → Lab(валидатор пула) → Бо�
   (`instruments`/`candles` = 0 строк), `192.168.1.2:5432` сейчас недоступен.
   На живой БД обогащение заполняется — логика подтверждена тестами на синтетических свечах.
   Запуск для просмотра: `uvicorn app.main:app :8000` (backend) + `npx vite --port 5174` (фронт).
+
+## Вкладка Analytics — Этап 2: реплеи + теги пресета + порядок — 2026-10-01 ✅
+
+Заказ владельца (`docs/ANALYTICS_TAB.md` §Этап 2): реплейные тесты видны в Analytics
+живым чтением из БД, карточка — теги конфига из сайдкара, порядок во фронте
+(клик → сделки, перезапуск = новый тест, удаление по одному/массово), выбор пресета
+в модалке запуска.
+
+- ✅ **`app/services/preset_tags.py`** — единый источник: `SIDECAR_DIR`,
+  `sanitize` (NAME_LIMIT=48, тот же `\/?%*:|"<>'`), `sidecar_path/load_sidecar/
+  save_sidecar/remove_sidecar/load_all_sidecars`, `tags_for_names` — 10 групп тегов
+  (Пресет/Роботы/Период/Сессии/Выходы/Деньги/Лимиты/Вход/Bias/Гейты/Издержки).
+  `scripts/preset.py` и `bot.py` переведены на сервис (один источник имени).
+- ✅ **`app/api/routes/analysis_replays.py`** → `/api/v1/analysis/replays`
+  (+зарегистрирован в `main.py`): `GET replays` (в т.ч. `losses`), `GET replays/{name}`
+  (summary + config_tags + groups), `slices?dim=` (8 измерений), `trades` (фильтры
+  outcome/ticker/side/exit/reason + карточки SL/TP/MAE/MFE/bars). Окна — из
+  `bot_test_runs` в ISO (фолбэк — первая сделка), источник правды по датам.
+- ✅ **Админка `bot.py`**: `GET /presets` (`PRESETS_DIR`, полный JSON пресета),
+  `GET /tests` — SQL-агрегат (без N+1): count/closed/wins/gw/gl/open + окно,
+  `GET/DELETE /tests/{name}` (убирает сделки+окно+сайдкар, возвращает details),
+  `POST /tests/delete` (массово), `POST /tests/{name}/restart` — новое имя
+  `<preset.id> <YYYYMMDD-HHMM>`, тот же payload/окно, старый тест не трогается;
+  `_save_test_sidecar()` вынесен из `/mode`, санитизация имени — через сервис.
+- ✅ **Фронт «Бот»** (`frontend/index.html`, `src/main.ts`, `src/style.css`):
+  таблица тестов (поиск, счётчики, checkall, сортировка по 10 колонкам с
+  `th[data-k]`), строка → дроуэр (карточки Net/WR/PF/Exp + все сделки 13 колонок,
+  «📊 В аналитику» уводит в карточку реплея), кнопки ↻/🗑 (перезапуск/удаление),
+  массовое удаление с confirm, обновление каждые 5с (`pollTests`, чистит сироты
+  выбора). Модалка теста: `#ts-preset` (пресеты подгружаются при показе вкладки),
+  `#ts-logdb`, автo-имя от пресета.
+- ✅ **Анализ**: источник `#rep-source=replay` → список/карточка/действия
+  (`renderRepRunHead` + `renderRepTags`, `renderRepActions` — ↻/🗑), панели
+  «Срезы»/«Сделки» работают и для реплеев; вид прогона скрыт.
+- ✅ **Тесты**: `backend/tests/test_replay_analytics.py` — **17 passed** (sqlite+
+  aiosqlite, monkeypatch `SIDECAR_DIR`/`PRESETS_DIR`/`SessionLocal`/`bot_set_mode`):
+  список/карточка/теги/деградация без сайдкара/404/8 срезов/фильтры сделок/
+  `GET /presets`/SQL-агрегат/админ-перезапуск/400 без окна/`_save_test_sidecar`.
+  Всего по прогону `test_replay+test_report+test_test_preset` — 45 passed;
+  весь suite (без `test_reference_run`/`test_research_pack`) — **956 passed, 2 skipped**.
+- ✅ **Приёмка живая**: curl всех новых эндпоинтов 200; синтетический тест
+  (4 сделки + сайдкар) → список (агрегаты/окно), карточка (теги/группы), все 8 срезов
+  с корректными session/hour/weekday, фильтры сделок, restart → новое имя в БД
+  (старый цел), delete → trades/windows/sidecar убраны, `.env` восстановлен,
+  мусорных строк в БД/пресетах не осталось. CDP-смоук UI (headless Chrome :9222 +
+  vite :5174): список/сортировка/чекбоксы/дроуэр/модалка/переход в Аналитику с
+  тегами и действиями — всё отрисовывается, JS-ошибок в новом коде нет.
+  `tsc -b` и `vite build` зелёные; ruff по новым файлам чисто.
+- ⚠️ Локальные ограничения: запуск реплея на .7 невозможен (нет `instrument_info`,
+  `instruments`=0); `192.168.1.2`/`.3` недоступны (обогащение ADX/ER/MAE/MFE,
+  «Рынок» — на живой БД); `psycopg2`/`psql` к локальной PG висят → только `asyncpg`.
+- ⚠️ Методология: в списке/карточке на первом плане сделки и gross W/L в штуках и ₽,
+  не net; PnL — не показатель.

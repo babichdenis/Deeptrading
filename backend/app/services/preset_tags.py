@@ -8,7 +8,7 @@ UI карточки прогона. Схема пресета и контрак�
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -49,7 +49,7 @@ def save_sidecar(test_name: str, preset: dict, payload: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(
         {"preset": preset, "payload": payload,
-         "created_utc": datetime.now(timezone.utc).isoformat()},
+         "created_utc": datetime.now(UTC).isoformat()},
         ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 

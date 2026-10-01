@@ -1587,3 +1587,53 @@ body.sb-resizing { cursor: col-resize !important; user-select: none; }
 
 .rep-more { display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--text-dim); }
 .rep-empty { padding: 14px; text-align: center; color: var(--text-faint); font-size: 12px; }
+
+.rep-kind.replay { background: rgba(224, 140, 90, 0.16); color: #e0985a; }
+.rep-preset {
+  display: inline-block; margin-left: 4px; padding: 0 5px; border-radius: 5px;
+  font-size: 10px; font-weight: 700; background: rgba(90, 180, 120, 0.14); color: var(--up);
+}
+.rep-actions {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 6px 10px; border: 1px dashed var(--border-soft); border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.05);
+}
+.rep-tags {
+  display: flex; flex-direction: column; gap: 4px; width: 100%;
+  margin-top: 4px; padding-top: 6px; border-top: 1px dashed var(--border-soft);
+}
+.rep-tag-row { display: flex; gap: 5px; align-items: baseline; flex-wrap: wrap; font-size: 11px; }
+.rep-tag-g {
+  min-width: 84px; color: var(--text-faint); text-transform: uppercase;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+}
+.rep-tag-row .td-chip { font-size: 10px; padding: 1px 6px; }
+.btn-danger { color: #e07a7a; border-color: rgba(224, 122, 122, 0.5); }
+.btn-danger:hover { background: rgba(224, 122, 122, 0.14); color: #ff9a9a; }
+
+/* BOT — список тестов: инструменты, колонки, дроуэр */
+.bot-test-head { justify-content: flex-start; flex-wrap: wrap; }
+.bot-test-head .rep-search { flex: 1; min-width: 140px; max-width: 280px; }
+.bot-test-head h3 { margin-right: auto !important; }
+.bot-test-tools { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 8px; }
+.runs-table th[data-k] { cursor: pointer; user-select: none; }
+.runs-table th.sorted { color: var(--accent); }
+.runs-table th.n, .runs-table td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.runs-table th.tcheck, .runs-table td.tcheck { width: 24px; text-align: center; padding-left: 4px; padding-right: 4px; }
+.runs-table td.test-name { font-weight: 600; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runs-table tr.selected td { background: rgba(var(--accent-rgb), 0.08); }
+.runs-table tr.active td { background: rgba(var(--accent-rgb), 0.14); }
+.runs-table tr { cursor: pointer; }
+.runs-table td.row-actions { white-space: nowrap; text-align: right; }
+.runs-table td.row-actions button { margin-left: 4px; }
+
+.bot-test-drawer {
+  margin-top: 12px; padding: 10px 12px; border: 1px solid var(--border-soft);
+  border-radius: 8px; background: var(--bg-soft);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.btd-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.btd-head b { font-size: 13px; word-break: break-all; }
+.btd-head .mini-hint { flex: 1; min-width: 120px; }
+.btd-head #btd-close { margin-left: auto; }
+.bot-test-drawer .rep-cards { max-height: none; }

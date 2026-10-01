@@ -106,14 +106,17 @@ FundBalanceDivergenceBot (индикатор FBD = внешние данные �
 в оригинале баг: stopPrice/profitPrice считаются от 0 — НЕ переносить,
 использовать activation-цены).
 
-### Волна C — Trend (8) + CounterTrend (2) — 3/10 готово (hub-канон)
+### Волна C — Trend (8) + CounterTrend (2) — 6/10 готово (hub-канон)
 - [x] MomentumMacd → `momentum_macd_hub` (strategies.py): MACD>signal И Momentum>100 — крест state-условия; зеркально SELL.
 - [x] ParabolicSarTrade → `parabolic_sar_hub` (strategies.py): флип SAR-тренда (Wilder, Af 0.02 / MaxAf 0.2).
 - [x] WilliamsRangeTrade → `williams_range_hub` (strategies.py): %R(14) крест downline -80 → BUY, крест upline -20 → SELL.
-Индикаторы IndicatorHub: williams_r, momentum, parabolic_sar; каталожные карточки wave=6.
-- [ ] BreakLinearRegressionChannel, ParabolicBollinger, ParabolicPriceChannel,
-PriceChannelTrade, StrategyBillWilliams, TwoTimeFramesBot, ClusterCountertrend — TODO.
-Нужно: regression-канал, fractal (BillWilliams); price_channel/bollinger/parabolic — есть.
+- [x] PriceChannelTrade → `price_channel_hub` (strategies.py): пробой канала L=21 со сдвигом [-2] (уровень предыдущего бара), крест пробоя; бар, пробивший обе стороны, входа не даёт.
+- [x] ParabolicBollinger → `parabolic_bollinger_hub` (strategies.py): крест касания BB-границы (std: делитель L-1 при L>30, иначе L — квирк C#) при параболике P строго внутри полос.
+- [x] ParabolicPriceChannel → `parabolic_price_channel_hub` (strategies.py): крест касания границы канала при P строго внутри; пробой по >=/<=, как в C#-индикаторе.
+Индикаторы IndicatorHub: williams_r, momentum, parabolic_sar; параболическая линия P — общий инкрементальный хелпер `_hub_parabolic` в strategies.py (квирк C#: volMult применяется в среднем второй раз). Выходы трейлингом по P из C# отдаются рантайму (SignalPolicy/exit-policy раннера) — конвенция hub-канона. Каталожные карточки wave=6.
+- [ ] BreakLinearRegressionChannel, StrategyBillWilliams, TwoTimeFramesBot,
+ClusterCountertrend — TODO.
+Нужно: regression-канал, fractal (BillWilliams), второй таймфрейм/два таба (→ волна H); price_channel/bollinger/parabolic — есть.
 
 ### Волна D — Patterns (7) + Monitors (4) — TODO
 CandlePatternBoost, CustomCandlesImpulseTrader, PinBarTrade, PivotPointsRobot,
