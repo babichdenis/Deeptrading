@@ -23,48 +23,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from bt_ose_sweep import ROBOTS  # noqa: E402
 
-BAD = set("\\/?%*:|\"<>")
-SESS_RU = {"morning": "утро", "day": "день", "evening": "вечер"}
-
-
-def sanitize(name: str, limit: int = 64) -> str:
-    return "".join(c if c not in BAD else "_" for c in str(name)).strip()[:limit]
-
-
-def tags(p: dict) -> list[str]:
-    h = p.get("harness") or {}
-    r = p.get("runtime") or {}
-    pr = p.get("preset") or {}
-    bots = ", ".join(
-        (b.get("robot") or "") + (f" {json.dumps(b['params'], ensure_ascii=False)}" if b.get("params") else "")
-        for b in (h.get("robots") or [])
-    )
-    sess = "/".join(SESS_RU.get(s, s) for s in (r.get("sessions") or [])) or "—"
-    money = r.get("money") or {}
-    entry = r.get("entry") or {}
-    rt_ex = r.get("exits") or {}
-    bias = r.get("bias") or {}
-    costs = h.get("costs") or {}
-    return [
-        f"id: {pr.get('id', '—')}",
-        f"имя: {pr.get('name', '—')}",
-        f"роботы: {bots or '—'}",
-        f"ТФ: {h.get('timeframe', '—')}",
-        f"бумаг: {len(h.get('universe') or [])}",
-        f"период: {'..'.join(h.get('period') or []) or '—'}",
-        f"сессии: {sess}",
-        f"капитал: {money.get('initial_cash', '—')} · qty {money.get('qty_per_trade', '—')} · "
-        f"поз {money.get('pos_pct', '—')}/{money.get('max_positions', '—')}",
-        f"SL/TP: {rt_ex.get('sl_mode', '—')} sl×{rt_ex.get('initial_sl_atr', '—')} "
-        f"trail:{rt_ex.get('trail_activation_comm_mult', 'off')} · exits {','.join(h.get('exits') or []) or '—'}",
-        f"bias: {'on' if bias.get('enabled') else 'off'} {bias.get('tf', '')}/{bias.get('period', '')}",
-        f"кворум: {entry.get('quorum', '—')} · confirm {entry.get('confirm_flip', '—')} · "
-        f"cooldown {entry.get('cooldown_bars', '—')}",
-        f"overnight: {'вкл' if r.get('overnight') else 'выкл'}",
-        f"гейты: {', '.join(entry.get('gates') or []) or '—'}",
-        f"режимы: {r.get('regimes', '—')}",
-        f"издержки: комиссия {costs.get('commission', '—')} · слиппедж {costs.get('slippage_bps', '—')}bps",
-    ]
+from app.services.preset_tags import sanitize, save_sidecar, tags  # noqa: E402
 
 
 def to_spec(p: dict) -> dict:
@@ -137,12 +96,7 @@ def main() -> int:
         print(f"saved: {out}")
         return 0
     payload, test_name = replay_payload(p)
-    sc_dir = ROOT / "reports" / "presets"
-    sc_dir.mkdir(parents=True, exist_ok=True)
-    sc = sc_dir / f"{sanitize(test_name)}.json"
-    sc.write_text(json.dumps(
-        {"preset": p, "payload": payload, "created_utc": datetime.now(timezone.utc).isoformat()},
-        ensure_ascii=False, indent=2), encoding="utf-8")
+    sc = save_sidecar(test_name, p, payload)
     print(json.dumps(payload, ensure_ascii=False, indent=1))
     print(f"сайдкар: {sc}")
     if a.start:

@@ -1059,6 +1059,18 @@ async def bot_set_mode(req: ModeRequest) -> dict:
         _os.environ["TEST_PRESET"] = _pj2.dumps(req.preset, ensure_ascii=False)
     else:
         _os.environ.pop("TEST_PRESET", None)
+    if mode == "test" and getattr(req, "preset", None):
+        from app.services.preset_tags import save_sidecar
+        try:
+            save_sidecar(name, req.preset, {
+                "mode": mode, "test_name": name,
+                "replay_start": req.replay_start.strip(), "replay_end": req.replay_end.strip(),
+                "replay_pace": pace, "test_engine": req.test_engine.strip(),
+                "test_interval": req.test_interval.strip(), "test_params": req.test_params,
+                "replay_log_persist": bool(req.replay_log_persist), "preset": req.preset,
+            })
+        except OSError:
+            logger.warning("sidecar write failed for %s", name)
     _write_env_mode(mode, test_name=name, replay_start=req.replay_start.strip(),
                     replay_end=req.replay_end.strip(), replay_pace=pace,
                     replay_log_persist=bool(req.replay_log_persist))
