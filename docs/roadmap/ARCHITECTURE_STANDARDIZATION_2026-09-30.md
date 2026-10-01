@@ -53,6 +53,33 @@
   комиссии/next_open/конфликты/шорт/жизненный цикл. Здесь `test_engine_golden.py`.
 - **L4 Experiment/Research** — dataset+strategy+WF/OOS/robustness → Analytics (PnL/PF/DD/срезы).
 
+## Инвентарь агрегаторов старших ТФ (находка REF-001b, 30.09)
+
+Де-факто **6 реализаций** агрегации 1m → старший ТФ в **двух конвенциях метки бара**:
+
+| Реализация | Конвенция | Потребители |
+|---|---|---|
+| `marketdata/resampler.py::Resampler` | **START** (эпоха, floor) — КАНОН | ReplayFeed (runtime replay), `universe/bars`, харнесс (после фикса REF-001b) |
+| `ml_ensemble_filter.resample_to_5m` | START (floor) | ML-фильтр |
+| `candle_cache.resample_from_1m` (SQL) | START (date_bin) — сверить тестом | запасённые ТФ-свечи / API |
+| `engine/candlehub.py::CandleSeries/bucket_close` (+`build_tf`) | **END** (ceil) | CandleHub (markethub, marketdata hub/adapter/orchestrator, ensemble_v2 M5); ранее — харнесс |
+| `services/ensemble.py::resample/cached_resample` | **END** (ceil; докстрока: «совпадает с bucket_close») | bias/regime, routes, research_pack |
+| `ensemble_ctx.py::DataContext.resample` (`_bucket_of`) | **END** (ceil) | ctx-контур ансамбля |
+
+**Почему так:** два контура — порт OsEngine (CandleManager → `candlehub`, метка по закрытию,
+как в OsEngine) и проектный marketdata (`Resampler`, метка по началу, совпадает с БД `date_bin`).
+Соглашение «CandleHub — источник правды» относилось к **владению 1m-рядами и событиями**,
+но агрегация ТФ размножилась по контурам и разошлась по конвенции.
+
+**План конвергенции (по одному, с тестами):**
+1. Выбрать единую конвенцию — предложение: **START/эпоха** (совпадает с БД/date_bin, UI, replay).
+2. `candlehub.build_tf`/`CandleSeries` → делегирование каноническому агрегатору (или явный
+   legacy-статус для OsEngine-parity потребителей).
+3. `services.ensemble.resample`/`ensemble_ctx` → тонкие обёртки над каноном (поведенческие
+   изменения bias/regime — проверять тестами по одному потребителю).
+4. `ml_ensemble_filter.resample_to_5m` → обёртка; `candle_cache` SQL — сверить и выровнять.
+5. Parity-тест «все агрегаторы дают идентичный ряд» + заморозка инвентаря (новый агрегатор — запрещён).
+
 ## План (приоритет — сверху)
 
 1. [x] Реестр компонентов (таблица выше).
