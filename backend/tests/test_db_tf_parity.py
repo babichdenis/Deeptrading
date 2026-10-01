@@ -64,3 +64,60 @@ def test_db_tf_matches_resampler(ival: int, tf_s: int):
             diffs += 1
     assert missing == 0, f"нет канонических баров для {missing} строк БД"
     assert diffs == 0, f"ТФ БД != Resampler: {diffs} расхождений из {len(db)} (пересобрать ТФ-таблицы)"
+
+
+SAMPLE_DAYS = 14
+# Основные ТФ контуров, покрытые каноническим Resampler (day/week/month — вне его:
+# Resampler поддерживает максимум 4h; их при пересборе строила та же floor-логика).
+SAMPLE_INTERVALS = {2: 300, 3: 900, 8: 600, 9: 1800, 4: 3600, 10: 7200, 11: 14400}
+
+
+@pytest.mark.integration
+def test_db_tf_sample_matches_resampler():
+    """Выборка 5 самых ликвидных фиг × 7 ТФ (5m..4h), окно последних SAMPLE_DAYS дней.
+
+    Последний ТФ-бар каждого интервала может быть формирующимся на момент
+    пересбора — исключается, как и в SBER-тесте.
+    """
+    from datetime import timedelta
+
+    eng = _sync_engine()
+    with eng.connect() as c:
+        figis = [r[0] for r in c.execute(text(
+            "SELECT figi FROM candles WHERE interval=2 AND ts >= now() - interval '30 days' "
+            "GROUP BY figi ORDER BY count(*) DESC LIMIT 5")).all()]
+    if not figis:
+        pytest.skip("нет 5min-строк за последние 30 дней")
+    oem = _oem()
+    problems: list[str] = []
+    checked = 0
+    for f in figis:
+        with eng.connect() as c:
+            mx = c.execute(text(
+                "SELECT max(ts) FROM candles WHERE figi=:f AND interval=2"), {"f": f}).scalar()
+        if not mx:
+            continue
+        mn = mx - timedelta(days=SAMPLE_DAYS)
+        for ival, tf_s in sorted(SAMPLE_INTERVALS.items()):
+            with eng.connect() as c:
+                db = c.execute(text(
+                    "SELECT ts, open, high, low, close FROM candles WHERE figi=:f AND interval=:i "
+                    "AND ts >= :a AND ts <= :b ORDER BY ts"),
+                    {"f": f, "i": ival, "a": mn, "b": mx}).all()
+            if not db:
+                continue
+            _rows, bars = oem._load_tf_cached(f, mn.date().isoformat(), mx.date().isoformat(), tf_s)
+            bar_by_ts = {b.ts: b for b in bars}
+            diffs = missing = 0
+            for ts, o, h, low, cl in db[:-1]:
+                b = bar_by_ts.get(ts)
+                if b is None:
+                    missing += 1
+                    continue
+                if (float(o), float(h), float(low), float(cl)) != (b.open, b.high, b.low, b.close):
+                    diffs += 1
+            checked += len(db) - 1
+            if missing or diffs:
+                problems.append(f"{f} interval={ival}: missing={missing} diffs={diffs} of {len(db)}")
+    assert checked > 0, "нечего проверять (нет ТФ-строк в окне)"
+    assert not problems, "ТФ БД != Resampler (пересобрать): " + "; ".join(problems)
