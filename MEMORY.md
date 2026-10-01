@@ -130,6 +130,15 @@ reconcile loop. НЕ реализовано: StreamingEnsemble (инкремен
 **Единый движок (цель):** runtime.py должен гонять тот же конвейер, что compute_ensemble
 (backtest_v2.py уже делает это через реальный runtime + FakeDatetime).
 
+### 🕐 КАНОН ТФ-АГРЕГАЦИИ — START (2026-10-01, обязательно)
+
+Метка ТФ-бара = **НАЧАЛО бакета** (эпоха/floor) — как в T-Invest (доказано: 10m 102/102,
+1h 18/18), в БД (`date_bin`), UI и replay. Любая агрегация 1m→ТФ обязана совпадать с
+`marketdata.Resampler`; заморозка — `backend/tests/test_aggregators_parity.py`.
+Новые агрегаторы и END/ceil-семантику (метка по закрытию) не заводить.
+Все 6 реализаций сведены к канону 01.10 (`6ac09ed`, `b367bcc`); детали —
+`docs/roadmap/ARCHITECTURE_STANDARDIZATION_2026-09-30.md`.
+
 ---
 
 ## 🔧 ОПЕРАЦИОННЫЕ ЗАМЕТКИ (актуально)
