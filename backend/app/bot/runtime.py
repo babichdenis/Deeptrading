@@ -3197,7 +3197,7 @@ class PaperBotRuntime:
             from app.bot.universe import select_eligible_universe, select_volatile_universe
 
             _umode = _universe_v2_mode()
-            if _umode in ("v2_trend", "v2_meanrev") and str(cfg.mode) == "test":
+            if _umode.startswith("v2_") and str(cfg.mode) == "test":
                 from app.bot.universe.runtime_select import select_screened_universe
 
                 async with SessionLocal() as db:
@@ -3232,7 +3232,7 @@ class PaperBotRuntime:
                 _audit_swallow('_startup@L2458', _sw_e)  # audit silent-except
                 pass
             # Loaded all eligible for streaming
-            if _umode in ("v2_trend", "v2_meanrev") and str(cfg.mode) == "test":
+            if _umode.startswith("v2_") and str(cfg.mode) == "test":
                 # v2-режим теста: подписка/стрим только на отобранный скринером набор
                 self.stream_universe = [u["figi"] for u in self.universe]
             else:
@@ -3976,7 +3976,7 @@ class PaperBotRuntime:
         while self.running:
             try:
                 # v2-режим теста: универс зафиксирован скринером — hot-add не дёргаем.
-                if (_universe_v2_mode() in ("v2_trend", "v2_meanrev")
+                if (_universe_v2_mode().startswith("v2_")
                         and str(getattr(self.config, "mode", "")) == "test"):
                     await asyncio.sleep(5)
                     continue
