@@ -5516,6 +5516,7 @@ class PaperBotRuntime:
             _res_a = run_gate_chain(TIME_GATES, _tc)
             if not _res_a.passed:
                 self._reject_entry("time", _res_a.key, _res_a.detail, figi, ticker)
+                self._trace_order_reject(figi, ticker, action, side, f"gate_time:{_res_a.key}", _res_a.detail)
                 return
         if action == "open":
             _gate_path.append("time")
@@ -5567,6 +5568,7 @@ class PaperBotRuntime:
             _res_s = run_gate_chain(MARKET_GATES, _mc)
             if not _res_s.passed:
                 self._reject_entry("signal", _res_s.key, _res_s.detail, figi, ticker)
+                self._trace_order_reject(figi, ticker, action, side, f"gate_signal:{_res_s.key}", _res_s.detail)
                 return
             if action == "open":
                 _gate_path.append("market")
@@ -5581,6 +5583,8 @@ class PaperBotRuntime:
             except Exception as _ge:
                 self._reject_entry("trend", "tf_gate_error",
                                    f"{type(_ge).__name__}: {str(_ge)[:80]}", figi, ticker)
+                self._trace_order_reject(figi, ticker, action, side, "gate_tf_error",
+                                         f"{type(_ge).__name__}: {str(_ge)[:80]}")
                 return
             _h1 = _mtf.get("h1") or {}
             _m5 = _mtf.get("m5") or {}
@@ -5627,6 +5631,7 @@ class PaperBotRuntime:
             _res_b = run_gate_chain(TREND_GATES, _tctx)
             if not _res_b.passed:
                 self._reject_entry("trend", _res_b.key, _res_b.detail, figi, ticker)
+                self._trace_order_reject(figi, ticker, action, side, f"gate_trend:{_res_b.key}", _res_b.detail)
                 return
             if action == "open":
                 _gate_path.append("trend")
@@ -5659,6 +5664,7 @@ class PaperBotRuntime:
             _res_c = run_gate_chain(PORTFOLIO_GATES, _pctx)
             if not _res_c.passed:
                 self._reject_entry("portfolio", _res_c.key, _res_c.detail, figi, ticker)
+                self._trace_order_reject(figi, ticker, action, side, f"gate_portfolio:{_res_c.key}", _res_c.detail)
                 return
             if action == "open":
                 _gate_path.append("portfolio")
@@ -5692,6 +5698,7 @@ class PaperBotRuntime:
                 self.events.log("AI_ORDER_SKIPPED", figi=figi, ticker=ticker,
                                 reason="; ".join(_ai_skip)[:200])
                 self._log_no_trade(figi, "ai_chase")
+                self._trace_order_reject(figi, ticker, action, side, "ai_chase", "; ".join(_ai_skip)[:120])
                 return
         # ================= STAGE D: сайзинг и маржа (запросы к брокеру) ==================
         if action == "open":
@@ -5919,6 +5926,7 @@ class PaperBotRuntime:
                             self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                             reason="MAX_EXPOSURE")
                             self._log_no_trade(figi, "max_exposure")
+                            self._trace_order_reject(figi, ticker, action, side, "max_exposure")
                             return
             except Exception as _sw_e:
                 _audit_swallow('_submit_order@L4366', _sw_e)  # audit silent-except
@@ -5965,6 +5973,7 @@ class PaperBotRuntime:
                     self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                     reason="MARKET_REVERSAL")
                     self._log_no_trade(figi, "market_reversal")
+                    self._trace_order_reject(figi, ticker, action, side, "market_reversal")
                     return
                 _ok_pf, _why_pf = _pcheck(_snap, side, _notional, ticker,
                                           await self.sector_meta(), _lim)
@@ -5974,6 +5983,7 @@ class PaperBotRuntime:
                     self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
                                     reason="PORTFOLIO_LIMIT", detail=_why_pf)
                     self._log_no_trade(figi, "portfolio_limit")
+                    self._trace_order_reject(figi, ticker, action, side, "portfolio_limit", str(_why_pf)[:140])
                     if bool(getattr(cfg, "queue_enabled", True)) and not (meta or {}).get("priority"):
                         await self._enqueue_candidate(figi, ticker, side, _why_pf,
                                                       meta=meta, snap=_snap)
@@ -5986,6 +5996,7 @@ class PaperBotRuntime:
             if _pend is not None and getattr(_pend, "status", "") == "PENDING_APPROVAL":
                 self._log(f"AI-ГЕЙТ: {ticker} уже ждёт решения — новую заявку не создаём")
                 self._log_no_trade(figi, "ai_already_pending")
+                self._trace_order_reject(figi, ticker, action, side, "ai_already_pending")
                 return
             _cd = float(getattr(cfg, "ai_reject_cooldown_min", 15.0) or 0.0)
             _until = self._ai_reject_until.get(figi)
