@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .bars import load_all_bars
 from .discovery import (
-    count_bars_by_figi,
     discover_liquid_universe,
     discover_tradeable_universe,
 )
@@ -63,26 +62,32 @@ async def _load_snapshot_bars(
     доступная история (как compat).
     """
     if _is_all_market(mode):
+        from sqlalchemy import text as _text
+
         snapshot = await discover_tradeable_universe(db)
         # instrument_info.figi может быть TCS-фигой, а свечи в БД — по BBG (как
         # в runtime): резолвим ticker → BBG через figi_by_ticker, fallback — своя фига.
-        resolved: list[tuple] = []
+        entries_by_figi: dict[str, tuple[str, int]] = {}
         for entry in snapshot.entries:
             bb = figi_by_ticker.get((entry.ref.ticker or "").upper()) or entry.ref.figi
-            resolved.append((entry, bb))
-        has_data = await count_bars_by_figi(
-            db, [bb for _, bb in resolved],
-            interval=_SOURCE_INTERVAL_TRADEABLE, min_bars=_MIN_BARS,
-        )
+            entries_by_figi.setdefault(bb, (entry.ref.ticker or "", int(entry.lot or 10)))
+        ticker_by_figi = {v: k for k, v in figi_by_ticker.items()}
+
+        # Полный рынок «по данным»: instrument_info.api_trade_available неполный
+        # (127 из 502, без SBER) — берём все фиги с достаточной 5m-историей в candles;
+        # тикер/лот — из tradeable-снимка, иначе из instruments (fallback хвост фиги, лот 10).
+        figis = (await db.execute(
+            _text("SELECT figi FROM candles WHERE interval=:i GROUP BY figi HAVING count(*) >= :m"),
+            {"i": _SOURCE_INTERVAL_TRADEABLE, "m": _MIN_BARS},
+        )).scalars().all()
         bars_by: dict[str, list] = {}
         refs = []
-        for entry, bb in resolved:
-            if bb not in has_data:
-                continue
+        for figi in figis:
+            ticker, _lot = entries_by_figi.get(figi, (ticker_by_figi.get(figi, figi[-6:]), 10))
             # Вся история: фичи сами отсекают бары позже as_of (limit «последних N
             # от сейчас» брал бы бары ПОСЛЕ старта реплея и ломал as_of-дисциплину).
-            bars_by[bb] = await load_all_bars(db, bb, interval=_SOURCE_INTERVAL_TRADEABLE)
-            refs.append(InstrumentRef(ticker=entry.ref.ticker, figi=bb))
+            bars_by[figi] = await load_all_bars(db, figi, interval=_SOURCE_INTERVAL_TRADEABLE)
+            refs.append(InstrumentRef(ticker=ticker, figi=figi))
         return refs, bars_by
 
     snapshot = discover_liquid_universe(figi_by_ticker)
