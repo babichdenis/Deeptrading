@@ -257,7 +257,9 @@ reconcile loop. НЕ реализовано: StreamingEnsemble (инкремен
   - `artifact` — требуют локальные research-файлы `backend/reports/` (не в git) → 7 файлов;
   - `integration` — требуют живых данных БД .2 → `test_research_pack.py`.
 - **CI гоняет только hermetic:** `pytest -q -m "not artifact and not integration"`.
-  **Baseline: 900 passed / 0 failed.** Зелёное число не должно зависеть от машины.
+  **Инвариант: 0 failed.** Число растёт по мере добавления тестов
+  (01.10: 900 → 923 passed, 54 deselected) — судить надо по «0 failed»,
+  а не по точному счётy.
 - **Локально полный прогон:** `~/.venvs/deeptrading/bin/python -m pytest tests -q`
   (hermetic + ожидаемые флаки по данным БД .2).
 - **Heatmap — ЕДИНСТВЕННАЯ каноническая версия 30m** (режим по 30m-барам, bias 30m —

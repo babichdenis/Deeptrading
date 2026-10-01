@@ -17,4 +17,4 @@
 
 | ADR | Дата | Решение | Статус |
 |---|---|---|---|
-| [0001](0001-hermetic-baseline-ci.md) | 2026-10-01 | Hermetic baseline для CI: тесты разделены на hermetic / `artifact` / `integration`; CI гоняет только hermetic (900 passed) | принято |
+| [0001](0001-hermetic-baseline-ci.md) | 2026-10-01 | Hermetic baseline для CI: тесты разделены на hermetic / `artifact` / `integration`; CI гоняет только hermetic (инвариант — 0 failed) | принято |

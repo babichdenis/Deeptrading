@@ -25,7 +25,9 @@
      → `test_research_pack.py`;
    - hermetic/unit — всё остальное, основной контур.
 2. **CI гоняет только hermetic:** `pytest -q -m "not artifact and not integration"`.
-   Зелёный baseline — **900 passed / 0 failed**.
+   Критерий готовности — **0 failed**; число passed растёт по мере добавления
+   тестов (900 → 923 на 2026-10-01), поэтомуBaseline — это инвариант,
+   а не конкретное число.
 3. Пункт P0.5: на `(path, method)` разрешён **ровно один** обработчик.
    `tests/test_route_uniqueness.py` падает при дубликатах.
 
