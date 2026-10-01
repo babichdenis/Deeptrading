@@ -37,6 +37,25 @@ def test_null_trail_off_and_all_regimes_skipped():
     assert out["trail_activation_comm_mult"] is None
 
 
+def test_ui_lock_wins_over_preset(monkeypatch):
+    """Настройки UI (сохранёнка) выше пресета: locked-поля пресет не трогает."""
+    monkeypatch.setenv("TEST_PRESET", '{"runtime": {"overnight": true, "sessions": ["morning"]}}')
+    cfg = SimpleNamespace(overnight=False, sessions=["day"], mode="test")
+    applied = apply_test_overrides(cfg, locked={"overnight"})
+    assert cfg.overnight is False          # UI выше пресета
+    assert cfg.sessions == ["morning"]     # незалоченное — пресет применяет
+    assert any(x.startswith("ui-lock:overnight") for x in applied)
+
+
+def test_preset_force_overrides_ui_lock(monkeypatch):
+    """Research-режим: TEST_PRESET_FORCE=1 возвращает пресету приоритет над UI."""
+    monkeypatch.setenv("TEST_PRESET", '{"runtime": {"overnight": true}}')
+    monkeypatch.setenv("TEST_PRESET_FORCE", "1")
+    cfg = SimpleNamespace(overnight=False, sessions=["day"], mode="test")
+    apply_test_overrides(cfg, locked={"overnight"})
+    assert cfg.overnight is True
+
+
 def test_apply_test_overrides_via_env():
     os.environ["TEST_PRESET"] = '{"runtime": {"money": {"initial_cash": 12345}}}'
     try:

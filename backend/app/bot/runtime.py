@@ -567,13 +567,18 @@ def _universe_v2_mode() -> str:
         return ""
 
 
-def apply_test_overrides(cfg) -> list[str]:
+def apply_test_overrides(cfg, locked: set[str] | None = None) -> list[str]:
     """Применить тестовые оверрайды (mode=test). Возвращает список применённых.
 
     env: TEST_GATES=on|off (гейты как на .2 / выкл), TEST_VARIANT=base|macd1|macd2.
+
+    locked — поля, явно сохранённые из UI (BOT_PERSIST_FIELDS): НАСТРОЙКИ UI ВЫШЕ
+    ПРЕСЕТА (решение владельца 02.10), такие поля пропускаются. Для research-прогонов,
+    где пресет обязан перебить UI, задать env TEST_PRESET_FORCE=1.
     """
     import os as _os
     applied: list[str] = []
+    _force = str(_os.environ.get("TEST_PRESET_FORCE", "") or "").strip().lower() in ("1", "true", "on", "yes")
     _gates = str(_os.environ.get("TEST_GATES", "on") or "on").lower()
     _variant = str(_os.environ.get("TEST_VARIANT", "base") or "base").lower()
     _src = dict(TEST_MODE_OVERRIDES)
@@ -614,6 +619,9 @@ def apply_test_overrides(cfg) -> list[str]:
         except Exception as _tpr_e:
             _audit_swallow('apply_test_overrides@test_preset', _tpr_e)
     for _k, _v in _src.items():
+        if locked and _k in locked and not _force:
+            applied.append(f"ui-lock:{_k}")
+            continue
         try:
             setattr(cfg, _k, _v)
             applied.append(f"{_k}={_v}")
@@ -3002,7 +3010,15 @@ class PaperBotRuntime:
             # движка теста (напр. ose_all) молча не работало: env ставился,
             # но никто его не читал.
             try:
-                _ov = apply_test_overrides(cfg)
+                # Настройки UI (сохранёнка) ВЫШЕ пресета: поля, сохранённые из UI,
+                # пресет не трогает (решение владельца, 02.10). TEST_PRESET_FORCE=1 — наоборот.
+                _locked: set[str] = set()
+                try:
+                    _saved = await load_bot_settings()
+                    _locked = {k for k in _saved.keys() if k in BOT_PERSIST_FIELDS}
+                except Exception:
+                    _locked = set()
+                _ov = apply_test_overrides(cfg, locked=_locked)
                 if _ov:
                     self._log("ТЕСТ-ОВЕРРАЙДЫ: " + ", ".join(_ov[:10]))
             except Exception as _sw_e:
