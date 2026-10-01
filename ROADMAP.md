@@ -1,7 +1,34 @@
 # ROADMAP — Deeptrading: стабилизация + порт идей OsEngine
 
+> **Роль файла (P1.3):** это **будущая очередь** и журнал фаз. Текущее состояние
+> проекта — `MEMORY.md` (читается первым), принятые решения — `docs/adr/`,
+> разбор проблем — `docs/roadmap/PROJECT_AUDIT_2026-09-30.md`.
+> `STATUS.md` и `PROJECT_STATE.md` — архивные handoff-документы (не канон).
+
+## Текущая очередь (по этапам аудита 2026-09-30)
+
+| Этап | Содержание | Статус |
+|---|---|---|
+| **A. Стабилизация** | CI на master, compileall, requirements, маркеры тестов, дубль `/heatmap` | ✅ закрыт 2026-10-01 (hermetic baseline 900 passed) |
+| **B. Систематизация** | канонизация доков (P1.3) ✅, артефакты (P1.4) ✅ частично, route-uniqueness ✅, **разбивка `routes/bot.py` + frontend `main.ts`**, typed application services | 🔄 в работе |
+| **C. Ускорение** | benchmark harness, bulk heatmap query, batch runtime startup, кэш indicator contexts | ⬜ не начат |
+| **D. Миграция Universe 2.0** | shadow diff → replay parity → staged cutover → удаление compat | ⬜ не начат |
+
+Ближайшие задачи (по убыванию приоритета):
+
+1. Разбить `backend/app/api/routes/bot.py` на feature-модули — **только после
+   того, как владелец закончит параллельную правку этого файла** (риск конфликта).
+2. То же для `frontend/src/main.ts` → `bot/`, `chart/`, `analytics/`, `warehouse/`, `router/`.
+3. Typed application services между routes и runtime.
+4. Этап C: начать с bulk heatmap query (N+1 → один запрос).
+
+Правила: не смешивать архитектурный refactor с изменением торговой логики
+в одном коммите; под refactor — сначала characterization-тесты.
+
+---
+
 Живой документ: обновляется в каждой рабочей сессии, чтобы всегда было видно,
-на каком этапе проект и что дальше. Последнее обновление: 2026-09-29.
+на каком этапе проект и что дальше. Последнее обновление: 2026-10-01.
 
 ## Контур
 
