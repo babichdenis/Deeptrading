@@ -80,10 +80,11 @@ async def resample_from_1m(
 ) -> int:
     """Заполнить старшие ТФ агрегацией минутных свечей из БД.
 
-    Метка сваггерированного бара = время закрытия (как у T-Invest):
-    bucket = ceil(unix_ts / step) * step. open=первая 1m, high=max,
-    low=min, close=последняя 1m, volume=sum.
-    Возвращает число записанных баров.
+    Канон (REF-001b, 30.09): метка бара = НАЧАЛО бакета (эпоха, floor) —
+    совпадает с marketdata.Resampler и SQL date_bin. Раньше здесь было
+    ceil/закрытие («как T-Invest»), из-за чего прогрев бота шёл по другой
+    сетке, чем live/replay-бары (смешение у стыка). open=первая 1m, high=max,
+    low=min, close=последняя 1m, volume=sum. Возвращает число записанных баров.
     """
     if interval_name == "1min":
         return 0
@@ -112,7 +113,7 @@ async def resample_from_1m(
     buckets: dict[int, dict] = {}
     for ts, open_, high, low, close, volume in rows:
         unix = int(ts.replace(tzinfo=timezone.utc).timestamp())
-        bucket_ts = math.ceil(unix / step_sec) * step_sec
+        bucket_ts = unix - (unix % step_sec)  # метка = НАЧАЛО бакета (канон: Resampler/date_bin)
         b = buckets.setdefault(bucket_ts, {
             "ts": bucket_ts, "open": open_, "high": high, "low": low, "close": close, "volume": 0,
         })

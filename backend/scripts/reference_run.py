@@ -18,7 +18,7 @@ import argparse
 import hashlib
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,11 +73,20 @@ def _trade_dict(t) -> dict:
 
 
 def run_reference(ref: dict) -> dict:
-    """Детерминированный эталонный прогон: DB (фикс. данные) → EngineRunner → ledger."""
+    """Детерминированный эталонный прогон: DB (фикс. данные) → EngineRunner → ledger.
+
+    warmup_days: движок грузит историю за N дней ДО периода (как проектный replay,
+    который прогревает стратегию preload'ом), прогоняется по расширенному ряду, а в
+    результат попадают сделки ТОЛЬКО окна [dfrom..dto] (pre_window_trades — счётчик
+    прогpевочных сделок). Это выравнивает контуры движок↔runtime (REF-001b).
+    """
     ds = ref["dataset"]
     figi = _figi(ds["ticker"])
     tf_s = oem.TF_SECONDS[ds["interval"]]
-    _rows, bars = oem._load_tf_cached(figi, ds["period"][0], ds["period"][1], tf_s)
+    warm = int(ref.get("warmup_days", 0) or 0)
+    start_ts = datetime.fromisoformat(ds["period"][0] + "T00:00:00+00:00")
+    load_from = (start_ts - timedelta(days=warm)).date().isoformat()
+    _rows, bars = oem._load_tf_cached(figi, load_from, ds["period"][1], tf_s)
     strat = build_strategy(ref["strategy"]["engine"], ref["strategy"].get("params") or None)
     ex = ref["execution"]
     cfg = EngineConfig(
@@ -87,13 +96,15 @@ def run_reference(ref: dict) -> dict:
     )
     led = EngineRunner(strategy=strat, exit_policy=oem.NoExitPolicy(), config=cfg).run(bars)
     trades = led.trades
+    win = [t for t in trades if t.entry_time >= start_ts]
     return {
         "data_hash": _data_hash(bars),
         "bars": len(bars),
-        "trades": len(trades),
-        "net": round(sum(t.net_pnl for t in trades), 4),
+        "pre_window_trades": len(trades) - len(win),
+        "trades": len(win),
+        "net": round(sum(t.net_pnl for t in win), 4),
         "fingerprint": led.fingerprint(),
-        "trades_list": [_trade_dict(t) for t in trades],
+        "trades_list": [_trade_dict(t) for t in win],
     }
 
 
@@ -190,7 +201,7 @@ def main() -> int:
         if not exp:
             print("нет expected в эталоне — сначала --write")
             return 2
-        keys = ("data_hash", "fingerprint", "trades", "net")
+        keys = ("data_hash", "bars", "pre_window_trades", "trades", "net", "fingerprint")
         bad = [k for k in keys if exp.get(k) != got.get(k)]
         if bad:
             print("РЕГРЕССИЯ:", ", ".join(bad))
@@ -200,7 +211,8 @@ def main() -> int:
         print("OK: эталон совпадает")
         return 0
     if a.write or not exp:
-        exp_got = {k: got[k] for k in ("data_hash", "bars", "trades", "net", "fingerprint")}
+        exp_got = {k: got[k] for k in ("data_hash", "bars", "pre_window_trades",
+                                       "trades", "net", "fingerprint")}
         ref["expected"] = exp_got
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(ref, ensure_ascii=False, indent=2), encoding="utf-8")

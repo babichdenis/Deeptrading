@@ -61,7 +61,7 @@
 |---|---|---|
 | `marketdata/resampler.py::Resampler` | **START** (эпоха, floor) — КАНОН | ReplayFeed (runtime replay), `universe/bars`, харнесс (после фикса REF-001b) |
 | `ml_ensemble_filter.resample_to_5m` | START (floor) | ML-фильтр |
-| `candle_cache.resample_from_1m` (SQL) | START (date_bin) — сверить тестом | запасённые ТФ-свечи / API |
+| `candle_cache.resample_from_1m` (SQL→БД) | **был END** (ceil, «как T-Invest») → **ИСПРАВЛЕН на START** (эпоха) | запасённые ТФ-свечи; прогрев бота (preload) |
 | `engine/candlehub.py::CandleSeries/bucket_close` (+`build_tf`) | **END** (ceil) | CandleHub (markethub, marketdata hub/adapter/orchestrator, ensemble_v2 M5); ранее — харнесс |
 | `services/ensemble.py::resample/cached_resample` | **END** (ceil; докстрока: «совпадает с bucket_close») | bias/regime, routes, research_pack |
 | `ensemble_ctx.py::DataContext.resample` (`_bucket_of`) | **END** (ceil) | ctx-контур ансамбля |
@@ -93,12 +93,15 @@
      `ose_exit_matrix._bars_tf_canonical` — харнесс переведён на канонический Resampler;
      REF-001 перебазирован (fingerprint `8a703fe9…`, 4 сделки). Внимание: все харнесс-цифры
      до 30.09 считались на старой сетке (кэш переразметится по data_hash сам).
-   - **ОСТАЛОСЬ (следующие шаги REF-001b):** (а) **прогрев** — runtime прогревает стратегию
-     историей до окна, движок стартует холодным: сигналы контуров сходятся начиная с 20:00
-     09-01 (флип-бар совпал в цене); нужна явная warmup-политика в REF-спеке; (б) семантика
-     после выхода — бот после signal_exit на противоположном сигнале не открыл обратную
-     позицию (сверить flip/entry-after-exit с EngineRunner); (в) прочие research-скрипты
-     (labeling/calibrate/trades_split) всё ещё на `build_tf` — выровнять на канон.
+   - **ОСТАЛОСЬ (следующие шаги REF-001b):** (а) **шов окна/прогрева** — движок грузит с 00:00 и включает
+     одно-минутную корзину открытия сессии 03:50, окно replay стартует 04:00, preload-граница бота
+     другая → одно-баровое расхождение серии и разное время RSI-кроссов (runtime SELL 04:30 vs
+     движок 08:30); нужна единая семантика шва (preload без будущих ts + общий старт серии);
+     (б) семантика после выхода — бот после signal_exit на противоположном сигнале не открыл
+     обратную позицию (сверить flip/entry-after-exit с EngineRunner); (в) прочие research-скрипты
+     (labeling/calibrate/trades_split) всё ещё на `build_tf` — выровнять на канон;
+     (г) parity-тест «ТФ-таблицы БД == Resampler» (после фикса candle_cache) + пересбор ТФ-таблиц
+     всех фиг (SBER пересобран вручную).
 4. [ ] Regime convergence: потребители `regime_strategies` → канонический RegimeDetector
    (адаптер на переходный период).
 5. [ ] StrategyCatalog: единый каталог (id/family/version/warmup/params/signal semantics/

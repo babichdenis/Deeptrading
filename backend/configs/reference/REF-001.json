@@ -23,10 +23,12 @@
     "slippage_bps": 2.0
   },
   "expected": {
-    "data_hash": "ee3f52373ab6a864",
-    "bars": 836,
+    "data_hash": "4b76c10cb0373247",
+    "bars": 1192,
+    "pre_window_trades": 1,
     "trades": 4,
-    "net": -3.031,
-    "fingerprint": "8a703fe9d9e152a3467911678e6fa3bea9fdb4cb09506495f7424164dea0627a"
-  }
+    "net": -2.8709,
+    "fingerprint": "d0451b32dde4f94450366000c7e2905a6c5460c0b95ae83752db4fb460ecdb55"
+  },
+  "warmup_days": 3
 }
