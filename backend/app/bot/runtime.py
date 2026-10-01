@@ -3232,11 +3232,15 @@ class PaperBotRuntime:
                 _audit_swallow('_startup@L2458', _sw_e)  # audit silent-except
                 pass
             # Loaded all eligible for streaming
-            async with SessionLocal() as db2:
-                all_eligible = (await db2.execute(
-                    text("SELECT figi FROM universe WHERE eligible_tier = 'eligible'")
-                )).scalars().all()
-                self.stream_universe = list(all_eligible) if all_eligible else [u["figi"] for u in self.universe]
+            if _umode in ("v2_trend", "v2_meanrev") and str(cfg.mode) == "test":
+                # v2-режим теста: подписка/стрим только на отобранный скринером набор
+                self.stream_universe = [u["figi"] for u in self.universe]
+            else:
+                async with SessionLocal() as db2:
+                    all_eligible = (await db2.execute(
+                        text("SELECT figi FROM universe WHERE eligible_tier = 'eligible'")
+                    )).scalars().all()
+                    self.stream_universe = list(all_eligible) if all_eligible else [u["figi"] for u in self.universe]
             for u in self.universe:
                 if u.get("ticker"):
                     self.tickers.setdefault(u["figi"], u["ticker"])
@@ -3971,6 +3975,11 @@ class PaperBotRuntime:
 
         while self.running:
             try:
+                # v2-режим теста: универс зафиксирован скринером — hot-add не дёргаем.
+                if (_universe_v2_mode() in ("v2_trend", "v2_meanrev")
+                        and str(getattr(self.config, "mode", "")) == "test"):
+                    await asyncio.sleep(5)
+                    continue
                 # Хоровод универса крутим независимо от торговых сессий:
                 # добавление/удаление тикеров должно работать как часы (ночью/в выходные
                 # свечи всё равно пишутся в БД потоком, а подписку подтянем к сессии).
