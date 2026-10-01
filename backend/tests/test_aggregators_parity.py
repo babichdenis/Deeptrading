@@ -2,14 +2,12 @@
 
 Канон — START (доказано против T-Invest 102/102). Тест:
 1) START-лагерь (Resampler, universe.bars, ml_ensemble_filter) обязан давать ИДЕНТИЧНЫЙ ряд;
-2) END-лагерь (services.ensemble.resample, candlehub.build_tf) — xfail(strict) до конвергенции:
-   когда схлопнется на START — тест станет XPASS и strict=True потребует обновить его.
+2) конвертированные (candlehub.build_tf, services.ensemble.resample) — обязаны совпасть с каноном;
+3) при появлении нового агрегатора ТФ — добавить его сюда и свести к канону.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-
-import pytest
 
 from app.engine.models import Candle as EC
 
@@ -89,9 +87,8 @@ def test_candlehub_build_tf_converged_to_start():
     assert _series(build_tf(ecs, 300, include_partial=True)) == _start_camp(rows)
 
 
-@pytest.mark.xfail(reason="services.ensemble.resample ещё END (ceil) — к конвергенции на START",
-                   strict=True)
 def test_ensemble_resample_converged_to_start():
+    """services.ensemble переведён на START (REF-001b): batch == канон."""
     rows = _rows()
     ecs = _engine_candles(rows)
     from app.services.ensemble import resample

@@ -45,13 +45,12 @@ def _secs_of(ts) -> int:
 
 
 def _bucket_of(ts, tf_sec: int) -> int:
-    """UTC-grid ceil bucketing: bucket = ceil(unix / tf) * tf.
+    """UTC-grid floor bucketing: bucket = unix - unix % tf — КАНОН START.
 
-    Совпадает с CandleHub.bucket_close и candle_cache.resample_from_1m.
+    Совпадает с marketdata.Resampler, CandleHub.build_tf и _resample_batch.
     """
-    import math
     u = _secs_of(ts)
-    return math.ceil(u / tf_sec) * tf_sec
+    return u - u % tf_sec
 
 
 def _key_of(ts, tf_sec: int):

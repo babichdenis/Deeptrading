@@ -107,11 +107,10 @@ def entry_pullback_deep_pass(c5: list[EngineCandle], atr5: list[float | None],
 
 
 def resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]:
-    """Batch resample 1m → tf с UTC-grid ceil bucketing.
+    """Batch resample 1m → tf с UTC-grid floor bucketing — КАНОН START.
 
-    Совпадает с CandleHub.bucket_close и DataContext (_bucket_of).
+    Совпадает с marketdata.Resampler, CandleHub.build_tf и DataContext (_bucket_of).
     """
-    import math
     out: list[EngineCandle] = []
     last_bucket: int | None = None
     for c in candles:
@@ -120,7 +119,7 @@ def resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]
             from datetime import timezone
             ts = ts.replace(tzinfo=timezone.utc)
         u = int(ts.timestamp())
-        bucket = math.ceil(u / tf_seconds) * tf_seconds
+        bucket = u - u % tf_seconds
         if last_bucket == bucket and out:
             prev = out[-1]
             out[-1] = EngineCandle(ts=prev.ts, open=prev.open, high=max(prev.high, c.high),
@@ -144,7 +143,6 @@ def _bar_stats_1m(candles: list[EngineCandle], tf_sec: int) -> dict:
     Нужно для гейта разряженности: бар, собранный из пары минут и единичных
     лотов, не должен порождать торговые сигналы.
     """
-    import math
     from datetime import timezone
     stats: dict = {}
     for c in candles:
@@ -152,7 +150,7 @@ def _bar_stats_1m(candles: list[EngineCandle], tf_sec: int) -> dict:
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         u = int(ts.timestamp())
-        bucket = math.ceil(u / tf_sec) * tf_sec
+        bucket = u - u % tf_sec
         key = datetime.fromtimestamp(bucket, tz=timezone.utc)
         st = stats.get(key)
         to = float(c.close) * float(c.volume or 0.0)
