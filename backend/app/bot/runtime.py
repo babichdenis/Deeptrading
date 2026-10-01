@@ -507,6 +507,7 @@ _PRESET_FIELD_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("confirm_flip", ("entry", "confirm_flip")),
     ("entry_last_hour_block", ("entry", "last_hour_block")),
     ("entry_volatility_max_mult", ("entry", "volatility_max_mult")),
+    ("signal_trace", ("trace", "enabled")),
     ("trade_regimes", ("regimes",)),
 )
 _MISS = object()
@@ -758,6 +759,7 @@ class PaperBotRuntime:
         self.orders: deque[BotOrder] = deque(maxlen=200)
         self.universe: list[dict] = []
         self.stream_universe: list[str] = []
+        self._trace = None  # SignalTraceEmitter (P0), включается флагом SIGNAL_TRACE/signal_trace
         self.candles_seen = 0
         self.signals_seen = 0
         self._candles_received = 0
@@ -3175,7 +3177,65 @@ class PaperBotRuntime:
         self.startup_task = asyncio.create_task(self._startup(cfg))
         return {"started": True, "async": True}
 
+    def _init_signal_trace(self, cfg) -> None:
+        """Signal Trace (P0): эмиттер включается cfg.signal_trace (preset trace.enabled) или env SIGNAL_TRACE."""
+        self._trace = None
+        try:
+            from app.config import get_settings as _gs
+            _s = _gs()
+            if not (bool(getattr(cfg, "signal_trace", False)) or bool(getattr(_s, "signal_trace", False))):
+                return
+            import os as _os
+            from uuid import uuid4
+            from app.engine.trace import RunInfo, Stage, Status, TraceEvent
+            from app.services.signal_trace import SignalTraceEmitter, short_hash
+            _preset_raw = _os.environ.get("TEST_PRESET", "") or ""
+            _cfg_keys = ("strategy_id", "interval_name", "sessions", "overnight", "pos_pct",
+                         "max_positions", "sl_mode", "stop_pct", "target_pct", "atr_period",
+                         "atr_multiplier", "atr_risk_reward", "confirm_flip",
+                         "reentry_cooldown_bars", "trade_regimes")
+            run = RunInfo(
+                run_id=uuid4().hex,
+                run_key=str(getattr(cfg, "test_name", "") or f"live:{datetime.now(timezone.utc).isoformat()}"),
+                contour="runtime",
+                mode=str(getattr(cfg, "mode", "")),
+                feed=str(getattr(cfg, "feed", "")),
+                test_name=str(getattr(cfg, "test_name", "")),
+                strategy_id=str(getattr(cfg, "strategy_id", "")),
+                interval=str(getattr(cfg, "interval_name", "")),
+                replay_from=str(getattr(cfg, "replay_start", "")),
+                replay_to=str(getattr(cfg, "replay_end", "")),
+                preset_hash=short_hash(_preset_raw) if _preset_raw else "",
+                config_hash=short_hash({k: getattr(cfg, k, None) for k in _cfg_keys}),
+            )
+            self._trace = SignalTraceEmitter(
+                run, directory=(str(getattr(_s, "signal_trace_dir", "") or "") or None)
+            )
+            self._trace.start()
+            self._trace.emit(TraceEvent(stage=Stage.RUN_OPEN, status=Status.CREATED))
+            self._log(f"SIGNAL-TRACE: пишу {self._trace.path}")
+        except Exception as _sw_e:
+            _audit_swallow("_init_signal_trace", _sw_e)
+            self._trace = None
+
+    async def _close_trace(self, reason: str = "") -> None:
+        """Финальный флаш Signal Trace (идемпотентно)."""
+        _tr = getattr(self, "_trace", None)
+        if _tr is None:
+            return
+        try:
+            from app.engine.trace import Stage, Status, TraceEvent
+            _tr.emit(TraceEvent(stage=Stage.RUN_CLOSE, status=Status.EXECUTED, reason=reason))
+            _summ = await _tr.aclose()
+            self._log(f"SIGNAL-TRACE: {_summ.get('events')} событий, dropped={_summ.get('dropped')}, "
+                      f"файл {_summ.get('path')}")
+        except Exception as _sw_e:
+            _audit_swallow("_close_trace", _sw_e)
+        finally:
+            self._trace = None
+
     async def _startup(self, cfg: BotConfig) -> None:
+        self._init_signal_trace(cfg)
         try:
             async with SessionLocal() as db:
                 rows = await db.execute(select(Instrument.ticker, Instrument.figi))
@@ -3436,6 +3496,7 @@ class PaperBotRuntime:
     async def stop(self) -> dict:
         was_running = self.running
         self.running = False
+        await self._close_trace("stop")
         if self.feed is not None:
             self.feed.request_stop()
         # --- Stop StreamManager ---
@@ -4641,6 +4702,7 @@ class PaperBotRuntime:
             except Exception as _sw_e:
                 _audit_swallow('_finalize_replay@test_run', _sw_e)
         self._log(f"REPLAY ЗАВЕРШЁН: закрыто {_closed} поз. по последним ценам (итоги в /bot/tests)")
+        await self._close_trace("replay_finished")
 
     async def _run(self) -> None:
         # Feed = источник СВЕЧЕЙ: всегда боевой токен + основной API, потому что
@@ -4975,6 +5037,7 @@ class PaperBotRuntime:
         if figi in self._signal_busy:
             return
         self._signal_busy.add(figi)
+        _trace_signal_id = None
         try:
             # Held-тикер: не рассматривать входы В СТОРОНУ открытой позиции
             # (экономия CPU/AI-гейта). Противоположные сигналы остаются — они нужны
@@ -4989,6 +5052,33 @@ class PaperBotRuntime:
             except Exception as _sw_e:
                 _audit_swallow('_process_candle@L3913', _sw_e)  # audit silent-except
                 pass
+            if self._trace is not None:
+                try:
+                    from app.engine.trace import Stage, Status, TraceEvent
+                    _st = getattr(strategy, "_hub_rsi_state", None)
+                    _ctx = {
+                        "called": True,
+                        "buffer": {
+                            "n": len(buffer),
+                            "maxlen": getattr(buffer, "maxlen", None),
+                            "first_ts": (buffer[0].ts.isoformat() if buffer else None),
+                            "last_ts": (buffer[-1].ts.isoformat() if buffer else None),
+                            "last_close": (float(buffer[-1].close) if buffer else None),
+                        },
+                        "rsi_state": ({
+                            "n": _st.get("n"),
+                            "len": _st.get("len"),
+                            "last": (round(float(_st["series"][-1]), 4) if _st.get("series") else None),
+                            "prev": (round(float(_st["series"][-2]), 4)
+                                     if _st.get("series") and len(_st["series"]) > 1 else None),
+                        } if _st else None),
+                        "held": figi in self._held,
+                        "pos_side": str(self._exit_side.get(figi) or ""),
+                    }
+                    self._trace.emit(TraceEvent(stage=Stage.EVAL, status=Status.CREATED, ts_bar=c.ts,
+                                                figi=figi, ticker=self.tickers.get(figi, ""), eval_ctx=_ctx))
+                except Exception:
+                    pass
             _t2 = _time.perf_counter()
             sig = await asyncio.to_thread(strategy.on_bar, list(buffer))
             # Инверсия на уровне СИГНАЛА: тогда вход, встречный сигнал и выходы
@@ -4999,6 +5089,25 @@ class PaperBotRuntime:
                            side=(_Side.SELL if sig.side == _Side.BUY else _Side.BUY),
                            time=sig.time, reason=f"inv:{sig.reason}",
                            features=sig.features, kind=sig.kind)
+            if self._trace is not None and sig is not None:
+                try:
+                    from app.engine.trace import Stage, Status, TraceEvent, make_signal_id
+                    _trace_signal_id = make_signal_id(
+                        run_id=self._trace.run.run_id, contour="runtime", figi=figi,
+                        strategy_id=str(getattr(sig, "strategy_id", "")),
+                        strategy_version=str(getattr(strategy, "version", "")),
+                        interval=str(getattr(self.config, "interval_name", "")),
+                        bar_ts=sig.time, side=sig.side.value, kind=str(getattr(sig, "kind", "entry")),
+                    )
+                    self._trace.emit(TraceEvent(
+                        stage=Stage.RAW, status=Status.CREATED, ts_bar=sig.time,
+                        figi=figi, ticker=self.tickers.get(figi, ""), signal_id=_trace_signal_id,
+                        side=sig.side.value, kind=str(getattr(sig, "kind", "entry")),
+                        reason=str(getattr(sig, "reason", "") or ""),
+                        features=dict(sig.features or {}),
+                    ))
+                except Exception:
+                    pass
             _et = (_time.perf_counter() - _t2) * 1000
             self.metrics["ensemble_ms_total"] += _et
             self.metrics["ensemble_ms_n"] += 1
@@ -5007,6 +5116,14 @@ class PaperBotRuntime:
         except Exception as e:
             _audit_swallow('_process_candle@L3930', e)  # audit silent-except
             self.events.log("SIGNAL_ERROR", figi=figi, reason=str(e)[:200])
+            if self._trace is not None:
+                try:
+                    from app.engine.trace import Stage, Status, TraceEvent
+                    self._trace.emit(TraceEvent(stage=Stage.ERROR, status=Status.ERROR, ts_bar=c.ts,
+                                                figi=figi, ticker=self.tickers.get(figi, ""),
+                                                error={"type": type(e).__name__, "message": str(e)[:200]}))
+                except Exception:
+                    pass
             sig = None
         finally:
             self._signal_busy.discard(figi)
@@ -5075,6 +5192,15 @@ class PaperBotRuntime:
             _sig_buy = sig.side.value == "BUY"
             if _cur and (_sig_buy == _pos_buy):
                 self._log_no_trade(figi, "already_held")
+                if self._trace is not None:
+                    try:
+                        from app.engine.trace import Stage, Status, TraceEvent
+                        self._trace.emit(TraceEvent(stage=Stage.DECISION, status=Status.SKIPPED,
+                                                    ts_bar=sig.time, figi=figi, ticker=self.tickers.get(figi, ""),
+                                                    signal_id=_trace_signal_id, side=sig.side.value,
+                                                    action="already_held", reason_code="already_held"))
+                    except Exception:
+                        pass
                 return
             self._log(f"СИГНАЛ-ВЫХОД {ticker} {sig.side.value} (против позиции {_cur or '?'}) "
                       f"sid={getattr(sig,'strategy_id','?')}")
@@ -5107,10 +5233,29 @@ class PaperBotRuntime:
         if state_now is PositionState.FLAT and \
                 str(getattr(sig, "kind", "entry") or "entry") == "exit":
             self._log_no_trade(figi, "exit_flat", "exit-голос на флэте проигнорирован (не вход)")
+            if self._trace is not None:
+                try:
+                    from app.engine.trace import Stage, Status, TraceEvent
+                    self._trace.emit(TraceEvent(stage=Stage.DECISION, status=Status.SKIPPED,
+                                                ts_bar=sig.time, figi=figi, ticker=self.tickers.get(figi, ""),
+                                                signal_id=_trace_signal_id, side=sig.side.value,
+                                                action="exit_flat", reason_code="exit_flat"))
+                except Exception:
+                    pass
             return
         bars_held = 0
         policy = SignalPolicy()
         action, note = policy.decide(sig, state_now, bars_held)
+        if self._trace is not None:
+            try:
+                from app.engine.trace import Stage, Status, TraceEvent
+                self._trace.emit(TraceEvent(stage=Stage.DECISION, status=Status.CREATED,
+                                            ts_bar=sig.time, figi=figi, ticker=ticker,
+                                            signal_id=_trace_signal_id, side=sig.side.value,
+                                            action=str(getattr(action, "value", action)),
+                                            reason=str(note), reason_code="policy"))
+            except Exception:
+                pass
 
         from app.engine.models import DecisionAction
         if action is DecisionAction.ACCEPT_ENTRY:
@@ -5274,6 +5419,14 @@ class PaperBotRuntime:
             return False
 
     async def _submit_order(self, figi: str, ticker: str, action: str, side: str, meta: dict | None = None) -> None:
+        if self._trace is not None:
+            try:
+                from app.engine.trace import Stage, Status, TraceEvent
+                self._trace.emit(TraceEvent(stage=Stage.ORDER, status=Status.CREATED,
+                                            figi=figi, ticker=ticker, action=action,
+                                            side=side, reason="submit"))
+            except Exception:
+                pass
         cfg = self.config
         # Инверсия уже применена на уровне сигнала (см. _process_candle) — здесь НЕ дублируем.
         qty = cfg.qty_per_trade
