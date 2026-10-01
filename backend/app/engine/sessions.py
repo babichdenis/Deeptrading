@@ -100,6 +100,38 @@ def is_clearing_gap(ts, sessions: list[str] | None = None) -> bool:
     return a <= mins < b
 
 
+def _last_session_end_msk(sessions: list[str] | None = None) -> int:
+    """Конец последней сессии дня в минутах МСК (0 = неизвестно)."""
+    if not sessions:
+        sessions = ["day"]
+    ends = [SESSION_WINDOWS.get(_s, (0, 0))[1] for _s in sessions]
+    return max(ends) if ends else 0
+
+
+def is_weekend(ts) -> bool:
+    """Суббота/воскресенье по МСК."""
+    return ts.astimezone(_MSK_TZ).weekday() >= 5
+
+
+def weekend_close_due(ts, sessions: list[str] | None = None) -> bool:
+    """Пора закрыть позицию, чтобы она НЕ пережила выходные.
+
+    Решение владельца (02.10): в выходные физически торговать нельзя — только
+    лимитные заявки и мизерный объём, одной сделкой можно развернуть весь тренд.
+    Поэтому в пятницу после конца последней сессии закрываемся, а уикенд позиция
+    не должна пережить НИ при каком overnight.
+    """
+    msk = ts.astimezone(_MSK_TZ)
+    if msk.weekday() >= 5:
+        return True
+    if msk.weekday() == 4:
+        last_end = _last_session_end_msk(sessions)
+        mins = msk.hour * 60 + msk.minute
+        if last_end and mins >= last_end:
+            return True
+    return False
+
+
 def should_force_close(ts, sessions: list[str] | None = None, overnight: bool = False) -> bool:
     """Закрывать ли позицию сейчас принудительно (EOD/ночь).
 
@@ -141,8 +173,7 @@ def eod_close_due(ts, sessions: list[str] | None = None, minutes_before: int = 1
         return True
     # Закрываемся только перед концом ПОСЛЕДНЕЙ сессии дня (вечерней),
     # а не на конце каждой (иначе бот не торговал бы вечернюю сессию).
-    _ends = [SESSION_WINDOWS.get(_s, (0, 0))[1] for _s in sessions]
-    _last_end = max(_ends) if _ends else 0
+    _last_end = _last_session_end_msk(sessions)
     if _last_end and (int(_last_end) - int(minutes_before)) <= mins < int(_last_end):
         return True
     return False

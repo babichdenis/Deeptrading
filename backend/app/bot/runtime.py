@@ -248,6 +248,9 @@ class BotConfig:
     # --- Overnight ---
     overnight: bool = False  # по умолчанию закрывать на конец торгового дня; True = держать через ночь
     eod_close_min_before: int = 10  # закрывать за N минут до конца последней сессии (overnight=False)
+    # Выходные: закрыться до ухода (владелец 02.10) — в выходные только лимитные
+    # заявки и тонкий объём, позиция не должна их пережить (и висеть до понедельника).
+    weekend_flat: bool = True
     # --- Bias-exit: закрывать позицию, если bias_by_state сменил знак против позиции ---
     # (по умолчанию ВЫКЛ: эталонный бэктест держит до EOD; опция — для экспериментов)
     bias_exit_enabled: bool = False
@@ -327,7 +330,7 @@ BOT_PERSIST_FIELDS = (
     "trail_activation_comm_mult", "trail_info_activation_comm_mult",
     "stop_pct", "target_pct", "sl_mode", "initial_sl_atr", "atr_period", "atr_multiplier",
     "atr_risk_reward", "top_n", "ensemble_quorum", "commission_rate",
-    "overnight", "eod_close_min_before", "bias_exit_enabled", "daily_bias", "daily_bias_mode",
+    "overnight", "eod_close_min_before", "weekend_flat", "bias_exit_enabled", "daily_bias", "daily_bias_mode",
     "mtf_align", "mtf_trigger", "ensemble_require_member",
     "entry_h1_align", "entry_tf_conflict", "entry_last_hour_block",
     "entry_hm_veto", "hm_veto_window_h", "hm_veto_thr_pct", "hm_veto_mode",
@@ -748,7 +751,7 @@ def _loss_hold_left(now: datetime, count: int, last_ts: datetime | None,
     return left if left > 0 else 0.0
 
 
-from app.engine.sessions import is_session_active as _sessions_allowed, should_force_close as _should_force_close, is_clearing_gap as _is_clearing_gap
+from app.engine.sessions import is_session_active as _sessions_allowed, should_force_close as _should_force_close, is_clearing_gap as _is_clearing_gap, weekend_close_due as _weekend_close_due
 
 
 class PaperBotRuntime:
@@ -1569,9 +1572,14 @@ class PaperBotRuntime:
                 pass
 
     async def reduce_positions(self, close_pct: float, reason: str, side: str = "",
-                               figis: set[str] | None = None) -> dict:
-        """Закрыть долю позиций (худшие по P&L) — трейлинг-стоп портфеля/разворот/ночь."""
-        if not self._in_trading_session():
+                               figis: set[str] | None = None,
+                               force: bool = False) -> dict:
+        """Закрыть долю позиций (худшие по P&L) — трейлинг-стоп портфеля/разворот/ночь.
+
+        force=True — закрыть мимо сессионного гейта: выходные не отменяют
+        требование «не пережить выходные» (там гейт иначе просто не пустит).
+        """
+        if not force and not self._in_trading_session():
             self._session_gate_log("закрытие позиций")
             return {}
         positions = await self.broker.positions()
@@ -1669,6 +1677,23 @@ class PaperBotRuntime:
                                                 reason="overnight_false")
                 except Exception as _e_eod:
                     _audit_swallow('_portfolio_guard_loop@L1297', _e_eod)  # audit silent-except
+                    pass
+                # --- Weekend flat: перед выходными закрыть всё (overnight не спасает).
+                try:
+                    if bool(getattr(cfg, "weekend_flat", True)) and self._held:
+                        from app.engine.sessions import weekend_close_due as _wk_due_fn
+                        if _wk_due_fn(self._bot_now(), cfg.sessions):
+                            _wk_figs = set(self._held) - self._swing
+                            r = (await self.reduce_positions(1.0, "weekend_force_close",
+                                                             figis=_wk_figs, force=True)
+                                 if _wk_figs else {})
+                            if r.get("closed"):
+                                _now_msk = self._bot_now().astimezone(timezone(timedelta(hours=3)))
+                                self._log(f"📅 WEEKEND: закрыто {r['closed']} поз. перед выходными "
+                                          f"({_now_msk.strftime('%a %d.%m %H:%M')} МСК)")
+                                self.events.log("WEEKEND_CLOSE", closed=r["closed"])
+                except Exception as _e_wk:
+                    _audit_swallow('_portfolio_guard_loop@weekend', _e_wk)  # audit silent-except
                     pass
                 # --- Уборка ночных: overnight=False, а позиция вошла до сегодня → закрыть.
                 try:
@@ -1774,6 +1799,23 @@ class PaperBotRuntime:
         if not self.config.sessions:
             return True
         return _sessions_allowed(self._bot_now(), self.config.sessions)
+
+    def _last_session_close(self, figi: str, fallback: float) -> float:
+        """Цена последней СЕССИОННОЙ свечи — цена выхода перед выходными.
+
+        В уикенд T-Invest отдаёт бары (тонкие/пустые), цена там не рыночная,
+        поэтому выходные приравниваем к последней пятничной цене.
+        """
+        try:
+            bb = self.tcs_to_bbg.get(figi, figi)
+            buf = self.buffers.get(bb) or self.buffers.get(figi) or []
+            for _b in reversed(list(buf)[-300:]):
+                _ts = getattr(_b, "ts", None)
+                if _ts is not None and _sessions_allowed(_ts, self.config.sessions):
+                    return float(_b.close)
+        except Exception as _sw_e:
+            _audit_swallow('_last_session_close', _sw_e)  # audit silent-except
+        return float(fallback)
 
 
     def _get_5m_bars(self, figi: str, buf_list: list) -> list:
@@ -5118,19 +5160,28 @@ class PaperBotRuntime:
         # Рестарт-защита: бэклоговые ночные свечи не должны ложно закрывать —
         # поэтому закрываем, только если начало бара ещё в разрешённой сессии.
         _now_end = c.ts + timedelta(seconds=STEP_SEC.get(self.config.interval_name, 300))
+        _in_ses = _sessions_allowed(c.ts, self.config.sessions)
+        # Выходные (решение владельца 02.10): закрыться ДО ухода в выходные —
+        # независимо от overnight, иначе позиция живёт до понедельника.
+        _wk_due = bool(getattr(self.config, "weekend_flat", True)) and _weekend_close_due(_now_end, self.config.sessions)
         if (not _closed and figi not in self._swing
-                and _should_force_close(_now_end, self.config.sessions, self.config.overnight)):
-            if _sessions_allowed(c.ts, self.config.sessions):
-                trade = await self.broker.close_position(figi, float(c.close), "overnight_force_close")
+                and (_wk_due or _should_force_close(_now_end, self.config.sessions, self.config.overnight))):
+            if _in_ses or _wk_due:
+                # В уикенд-барах (T-Invest их отдаёт) цена не рыночная — выходим
+                # по последней СЕССИОННОЙ свече (пятница).
+                _px = float(c.close) if _in_ses else self._last_session_close(figi, float(c.close))
+                _reason = "weekend_force_close" if _wk_due else "overnight_force_close"
+                _fb_px = float(c.close) if _in_ses else _px
+                trade = await self.broker.close_position(figi, _px, _reason)
                 self._held.discard(figi)
                 self._opposite_count.pop(figi, None)
                 self._last_exit_bar[figi] = self._bar_counter
                 self._clear_exit_state(figi)
                 _bh_overnight = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
                 if trade:
-                    await self._st_close(figi, float(c.open), reason="overnight_force_close",
+                    await self._st_close(figi, _fb_px, reason=_reason,
                                           net=float(trade.net_pnl), meta={"bars_held": _bh_overnight})
-                    self._log(f"ВЫХОД {figi[-6:]} (overnight) pnl={float(trade.net_pnl):+.2f}")
+                    self._log(f"ВЫХОД {figi[-6:]} ({'weekend' if _wk_due else 'overnight'}) pnl={float(trade.net_pnl):+.2f}")
             else:
                 self._session_gate_log("overnight закрытие")
 
