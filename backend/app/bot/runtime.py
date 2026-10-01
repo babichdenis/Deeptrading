@@ -3277,7 +3277,11 @@ class PaperBotRuntime:
                             await ensure_candles(db, u["figi"], cfg.interval_name, days=7)
                             interval_value = self._interval_value()
                             candles = await _lc(db, u["figi"], interval_value,
-                                                date_from=self._bot_now() - timedelta(days=3))
+                                                date_from=self._bot_now() - timedelta(days=3),
+                                                date_to=self._bot_now())
+                            # date_to ОБЯЗАТЕЛЕН: без него выборка тянет бары ПОСЛЕ окна
+                            # реплея, [-MAX_BUFFER:] берёт их, ряд становится немонотонным
+                            # и RSI-стратегия теряет канонические кроссы (найдено 01.10).
                             for row in candles[-MAX_BUFFER:]:
                                 buf.append(EC(ts=row.ts, open=row.open, high=row.high,
                                               low=row.low, close=row.close, volume=row.volume))
@@ -3975,9 +3979,10 @@ class PaperBotRuntime:
 
         while self.running:
             try:
-                # v2-режим теста: универс зафиксирован скринером — hot-add не дёргаем.
-                if (_universe_v2_mode().startswith("v2_")
-                        and str(getattr(self.config, "mode", "")) == "test"):
+                # replay/test: универс фиксируется на старте окна. Hot-add по «сейчас»
+                # подмешивал бы бары ПОСЛЕ окна реплея (и 1m в TF-буфер) — ломал прогретые
+                # ряды и терял сигналы (найдено 01.10 на прогонах v2trendALL/dbg0901).
+                if str(getattr(self.config, "feed", "")) == "replay":
                     await asyncio.sleep(5)
                     continue
                 # Хоровод универса крутим независимо от торговых сессий:
