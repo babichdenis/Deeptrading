@@ -689,7 +689,10 @@ function tradeDetailsHtml(t: SandboxTrade): string {
     // ATR на пике — в абсолютных единицах цены (как на входе); % только как запасной вариант для старых сделок.
     if (t.max_pnl_atr != null) R.push(kv("ATR (пик)", `${money(t.max_pnl_atr)} ₽`));
     else if (t.max_pnl_atr_pct != null) R.push(kv("ATR (пик)", `${t.max_pnl_atr_pct}%`));
-    if (t.max_pnl_mae_atr != null) R.push(kv("MAE до пика", `${t.max_pnl_mae_atr.toFixed(2)} ATR`));
+    if (t.max_pnl_mae_atr != null)
+      R.push(kv("MAE до пика", `${t.max_pnl_mae_atr.toFixed(2)} ATR` +
+        (t.max_pnl_mae_pct != null ? ` · ${t.max_pnl_mae_pct.toFixed(2)}%` : "")));
+    else if (t.max_pnl_mae_pct != null) R.push(kv("MAE до пика", `${t.max_pnl_mae_pct.toFixed(2)}%`));
     // R в том же формате, что «R план» на входе (1:X.XX).
     if (t.max_pnl_r != null) R.push(kv("R (пик)", `<span class="${t.max_pnl_r >= 0 ? "pos" : "neg"}">1:${t.max_pnl_r.toFixed(2)}</span>`));
     if (t.max_pnl_roi_pct != null) R.push(kv("ROI (пик)", `<span class="${t.max_pnl_roi_pct >= 0 ? "pos" : "neg"}">${t.max_pnl_roi_pct >= 0 ? "+" : ""}${t.max_pnl_roi_pct.toFixed(1)}%</span>`));
@@ -3323,6 +3326,7 @@ interface SandboxTrade {
   max_pnl?: number | null; max_pnl_time?: string | null; max_pnl_price?: number | null;
   max_pnl_atr_pct?: number | null; max_pnl_atr?: number | null; max_pnl_r?: number | null; max_pnl_roi_pct?: number | null;
   max_pnl_mae_atr?: number | null;
+  max_pnl_mae_pct?: number | null;
   trail_info?: TrailInfo | null;
   sl_atr?: number | null; tp_atr?: number | null; rr_initial?: number | null;
   roi_sl_pct?: number | null; roi_tp_pct?: number | null;

@@ -687,7 +687,8 @@ async def _test_portfolio_digest(test_name: str, rows: list) -> dict:
 def _peak_fields(exit_meta) -> dict:
     """Пик P&L сделки (макс. цена при лонге / мин. при шорте, ATR, MAE) из exit_meta."""
     out = {"max_pnl": None, "max_pnl_time": None, "max_pnl_price": None,
-           "max_pnl_atr": None, "max_pnl_atr_pct": None, "max_pnl_mae_atr": None}
+           "max_pnl_atr": None, "max_pnl_atr_pct": None, "max_pnl_mae_atr": None,
+           "max_pnl_mae_pct": None}
     try:
         import json as _pj
         if not exit_meta:
@@ -705,6 +706,8 @@ def _peak_fields(exit_meta) -> dict:
             out["max_pnl_atr_pct"] = round(float(_m["max_pnl_atr_pct"]), 2)
         if _m.get("max_pnl_mae_atr") is not None:
             out["max_pnl_mae_atr"] = float(_m["max_pnl_mae_atr"])
+        if _m.get("max_pnl_mae_pct") is not None:
+            out["max_pnl_mae_pct"] = float(_m["max_pnl_mae_pct"])
     except Exception:
         pass
     return out
@@ -739,7 +742,8 @@ def _test_trade_row(r) -> dict:
     _notional = _entry * _qty
     _own = _notional / _lev
     # Пик PnL + время + ATR из exit_meta (пишется в runtime._st_close).
-    _peak = {"pnl": None, "time": None, "price": None, "atr_pct": None, "atr": None, "r": None, "roi_pct": None, "mae_atr": None}
+    _peak = {"pnl": None, "time": None, "price": None, "atr_pct": None, "atr": None, "r": None, "roi_pct": None,
+             "mae_atr": None, "mae_pct": None}
     _trail_info = None
     try:
         _em = json.loads(r.exit_meta) if r.exit_meta else {}
@@ -752,6 +756,8 @@ def _test_trade_row(r) -> dict:
             # показывали «Забрал бы −9 417 ₽» при отсутствии срабатывания).
             _thit = bool(str(_t.get("hit_ts") or "").strip()) and _tpx_raw > 0
             _trisk = abs(_entry - float(r.stop_loss)) * _qty if (r.stop_loss is not None and float(r.stop_loss) != _entry) else 0.0
+            if r.stop_loss is not None and abs(_entry - float(r.stop_loss)) > 5.0 * _entry:
+                _trisk = 0.0
             _trail_info = {
                 "activated": bool(_t.get("activated")),
                 "trail_stop": round(float(_t.get("trail_stop") or 0.0), 6),
@@ -767,6 +773,12 @@ def _test_trade_row(r) -> dict:
             _mp = float(_em["max_pnl"])
             _slv = float(r.stop_loss) if r.stop_loss is not None else None
             _risk = abs(_entry - _slv) * _qty if (_slv is not None and _slv != _entry) else 0.0
+            # SL дальше 5× входа = стоп фактически ОТКЛЮЧЁН (presets signal-only
+            # держат stop_pct=10.0 = 1000%). R по такому «риску» — 0.00 у любой
+            # сделки, он только путает. Молча отдаём None, карточка строку прячет.
+            _sl_sane = bool(_slv is not None and abs(_entry - _slv) <= 5.0 * _entry)
+            if not _sl_sane:
+                _risk = 0.0
             _peak = {
                 "pnl": round(_mp, 2),
                 "time": str(_em.get("max_pnl_time") or ""),
@@ -775,8 +787,10 @@ def _test_trade_row(r) -> dict:
                 "atr": (round(float(_em["max_pnl_atr"]), 4) if _em.get("max_pnl_atr") is not None else None),
                 "r": round(_mp / _risk, 2) if _risk else None,
                 "roi_pct": round(_mp / _own * 100, 1) if _own else None,
-                # MAE до пика: макс. просадка ниже входа (в ATR) на пути к пику прибыли.
+                # MAE до пика: макс. просадка ниже входа (в ATR и в % от входа)
+                # на пути к пику прибыли.
                 "mae_atr": (round(float(_em["max_pnl_mae_atr"]), 2) if _em.get("max_pnl_mae_atr") is not None else None),
+                "mae_pct": (round(float(_em["max_pnl_mae_pct"]), 2) if _em.get("max_pnl_mae_pct") is not None else None),
             }
     except Exception:
         pass
@@ -825,6 +839,7 @@ def _test_trade_row(r) -> dict:
         "max_pnl_price": _peak["price"], "max_pnl_atr_pct": _peak["atr_pct"],
         "max_pnl_r": _peak["r"], "max_pnl_roi_pct": _peak["roi_pct"],
         "max_pnl_mae_atr": _peak["mae_atr"],
+        "max_pnl_mae_pct": _peak["mae_pct"],
         "max_pnl_atr": _peak["atr"],
         "trail_info": _trail_info,
         "sl_atr": _init["sl_atr"], "tp_atr": _init["tp_atr"],
@@ -860,7 +875,8 @@ async def _test_position_row(r, cur: float | None) -> dict:
     _net_est = pnl - _cr * (entry + cur) * qty
     # Пик P&L открытой позиции — из in-memory учёта рантайма (в exit_meta попадёт при закрытии).
     _peak = {"max_pnl": None, "max_pnl_time": None, "max_pnl_price": None,
-             "max_pnl_atr": None, "max_pnl_atr_pct": None, "max_pnl_mae_atr": None}
+             "max_pnl_atr": None, "max_pnl_atr_pct": None, "max_pnl_mae_atr": None,
+           "max_pnl_mae_pct": None}
     try:
         from app.bot.runtime import runtime as _rt_pk
         _pk = (_rt_pk._peak_pnl or {}).get(r.figi)

@@ -2347,6 +2347,12 @@ class PaperBotRuntime:
                                     meta["mae_time"] = str(_peak.get("mae_ts"))
                             # legacy-ключ карточки — теперь в корректных единицах
                             meta["max_pnl_mae_atr"] = meta["mae_atr"]
+                            # MAE ДО ПИКА в % от входа (не путать с mae_pct выше —
+                            # это максимум за всю сделку, включая провалы после пика).
+                            try:
+                                meta["max_pnl_mae_pct"] = round(float(_peak.get("mae_pct") or 0.0), 2)
+                            except Exception:
+                                meta["max_pnl_mae_pct"] = 0.0
                         except Exception as _sw_e:
                             _audit_swallow('_st_close@peak_mae', _sw_e)  # audit silent-except
                             pass
@@ -6515,6 +6521,11 @@ class PaperBotRuntime:
         # Старт пика P&L: от входа, лучший ход = 0.
         self._peak_pnl[figi] = {"pnl": 0.0, "ts": c.ts, "price": float(entry_px),
                                 "atr_abs": None, "atr_pct": None, "mae": 0.0}
+        # Виртуальный трейл — строго с нуля на каждой позиции. Раньше _trail_info
+        # жил до _st_close, а часть путей закрытия (_st_close bypass: closed_at_broker,
+        # duplicate_cleanup) его не вычищала → новая позиция по тому же figi
+        # наследовала activated=True и hit_ts ЧУЖОЙ сделки (PLZL 04.09.2026).
+        self._trail_info.pop(figi, None)
         if plan.take_profit is not None:
             self._exit_target[figi] = float(plan.take_profit)
         self._entry_bar_index[figi] = self._bar_counter
@@ -6587,6 +6598,8 @@ class PaperBotRuntime:
             # Пик P&L после рестарта считаем заново (прошлые бары недоступны).
             self._peak_pnl[figi] = {"pnl": 0.0, "ts": c.ts, "price": float(_entry_px),
                                     "atr_abs": None, "atr_pct": None, "mae": 0.0}
+            # Виртуальный трейл после рестарта — с нуля (см. _open_position).
+            self._trail_info.pop(figi, None)
             # Источник уровней при восстановлении: сначала БД (ручные правки/прошлый
             # прогон переживают рестарт), иначе — расчёт от ATR.
             _db_sl = _db_tp = None
@@ -6767,6 +6780,12 @@ class PaperBotRuntime:
             if _peak is None:
                 _peak = {"pnl": float("-inf"), "mae_cur": 0.0, "mae_atr": 0.0}
             _peak["mae_cur"] = max(float(_peak.get("mae_cur", 0.0)), _mae_cur)
+            # MAE до пика ещё и в % от входа (для карточки: «MAE до пика … %»).
+            try:
+                _mae_pct_cur = (float(_adv_px) / float(entry_px) * 100.0) if (entry_px and _adv_px > 0) else 0.0
+            except Exception:
+                _mae_pct_cur = 0.0
+            _peak["mae_cur_pct"] = max(float(_peak.get("mae_cur_pct", 0.0)), _mae_pct_cur)
             # Макс. просадка в ЦЕНЕ за всю сделку (для калибровки SL): расстояние,
             # цена и время самого глубокого ухода против позиции (29.09).
             if _adv_px > float(_peak.get("mae_dist", 0.0)):
@@ -6783,7 +6802,8 @@ class PaperBotRuntime:
                 _peak.update({"pnl": round(_cur_pnl, 2), "ts": c.ts.isoformat(),
                               "price": float(_peak_px), "atr_pct": round(_atr_p, 2),
                               "atr_abs": (round(float(_atr_v), 4) if _atr_v else None),
-                              "mae_atr": round(float(_peak.get("mae_cur", 0.0)), 2)})
+                              "mae_atr": round(float(_peak.get("mae_cur", 0.0)), 2),
+                              "mae_pct": round(float(_peak.get("mae_cur_pct", 0.0)), 2)})
             self._peak_pnl[figi] = _peak
         except Exception as _sw_e:
             _audit_swallow('_step_exit@peak', _sw_e)  # audit silent-except
@@ -6875,13 +6895,19 @@ class PaperBotRuntime:
                                 except Exception:
                                     pass
                                 # Сработал бы трейл? Только закрытие за стопом (close_based).
-                                _ti_price, _ti_reason = _ibe(c, state, float(_new_stop), None, close_based=True)
-                                if _ti_price is not None and not _ti.get("hit_ts"):
-                                    _ti["hit_ts"] = c.ts.isoformat()
-                                    _ti["hit_price"] = float(_ti_price)
-                                    _ti["hit_reason"] = _ti_reason or "TRAIL"
-                                    self._log(f"ИНФО-ТРЕЙЛ СРАБОТАЛ БЫ {figi[-6:]} цена={_ti_price:.2f} "
-                                              f"({_ti_reason}) стоп={_new_stop:.2f} текущий_стоп={stop if stop is not None else '-'}")
+                                # На баре РОЖДЕНИЯ стопа не проверяем: стоп, рождённый из
+                                # high/low этого же бара, лежит ВНУТРИ его диапазона, и
+                                # open ≤ stop срабатывал всегда (PLZL 04.09.2026: трейл
+                                # «вышел» в точке входа, +0.00₽). Проверка начинается со
+                                # СЛЕДУЮЩЕГО бара — как и для _prev выше.
+                                if not _born_this_bar:
+                                    _ti_price, _ti_reason = _ibe(c, state, float(_new_stop), None, close_based=True)
+                                    if _ti_price is not None and not _ti.get("hit_ts"):
+                                        _ti["hit_ts"] = c.ts.isoformat()
+                                        _ti["hit_price"] = float(_ti_price)
+                                        _ti["hit_reason"] = _ti_reason or "TRAIL"
+                                        self._log(f"ИНФО-ТРЕЙЛ СРАБОТАЛ БЫ {figi[-6:]} цена={_ti_price:.2f} "
+                                                  f"({_ti_reason}) стоп={_new_stop:.2f} текущий_стоп={stop if stop is not None else '-'}")
                         except Exception as _twe:
                             self._log(f"инфо-трейл update error {figi[-6:]}: {_twe}")
         except Exception as _tge:
