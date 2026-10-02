@@ -710,6 +710,24 @@ def _peak_fields(exit_meta) -> dict:
     return out
 
 
+def _entry_sid_reg(meta_raw) -> tuple[str | None, str | None]:
+    """Движок и режим входа из meta сделки (карточка runtime._entry_card).
+
+    Раньше в строках сделок стояло жёсткое "v4_enhanced" — для прогонов на
+    rsi_trade_hub таблица «Последние сделки» показывала чужой движок.
+    """
+    try:
+        m = json.loads(meta_raw) if meta_raw else {}
+    except Exception:
+        return (None, None)
+    if not isinstance(m, dict):
+        return (None, None)
+    e = m.get("entry") if isinstance(m.get("entry"), dict) else {}
+    sid = str(m.get("strategy_id") or e.get("strategy_id") or "").strip() or None
+    reg = str(m.get("regime") or m.get("entry_regime") or "").strip() or None
+    return (sid, reg)
+
+
 def _test_trade_row(r) -> dict:
     """Одна сделка теста в формате /sandbox/trades (закрытая или открытая)."""
     is_open = r.exit_time is None
@@ -785,6 +803,7 @@ def _test_trade_row(r) -> dict:
                     _init["rr_initial"] = round(abs(_tp0 - _entry) / _dsl, 2)
     except Exception:
         pass
+    _sid, _reg = _entry_sid_reg(r.meta)
     return {
         "figi": r.figi, "ticker": r.ticker, "side": r.side,
         "qty": int(r.qty),
@@ -799,7 +818,7 @@ def _test_trade_row(r) -> dict:
         "exit_reason": "на торгах" if is_open else (r.exit_reason or ""),
         "entry_reason": r.entry_reason, "meta": r.meta, "exit_meta": r.exit_meta,
         **_peak,
-        "strategy_id": "v4_enhanced",
+        "strategy_id": _sid, "regime": _reg,
         "notional": round(_notional, 2), "leverage": round(_lev, 2),
         "own_money": round(_own, 2),
         "max_pnl": _peak["pnl"], "max_pnl_time": _peak["time"],
@@ -1286,6 +1305,7 @@ async def sandbox_trades(limit: int = 50):
                 side = "LONG" if qty > 0 else "SHORT"
                 ticker = omap.get(pos.figi, pos.figi[:8])
                 e = enrich.get(pos.figi, {})
+                _sid_o, _reg_o = _entry_sid_reg(e.get("meta"))
                 open_items.append({
                     "figi": pos.figi, "ticker": e.get("ticker") or ticker,
                     "side": e.get("side") or side, "qty": int(abs(qty)),
@@ -1295,7 +1315,7 @@ async def sandbox_trades(limit: int = 50):
                     "stop_loss": e.get("stop_loss"), "take_profit": e.get("take_profit"),
                     "exit_reason": "на торгах",
                     "entry_reason": e.get("entry_reason"), "meta": e.get("meta"),
-                    "exit_meta": None, "strategy_id": "v4_enhanced",
+                    "exit_meta": None, "strategy_id": _sid_o, "regime": _reg_o,
                     "leverage": round(float(e.get("leverage") or 1.0), 1),
                     "notional": round(float(e.get("entry_price") or round(avg, 6)) * int(abs(qty)), 2),
                     "own_money": round(round(float(e.get("entry_price") or round(avg, 6)) * int(abs(qty)), 2)
@@ -1322,6 +1342,7 @@ async def sandbox_trades(limit: int = 50):
                 for r in rows:
                     _not = round(float(r.entry_price) * int(r.qty), 2)
                     _lev = float(r.leverage) if r.leverage else 1.0
+                    _sid_r, _reg_r = _entry_sid_reg(r.meta)
                     closed_stored.append({
                         "figi": r.figi, "ticker": r.ticker, "side": r.side,
                         "qty": r.qty,
@@ -1338,7 +1359,7 @@ async def sandbox_trades(limit: int = 50):
                         "meta": r.meta,
                         "exit_meta": r.exit_meta,
                         **_peak_fields(r.exit_meta),
-                        "strategy_id": "v4_enhanced",
+                        "strategy_id": _sid_r, "regime": _reg_r,
                         "leverage": round(_lev, 1),
                         "notional": _not,
                         "own_money": round(_not / _lev, 2),

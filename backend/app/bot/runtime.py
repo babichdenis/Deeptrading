@@ -2097,6 +2097,84 @@ class PaperBotRuntime:
             pass
         return stats
 
+    def _entry_card(self, figi: str, meta: dict | None, regime: str | None) -> dict:
+        """Каноническая карточка входа для любого движка: причина, голоса, режим.
+
+        Ансамбль (bot/ensemble_strategy.py) и OSE-стратегии (engine/ose/strategy.py)
+        карточку уже приносят в features — тогда только добираем режим. Одиночные
+        движки (rsi_trade_hub, моментум, AI, очередь) приносят голые фичи
+        ({"rsi": 37.09}), из-за чего в таблице «Последние сделки» вход был пустой:
+        не видно ни кто голосовал, ни в каком режиме входили. Здесь пишем голос
+        движка как есть — один движок = один голос (требование владельца: голос
+        хоть одного робота должен попадать в карточку).
+
+        Ключи meta повторяют формат ансамбля: entry.reason/entry.features + плоские
+        rsi*/голоса, quorum_event, regime — их читает фронт (renderTrades,
+        tradeDetailsHtml) и bot.py.
+        """
+        out = dict(meta or {})
+        sig = out.pop("_sig", None)
+        sig = sig if isinstance(sig, dict) else {}
+        strat = None
+        try:
+            strat = self.strategies.get(figi)
+        except Exception:
+            strat = None
+        sid = str(sig.get("strategy_id") or getattr(strat, "strategy_id", "")
+                  or getattr(self.config, "strategy_id", "") or "")
+        robot = str(getattr(strat, "robot_name", "") or sid or "?")
+        is_buy = str(sig.get("side") or "").upper() in ("BUY", "LONG")
+        reg = regime or out.get("entry_regime") or out.get("regime")
+        if isinstance(out.get("entry"), dict) and out.get("entry"):
+            # Движок карточку уже принёс (ансамбль/OSE) — не перетираем.
+            if reg and not out.get("regime"):
+                out["regime"] = reg
+            if sid and not out.get("strategy_id"):
+                out["strategy_id"] = sid
+            return out
+        flat = {k: v for k, v in out.items()
+                if k not in ("leverage", "gate_path", "atr_entry", "entry_regime",
+                             "sl_initial", "entry_price0", "entry_time", "regime",
+                             "quorum_event", "buy_votes", "sell_votes", "votes",
+                             "vote_detail", "entry")}
+        reason = str(sig.get("reason") or "").strip() or (f"{sid}:signal" if sid else "signal")
+        entry = {
+            "reason": reason[:128],          # колонка entry_reason VARCHAR(128)
+            "side": sig.get("side"),
+            "ts": sig.get("ts"),
+            "strategy_id": sid,
+            "robot": robot,
+            "kind": sig.get("kind"),
+            "votes": 1,
+            "buy_votes": 1 if is_buy else 0,
+            "sell_votes": 0 if is_buy else 1,
+            "vote_detail": f"{robot}:{reason}"[:120],
+            "features": flat,
+        }
+        entry.update(flat)                   # rsi/rsi_5m/rsi_sig — как у ансамбля
+        out["entry"] = entry
+        out["quorum_event"] = {
+            "ts": sig.get("ts"),
+            "side": sig.get("side"),
+            "votes": 1,
+            "buy_votes": entry["buy_votes"],
+            "sell_votes": entry["sell_votes"],
+            "members_for": [robot] if is_buy else [],
+            "opposition": [] if is_buy else [robot],
+            "total_members": 1,
+            "quorum_k": 1,
+            "reason": reason[:120],
+        }
+        out["votes"] = 1
+        out["buy_votes"] = entry["buy_votes"]
+        out["sell_votes"] = entry["sell_votes"]
+        out["vote_detail"] = entry["vote_detail"]
+        out["engine"] = "single"             # режим входа: одиночный движок, не ансамбль
+        out["strategy_id"] = sid
+        if reg:
+            out["regime"] = reg
+        return out
+
     async def _st_open(self, figi, ticker, side, qty, price, sl, tp, meta: dict | None = None, leverage: float = 1.0) -> None:
         try:
             if str((meta or {}).get("hold") or "").lower() == "swing":
@@ -2122,6 +2200,8 @@ class PaperBotRuntime:
         # в таблицу позиций уходит сырой dict (режим = "{'state': 'TREND_UP', ...}").
         _er_norm = (_er.get("state") if isinstance(_er, dict) else _er) or "NO_REGIME"
         self._entry_regime[figi] = _er_norm
+        # Карточка входа (reason/голоса/режим) — для ЛЮБОГО движка, см. _entry_card.
+        _meta_row = self._entry_card(figi, meta, _er_norm)
         try:
             async with SessionLocal() as db:
                 # Идемпотентность: один открытый ряд на figi. Если уже есть
@@ -2145,8 +2225,8 @@ class PaperBotRuntime:
                     entry_price=float(price),
                     stop_loss=float(sl) if sl else None,
                     take_profit=float(tp) if tp else None,
-                    entry_reason=(meta or {}).get("entry", {}).get("reason") if isinstance(meta, dict) else None,
-                    meta=_json.dumps({**(meta or {}), "sl_initial": float(sl) if sl else None,
+                    entry_reason=(str(_meta_row.get("entry", {}).get("reason") or "")[:128] or None),
+                    meta=_json.dumps({**_meta_row, "sl_initial": float(sl) if sl else None,
                                       "entry_price0": float(price),
                                       "entry_regime": _er_norm,
                                       "entry_time": _now.isoformat()}, ensure_ascii=False, default=str),
@@ -5515,7 +5595,16 @@ class PaperBotRuntime:
             if bool(getattr(self.config, "momentum_only", False)):
                 self._log(f"МОМЕНТУМ-ONLY: сигнал ансамбля {ticker} {sig.side.value} игнорируется")
                 return
-            await self._submit_order(figi, ticker, "open", sig.side.value, meta=dict(sig.features or {}))
+            # _sig — подсказка для _entry_card: кто именно проголосовал и почему
+            # (причина сигнала). Без неё карточка входа у одиночных движков пустая.
+            await self._submit_order(figi, ticker, "open", sig.side.value,
+                                     meta={**dict(sig.features or {}),
+                                           "_sig": {"strategy_id": str(getattr(sig, "strategy_id", "") or ""),
+                                                    "side": str(getattr(getattr(sig, "side", None), "value", "") or ""),
+                                                    "reason": str(getattr(sig, "reason", "") or ""),
+                                                    "kind": str(getattr(sig, "kind", "entry") or "entry"),
+                                                    "ts": (sig.time.isoformat()
+                                                           if getattr(sig, "time", None) is not None else None)}})
         elif action is DecisionAction.ACCEPT_EXIT:
             # Закрываем ТОЛЬКО позиции из нашего учёта (_held). pos_now со стрима/брокера
             # отстаёт на десятки секунд после реального закрытия → без этой защиты бот

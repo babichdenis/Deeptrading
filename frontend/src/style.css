@@ -889,6 +889,7 @@ body.embedded .sklad-panel { display: none; }
 
 .exit-chip { display: inline-block; padding: 2px 7px; border-radius: 5px; background: #151d27; border: 1px solid #344253; color: #aab5c4; font-size: 9px; font-weight: 700; white-space: nowrap; }
 .entry-chip { display: inline-block; padding: 2px 7px; border-radius: 5px; background: #101a24; border: 1px solid #2b4a63; color: #7fd0ff; font-size: 9px; font-weight: 700; white-space: nowrap; }
+.regime-cell { font-size: 9px; letter-spacing: .3px; white-space: nowrap; }
 .exit-chip i { font-style: normal; font-weight: 500; }
 .exit-chip.stop { background: #28131a; border-color: #6a2636; color: #ff596c; }
 .exit-chip.pending { background: #17201a; border-color: #395142; color: #e0b83e; }

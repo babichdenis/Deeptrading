@@ -471,7 +471,10 @@ function renderTrades(): void {
     let _xm: any = null;
     try { _me = t.meta ? JSON.parse(t.meta) : null; } catch { _me = null; }
     try { _xm = t.exit_meta ? JSON.parse(t.exit_meta) : null; } catch { _xm = null; }
-    const _entryM = (_me?.entry as Record<string, unknown>) || {};
+    const _entryM = ((_me?.entry as Record<string, unknown>) || {}) as Record<string, unknown>;
+    // RSI-плоские ключи старых сделок лежат на верхнем уровне meta (rsi, rsi_5m…):
+    // читаем оттуда, если в карточке входа их нет.
+    const _rsiAt = (k: string): unknown => (_entryM[k] !== undefined ? _entryM[k] : _me?.[k]);
     const _rsiSigTf = typeof _entryM.rsi_sig_tf === "string" ? _entryM.rsi_sig_tf as string : "10min";
     const _rsiChip = (lbl: string, vRaw: unknown, pRaw: unknown): string => {
       if (typeof vRaw !== "number") return "";
@@ -483,11 +486,13 @@ function renderTrades(): void {
       return `<span class="dim">${lbl} <span class="${cls}">${v.toFixed(1)}${arrow}</span></span>`;
     };
     const _rsiChips = [
-      _rsiChip("1м", _entryM.rsi, _entryM.rsi_prev),
-      _rsiChip("5м", _entryM.rsi_5m, _entryM.rsi_5m_prev),
-      _rsiChip(_rsiSigTf.replace("min", "м"), _entryM.rsi_sig, _entryM.rsi_sig_prev),
+      _rsiChip("1м", _rsiAt("rsi"), _rsiAt("rsi_prev")),
+      _rsiChip("5м", _rsiAt("rsi_5m"), _rsiAt("rsi_5m_prev")),
+      _rsiChip(_rsiSigTf.replace("min", "м"), _rsiAt("rsi_sig"), _rsiAt("rsi_sig_prev")),
     ].filter(Boolean).join(" · ");
-    const _regime = typeof _me?.regime === "string" ? _me.regime as string : "";
+    // Режим входа: карточка (meta.regime) → плоский entry_regime → поле строки.
+    const _regime = String(_me?.regime ?? _me?.entry_regime ?? t.regime ?? "");
+    const _regChip = _regimeShort(_regime);
     const _trailOut = !!((_xm?.trailing ?? _xm?.trail_active ?? _me?.trailing ?? _me?.trail_active) === true);
     let exitChip = `<span class="exit-chip">${t.exit_reason}</span>`;
     if (_trailOut) exitChip = `<span class="exit-chip">Trailing</span>`;
@@ -496,23 +501,34 @@ function renderTrades(): void {
     else if (t.exit_reason === "flip") exitChip = `<span class="exit-chip">Flip</span>`;
     else if (t.exit_reason === "session_end") exitChip = `<span class="exit-chip pending">Session</span>`;
     else if (isOpen) exitChip = `<span class="exit-chip pending">Открыта</span>`;
-    // Вход (голоса ансамбля) из meta.entry / meta.quorum_event.
+    // Вход: кто проголосовал и в каком режиме. Источники — карточка входа
+    // (meta.entry / meta.quorum_event), затем колонки строки (entry_reason,
+    // strategy_id) — чтобы старые сделки тоже не были пустыми.
     let entryCell = "—";
     try {
       const m = _me;
-      const er = String(m?.entry?.reason ?? m?.entry_reason ?? "");
-      const f = ((m?.entry?.features || m?.quorum_event || {}) as Record<string, unknown>) || {};
-      if (er) {
+      const _e0 = (m?.entry || {}) as Record<string, unknown>;
+      const er = String(_e0.reason ?? m?.entry_reason ?? t.entry_reason ?? "");
+      const _sid0 = String(_e0.strategy_id ?? m?.strategy_id ?? t.strategy_id ?? "");
+      const f = ((_e0.features || m?.quorum_event || m || {}) as Record<string, unknown>) || {};
+      const _f = f as Record<string, unknown>;
+      const erShown = er || _sid0;
+      if (erShown) {
         let votes = "";
-        if (typeof f.long_votes === "number" || typeof f.short_votes === "number") votes = ` ↑${f.long_votes ?? 0}/↓${f.short_votes ?? 0}`;
-        else if (typeof f.votes_up === "number" || typeof f.votes_dn === "number") votes = ` ↑${f.votes_up ?? 0}/↓${f.votes_dn ?? 0}`;
-        else if (typeof f.votes === "number" || typeof f.buy_votes === "number" || typeof f.sell_votes === "number") {
-          const bv = typeof f.buy_votes === "number" ? f.buy_votes : 0;
-          const sv = typeof f.sell_votes === "number" ? f.sell_votes : 0;
-          votes = ` v${typeof f.votes === "number" ? f.votes : bv + sv}`;
+        if (typeof _f.long_votes === "number" || typeof _f.short_votes === "number") votes = ` ↑${_f.long_votes ?? 0}/↓${_f.short_votes ?? 0}`;
+        else if (typeof _f.votes_up === "number" || typeof _f.votes_dn === "number") votes = ` ↑${_f.votes_up ?? 0}/↓${_f.votes_dn ?? 0}`;
+        else if (typeof _f.votes === "number" || typeof _f.buy_votes === "number" || typeof _f.sell_votes === "number") {
+          const bv = typeof _f.buy_votes === "number" ? _f.buy_votes : 0;
+          const sv = typeof _f.sell_votes === "number" ? _f.sell_votes : 0;
+          votes = ` v${typeof _f.votes === "number" ? _f.votes : bv + sv}`;
         }
-        const short = er.replace("_ensemble", "").replace("neutral_", "neu:").replace("range_", "rng:").replace("hv_", "hv:");
-        entryCell = `<span class="entry-chip" title="${esc(er)}">${esc(short)}${votes}</span>`;
+        const short = (erShown.replace("_ensemble", "").replace("neutral_", "neu:").replace("range_", "rng:").replace("hv_", "hv:"));
+        const title = `${er || _sid0}${votes ? " · голоса " + votes.slice(1) : ""}${_regime ? " · режим " + _regime : ""}`;
+        entryCell = `<span class="entry-chip" title="${esc(title)}">${esc(short)}${esc(votes)}</span>`;
+      }
+      // Режим входа — в строке таблицы (требование владельца), даже если чип входа пуст.
+      if (_regChip) {
+        entryCell += ` <span class="dim regime-cell" title="режим рынка на входе: ${esc(_regime)}">${esc(_regChip)}</span>`;
       }
     } catch { /* noop */ }
     // R-множитель = net_pnl / риск (|entry−SL|×qty).
@@ -562,7 +578,7 @@ function tradeDetailsHtml(t: SandboxTrade): string {
   const qe = (m?.quorum_event as Record<string, unknown>) || {};
   const setups = (m?.setups as Record<string, Record<string, unknown>>) || {};
   const vol = (m?.volume as Record<string, number>) || {};
-  const regNow = m?.regime as string | undefined;
+  const regNow = (m?.regime ?? m?.entry_regime ?? t.regime) as string | undefined;
   const ab = entry.against_bias;
   const chip = (txt: string, c: string) => `<span class="td-chip" style="color:${c};border-color:${c}">${txt}</span>`;
   const fnum = (x: number | undefined) => (x == null ? "—" : new Intl.NumberFormat("ru-RU").format(Math.round(x)));
@@ -572,8 +588,19 @@ function tradeDetailsHtml(t: SandboxTrade): string {
 
   // Левая колонка: ВХОД.
   const L: string[] = [];
-  L.push(kv("Вход", `${String(t.side)} · ${String(entry.reason ?? "—")}` +
+  const _eReason = String(entry.reason ?? t.entry_reason ?? t.strategy_id ?? "—");
+  L.push(kv("Вход", `${String(t.side)} · ${_eReason}` +
     (ab === true ? " " + chip("ПРОТИВ bias", "#e74c3c") : ab === false ? " " + chip("по bias", "#2ecc71") : "")));
+  // Движок и режим входа — по требованию владельца видно всегда, даже если
+  // карточка входа записана частично (старые сделки тестовых прогонов).
+  const _eSid = String(entry.strategy_id ?? m?.strategy_id ?? t.strategy_id ?? "");
+  if (_eSid) {
+    const _eVotes = entry.votes ?? m?.votes ?? null;
+    const _eRobot = String(entry.robot ?? "");
+    L.push(kv("Движок", esc(_eSid) + (_eVotes != null ? ` · голосов: ${String(_eVotes)}` : "") + (_eRobot ? ` (${esc(_eRobot)})` : "")));
+  }
+  const _eReg = String(regNow ?? "");
+  if (_eReg) L.push(kv("Режим входа", esc(_eReg)));
   if (entry.features) L.push(kv("Level", String((entry.features as Record<string, unknown>).breakout_level ?? "—")));
   // RSI на баре входа (rsi_filter-гейт 40–60): вне коридора — предупреждение.
   // RSI 1м / 5м / сигнального ТФ (10м) на баре сигнала — значение + стрелка направления.
@@ -3289,6 +3316,9 @@ interface SandboxTrade {
   entry_time: string; ts: string | null; stop_loss: number | null; take_profit: number | null;
   net_pnl: number | null; commission: number; exit_reason: string; meta?: string | null;
   exit_meta?: string | null;
+  entry_reason?: string | null;
+  strategy_id?: string | null;
+  regime?: string | null;
   leverage?: number | null; notional?: number | null; own_money?: number | null;
   max_pnl?: number | null; max_pnl_time?: string | null; max_pnl_price?: number | null;
   max_pnl_atr_pct?: number | null; max_pnl_atr?: number | null; max_pnl_r?: number | null; max_pnl_roi_pct?: number | null;
@@ -3309,6 +3339,16 @@ interface TrailInfo {
   hit_r?: number | null;
   hit_roi_pct?: number | null;
 }
+const _REGIME_SHORT: Record<string, string> = {
+  HIGH_VOLATILITY: "волат", TREND_UP: "тренд↑", TREND_DOWN: "тренд↓",
+  RANGE: "флэт", NEUTRAL: "нейтр", NO_REGIME: "нет",
+};
+function _regimeShort(reg: string): string {
+  const r = String(reg || "").trim();
+  if (!r) return "";
+  return _REGIME_SHORT[r] || r.replace(/_/g, " ").toLowerCase();
+}
+
 let _lastTrades: SandboxTrade[] = [];
 let _lastTradeHist = new Map<string, Array<Record<string, unknown>>>();
 const _openDetails = new Set<string>();
