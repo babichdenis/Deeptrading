@@ -49,7 +49,7 @@ def _bars(n: int, base: float = 100.0, drift: float = 0.1, v: float | None = Non
 
 def test_atr_parity_with_canonical_indicatorhub():
     bars = _bars(60)
-    got = compute_volatility_features(SBER, bars, as_of=bars[-1].ts)
+    got = compute_volatility_features(SBER, bars, as_of=bars[-1].ts + STEP)
     canonical = [v for v in hub_atr(bars[-44:], 14) if v is not None][-1]
     assert got.valid
     assert got.atr == pytest.approx(float(canonical))
@@ -57,7 +57,7 @@ def test_atr_parity_with_canonical_indicatorhub():
 
 def test_atr_pct_formula():
     bars = _bars(60)
-    got = compute_volatility_features(SBER, bars, as_of=bars[-1].ts)
+    got = compute_volatility_features(SBER, bars, as_of=bars[-1].ts + STEP)
     assert got.valid
     assert got.atr_pct == pytest.approx(round(got.atr / bars[-1].close * 100, 3))
 
@@ -66,8 +66,8 @@ def test_atr_parity_matches_legacy_feature_layer():
     from app.bot.universe.features import compute_feature_set
 
     bars = _bars(60)
-    v2 = compute_volatility_features(SBER, bars, as_of=bars[-1].ts)
-    legacy = compute_feature_set(SBER, bars, as_of=bars[-1].ts)
+    v2 = compute_volatility_features(SBER, bars, as_of=bars[-1].ts + STEP)
+    legacy = compute_feature_set(SBER, bars, as_of=bars[-1].ts + STEP)
     assert v2.atr == pytest.approx(legacy.atr)
     assert v2.atr_pct == pytest.approx(legacy.atr_pct)
 
@@ -93,7 +93,7 @@ def test_zero_close_invalid():
     bars[-1] = EngineCandle(
         ts=bars[-1].ts, open=0.0, high=1.0, low=0.0, close=0.0, volume=0.0
     )
-    got = compute_volatility_features(SBER, bars, as_of=bars[-1].ts)
+    got = compute_volatility_features(SBER, bars, as_of=bars[-1].ts + STEP)
     assert not got.valid
     assert got.reason == "invalid_close"
 
@@ -132,14 +132,14 @@ def test_as_of_moves_only_when_relevant_history_changes():
 
 def test_deterministic_same_input_same_output():
     bars = _bars(60)
-    a = compute_volatility_features(SBER, bars, as_of=bars[-1].ts)
-    b = compute_volatility_features(SBER, bars, as_of=bars[-1].ts)
+    a = compute_volatility_features(SBER, bars, as_of=bars[-1].ts + STEP)
+    b = compute_volatility_features(SBER, bars, as_of=bars[-1].ts + STEP)
     assert a == b
 
 
 def test_realized_volatility_and_range_pct_populated():
     bars = _bars(60)
-    got = compute_volatility_features(SBER, bars, as_of=bars[-1].ts)
+    got = compute_volatility_features(SBER, bars, as_of=bars[-1].ts + STEP)
     assert got.valid
     assert got.realized_volatility is not None and got.realized_volatility >= 0
     assert got.range_pct is not None and got.range_pct > 0

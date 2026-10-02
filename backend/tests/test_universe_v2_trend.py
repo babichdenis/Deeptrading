@@ -118,9 +118,18 @@ def test_slope_scale_independent_via_normalization():
 
 
 def test_insufficient_data_invalid():
-    got = compute_trend_features(REF, _bars([100.0]), as_of=T0, window=44)
+    # Бар должен быть ЗАКРЫТ на as_of (граница P1.3), иначе причина была бы
+    # no_data вместо insufficient_bars — тест проверяет именно нехватку истории.
+    got = compute_trend_features(REF, _bars([100.0]), as_of=T0 + STEP, window=44)
     assert not got.valid
     assert got.reason == "insufficient_bars"
+
+
+def test_unclosed_bar_is_no_data_not_insufficient():
+    """Единственный незакрытый бар на as_of = нет данных, а не «мало баров»."""
+    got = compute_trend_features(REF, _bars([100.0]), as_of=T0, window=44)
+    assert not got.valid
+    assert got.reason == "no_data"
 
 
 def test_no_data_invalid():

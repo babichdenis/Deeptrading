@@ -97,7 +97,7 @@ def test_bounded_tail_equals_full_history_for_all_measures(total):
     """
     closes = [100 + 3.0 * ((i * 7) % 11) + 0.15 * i for i in range(total)]
     full = _bars(closes)
-    as_of = full[-1].ts
+    as_of = full[-1].ts + STEP
     tail = full[-FEATURE_WINDOW:]
 
     assert len(tail) == FEATURE_WINDOW
@@ -126,11 +126,12 @@ def test_bars_used_counts_visible_history_not_window():
     """bars_used — диагностика (сколько баров видно), НЕ окно расчёта.
 
     Поэтому 200 баров и хвост из 44 дают одинаковые atr/atr_pct, но разный
-    bars_used. Если bars_used начнёт влиять на решения, этот теф reminder.
+    bars_used. Если bars_used начнёт влиять на решения, этот тест напоминает.
     """
     closes = [100 + 3.0 * ((i * 7) % 11) + 0.15 * i for i in range(200)]
     full = _bars(closes)
-    as_of = full[-1].ts
+    # Момент закрытия последнего бара, иначе последний бар не виден (P1.3).
+    as_of = full[-1].ts + STEP
     tail = full[-FEATURE_WINDOW:]
 
     a = compute_feature_set(SBER, full, as_of=as_of)
@@ -143,7 +144,7 @@ def test_bars_used_counts_visible_history_not_window():
 
 def test_market_features_volatility_and_trend_match_on_tail():
     full = _bars([100 + 3.0 * ((i * 7) % 11) + 0.15 * i for i in range(150)])
-    as_of = full[-1].ts
+    as_of = full[-1].ts + STEP
     tail = full[-FEATURE_WINDOW:]
 
     a = compute_market_features(SBER, full, as_of=as_of)
@@ -178,26 +179,28 @@ def test_trend_direction_identical_on_tail():
 
 
 def test_tail_filter_drops_bars_after_as_of():
-    """Bounded-загрузка отдаёт бары с ts <= as_of; лишние должны отсекаться."""
+    """Отдаём только закрытые бары; незакрытый на as_of отсекается (P1.3)."""
     closes = [100 + i for i in range(80)]
     full = _bars(closes)
-    as_of = full[50].ts
+    # as_of внутри интервала бара full[50] — он ещё не закрыт.
+    as_of = full[50].ts + timedelta(seconds=1)
 
-    visible = [b for b in full if b.ts <= as_of]
+    visible = [b for b in full if b.ts + STEP <= as_of]
     fs = compute_feature_set(SBER, visible, as_of=as_of)
     assert fs.valid
-    assert fs.bars_used == 51
-    assert fs.close == pytest.approx(full[50].close)
+    assert fs.bars_used == 50
+    assert fs.close == pytest.approx(full[49].close)
 
 
 def test_as_of_boundary_bar_is_visible():
-    """Бар ровно на as_of виден (ts <= as_of) — граница включительная."""
+    """Граница по закрытию: бар виден в момент закрытия, не раньше (P1.3)."""
     closes = [100 + i for i in range(60)]
     full = _bars(closes)
-    fs = compute_feature_set(SBER, full, as_of=full[-1].ts)
+    closed = full[-1].ts + STEP
+    fs = compute_feature_set(SBER, full, as_of=closed)
     assert fs.valid and fs.bars_used == 60
 
-    fs_prev = compute_feature_set(SBER, full, as_of=full[-1].ts - timedelta(seconds=1))
+    fs_prev = compute_feature_set(SBER, full, as_of=closed - timedelta(seconds=1))
     assert fs_prev.valid and fs_prev.bars_used == 59
 
 
@@ -205,7 +208,7 @@ def test_future_bar_cannot_change_past_features():
     """Добавление будущего бара не меняет признаки для as_of (look-ahead)."""
     closes = [100 + 2.0 * i for i in range(60)]
     full = _bars(closes)
-    as_of = full[-1].ts
+    as_of = full[-1].ts + STEP
     baseline = compute_market_features(SBER, full, as_of=as_of)
 
     from app.engine.models import Candle as EngineCandle
@@ -273,12 +276,17 @@ def test_tail_figis_reports_only_instruments_with_bars():
 
 
 def test_bulk_sql_has_as_of_bound_and_limit():
-    """SQL-контракт: ts <= as_of и LIMIT присутствуют, порядок DESC внутри."""
+    """SQL-контракт: граница по закрытию бара, LIMIT и порядок DESC внутри.
+
+    Отбор строго ts <= as_of неверен: метка = начало бакета, и такой отбор
+    включал бы незакрытый бар (P1.3). Проверяем именно ts + interval <= as_of.
+    """
     from app.bot.universe.bars import BULK_TAIL_SQL
 
     sql = " ".join(str(BULK_TAIL_SQL).split()).upper()
     assert "UNNEST(:FIGIS)" in sql
-    assert "CANDLES.TS <= :AS_OF" in sql
+    assert "CANDLES.TS + MAKE_INTERVAL(MINS => :STEP_MIN) <= :AS_OF" in sql
+    assert "CANDLES.TS <= :AS_OF" not in sql
     assert "LIMIT :WINDOW" in sql
     assert "ORDER BY CANDLES.TS DESC" in sql
     assert "INTERVAL = :INTERVAL" in sql
@@ -320,12 +328,15 @@ def test_bulk_matches_per_figi_on_live_db():
                 )).scalar()
                 if row is None:
                     pytest.skip("нет 5m свечей в БД .7")
+                # as_of на МЕТКЕ бакета — худший случай: последний бар не
+                # закрыт, эталон обязан отбросить его так же, как load_bars.
                 as_of = row
                 figis = [
                     r[0]
                     for r in (await conn.execute(
                         text(
-                            "SELECT figi FROM candles WHERE interval=5 AND ts <= :a "
+                            "SELECT figi FROM candles WHERE interval=5 "
+                            "AND ts + make_interval(mins => 5) <= :a "
                             "GROUP BY figi HAVING count(*) >= 30 LIMIT 8"
                         ),
                         {"a": as_of},

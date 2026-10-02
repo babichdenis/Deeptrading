@@ -8,11 +8,12 @@
     load_bars / load_all_bars — один FIGI (совместимость, legacy-путь);
     load_bars_bulk_bounded   — хвост окна для всего рынка одним запросом.
 
-Bounded-семантика (AUDIT P1.1): меры (volatility/trend/features) читают только
-visible[-window:] и последний close, где visible = бары с ts <= as_of. Поэтому
-загрузка последних window баров с ts <= as_of даёт Побитово тот же результат,
-что и вся история, — но вместо ~3000 баров на FIGI едет ~44. Эквивалентность
-зафиксирована тестом test_universe_v2_bulk_load.py.
+Bounded-семантика (AUDIT P1.1/P1.3): меры (volatility/trend/features) читают
+только visible[-window:] и последний close, где visible = ЗАКРЫТЫЕ на as_of
+бары (ts + TF <= as_of; метка бара = начало бакета, решение владельца).
+Поэтому загрузка последних window закрытых баров даёт побитово тот же
+результат, что и вся история, — но вместо ~3000 баров на FIGI едет ~44.
+Эквивалентность зафиксирована тестом test_universe_v2_bulk_load.py.
 """
 from __future__ import annotations
 
@@ -131,7 +132,7 @@ BULK_TAIL_SQL = text(
         FROM candles
         WHERE candles.figi = f.figi
           AND candles.interval = :interval
-          AND candles.ts <= :as_of
+          AND candles.ts + make_interval(mins => :step_min) <= :as_of
         ORDER BY candles.ts DESC
         LIMIT :window
     ) AS c
@@ -142,6 +143,7 @@ BULK_TAIL_SQL = text(
     bindparam("interval", type_=SmallInteger),
     bindparam("as_of", type_=DateTime(timezone=True)),
     bindparam("window", type_=Integer),
+    bindparam("step_min", type_=Integer),
 )
 
 
@@ -189,7 +191,12 @@ async def load_bars_bulk_bounded(
     window: int,
     as_of: datetime,
 ) -> dict[str, list[EngineCandle]]:
-    """Последние window свечей с ts <= as_of для каждого FIGI, одним запросом.
+    """Последние window ЗАКРЫТЫХ свечей для каждого FIGI, одним запросом.
+
+    Граница — по факту закрытия бара: отбираются бары с ts + TF <= as_of
+    (AUDIT P1.3, решение владельца). Метка бара = начало бакета, поэтому
+    отбор строго на ts <= as_of заглядывал бы внутрь незакрытого бара и
+    молча урезал окно на один бар на каждой границе.
 
     Заменяет N вызовов load_all_bars (каждый тянул всю историю инструмента).
     Ключ возврата — figi; FIGI без баров на as_of отсутствует, как и раньше.
@@ -204,7 +211,13 @@ async def load_bars_bulk_bounded(
         return {}
     result = await db.execute(
         BULK_TAIL_SQL,
-        {"figis": unique, "interval": interval, "as_of": as_of, "window": window},
+        {
+            "figis": unique,
+            "interval": interval,
+            "as_of": as_of,
+            "window": window,
+            "step_min": interval,
+        },
     )
     return group_tail_rows(_as_tail_rows(result))
 

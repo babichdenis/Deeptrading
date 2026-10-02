@@ -75,11 +75,11 @@ async def _load_snapshot_bars(
 ) -> tuple[list, dict[str, list], dict[str, int]]:
     """(список ref'ов, bars_by_figi, lot_by_figi) для выбранного источника.
 
-    Бары грузятся одним bounded-запросом: последние FEATURE_WINDOW баров с
-    ts <= as_of на FIGI (AUDIT P1.1). Меры читают только хвост окна, поэтому
-    результат совпадает с прежней загрузкой всей истории побитово, но вместо
-    ~3000 строк на инструмент едет ~44. Эквивалентность зафиксирована тестом
-    test_universe_v2_bulk_load.py.
+    Бары грузятся одним bounded-запросом: последние FEATURE_WINDOW ЗАКРЫТЫХ
+    на as_of баров (ts + TF <= as_of) на FIGI (AUDIT P1.1/P1.3). Меры читают
+    только хвост окна, поэтому результат совпадает с прежней загрузкой всей
+    истории побитово, но вместо ~3000 строк на инструмент едет ~44.
+    Эквивалентность зафиксирована тестом test_universe_v2_bulk_load.py.
     """
     if _is_all_market(mode):
         from sqlalchemy import text as _text
@@ -100,7 +100,8 @@ async def _load_snapshot_bars(
         # старта реплея проходил бы отбор и молча уходил в невалидные признаки.
         figis = (await db.execute(
             _text(
-                "SELECT figi FROM candles WHERE interval=:i AND ts <= :a "
+                "SELECT figi FROM candles WHERE interval=:i "
+                "AND ts + make_interval(mins => :i) <= :a "
                 "GROUP BY figi HAVING count(*) >= :m"
             ),
             {"i": _SOURCE_INTERVAL_TRADEABLE, "a": as_of, "m": _MIN_BARS},

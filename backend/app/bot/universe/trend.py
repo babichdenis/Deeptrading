@@ -18,9 +18,9 @@ FLAT-классификация: явный порог FLAT_THRESHOLD в нор�
 конкретной стратегии (TrendStrategyScreener), а не этому модулю.
 
 Принципы:
-    * только бары с ts <= as_of (граница P1.3 зафиксирована в
-      test_universe_v2_as_of_boundary.py; строгая граница ts + TF <= as_of
-      готова в bars.bar_is_visible, но смена семантики — решение владельца);
+    * только ЗАКРЫТЫЕ на as_of бары: ts + TF <= as_of, т.е. видимость по факту
+      закрытия, а не по метке (метка = начало бакета). Решение владельца,
+      контракт в bars.bar_is_visible и test_universe_v2_as_of_boundary.py;
     * детерминированность: одинаковые входы -> одинаковый результат;
     * недостаточная история (меньше 2 баров для наклона или нет ATR для
       нормировки) -> valid=False с причиной;
@@ -32,7 +32,7 @@ from datetime import datetime
 from typing import Sequence
 
 from app.bot.universe.domain import InstrumentRef, TrendDirection, TrendFeatures
-from app.bot.universe.features import ATR_PERIOD
+from app.bot.universe.features import ATR_PERIOD, _visible
 from app.bot.universe.volatility import _last_non_null
 from app.engine.indicatorhub import _atr as _atr_canonical
 
@@ -74,7 +74,7 @@ def compute_trend_features(
     нормализация — канонический ATR по тому же окну. direction — по знаку
     normalized_slope с порогом FLAT_THRESHOLD.
     """
-    visible = [b for b in bars if b.ts <= as_of]
+    visible = _visible(bars, as_of)
     if not visible:
         return TrendFeatures(instrument, as_of, valid=False, reason="no_data")
 
@@ -97,7 +97,7 @@ def compute_trend_features(
             slope=slope,
             bars_used=len(visible),
             valid=False,
-            reason=f"no_atr_for_normalization" if atr is None else "no_atr_for_normalization",
+            reason="no_atr_for_normalization",
         )
 
     normalized = slope / float(atr)

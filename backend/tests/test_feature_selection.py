@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from app.bot.universe import features, selection
+from app.bot.universe import selection
 from app.bot.universe.bars import resample_1m_to_5m
 from app.bot.universe.domain import (
     FeatureSet,
@@ -44,6 +44,8 @@ from app.engine.indicatorhub import _atr as hub_atr
 
 AS_OF = datetime(2026, 9, 30, 18, 0, 0)
 BAR_MINUTES = 5
+BAR = timedelta(minutes=BAR_MINUTES)
+CLOSE_AT = AS_OF + BAR
 
 
 def make_bars(closes, *, start=AS_OF, step_minutes=1, volumes=None) -> list[EngineCandle]:
@@ -133,7 +135,7 @@ def test_legacy_atr_pct_wrapper_unchanged():
     for closes in ([], [100.0], [100.0] * 13, list(range(50, 150))):
         bars = make_bars(closes)
         legacy_value, legacy_valid = atr_pct(bars, FEATURE_WINDOW)
-        new = compute_feature_set(ref("T"), bars, as_of=AS_OF)
+        new = compute_feature_set(ref("T"), bars, as_of=CLOSE_AT)
         if legacy_valid:
             assert new.atr_pct == legacy_value
             assert new.valid is True
@@ -224,13 +226,15 @@ def test_lookahead_ignores_bars_inside_future_window():
 def test_lookahead_as_of_in_past_excludes_newer_bars():
     """as_of в середине истории — видны только бары до него."""
     bars = series(60, start=AS_OF - timedelta(minutes=5 * 59))
-    mid = bars[29].ts
+    # Граница P1.3: бар виден по факту закрытия, поэтому mid — момент закрытия
+    # bars[29], а не его метка.
+    mid = bars[29].ts + BAR
 
     at_mid = compute_feature_set(ref("ALRS"), bars, as_of=mid)
     assert at_mid.bars_used == 30
     assert at_mid.as_of == mid
 
-    full = compute_feature_set(ref("ALRS"), bars, as_of=AS_OF)
+    full = compute_feature_set(ref("ALRS"), bars, as_of=CLOSE_AT)
     assert full.bars_used == 60
     assert full.atr_pct != at_mid.atr_pct or full.valid != at_mid.valid
 
@@ -415,9 +419,6 @@ def test_ranking_change_does_not_produce_exit():
         FeatureSet(instrument=ref(held), as_of=AS_OF, atr=9.0, atr_pct=0.01, valid=True)
     ]
 
-    before = select([f for f in fset if f.instrument.ticker != held] + [
-        f for f in fset if f.instrument.ticker == held
-    ], top_n=2)
     after = select(fset, top_n=2)
 
     assert held not in [i.instrument.ticker for i in after.selected]

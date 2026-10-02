@@ -9,9 +9,9 @@ ATR — КАНОНИЧЕСКИЙ (app.engine.indicatorhub._atr), второго 
 parity-блок в tests/test_universe_v2_volatility.py).
 
 Принципы:
-    * только бары с ts <= as_of (граница P1.3 зафиксирована в
-      test_universe_v2_as_of_boundary.py; строгая граница ts + TF <= as_of
-      готова в bars.bar_is_visible, но смена семантики — решение владельца);
+    * только ЗАКРЫТЫЕ на as_of бары: ts + TF <= as_of, т.е. видимость по факту
+      закрытия, а не по метке (метка = начало бакета). Решение владельца,
+      контракт в bars.bar_is_visible и test_universe_v2_as_of_boundary.py;
     * детерминированность: одинаковые входы -> одинаковый результат;
     * недостаток/невалидность данных -> valid=False с понятной причиной;
     * внутри measure нет обращения к DB/Broker/HTTP и скрытых настроек —
@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Sequence
 
 from app.bot.universe.domain import InstrumentRef, VolatilityFeatures
-from app.bot.universe.features import ATR_PERIOD, FEATURE_WINDOW
+from app.bot.universe.features import ATR_PERIOD, FEATURE_WINDOW, _visible
 from app.engine.indicatorhub import _atr as _atr_canonical
 
 
@@ -69,11 +69,12 @@ def compute_volatility_features(
 ) -> VolatilityFeatures:
     """VolatilityFeatures на as_of. Чистая детерминированная функция.
 
-    visible = бары с ts <= as_of; ATR считается по последним window из них
+    visible = закрытые на as_of бары (ts + TF <= as_of); ATR считается по
+    последним window из них
     каноническим атрибутом indicatorhub. Единственное место принятия решения
     о valid: хватило истории и цены не нулевые/отрицательные.
     """
-    visible = [b for b in bars if b.ts <= as_of]
+    visible = _visible(bars, as_of)
     if not visible:
         return VolatilityFeatures(instrument, as_of, valid=False, reason="no_data")
 

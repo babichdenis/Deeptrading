@@ -1,15 +1,12 @@
-"""AUDIT P1.3: граница as_of — контракт зафиксирован тестом, решение по смене — за владельцем.
+"""AUDIT P1.3: граница as_of по факту закрытия бара (решение владельца).
 
-Факт из аудита: после перехода на START-метку старший бар с ts=T описывает
-[T, T+TF). Условие `ts <= as_of` включает бар, который на as_of ещё не закрыт.
+Метка ТФ-бара = НАЧАЛО бакета (канон проекта: T-Invest, app.marketdata.resampler,
+docs/architecture). Значит бар с меткой T описывает интервал [T, T+TF) и НЕ
+закрыт в момент T.
 
-Здесь зафиксировано ТЕКУЩЕЕ поведение слоя (ts <= as_of, граница включительная)
-и явно помечен риск. Менять семантику мер на `ts + TF <= as_of` — решение с
-последствиями для бэктестов и ранжирования Universe, поэтому оно не сделано
-молча: смена ломает 7 существующих тестов, фиксирующих старое поведение.
-
-Хелперы bar_is_visible/bar_close_ts в bars.py — готовая реализация «строгой»
-границы: их достаточно применить в _visible, когда владелец утвердит смену.
+Поэтому видимость — по закрытию: бар виден, когда ts + TF <= as_of.
+Прежний фильтр `ts <= as_of` на START-метках включал незакрытый бар, то есть на
+replay-старте ровно в T подглядывал в минуты, которых рантайм ещё не видел.
 """
 from __future__ import annotations
 
@@ -44,14 +41,13 @@ def _bars(n=60):
     return out
 
 
-# ── Метание START подтверждено ───────────────────────────────────────────
+# ── Канон: метка = начало бакета ────────────────────────────────────────
 
 
 def test_bar_label_is_bucket_start_not_close():
-    """Метка = начало бакета (канон проекта, как в T-Invest и в resampler).
+    """Метка указывает на НАЧАЛО интервала, а не на момент закрытия.
 
-    Бар [T0, T0+5) закрывается и эмитится с меткой T0 — то есть метка указывает
-    на НАЧАЛО интервала, а не на момент закрытия.
+    Бар [T0, T0+5) закрывается и эмитится с меткой T0.
     """
     from dataclasses import dataclass
 
@@ -77,50 +73,55 @@ def test_bar_label_is_bucket_start_not_close():
     assert bar_close_ts(emitted, STEP) == T0 + STEP
 
 
-# ── Хелперы строгой границы готовы и корректны ──────────────────────────
+# ── Контракт видимости ──────────────────────────────────────────────────
 
 
-def test_strict_boundary_helpers_behave_as_documented():
+def test_bar_not_visible_at_its_own_label():
+    """На метке своего бара он ещё не закрыт — главный регресс P1.3."""
     bar = _bars(1)[0]
     assert bar_is_visible(bar, as_of=bar.ts, interval=STEP) is False
+
+
+def test_bar_visible_at_its_close():
+    """Граница включительная: в момент закрытия бар виден."""
+    bar = _bars(1)[0]
     assert bar_is_visible(bar, as_of=bar.ts + STEP, interval=STEP) is True
+
+
+def test_bar_invisible_one_microsecond_before_close():
+    bar = _bars(1)[0]
     assert bar_is_visible(
         bar, as_of=bar.ts + STEP - timedelta(microseconds=1), interval=STEP
     ) is False
+
+
+def test_bar_visible_after_close():
+    bar = _bars(1)[0]
     assert bar_is_visible(bar, as_of=bar.ts + STEP + timedelta(hours=1), interval=STEP) is True
 
 
-def test_strict_boundary_would_exclude_exactly_one_bar():
-    """Сколько баров теряет строгая граница: ровно один — тот, что на as_of."""
+# ── Меры применяют строгую границу ─────────────────────────────────────
+
+
+def test_unclosed_bar_excluded_from_features():
     bars = _bars(60)
     as_of = bars[-1].ts
-    loose = [b for b in bars if b.ts <= as_of]
-    strict = [b for b in bars if bar_is_visible(b, as_of=as_of, interval=STEP)]
-    assert len(loose) - len(strict) == 1
-
-
-# ── ТЕКУЩИЙ контракт слоя: ts <= as_of ──────────────────────────────────
-
-
-def test_current_contract_includes_bar_labelled_as_of():
-    """Зафиксировано: слой СЕЙЧАС включает бар с ts == as_of (граница <=)."""
-    bars = _bars(60)
-    fs = compute_feature_set(SBER, bars, as_of=bars[-1].ts)
-    assert fs.valid
-    assert fs.bars_used == 60
-    assert fs.close == pytest.approx(bars[-1].close)
-
-
-def test_current_contract_excludes_bar_after_as_of():
-    bars = _bars(60)
-    fs = compute_feature_set(SBER, bars, as_of=bars[-1].ts - timedelta(seconds=1))
+    fs = compute_feature_set(SBER, bars, as_of=as_of)
     assert fs.valid
     assert fs.bars_used == 59
     assert fs.close == pytest.approx(bars[-2].close)
 
 
+def test_bar_included_once_closed():
+    bars = _bars(60)
+    fs = compute_feature_set(SBER, bars, as_of=bars[-1].ts + STEP)
+    assert fs.valid
+    assert fs.bars_used == 60
+    assert fs.close == pytest.approx(bars[-1].close)
+
+
 def test_all_measures_share_the_same_boundary():
-    """Volatility/trend/MarketFeatures не разъезжаются по границе."""
+    """Volatility, trend и MarketFeatures не разъезжаются по границе."""
     bars = _bars(60)
     as_of = bars[-1].ts
 
@@ -128,16 +129,26 @@ def test_all_measures_share_the_same_boundary():
     trend = compute_trend_features(SBER, bars, as_of=as_of, window=44)
     mkt = compute_market_features(SBER, bars, as_of=as_of)
 
-    assert vol.bars_used == trend.bars_used == 60
-    assert mkt.volatility.bars_used == mkt.trend.bars_used == 60
+    assert vol.bars_used == trend.bars_used == 59
+    assert mkt.volatility.bars_used == mkt.trend.bars_used == 59
     assert vol.valid and trend.valid and mkt.valid
 
 
-def test_future_bar_never_leaks_into_features():
-    """Регресс-тест, который обязан остаться зелёным при ЛЮБОЙ границе.
+def test_boundary_consistent_across_as_of_sweep():
+    """Ни на одном as_of слои не видят разное число баров."""
+    bars = _bars(80)
+    for i in range(len(bars)):
+        as_of = bars[i].ts
+        vol = compute_volatility_features(SBER, bars, as_of=as_of)
+        trend = compute_trend_features(SBER, bars, as_of=as_of, window=44)
+        assert vol.bars_used == trend.bars_used == i, i
 
-    Бар строго после as_of не влияет на признаки — это уже работает.
-    """
+
+# ── Look-ahead: главные регрессы ────────────────────────────────────────
+
+
+def test_future_bar_never_leaks_into_features():
+    """Бар строго после as_of не влияет на признаки."""
     from app.engine.models import Candle as EngineCandle
 
     bars = _bars(60)
@@ -155,11 +166,44 @@ def test_future_bar_never_leaks_into_features():
     assert got.volatility.atr_pct == baseline.volatility.atr_pct
     assert got.trend.direction == baseline.trend.direction
     assert got.trend.strength == pytest.approx(baseline.trend.strength, rel=1e-12)
-    assert got.volatility.bars_used == baseline.volatility.bars_used
 
 
-def test_no_bars_visible_is_invalid():
-    fs = compute_feature_set(SBER, _bars(1), as_of=T0 - timedelta(minutes=1))
+def test_bar_at_as_of_with_extreme_values_is_excluded():
+    """Сценарий из аудита: бар ts == as_of с экстремальными значениями.
+
+    Именно этот бар раньше заглядывал в будущее. Теперь он отброшен, поэтому
+    результат совпадает с расчётом, где такого бара просто нет.
+    """
+    from app.engine.models import Candle as EngineCandle
+
+    bars = _bars(60)
+    as_of = bars[-1].ts
+    baseline = compute_market_features(SBER, bars, as_of=as_of)
+
+    poisoned = bars + [
+        EngineCandle(
+            ts=as_of, open=1.0, high=99999.0, low=0.001, close=99999.0, volume=10**12
+        )
+    ]
+    got = compute_market_features(SBER, poisoned, as_of=as_of)
+
+    assert got.volatility.atr == pytest.approx(baseline.volatility.atr, rel=1e-12)
+    assert got.volatility.atr_pct == baseline.volatility.atr_pct
+    assert got.trend.direction == baseline.trend.direction
+    assert got.trend.slope == pytest.approx(baseline.trend.slope, rel=1e-12)
+    assert got.volatility.bars_used == baseline.volatility.bars_used == 59
+
+
+def test_replay_start_on_bucket_boundary_sees_nothing_of_that_bucket():
+    """Replay стартует ровно в T — бар [T, T+5) ещё не участвует."""
+    bars = _bars(60)
+    as_of = bars[-1].ts
+    assert compute_feature_set(SBER, bars, as_of=as_of).bars_used == 59
+    assert compute_feature_set(SBER, bars, as_of=as_of + STEP).bars_used == 60
+
+
+def test_no_visible_bars_is_invalid():
+    fs = compute_feature_set(SBER, _bars(1), as_of=T0)
     assert fs.valid is False
     assert fs.bars_used == 0
     assert fs.atr is None

@@ -23,7 +23,7 @@ Phase 4: compute_feature_set — чистый расчёт без БД, без w
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Iterable, Mapping, Sequence
 
 from app.bot.universe.domain import FeatureSet, InstrumentRef, MarketFeatures
@@ -31,6 +31,23 @@ from app.engine.indicatorhub import _atr as _atr_canonical
 
 ATR_PERIOD = 14
 FEATURE_WINDOW = 44
+
+SOURCE_INTERVAL_MIN = 5
+
+
+def _visible(bars: Sequence, as_of: datetime) -> list:
+    """Бары, ЗАКРЫТЫЕ на момент as_of (AUDIT P1.3, решение владельца).
+
+    Метка бара = начало бакета (канон проекта), поэтому бар с меткой T описывает
+    [T, T+TF) и становится видимым только в T+TF. Прежний фильтр `ts <= as_of`
+    включал незакрытый бар и заглядывал в его внутренность — на replay-старте
+    ровно в T это давало значения из минут, которых рантайм ещё не видел.
+    Граница включительная: на самом моменте закрытия бар виден.
+    """
+    from app.bot.universe.bars import bar_is_visible
+
+    step = timedelta(minutes=SOURCE_INTERVAL_MIN)
+    return [b for b in bars if bar_is_visible(b, as_of=as_of, interval=step)]
 
 
 def _measure(bars: Sequence, window: int, period: int) -> tuple[float | None, float | None, bool]:
@@ -64,7 +81,7 @@ def compute_feature_set(
     bars.timestamp <= as_of. Всё остальное зависит только от аргументов: ни БД,
     ни системных часов, ни глобального состояния.
     """
-    visible = [b for b in bars if b.ts <= as_of]
+    visible = _visible(bars, as_of)
     if not visible:
         return FeatureSet(instrument=instrument, as_of=as_of, valid=False)
 
