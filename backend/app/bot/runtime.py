@@ -575,9 +575,12 @@ def apply_test_overrides(cfg, locked: set[str] | None = None) -> list[str]:
 
     env: TEST_GATES=on|off (гейты как на .2 / выкл), TEST_VARIANT=base|macd1|macd2.
 
-    locked — поля, явно сохранённые из UI (BOT_PERSIST_FIELDS): НАСТРОЙКИ UI ВЫШЕ
-    ПРЕСЕТА (решение владельца 02.10), такие поля пропускаются. Для research-прогонов,
+    locked — поля, явно сохранённые из UI (BOT_PERSIST_FIELDS). Для research-прогонов,
     где пресет обязан перебить UI, задать env TEST_PRESET_FORCE=1.
+
+    Пресет всегда применяется последним и без ui-lock (решение владельца):
+    пресет — это то, что он хочет тестировать. Расхождения с UI не молчат —
+    их отдаёт preset_ui_conflicts(), и UI показывает модалкой после старта.
     """
     import os as _os
     applied: list[str] = []
@@ -609,15 +612,37 @@ def apply_test_overrides(cfg, locked: set[str] | None = None) -> list[str]:
             _audit_swallow('apply_test_overrides@test_params', _tp_e)
     # Пресет («ветка») конфигурации: env TEST_PRESET='{"runtime": {...}}' — whitelist
     # полей (сессии/overnight/деньги/выходы/вход/гейты/режимы), раньше живших в .env/сейве.
+    #
+    # РЕШЕНИЕ ВЛАДЕЛЬЦА (02.10): тестировать надо то, что в пресете, НО он хочет
+    # видеть разницу. Поэтому выбор делается ДО старта в модалке и приходит сюда
+    # через TEST_PRESET_MODE (см. run_state.preset_mode):
+    #   "preset" — едем по пресету, он перебивает сохранённые ползунки;
+    #   "ui"     — едем по ползункам интерфейса, пресет НЕ применяется;
+    #   ""/нет   — пресет выбран, но режим не задан (старые вызовы/API) → как "preset".
+    # Расхождения в обоих случаях показываем модалкой (preset_ui_conflicts).
+    _pmode = str(_os.environ.get("TEST_PRESET_MODE", "") or "").strip().lower()
+    _use_ui = _pmode == "ui"
+    _preset_src: dict = {}
     _tps = str(_os.environ.get("TEST_PRESET", "") or "").strip()
-    if _tps:
+    if _tps and _use_ui:
+        # Выбран режим «по UI»: пресет намеренно не применяем, но сам факт выбора
+        # и конфликт остаются в логах, чтобы результат не читался как «пресет не сработал».
+        applied.append("preset=SKIPPED (режим: по настройкам UI)")
         try:
             import json as _json2
             _pres = _json2.loads(_tps)
             _rt = _pres.get("runtime") if isinstance(_pres, dict) else None
             if isinstance(_rt, dict):
-                for _pk, _pv in _runtime_preset_overrides(_rt).items():
-                    _src[_pk] = _pv
+                _preset_src = _runtime_preset_overrides(_rt)  # только для конфликтов
+        except Exception as _tpr_e:
+            _audit_swallow('apply_test_overrides@test_preset', _tpr_e)
+    elif _tps:
+        try:
+            import json as _json2
+            _pres = _json2.loads(_tps)
+            _rt = _pres.get("runtime") if isinstance(_pres, dict) else None
+            if isinstance(_rt, dict):
+                _preset_src = _runtime_preset_overrides(_rt)
                 applied.append("preset=runtime")
         except Exception as _tpr_e:
             _audit_swallow('apply_test_overrides@test_preset', _tpr_e)
@@ -631,7 +656,50 @@ def apply_test_overrides(cfg, locked: set[str] | None = None) -> list[str]:
         except Exception as _sw_e:
             _audit_swallow('apply_test_overrides@L371', _sw_e)  # audit silent-except
             pass
+    # Пресет — последним и без ui-lock: в режиме «по пресету» он главный.
+    if _preset_src and not _use_ui:
+        for _k, _v in _preset_src.items():
+            try:
+                setattr(cfg, _k, _v)
+                applied.append(f"preset:{_k}={_v}")
+            except Exception as _sw_e:
+                _audit_swallow('apply_test_overrides@preset', _sw_e)  # audit silent-except
     return applied
+
+
+def preset_ui_conflicts(saved: dict | None = None) -> list[dict]:
+    """Расхождения «настройки UI vs пресет» для модалки выбора режима.
+
+    Возвращает [{field, ui, preset}] — только те поля, которые владелец явно
+    сохранил из UI (bot_settings) и которые пресет перебивает своим значением.
+    Считается независимо от выбранного режима: даже при «еду по UI» полезно
+    показать, чем владелец жертвует.
+    """
+    import os as _os
+    _tps = str(_os.environ.get("TEST_PRESET", "") or "").strip()
+    if not _tps or not isinstance(saved, dict):
+        return []
+    try:
+        import json as _json3
+        _pres = _json3.loads(_tps)
+        _rt = _pres.get("runtime") if isinstance(_pres, dict) else None
+    except Exception as _pc_e:
+        _audit_swallow('preset_ui_conflicts@parse', _pc_e)
+        return []
+    if not isinstance(_rt, dict):
+        return []
+    out: list[dict] = []
+    for _k, _pv in _runtime_preset_overrides(_rt).items():
+        if _k not in saved:
+            continue
+        _uv = saved.get(_k)
+        if _uv == _pv:
+            continue
+        if isinstance(_uv, (list, tuple)) or isinstance(_pv, (list, tuple)):
+            if list(_uv or []) == list(_pv or []):
+                continue
+        out.append({"field": _k, "ui": _uv, "preset": _pv})
+    return out
 
 
 async def load_ensemble_config(mode: str = "") -> dict:
@@ -797,6 +865,9 @@ class PaperBotRuntime:
         # иначе статус вечно показывал active=true на застывшем проценте.
         self._replay_finished: bool = False
         self._replay_summary: dict | None = None
+        # Расхождения «настройки UI vs пресет» последнего старта (mode=test):
+        # пресет главный, но список показывается в UI модалкой сразу после старта.
+        self._preset_conflicts: list[dict] = []
         self._signal_busy: set[str] = set()
         self._skip_logged: dict[str, object] = {}  # figi -> ts последней залогированной причины "нет входа"
         self._held: set[str] = set()
@@ -2981,6 +3052,8 @@ class PaperBotRuntime:
                 "last_candle_ts": self.last_candle_ts.isoformat() if self.last_candle_ts else None,
             },
             "replay": self._replay_status_dict(),
+            # Пресет главный; здесь — что он перебил в настройках UI (модалка в UI).
+            "preset_conflicts": list(getattr(self, "_preset_conflicts", []) or []),
             "risk": {
                 "state": risk.state,
                 "daily_pnl": round(risk.daily_pnl, 2),
@@ -3143,14 +3216,24 @@ class PaperBotRuntime:
                 # Настройки UI (сохранёнка) ВЫШЕ пресета: поля, сохранённые из UI,
                 # пресет не трогает (решение владельца, 02.10). TEST_PRESET_FORCE=1 — наоборот.
                 _locked: set[str] = set()
+                _saved_ui: dict = {}
                 try:
                     _saved = await load_bot_settings()
-                    _locked = {k for k in _saved.keys() if k in BOT_PERSIST_FIELDS}
+                    _saved_ui = dict(_saved or {})
+                    _locked = {k for k in _saved_ui.keys() if k in BOT_PERSIST_FIELDS}
                 except Exception:
                     _locked = set()
                 _ov = apply_test_overrides(cfg, locked=_locked)
                 if _ov:
                     self._log("ТЕСТ-ОВЕРРАЙДЫ: " + ", ".join(_ov[:10]))
+                # Расхождения «UI vs пресет» — пресет главный, но владелец должен
+                # УВИДЕТЬ, что его ползунки перебиты (модалка сразу после старта).
+                self._preset_conflicts = preset_ui_conflicts(_saved_ui)
+                if self._preset_conflicts:
+                    self._log(
+                        "ПРЕСЕТ ПЕРЕБИЛ UI: " + ", ".join(
+                            f"{c['field']}(ui={c['ui']}→{c['preset']})"
+                            for c in self._preset_conflicts[:8]))
             except Exception as _sw_e:
                 _audit_swallow('start@test_overrides', _sw_e)
         # --- Replay: стартуем виртуальные часы с начала окна (до первой свечи). ---

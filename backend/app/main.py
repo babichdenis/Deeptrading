@@ -61,7 +61,23 @@ async def lifespan(app: FastAPI):
         # get_settings() в блоке RUN_MIGRATIONS_ON_START выше (UnboundLocalError):
         # «alembic upgrade head failed: cannot access local variable...».
         _s = get_settings()
-        _mode = _s.bot_mode if _s.bot_mode in ("sandbox", "live", "test") else "sandbox"
+        # Контур и параметры прогона — из data/run_state.json (единственный
+        # источник, пишет POST /api/v1/bot/mode). .env — легаси-фолбэк, и мы
+        # честно пишем в лог, откуда взялись: раньше TEST_ENGINE жил только в
+        # процессе, и после рестарта контур молча падал в ensemble_v4 вместо
+        # одиночного движка (реплей на порядок медленнее).
+        from app.services.run_state import resolve_boot_state, sync_env
+        _state, _src = resolve_boot_state(_s)
+        _mode = _state.get("mode") if _state.get("mode") in ("sandbox", "live", "test") else "sandbox"
+        if _mode == "test":
+            # process-env — производная от файла, не самостоятельный источник
+            sync_env(_state)
+        import logging as _logging
+        _logging.getLogger("uvicorn").info(
+            "Auto-start contour=%s from %s (engine=%s tf=%s test=%s)",
+            _mode, _src, _state.get("test_engine") or "ensemble_v4",
+            _state.get("test_interval") or "1min", _state.get("test_name") or "-")
+
         if not runtime.running:
             cfg = BotConfig(
                 strategy_id="ensemble_v4",
@@ -96,7 +112,7 @@ async def lifespan(app: FastAPI):
                             pass
             except Exception:
                 pass
-            # Режим/фид/реплей — всегда из .env, не из сохранёнок.
+            # Контур/фид/реплей — из run_state.json (не из сохранёнок настроек).
             cfg.mode = _mode
             cfg.feed = "replay" if _mode == "test" else "stream"
             if _mode == "test":
@@ -105,12 +121,15 @@ async def lifespan(app: FastAPI):
                 # чтобы bot_config.json/gates_config.json их не затирали.
                 cfg.mode = "test"
                 cfg.feed = "replay"
-                cfg.test_name = _s.bot_test_name or os.environ.get("BOT_TEST_NAME", "")
-                cfg.replay_start = _s.bot_test_start or os.environ.get("BOT_TEST_START", "")
-                cfg.replay_end = _s.bot_test_end or os.environ.get("BOT_TEST_END", "")
-                cfg.replay_pace = _s.bot_test_pace or os.environ.get("BOT_TEST_PACE", "fast")
+                cfg.test_name = _state.get("test_name", "")
+                cfg.replay_start = _state.get("replay_start", "")
+                cfg.replay_end = _state.get("replay_end", "")
+                cfg.replay_pace = _state.get("replay_pace") or "fast"
                 cfg.test_variant = _s.bot_test_variant or os.environ.get("TEST_VARIANT", "")
-                cfg.replay_log_persist = bool(_s.bot_test_log_persist) or os.environ.get("BOT_TEST_LOG_PERSIST", "0") == "1"
+                cfg.replay_log_persist = bool(_state.get("replay_log_persist"))
+                # Оверрайды движка/TF/параметров/пресета — через process-env,
+                # который мы только что пересобрали из run_state.json (sync_env).
+
             # Сильная ссылка на задачу старта: create_task без ссылки может
             # быть собран GC до завершения старта (рвутся asyncpg-коннекты).
             _bot_start_task = asyncio.create_task(runtime.start(cfg))

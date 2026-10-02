@@ -1287,6 +1287,330 @@ class ParabolicPriceChannelHubStrategy:
 
 
 @dataclass(frozen=True)
+class BreakLrChannelHubParams:
+    lr_period: int = 50          # Period Linear Regression
+    up_deviation: float = 1.0    # Deviation LR (верхняя граница)
+    down_deviation: float = 1.0  # Deviation LR (нижняя граница)
+    sma_length: int = 100        # Sma Length Filter
+    sma_position_filter: bool = False  # Is SMA Filter On (цена не с той стороны SMA)
+    sma_slope_filter: bool = False     # Is Sma Slope Filter On (наклон против входа)
+
+
+class BreakLrChannelHubStrategy:
+    """Логика OsEngine BreakLinearRegressionChannel (Trend).
+
+    Канал линейной регрессии по Close за lr_period: центр — МНК-прямая
+    (b = (n·Σxy − Σx·Σy)/(n·Σx² − (Σx)²), a = (Σy − Σx·b)/n), шум = среднее
+    |Close − линия| за окно (в оригинале делится на период, не на √n —
+    квирк сохранён), границы = центр ± deviation·шум. Вход state-крестом:
+    Close > upper → BUY, Close < lower → SELL (в оригинале вход каждый бар,
+    пока условие и flat — здесь сигнал на первый бар условия). Фильтры
+    SMA(sma_length), каждый со своим флагом: position — Close на «неверной»
+    стороне SMA блокирует; slope — SMA наклонена против входа блокирует.
+    Выход: лонг — стоп на нижней границе уровня предыдущего бара (аналог
+    CloseAtStop, поставленного прошлым обработчиком), шорт — на верхней →
+    kind="exit". При одновременном входном кресте и стопе приоритет у
+    входа (противоположный вход разворачивает позицию политикой раннера);
+    режимы OnlyLong/OnlyShort и объёмы — на стороне раннера.
+    """
+    strategy_id = "break_lr_channel_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: BreakLrChannelHubParams | None = None):
+        self.p = params or BreakLrChannelHubParams()
+
+    def reset(self) -> None:
+        self._prev_buy = False
+        self._prev_sell = False
+
+    def warmup_bars(self) -> int:
+        return max(int(self.p.lr_period), int(self.p.sma_length)) + 3
+
+    def _channel(self, candles: Sequence[Candle], end: int):
+        """(upper, lower) границы LRC на баре end; None — окно не готово."""
+        n = int(self.p.lr_period)
+        if n <= 1 or end + 1 < n:
+            return None, None
+        ys = [float(c.close) for c in candles[end + 1 - n:end + 1]]
+        sx = n * (n - 1) / 2.0
+        sxx = (n - 1) * n * (2 * n - 1) / 6.0
+        sy = sum(ys)
+        sxy = sum(x * y for x, y in enumerate(ys))
+        den = n * sxx - sx * sx
+        if den == 0:
+            return None, None
+        b = (n * sxy - sx * sy) / den
+        a = (sy - sx * b) / n
+        central = a + b * (n - 1)
+        se = sum(abs(y - (a + b * x)) for x, y in enumerate(ys)) / n
+        return (central + float(self.p.up_deviation) * se,
+                central - float(self.p.down_deviation) * se)
+
+    def _sma(self, candles: Sequence[Candle], end: int) -> float | None:
+        n = int(self.p.sma_length)
+        if end + 1 < n:
+            return None
+        return sum(float(c.close) for c in candles[end + 1 - n:end + 1]) / n
+
+    def _filtered(self, candles: Sequence[Candle], i: int, for_buy: bool) -> bool:
+        cur = candles[i]
+        sma = self._sma(candles, i)
+        if sma is None:
+            return False
+        if self.p.sma_position_filter:
+            if for_buy and sma > float(cur.close):
+                return True
+            if not for_buy and sma < float(cur.close):
+                return True
+        if self.p.sma_slope_filter:
+            prev = self._sma(candles, i - 1)
+            if prev is not None:
+                if for_buy and sma < prev:
+                    return True
+                if not for_buy and sma > prev:
+                    return True
+        return False
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        if len(candles) < self.warmup_bars():
+            return None
+        i = len(candles) - 1
+        cur = candles[i]
+        up, down = self._channel(candles, i)          # вход — канал текущего бара
+        up_ex, down_ex = self._channel(candles, i - 1)  # стоп — уровень пред. бара
+        if up is None or up_ex is None:
+            return None
+        buy_cond = float(cur.close) > up
+        sell_cond = float(cur.close) < down
+        buy_sig = buy_cond and not self._prev_buy and not self._filtered(candles, i, for_buy=True)
+        sell_sig = sell_cond and not self._prev_sell and not self._filtered(candles, i, for_buy=False)
+        self._prev_buy, self._prev_sell = buy_cond, sell_cond
+        feat = {"upper": round(up, 6), "lower": round(down, 6)}
+        if buy_sig:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=cur.ts,
+                          reason="blrc_break_up", features=feat)
+        if sell_sig:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=cur.ts,
+                          reason="blrc_break_down", features=feat)
+        # exit-поток: касание противоположной границы (стоп-семантика)
+        if cur.low <= down_ex:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=cur.ts,
+                          kind="exit", reason="blrc_stop_down", features=feat)
+        if cur.high >= up_ex:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=cur.ts,
+                          kind="exit", reason="blrc_stop_up", features=feat)
+        return None
+
+
+@dataclass(frozen=True)
+class BillWilliamsHubParams:
+    jaw_length: int = 40    # AlligatorSlowLineLength
+    teeth_length: int = 10  # AlligatorMiddleLineLength
+    lips_length: int = 3    # AlligatorFastLineLength
+    jaw_shift: int = 8
+    teeth_shift: int = 5
+    lips_shift: int = 3
+
+
+class BillWilliamsHubStrategy:
+    """Логика OsEngine StrategyBillWilliams (Trend), без доливов.
+
+    Alligator = SSMA (seed SMA(length), далее (prev·(n−1)+c)/n — Ssma.cs)
+    с длинами lips/teeth/jaw 3/10/40 и сдвигами 3/5/8: значение бара i
+    читается с i−shift; серия робота: up=Lips, middle=Teeth, down=Jaw.
+    Fractal 5-баровый со строгими сравнениями, значение публикуется на
+    центре (j), доступно с j+2; берётся последний ненулевой. Вход BUY на
+    кресте state-условия: Close строго выше Lips, Teeth И Jaw одновременно
+    и выше последнего верхнего фрактала (AO в оригинале участвует только в
+    доливах той же стороны — в single-position движок не переносится);
+    SELL зеркально. Выход: лонг при Close < Teeth, шорт при Close > Teeth
+    → kind="exit" на переходе условия (иначе спам каждый бар). При
+    одновременном входе и выходе приоритет у входа.
+    """
+    strategy_id = "bill_williams_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: BillWilliamsHubParams | None = None):
+        self.p = params or BillWilliamsHubParams()
+        self.reset()
+
+    def reset(self) -> None:
+        self._prev_buy = False
+        self._prev_sell = False
+        self._prev_exit_sell = False
+        self._prev_exit_buy = False
+        self._ssma_state: dict[int, dict] = {}
+
+    def warmup_bars(self) -> int:
+        return int(self.p.jaw_length) + int(self.p.jaw_shift) + 6
+
+    def _ssma_point(self, closes: list[float], length: int, upto: int) -> float | None:
+        """SSMA OsEngine (Ssma.cs) на баре upto; None до готовности."""
+        if length <= 0:
+            return None
+        st = self._ssma_state.setdefault(length, {"n": 0, "val": None})
+        while st["n"] <= upto and st["n"] < len(closes):
+            j = st["n"]
+            if j == length:
+                # OsEngine-квирк Ssma.cs: сид на index == length по барам 1..length (бар 0 пропущен)
+                st["val"] = sum(closes[j - length + 1:j + 1]) / length
+            elif j > length:
+                st["val"] = (st["val"] * (length - 1) + closes[j]) / length
+            st["n"] += 1
+        return st["val"] if st["n"] > upto and st["val"] is not None else None
+
+    @staticmethod
+    def _last_fractal(candles: Sequence[Candle], i: int, up: bool) -> float | None:
+        """Последний ненулевой 5-баровый фрактал (центр j ≤ i−2, строго)."""
+        for j in range(i - 2, 1, -1):
+            if up:
+                v = float(candles[j].high)
+                if (v > float(candles[j - 1].high) and v > float(candles[j - 2].high)
+                        and v > float(candles[j + 1].high) and v > float(candles[j + 2].high)):
+                    return v
+            else:
+                v = float(candles[j].low)
+                if (v < float(candles[j - 1].low) and v < float(candles[j - 2].low)
+                        and v < float(candles[j + 1].low) and v < float(candles[j + 2].low)):
+                    return v
+        return None
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        if len(candles) < self.warmup_bars():
+            return None
+        i = len(candles) - 1
+        cur = candles[i]
+        closes = [float(c.close) for c in candles]
+        lips = self._ssma_point(closes, int(self.p.lips_length), i - int(self.p.lips_shift))
+        teeth = self._ssma_point(closes, int(self.p.teeth_length), i - int(self.p.teeth_shift))
+        jaw = self._ssma_point(closes, int(self.p.jaw_length), i - int(self.p.jaw_shift))
+        f_up = self._last_fractal(candles, i, up=True)
+        f_dn = self._last_fractal(candles, i, up=False)
+        if None in (lips, teeth, jaw) or f_up is None or f_dn is None:
+            return None
+        px = float(cur.close)
+        lines = {"lips": round(lips, 6), "teeth": round(teeth, 6), "jaw": round(jaw, 6)}
+        buy_ok = px > lips and px > teeth and px > jaw and px > f_up
+        sell_ok = px < lips and px < teeth and px < jaw and px < f_dn
+        buy_sig = buy_ok and not self._prev_buy
+        sell_sig = sell_ok and not self._prev_sell
+        self._prev_buy, self._prev_sell = buy_ok, sell_ok
+        if buy_sig:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=cur.ts,
+                          reason="bw_alligator_fractal_up",
+                          features={**lines, "fractal_up": round(f_up, 6)})
+        if sell_sig:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=cur.ts,
+                          reason="bw_alligator_fractal_down",
+                          features={**lines, "fractal_down": round(f_dn, 6)})
+        # exit-поток: лонг при price < Teeth, шорт при price > Teeth (на переходе)
+        exit_sell = px < teeth
+        exit_buy = px > teeth
+        es = exit_sell and not self._prev_exit_sell
+        eb = exit_buy and not self._prev_exit_buy
+        self._prev_exit_sell, self._prev_exit_buy = exit_sell, exit_buy
+        if es:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=cur.ts,
+                          kind="exit", reason="bw_close_below_teeth",
+                          features={"teeth": round(teeth, 6)})
+        if eb:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=cur.ts,
+                          kind="exit", reason="bw_close_above_teeth",
+                          features={"teeth": round(teeth, 6)})
+        return None
+
+
+@dataclass(frozen=True)
+class TwoTimeFramesHubParams:
+    pc_length: int = 20    # PC length
+    sma_length: int = 30   # Sma length
+    big_tf_min: int = 60   # старший ТФ в минутах (в оригинале — вторая вкладка)
+
+
+class TwoTimeFramesHubStrategy:
+    """Логика OsEngine TwoTimeFramesBot (Trend, long-only).
+
+    Вход BUY на кресте state-условия: Close > верх PriceChannel уровня
+    предыдущего бара (в оригинале PC DataSeries Values[Count−2]) И close
+    последнего ЗАКРЫТОГО бара старшего ТФ > SMA(sma_length) по закрытым
+    барам старшего ТФ (агрегация бакетами по эпохе, look-ahead нет — как
+    rsi_mtf_hub). Выход: Close < низ PC → kind="exit" SELL (в оригинале
+    CloseAtMarket). Шортов нет — long-only (Regime On/Off в оригинале);
+    big_tf_min — параметризованный аналог второй вкладки. Уровни PC читают
+    окно до предыдущего бара включительно, текущий бар в канал не входит.
+    """
+    strategy_id = "two_timeframes_hub"
+    version = "1.0.0"
+
+    def __init__(self, params: TwoTimeFramesHubParams | None = None):
+        self.p = params or TwoTimeFramesHubParams()
+        self.reset()
+
+    def reset(self) -> None:
+        self._prev_buy = False
+        self._bkt_ts = None
+        self._bkt_close: float | None = None
+        self._big_closes: list[float] = []
+
+    def warmup_bars(self) -> int:
+        per = max(1, int(self.p.big_tf_min) // 5)
+        return (int(self.p.sma_length) + 1) * per + int(self.p.pc_length) + 2
+
+    @staticmethod
+    def _pc_level(candles: Sequence[Candle], length: int, end: int,
+                  up: bool) -> float | None:
+        if length <= 0 or end + 1 < length:
+            return None
+        window = candles[end + 1 - length:end + 1]
+        if up:
+            return float(max(c.high for c in window))
+        return float(min(c.low for c in window))
+
+    def _big_tail(self, candles: Sequence[Candle]) -> None:
+        last = candles[-1]
+        bmin = max(1, int(self.p.big_tf_min))
+        ep = int(last.ts.timestamp()) // 60
+        b0 = (ep // bmin) * bmin
+        b0_ts = datetime.fromtimestamp(b0 * 60, tz=last.ts.tzinfo or timezone.utc)
+        if self._bkt_ts is None or b0_ts != self._bkt_ts:
+            if self._bkt_close is not None:
+                self._big_closes.append(self._bkt_close)
+            self._bkt_ts = b0_ts
+        self._bkt_close = float(last.close)
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        n = len(candles)
+        if n < int(self.p.pc_length) + 2:
+            return None
+        i = n - 1
+        cur = candles[i]
+        up = self._pc_level(candles, int(self.p.pc_length), i - 1, up=True)
+        down = self._pc_level(candles, int(self.p.pc_length), i - 1, up=False)
+        if up is None or down is None:
+            return None
+        self._big_tail(candles)
+        sl = int(self.p.sma_length)
+        if sl <= 0 or len(self._big_closes) < sl:
+            return None
+        big_close = self._big_closes[-1]
+        big_sma = sum(self._big_closes[-sl:]) / sl
+        if big_close <= 0 or big_sma <= 0:
+            return None
+        feat = {"pc_up": round(up, 6), "pc_down": round(down, 6),
+                "big_close": round(big_close, 6), "big_sma": round(big_sma, 6)}
+        buy_ok = float(cur.close) > up and big_close > big_sma
+        buy_sig = buy_ok and not self._prev_buy
+        self._prev_buy = buy_ok
+        if buy_sig:
+            return Signal(strategy_id=self.strategy_id, side=Side.BUY, time=cur.ts,
+                          reason="ttf_pc_break_bigtf_up", features=feat)
+        if float(cur.close) < down:
+            return Signal(strategy_id=self.strategy_id, side=Side.SELL, time=cur.ts,
+                          kind="exit", reason="ttf_pc_down", features=feat)
+        return None
+
+
+@dataclass(frozen=True)
 class CanonEnsembleParams:
     members: str = "rsi_trade_hub"  # CSV strategy_id реестра (параметры — дефолтные)
     quorum: int = 1
@@ -1378,6 +1702,9 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "price_channel_hub": PriceChannelHubStrategy,
     "parabolic_bollinger_hub": ParabolicBollingerHubStrategy,
     "parabolic_price_channel_hub": ParabolicPriceChannelHubStrategy,
+    "break_lr_channel_hub": BreakLrChannelHubStrategy,
+    "bill_williams_hub": BillWilliamsHubStrategy,
+    "two_timeframes_hub": TwoTimeFramesHubStrategy,
     "canon_ensemble": CanonEnsembleStrategy,
     "long_ensemble": LongEnsembleStrategy,
     "short_ensemble": ShortEnsembleStrategy,
@@ -1419,6 +1746,9 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "price_channel_hub": PriceChannelHubParams,
     "parabolic_bollinger_hub": ParabolicBollingerHubParams,
     "parabolic_price_channel_hub": ParabolicPriceChannelHubParams,
+    "break_lr_channel_hub": BreakLrChannelHubParams,
+    "bill_williams_hub": BillWilliamsHubParams,
+    "two_timeframes_hub": TwoTimeFramesHubParams,
     "canon_ensemble": CanonEnsembleParams,
     "long_ensemble": LongEnsembleParams,
     "short_ensemble": ShortEnsembleParams,

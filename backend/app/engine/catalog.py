@@ -508,6 +508,45 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "vol_mult": {"type": "float", "default": 0.1, "min": 0.01, "max": 2.0},
         },
     ),
+    "break_lr_channel_hub": StrategyCard(
+        id="break_lr_channel_hub", name="Break Linear Regression Channel (hub-канон)", family="trend", wave=6,
+        long_rule="Close пробил верх LRC (period 50, dev 1.0); опц. фильтры SMA — позиция/наклон (OsEngine BreakLinearRegressionChannel)",
+        short_rule="Close пробил низ LRC; выход — стоп на противоположной границе уровня предыдущего бара",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "lr_period": {"type": "int", "default": 50, "min": 5, "max": 300},
+            "up_deviation": {"type": "float", "default": 1.0, "min": 0.1, "max": 5.0},
+            "down_deviation": {"type": "float", "default": 1.0, "min": 0.1, "max": 5.0},
+            "sma_length": {"type": "int", "default": 100, "min": 2, "max": 300},
+            "sma_position_filter": {"type": "bool", "default": False},
+            "sma_slope_filter": {"type": "bool", "default": False},
+        },
+    ),
+    "bill_williams_hub": StrategyCard(
+        id="bill_williams_hub", name="Bill Williams (hub-канон)", family="trend", wave=6,
+        long_rule="Close строго выше Lips/Teeth/Jaw (SSMA 3/10/40, сдвиги 3/5/8) и выше последнего верхнего фрактала (OsEngine StrategyBillWilliams)",
+        short_rule="Close ниже всех линий Alligator и ниже нижнего фрактала; выход — против Teeth",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "jaw_length": {"type": "int", "default": 40, "min": 5, "max": 200},
+            "teeth_length": {"type": "int", "default": 10, "min": 3, "max": 100},
+            "lips_length": {"type": "int", "default": 3, "min": 2, "max": 50},
+            "jaw_shift": {"type": "int", "default": 8, "min": 0, "max": 50},
+            "teeth_shift": {"type": "int", "default": 5, "min": 0, "max": 50},
+            "lips_shift": {"type": "int", "default": 3, "min": 0, "max": 50},
+        },
+    ),
+    "two_timeframes_hub": StrategyCard(
+        id="two_timeframes_hub", name="Two Time Frames (hub-канон)", family="trend", wave=6,
+        long_rule="Close > верх PriceChannel пред. бара И close старшего ТФ > SMA (long-only, OsEngine TwoTimeFramesBot)",
+        short_rule="— long-only; выход: Close < низ PriceChannel",
+        timeframes=("5min", "15min"), status="AVAILABLE",
+        params_schema={
+            "pc_length": {"type": "int", "default": 20, "min": 2, "max": 200},
+            "sma_length": {"type": "int", "default": 30, "min": 1, "max": 200},
+            "big_tf_min": {"type": "int", "default": 60, "min": 10, "max": 1440},
+        },
+    ),
 }
 
 

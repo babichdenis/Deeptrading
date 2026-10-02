@@ -9,15 +9,16 @@
 
 ## Инфраструктура (важно!)
 
-Два ноутбука в одной сети:
+**IP-адреса сдвинулись после ребута роутера (01.10.2026) — роли прежние, проверено:**
 
 | Машина | IP | Роль |
 |---|---|---|
-| MacBook «код» | 192.168.1.7 | Здесь правим код (opencode) |
-| MacBook «сервер» | 192.168.1.3 | FastAPI backend + Vite frontend |
-| **БД (Postgres 14, Homebrew)** | **192.168.1.7 (эта машина)** | **БД переехала СЮДА (2026-10-01): `deeptrading:deeptrading@127.0.0.1:5432/deeptrading`, слушает ТОЛЬКО localhost → с других машин напрямую не доступна. Старая БД на .2 (Docker) — не источник. Данные ещё не перелиты (`instruments=0`, `instrument_info` нет → запуск бота/реплея падает).** |
+| MacBook «код» | 192.168.1.6 | Здесь правим код (opencode); в старых документах числился как .7 |
+| MacBook «сервер» | 192.168.1.7 | FastAPI backend + Vite frontend + git (бывший .3) |
+| **БД (Postgres 16, Docker)** | **192.168.1.7 (сервер)** | **БД живёт на сервере: `deeptrading:deeptrading@192.168.1.7:5432/deeptrading`, доступна со всех машин. Старый адрес был `192.168.1.2` — больше не работает. Локальный dev-PG14 на маке-коде (`127.0.0.1:5432`) — песочница, не источник.** |
+| Windows-раннер | 192.168.1.8 | живой бот/таски (`uvicorn_test`), ssh `nadts@192.168.1.8` (бывший .2); :8000 после ребута не поднимался |
 
-Папка проекта `/Volumes/Dev/Deeptrading` — это сетевой диск с машины .3.
+Папка проекта `/Volumes/Dev/Deeptrading` — это сетевой диск с машины .7 (сервера; монтируется по mDNS-имени, шара пережила смену IP).
 **Правила:**
 - НЕ устанавливать node_modules/venv на сетевой диск с этой машины (SMB бьёт тысячи мелких файлов).
   - venv Python: `~/.venvs/deeptrading` (локально на каждой машине свой)
@@ -27,7 +28,7 @@
 
 ## Стек
 
-- Backend: Python 3.11, FastAPI, SQLAlchemy 2 async, asyncpg, PostgreSQL 14 (.7: localhost:5432)
+- Backend: Python 3.11, FastAPI, SQLAlchemy 2 async, asyncpg, PostgreSQL 16 (боевая: `192.168.1.7:5432`, Docker; локальный dev-PG14 на маке — песочница)
 - SDK: `t-tech-investments` → импорт `from t_tech.invest import Client` (НЕ tinkoff.invest!)
 - Frontend: Vite + TypeScript + lightweight-charts v5
 
@@ -47,16 +48,17 @@ cd frontend && npm install && npm run dev    # :5173
 BACKEND_URL=http://<ip>:8000 npm run dev     # если бэк не локальный
 ```
 
-## Деплой/рестарт на .2 (Windows runner, где крутится живой бот)
+## Деплой/рестарт на .8 (Windows runner, бывший .2, где крутится живой бот)
 
 ```bash
 # Деплой файлов (sshpass локально установлен):
-sshpass -p 0987 scp -o StrictHostKeyChecking=no <file> nadts@192.168.1.2:C:/Users/nadts/Dev/Deeptrading/<path>
+sshpass -p 0987 scp -o StrictHostKeyChecking=no <file> nadts@192.168.1.8:C:/Users/nadts/Dev/Deeptrading/<path>
 # Рестарт backend — НЕ скрипт, а таск планировщика:
 #   таск `uvicorn_test` → C:\Users\nadts\run_uvicorn.bat → uvicorn app.main:app :8000
-sshpass -p 0987 ssh -o StrictHostKeyChecking=no nadts@192.168.1.2 \
+sshpass -p 0987 ssh -o StrictHostKeyChecking=no nadts@192.168.1.8 \
   "powershell -NoProfile -Command \"Get-CimInstance Win32_Process -Filter \\\"Name='python.exe' AND CommandLine LIKE '%uvicorn%'\\\" | ForEach-Object { Stop-Process -Id \\\$_.ProcessId -Force -ErrorAction SilentlyContinue }; cmd /c schtasks /run /tn uvicorn_test\""
-# После рестарта wait ~20с и проверка: curl http://192.168.1.2:8000/api/v1/bot/status (running=true)
+# После рестарта wait ~20с и проверка: curl http://192.168.1.8:8000/api/v1/bot/status (running=true)
+# (сейчас :8000 отвечает на сервере .7 — там подняты параллельные дев-бэкенды)
 # Vite на .2: таск `vitebot` (Не убивать kill — респавнится).
 # Логи: /bot/logs держит ~300 записей (кольцо); история большего срока — из БД.
 ```
@@ -70,8 +72,8 @@ sshpass -p 0987 ssh -o StrictHostKeyChecking=no nadts@192.168.1.2 \
 ```bash
 # локальный бэкенд:
 /usr/local/bin/python3 ~/Dev/Deeptrading/backend/scripts/reset_sandbox_account.py
-# или бэкенд на .2 (Windows):
-/usr/local/bin/python3 ~/Dev/Deeptrading/backend/scripts/reset_sandbox_account.py --host http://192.168.1.2:8000
+# или бэкенд на .8 (Windows):
+/usr/local/bin/python3 ~/Dev/Deeptrading/backend/scripts/reset_sandbox_account.py --host http://192.168.1.8:8000
 # опции: --cash 20000 --name NewBot --keep-history (не стирать сделки/историю)
 ```
 
@@ -151,7 +153,7 @@ T-Invest API → ensure_candles() [докачка ТОЛЬКО недостаю�
 
 ## СЛЕДУЮЩАЯ СЕССИЯ — СТАРТ (обязательно)
 Сделать БЕЗ вопросов, в этом порядке:
-1. Запустить ТЕСТОВОГО БОТА на .2 (nadts@192.168.1.2): те же 20 тикеров, cash 10000, тот же runtime с прогревом из БД (3д 1m, ensemble≥120). НЕ audit_replay, НЕ parity — именно бота (main.py / run_bot_engine).
+1. Запустить ТЕСТОВОГО БОТА на .8 (nadts@192.168.1.8, бывший .2): те же 20 тикеров, cash 10000, тот же runtime с прогревом из БД (3д 1m, ensemble≥120). НЕ audit_replay, НЕ parity — именно бота (main.py / run_bot_engine).
 2. Снять его сделки за те же сутки, что берём у Live.
 3. Сравнить построчно (real Live ↔ real .2): те же входы/выходы/сессии утро|день|вечер. Расхождения — тайминги стрима/прогрева/книг.
 4. Месяц — после того как сутки сошлись.

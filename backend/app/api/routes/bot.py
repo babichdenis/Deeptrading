@@ -927,38 +927,92 @@ class ModeRequest(BaseModel):
     test_params: dict = Field(default_factory=dict)  # параметры движка теста, напр. {"quorum": 2}
     preset: dict = Field(default_factory=dict)  # «ветка»-пресет: runtime-блок применится к cfg (env TEST_PRESET)
     replay_log_persist: bool = False  # писать логи теста в bot_logs
+    # Решение владельца из модалки выбора (кто едем — пресет или ползунки UI):
+    # "" = пресет выбран, режим не задан (старые вызовы) → как "preset";
+    # "preset" = едем по пресету; "ui" = по сохранённым настройкам интерфейса.
+    preset_mode: str = ""
+    # Чем закончился выбор в UI: "user" (нажал кнопку) | "timeout" (15 с истекли).
+    # Пишется в логи прогона — по результату видно, чей это был выбор.
+    preset_choice: str = ""
 
 
-def _write_env_mode(mode: str, test_name: str = "", replay_start: str = "", replay_end: str = "",
-                    replay_pace: str = "fast", replay_log_persist: bool = False) -> None:
-    """Обновить BOT_MODE (и параметры теста) в backend/.env — переживают рестарт uvicorn."""
+class PresetPreviewRequest(BaseModel):
+    """Предварительный расчёт расхождений — БЕЗ запуска теста."""
+    preset: dict = Field(default_factory=dict)
+
+
+@router.post("/preset/preview")
+async def bot_preset_preview(req: PresetPreviewRequest) -> dict:
+    """Посчитать расхождения «пресет vs настройки UI» ДО старта прогона.
+
+    Нужен UI-модалке выбора: показать, чем именно владелец жертвует в каждом
+    режиме, и дать 15 секунд на решение. Ничего не запускает и не меняет.
+    """
+    preset = req.preset or {}
+    conflicts: list[dict] = []
+    ui_values: dict = {}
+    preset_fields: dict = {}
+    try:
+        rt_block = (preset.get("runtime") if isinstance(preset, dict) else None) or {}
+        if isinstance(rt_block, dict) and rt_block:
+            from app.bot.runtime import _runtime_preset_overrides
+            preset_fields = _runtime_preset_overrides(rt_block)
+            saved = await load_bot_settings()
+            ui_values = {k: saved.get(k) for k in preset_fields if k in saved}
+            for k, pv in preset_fields.items():
+                if k not in saved:
+                    continue
+                uv = saved.get(k)
+                if uv == pv:
+                    continue
+                if isinstance(uv, (list, tuple)) or isinstance(pv, (list, tuple)):
+                    if list(uv or []) == list(pv or []):
+                        continue
+                conflicts.append({"field": k, "ui": uv, "preset": pv})
+    except Exception as _pp_e:
+        logger.warning("preset preview failed: %s", str(_pp_e)[:120])
+        return {"ok": False, "conflicts": [], "error": str(_pp_e)[:200]}
+    return {
+        "ok": True,
+        "has_preset": bool(preset),
+        "conflicts": conflicts,
+        "conflict_count": len(conflicts),
+        "preset_fields": sorted(preset_fields.keys()),
+        "ui_saved_count": len(ui_values),
+    }
+
+
+def _write_env_mode(mode: str, env_path: str = "") -> None:
+    """Обновить BOT_MODE в backend/.env — переживает рестарт uvicorn.
+
+    ВАЖНО: из .env убираются только ключи, которые переехали в
+    data/run_state.json (BOT_TEST_NAME/START/END/PACE/LOG_PERSIST) — иначе
+    рестарт терял TEST_ENGINE/TEST_INTERVAL и контур молча падал в ensemble_v4.
+    Остальное в .env остаётся: BOT_TEST_VARIANT (какой файл
+    ensemble_config.test.<variant>.json брать) — это ops-ручка, её задаёт не UI.
+    env_path — только для тестов.
+    """
     import os
     from pathlib import Path
-    env_path = Path(__file__).resolve().parents[3] / ".env"
-    pairs = {"BOT_MODE": mode, "BOT_TEST_NAME": test_name,
-             "BOT_TEST_START": replay_start, "BOT_TEST_END": replay_end,
-             "BOT_TEST_PACE": replay_pace,
-                 "BOT_TEST_LOG_PERSIST": "1" if replay_log_persist else "0"}
+    path = Path(env_path) if env_path else Path(__file__).resolve().parents[3] / ".env"
+    migrated = ("BOT_TEST_NAME", "BOT_TEST_START", "BOT_TEST_END",
+                "BOT_TEST_PACE", "BOT_TEST_LOG_PERSIST")
     try:
-        lines = env_path.read_text(encoding="utf-8").splitlines()
-        out, have = [], set()
+        lines = path.read_text(encoding="utf-8").splitlines()
+        out, have = [], False
         for ln in lines:
             key = ln.split("=", 1)[0].strip()
-            if key in pairs:
-                have.add(key)
-                out.append(f"{key}={pairs[key]}")
+            if key == "BOT_MODE":
+                have = True
+                out.append(f"BOT_MODE={mode}")
+            elif key in migrated:
+                continue  # состояние прогона теперь в run_state.json
             else:
                 out.append(ln)
-        for k, v in pairs.items():
-            if k not in have:
-                out.append(f"{k}={v}")
-        env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+        if not have:
+            out.append(f"BOT_MODE={mode}")
+        path.write_text("\n".join(out) + "\n", encoding="utf-8")
         os.environ["BOT_MODE"] = mode
-        os.environ["BOT_TEST_NAME"] = test_name
-        os.environ["BOT_TEST_START"] = replay_start
-        os.environ["BOT_TEST_END"] = replay_end
-        os.environ["BOT_TEST_PACE"] = replay_pace
-        os.environ["BOT_TEST_LOG_PERSIST"] = "1" if replay_log_persist else "0"
     except Exception:
         pass
 
@@ -1031,6 +1085,10 @@ def _save_test_sidecar(name: str, req: ModeRequest, pace: str) -> bool:
             "replay_pace": pace, "test_engine": req.test_engine.strip(),
             "test_interval": req.test_interval.strip(), "test_params": req.test_params,
             "replay_log_persist": bool(req.replay_log_persist), "preset": req.preset,
+            # Режим прогона: по пресету или по сохранённым настройкам UI.
+            # Аналитика рисует настройки тегами — она должна знать, ЧТО применялось.
+            "preset_mode": (getattr(req, "preset_mode", "") or ""),
+            "preset_choice": (getattr(req, "preset_choice", "") or ""),
         })
     except OSError:
         logger.warning("sidecar write failed for %s", name)
@@ -1059,35 +1117,51 @@ async def bot_set_mode(req: ModeRequest) -> dict:
     else:
         name = req.test_name
     pace = req.replay_pace if req.replay_pace in ("fast", "wall") else "fast"
-    # Движок теста: непустой test_engine -> одиночная стратегия (use_ensemble=False)
-    # через env TEST_ENGINE (читает apply_test_overrides); пустой -> ensemble_v4.
-    import os as _os
+    # Движок/TF/параметры/пресет теста — состояние прогона, его хранит
+    # data/run_state.json, а os.environ здесь только кэш для apply_test_overrides
+    # (на старте сервера он собирается из того же файла). Пусто -> ensemble_v4.
     _eng = req.test_engine.strip()
-    if _eng:
-        _os.environ["TEST_ENGINE"] = _eng
-    else:
-        _os.environ.pop("TEST_ENGINE", None)
-    # TF и параметры одиночного движка теста (читает apply_test_overrides):
     _tif = req.test_interval.strip().lower()
-    if _tif:
-        _os.environ["TEST_INTERVAL"] = _tif
-    else:
-        _os.environ.pop("TEST_INTERVAL", None)
-    if req.test_params:
-        import json as _pj
-        _os.environ["TEST_PARAMS"] = _pj.dumps(req.test_params, ensure_ascii=False)
-    else:
-        _os.environ.pop("TEST_PARAMS", None)
-    if getattr(req, "preset", None):
-        import json as _pj2
-        _os.environ["TEST_PRESET"] = _pj2.dumps(req.preset, ensure_ascii=False)
-    else:
-        _os.environ.pop("TEST_PRESET", None)
+    # Решение владельца из модалки: едем по пресету или по сохранённым ползункам.
+    # Дефолт — "ui": таймер в UI истёк, значит он не выбрал и мы НЕ применяем
+    # пресет молча (иначе результат нельзя будет отличить от явного выбора).
+    _pmode = (getattr(req, "preset_mode", "") or "").strip().lower()
+    _pchoice = (getattr(req, "preset_choice", "") or "").strip().lower()
+    if _pchoice not in ("user", "timeout"):
+        _pchoice = ""
+    if _pmode not in ("preset", "ui"):
+        _pmode = "ui" if _pchoice == "timeout" else ("preset" if getattr(req, "preset", None) else "")
+    # Разрешённые значения — обратно в req: их читает сайдкар (иначе в аналитику
+    # уйдёт пустой режим, и прогон будет неотличим от «пресета не было»).
+    req.preset_mode = _pmode
+    req.preset_choice = _pchoice
     if mode == "test":
         _save_test_sidecar(name, req, pace)
-    _write_env_mode(mode, test_name=name, replay_start=req.replay_start.strip(),
-                    replay_end=req.replay_end.strip(), replay_pace=pace,
-                    replay_log_persist=bool(req.replay_log_persist))
+    # Состояние прогона — в data/run_state.json (единственное место, откуда
+    # автостарт берёт контур и движок после рестарта). .env — только BOT_MODE,
+    # os.environ — кэш для apply_test_overrides, собираемый из этого же файла.
+    _run_state = {
+        "mode": mode,
+        "test_name": name,
+        "replay_start": req.replay_start.strip(),
+        "replay_end": req.replay_end.strip(),
+        "replay_pace": pace,
+        "replay_log_persist": bool(req.replay_log_persist),
+        "test_engine": _eng,
+        "test_interval": _tif,
+        "test_params": req.test_params or {},
+        "preset": getattr(req, "preset", None) or {},
+        "preset_mode": _pmode,
+    }
+    try:
+        from app.services.run_state import save_run_state, sync_env
+        _saved_ok = save_run_state(_run_state)
+        sync_env(_run_state)
+        if not _saved_ok:
+            logger.warning("run_state.json не записан — рестарт восстановит прошлый прогон")
+    except Exception as _rs_e:
+        logger.warning("run_state save failed: %s", str(_rs_e)[:120])
+    _write_env_mode(mode)
     try:
         from app.config import get_settings
         get_settings.cache_clear()
@@ -1109,8 +1183,29 @@ async def bot_set_mode(req: ModeRequest) -> dict:
             replay_log_persist=bool(req.replay_log_persist)))
     except Exception as e:
         raise HTTPException(500, f"restart failed: {e}")
+    if mode == "test" and getattr(req, "preset", None):
+        # Решение о режиме — в лог прогона: по нему видно, чей это был выбор
+        # (кнопка или истёкший таймер) и что именно применено к прогону.
+        _how = {"user": "выбор владельца", "timeout": "таймер 15 с истёк"}.get(_pchoice, "по умолчанию")
+        _what = ("по ПРЕСЕТУ (он перебивает ползунки)" if _pmode == "preset"
+                 else "по НАСТРОЙКАМ UI (пресет не применён)")
+        _c = list(getattr(runtime, "_preset_conflicts", []) or [])
+        logger.info("test %s: режим %s (%s), расхождений с UI: %d", name, _what, _how, len(_c))
+        try:
+            runtime._log(
+                f"РЕЖИМ ТЕСТА: {_what} — {_how}. Пресет «{req.preset.get('preset', {}).get('id', '?') if isinstance(req.preset, dict) else '?'}», "
+                f"расхождений с сохранёнными настройками UI: {len(_c)}"
+                + (": " + ", ".join(f"{x['field']} {x['ui']}→{x['preset']}" for x in _c[:6]) if _c else "")
+            )
+        except Exception as _lg_e:
+            logger.debug("decision log failed: %s", str(_lg_e)[:80])
+    # Расхождения «пресет vs UI» — возвращаем в ответе: UI показывает их в модалке
+    # выбора (и в статусе, если контур поднялся автостартом).
+    _conflicts = list(getattr(runtime, "_preset_conflicts", []) or [])
     return {"mode": mode, "test_name": name or None, "restarted": was_running, "replay_pace": pace,
-            "replay_log_persist": bool(req.replay_log_persist)}
+            "replay_log_persist": bool(req.replay_log_persist),
+            "preset_conflicts": _conflicts,
+            "preset_mode": _pmode, "preset_choice": _pchoice}
 
 
 class PauseRequest(BaseModel):
@@ -1984,6 +2079,35 @@ async def bot_presets() -> dict:
     return {"presets": out}
 
 
+@router.get("/engines")
+async def bot_engines() -> dict:
+    """Движки и таймфреймы для тест-модалки.
+
+    Из интерфейса тест раньше всегда шёл на ensemble_v4/1min — быстрые одиночные
+    движки (rsi_trade_hub и т.п.) можно было задать только через API. Отдаём
+    полный реестр + допустимые TF, чтобы выбор был в UI и попадал в run_state.
+    Пустой id движка = ансамбль (поведение по умолчанию).
+    """
+    try:
+        from app.engine.strategies import STRATEGY_REGISTRY
+        ids = sorted(STRATEGY_REGISTRY.keys())
+    except Exception as _be_e:
+        logger.warning("engines list failed: %s", str(_be_e)[:120])
+        ids = []
+    tf_labels = {"1min": "1 мин", "5min": "5 мин", "10min": "10 мин",
+                 "15min": "15 мин", "30min": "30 мин", "hour": "1 час"}
+    try:
+        from app.bot.feed import STEP_SEC
+        tf_ids = list(STEP_SEC.keys())
+    except Exception:
+        tf_ids = list(tf_labels.keys())
+    return {
+        "default": {"id": "", "label": "ensemble_v4 — ансамбль (по умолчанию)"},
+        "engines": [{"id": i, "label": i} for i in ids],
+        "intervals": [{"id": i, "label": tf_labels.get(i, i)} for i in tf_ids],
+    }
+
+
 @router.get("/tests")
 async def bot_tests() -> dict:
     """Список всех прогонов тестов (mode='paper' + test_name) со статистикой.
@@ -2095,6 +2219,26 @@ async def bot_test_trades(name: str) -> dict:
             "test_name": t.test_name,
         })
     return {"test_name": name, "trades": trades}
+
+
+@router.get("/tests/{name}/tags")
+async def bot_test_tags(name: str) -> dict:
+    """Теги настроек теста из сайдкара пресета — блок данных под прогресс-баром.
+
+    Только файл `reports/presets/<name>.json`, без БД: сайдкар пишется при старте
+    теста, раньше сделок. Источник правды — app.services.preset_tags (тот же, что
+    Analytics/CLI `preset.py tags`).
+    """
+    from app.services.preset_tags import load_sidecar, preset_id, tag_groups
+    sc = load_sidecar(name)
+    head = ((sc or {}).get("preset") or {}).get("preset") or {}
+    return {
+        "test_name": name,
+        "has_sidecar": bool(sc),
+        "preset_id": preset_id(sc),
+        "notes": str(head.get("notes") or ""),
+        "groups": tag_groups((sc or {}).get("preset") or {}) if sc else [],
+    }
 
 
 @router.delete("/tests/{name}")

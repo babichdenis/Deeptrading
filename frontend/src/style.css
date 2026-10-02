@@ -864,6 +864,8 @@ body.embedded .sklad-panel { display: none; }
 .bot-replay-pct { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
 .bot-replay-track { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .bot-replay-fill { height: 100%; background: linear-gradient(90deg, #4e9cff, #3fb68b); transition: width .4s ease; }
+.bot-replay-tags { margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel, #161b26); }
+.bot-replay-tags .rep-tags { margin-top: 0; padding-top: 0; border-top: 0; }
 #page-bot .bot-chart-section { margin-left: 0; margin-right: 0; }
 .bot-chart-wrap { margin: 12px 0 0; padding: 0; border: 0; height: 50vh; min-height: 240px; }
 .bot-chart-wrap .chart-wrap { height: 100%; }
@@ -928,6 +930,16 @@ body.embedded .sklad-panel { display: none; }
 .bs-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-dim); margin-bottom: 10px; }
 .bs-field input { padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
 .bs-hint { margin-top: 12px; }
+
+/* Модалка выбора «пресет или настройки UI»: таймер 15 с + прогресс-бар. */
+#pc-timer-wrap { margin: 12px 0 4px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pc-timerbar { flex: 1; min-width: 160px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.pc-timerfill { height: 100%; width: 100%; background: linear-gradient(90deg, var(--gold), var(--down)); transition: width 1s linear; }
+.pc-timerfill.urgent { background: var(--down); }
+#pc-list { max-height: 320px; overflow-y: auto; }
+#pc-list .bs-field { display: flex; flex-direction: column; gap: 2px; }
+#pc-list .pc-when { font-size: 10px; color: var(--text-faint); }
+#pc-list .pc-when b { color: var(--gold); font-weight: 600; }
 
 /* ============================================================
    RIGHT RAIL — Рынок · Голоса / AI-гейт

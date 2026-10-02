@@ -66,7 +66,7 @@
 | ML | `h057_extract.py`, `h057_train.py`, `h058_h059_significance.py`, `h_label_dataset.py`, `h_train_ml.py`, `ml_train_csv.py`, `run_v4_mltest.py` | Meta-model / triple-barrier |
 | Аллокация | `batch_block_E.py`, `_E3.py`, `h081_leverage.py`, `h082_pyramiding.py`, `h083_hrp.py` | Capital allocation |
 | Эксперименты (P0/P1) | `run_exp002.py`, `run_exp002b.py`, `run_exp003a.py`, `run_exp_e1.py`, `run_exp_e2.py`, `run_exp_e5_trailing.py`, `run_exp_regime_gated.py`, `run_b4run*.py`, `run_session_expand.py` | Vol-gate/RSI-remove/signal_exit/cooldown/trailing/regime-gated |
-| Режимы | `run_vol_regime_h1.py`, `regime_diagnostic.py`, `diag_regime.py`, `sector_correlation_shadow.py` | Vol-regime анализ |
+| Режимы | `run_vol_regime_h1.py`, `regime_diagnostic.py`, `diag_regime.py`, `sector_correlation_shadow.py`, `regime_calibration.py`, `regime_calibration_dataset.py`, `regime_v2_axis_validation.py` | Vol-regime анализ; `regime_calibration*` — read-only диагностика/forward-датасет canonical RegimeDetector; `regime_v2_axis_validation.py` — OOS-валидация осей Regime v2 (train/OOS, сетка W×h) на боевой БД |
 
 ## 6. SANDBOX / LIVE (sb_*, sandbox_*)
 

@@ -326,6 +326,21 @@ def test_bot_test_trades_endpoint(env):
     assert any(t["exit_reason"] == "stop_loss" for t in d["trades"])
 
 
+def test_bot_test_tags_endpoint(env):
+    d = _get(env, f"/api/v1/bot/tests/{NAME_A}/tags")
+    assert d["test_name"] == NAME_A
+    assert d["has_sidecar"] is True and d["preset_id"] == "mtf-rsi-v1"
+    groups = {g["group"]: g["items"] for g in d["groups"]}
+    assert groups["Пресет"][0] == {"k": "id", "v": "mtf-rsi-v1"}
+    assert any(i["k"] == "pullback_ema" for i in groups["Роботы"])
+    assert {"k": "движок", "v": "ensemble_v4"} in groups["Роботы"]
+    assert {"k": "вход", "v": "утро/день"} in groups["Сессии"]
+    assert {"k": "комиссия", "v": "0.0005"} in groups["Издержки"]
+
+    miss = _get(env, "/api/v1/bot/tests/no-such-test/tags")
+    assert miss["has_sidecar"] is False and miss["groups"] == []
+
+
 def test_delete_one_test_cleans_trades_window_and_sidecar(env):
     assert (env.sidecar_dir / f"{NAME_A}.json").is_file()
     res = env.client.delete(f"/api/v1/bot/tests/{NAME_A}")

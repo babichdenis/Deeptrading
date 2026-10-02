@@ -106,17 +106,18 @@ FundBalanceDivergenceBot (индикатор FBD = внешние данные �
 в оригинале баг: stopPrice/profitPrice считаются от 0 — НЕ переносить,
 использовать activation-цены).
 
-### Волна C — Trend (8) + CounterTrend (2) — 6/10 готово (hub-канон)
+### Волна C — Trend (8) + CounterTrend (2) — 9/10 готово (hub-канон)
 - [x] MomentumMacd → `momentum_macd_hub` (strategies.py): MACD>signal И Momentum>100 — крест state-условия; зеркально SELL.
 - [x] ParabolicSarTrade → `parabolic_sar_hub` (strategies.py): флип SAR-тренда (Wilder, Af 0.02 / MaxAf 0.2).
 - [x] WilliamsRangeTrade → `williams_range_hub` (strategies.py): %R(14) крест downline -80 → BUY, крест upline -20 → SELL.
 - [x] PriceChannelTrade → `price_channel_hub` (strategies.py): пробой канала L=21 со сдвигом [-2] (уровень предыдущего бара), крест пробоя; бар, пробивший обе стороны, входа не даёт.
 - [x] ParabolicBollinger → `parabolic_bollinger_hub` (strategies.py): крест касания BB-границы (std: делитель L-1 при L>30, иначе L — квирк C#) при параболике P строго внутри полос.
 - [x] ParabolicPriceChannel → `parabolic_price_channel_hub` (strategies.py): крест касания границы канала при P строго внутри; пробой по >=/<=, как в C#-индикаторе.
-Индикаторы IndicatorHub: williams_r, momentum, parabolic_sar; параболическая линия P — общий инкрементальный хелпер `_hub_parabolic` в strategies.py (квирк C#: volMult применяется в среднем второй раз). Выходы трейлингом по P из C# отдаются рантайму (SignalPolicy/exit-policy раннера) — конвенция hub-канона. Каталожные карточки wave=6.
-- [ ] BreakLinearRegressionChannel, StrategyBillWilliams, TwoTimeFramesBot,
-ClusterCountertrend — TODO.
-Нужно: regression-канал, fractal (BillWilliams), второй таймфрейм/два таба (→ волна H); price_channel/bollinger/parabolic — есть.
+- [x] BreakLinearRegressionChannel → `break_lr_channel_hub` (strategies.py): close пробил верх/низ LRC (МНК-прямая, period 50, dev 1.0/1.0); опц. фильтры SMA (close/SMA, наклон SMA); выход — стоп на противоположной границе канала, уровень предыдущего бара (`blrc_stop_*`).
+- [x] StrategyBillWilliams → `bill_williams_hub` (strategies.py): close строго выше/ниже всех линий Alligator (SSMA lips 3/3, teeth 10/5, jaw 40/8) И прорыв последнего фрактала (окно 5, сдвиг 2); выход — close против Teeth (`bw_close_*_teeth`).
+- [x] TwoTimeFramesBot → `two_timeframes_hub` (strategies.py): long-only; close > верх PriceChannel(20) пред. бара И close старшего ТФ (60 мин, ресемпл) > SMA(30); выход — close < низ канала (`ttf_pc_down`).
+Индикаторы IndicatorHub: williams_r, momentum, parabolic_sar; параболическая линия P — общий инкрементальный хелпер `_hub_parabolic` в strategies.py (квирк C#: volMult применяется в среднем второй раз). LRC и Alligator считаются инкрементально внутри самих стратегий (SSMA = EMA с SMA-инициализацией, квирк C#). Выходы трейлингом по P из C# отдаются рантайму (SignalPolicy/exit-policy раннера) — конвенция hub-канона. Каталожные карточки wave=6.
+- [ ] ClusterCountertrend — TODO (кластерный объёмный профиль требует данные уровня 2 → вынести в волну H/источники данных).
 
 ### Волна D — Patterns (7) + Monitors (4) — TODO
 CandlePatternBoost, CustomCandlesImpulseTrader, PinBarTrade, PivotPointsRobot,

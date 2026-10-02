@@ -55,6 +55,110 @@ function setText(id: string, text: string): void { const el = $(id); if (el) el.
 function showModal(id: string): void { $(id)?.classList.remove("hidden"); }
 function hideModal(id: string): void { $(id)?.classList.add("hidden"); }
 
+interface PresetConflict { field: string; ui: unknown; preset: unknown; }
+
+function fmtVal(v: unknown): string {
+  if (v === null || v === undefined || v === "") return "—";
+  if (Array.isArray(v)) return v.join(", ");
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+/**
+ * Модалка ВЫБОРА: едем по пресету или по настройкам интерфейса.
+ *
+ * Показывается ДО старта (owner попросил видеть разницу и решать самому).
+ * Таймер 15 секунд; если владелец не выбрал — resolve(null) → старт по UI.
+ * Возвращает "preset" | "ui" | null (таймаут), либо "__closed" если закрыл окно.
+ */
+const PC_TIMEOUT_SEC = 15;
+let _pcTimer: number | null = null;
+
+type PresetChoice = "preset" | "ui" | null | "__closed";
+
+function renderConflictRows(list: PresetConflict[]): void {
+  const box = $("pc-list");
+  if (!box) return;
+  box.innerHTML = "";
+  for (const c of list) {
+    const row = document.createElement("div");
+    row.className = "bs-field";
+    const lab = document.createElement("span");
+    lab.textContent = c.field;
+    const val = document.createElement("div");
+    val.className = "pc-when";
+    val.innerHTML = "";
+    val.append("в интерфейсе: ");
+    const u = document.createElement("span");
+    u.textContent = fmtVal(c.ui);
+    val.append(u, " → по пресету: ");
+    const p = document.createElement("b");
+    p.textContent = fmtVal(c.preset);
+    val.append(p);
+    row.append(lab, val);
+    box.appendChild(row);
+  }
+}
+
+function askPresetOrUi(list: PresetConflict[], presetId: string): Promise<PresetChoice> {
+  return new Promise<PresetChoice>((resolve) => {
+    setText("pc-preset-id", presetId || "—");
+    setText("pc-count", String(list.length));
+    renderConflictRows(list);
+    // Модалку могла до этого закрыть/переиспользовать — вернуть рабочий вид.
+    $("pc-timer-wrap")?.classList.remove("hidden");
+    $("pc-use-preset")?.classList.remove("hidden");
+    $("pc-use-ui")?.classList.remove("hidden");
+    $("pc-hint-choice")?.classList.remove("hidden");
+
+    let left = PC_TIMEOUT_SEC;
+    const fill = $("pc-timerfill");
+    const paint = (): void => {
+      if (fill) {
+        fill.style.width = `${(left / PC_TIMEOUT_SEC) * 100}%`;
+        fill.classList.toggle("urgent", left <= 5);
+      }
+      setText("pc-seconds", String(Math.max(left, 0)));
+    };
+
+    let done = false;
+    const finish = (choice: PresetChoice): void => {
+      if (done) return;
+      done = true;
+      if (_pcTimer !== null) { clearInterval(_pcTimer); _pcTimer = null; }
+      $("pc-use-preset")?.removeEventListener("click", onPreset);
+      $("pc-use-ui")?.removeEventListener("click", onUi);
+      $("pc-close")?.removeEventListener("click", onClose);
+      hideModal("pc-modal-overlay");
+      resolve(choice);
+    };
+    const onPreset = (): void => finish("preset");
+    const onUi = (): void => finish("ui");
+    const onClose = (): void => finish("__closed");
+
+    $("pc-use-preset")?.addEventListener("click", onPreset);
+    $("pc-use-ui")?.addEventListener("click", onUi);
+    $("pc-close")?.addEventListener("click", onClose);
+
+    paint();
+    _pcTimer = window.setInterval(() => {
+      left -= 1;
+      if (left <= 0) {
+        // Таймер истёк — по требованию владельца стартуем по настройкам UI.
+        finish(null);
+        return;
+      }
+      paint();
+    }, 1000);
+
+    showModal("pc-modal-overlay");
+  });
+}
+
+// «Прерван ли автостартом» — нет: расхождения показывает только модалка ПЕРЕД
+// стартом. После старта второй раз всплывать нельзя: если владелец выбрал «по UI»,
+// конфиг совпадает с ползунками, и предупреждение «пресет расходится» только путает.
+
 function money(n: number): string { return n.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
 function pct(n: number): string { return (n >= 0 ? "+" : "") + n.toFixed(2) + "%"; }
@@ -92,6 +196,7 @@ async function pollBotStatus(): Promise<void> {
       session: string;
       trading_status: string;
       imoex_guard?: { active?: number | boolean; pct?: number; dir_pct_20m?: number; dir_pct_5m?: number; blocks?: number; age_sec?: number; last_candle?: string; enabled?: boolean; stale?: boolean };
+      preset_conflicts?: PresetConflict[];
       ai_mode: string;
       mode: string;
       config?: { mode?: string };
@@ -217,9 +322,45 @@ function renderReplayBar(status: any): void {
   const rp = status?.replay;
   const _mode = String(status?.mode || "");
   const _testMode = _mode === "test" || _mode.indexOf("test:") === 0 || _mode === "replay";
-  const active = !!(rp && rp.active) || _testMode;
-  bar.style.display = active ? "flex" : "none";
-  if (!active) { (window as any).__replayT0 = 0; return; }
+  // ВАЖНО: завершённый прогон больше не рисуем живой полосой. Раньше условие
+  // `|| _testMode` держало её вечно — тест заканчивался за 20 секунд, а полоса
+  // «висела» на 93% с тикающим таймером, как будто прогон идёт.
+  const finished = !!(rp && rp.finished) && _testMode;
+  const active = !!(rp && rp.active) || (_testMode && !finished);
+  bar.style.display = (active || finished) ? "flex" : "none";
+  if (!active) {
+    (window as any).__replayT0 = 0;
+    if (finished) {
+      // Итоговое состояние: явно «завершён», без живого таймера и ETA.
+      const pctEl = document.getElementById("bot-replay-pct");
+      const timeEl = document.getElementById("bot-replay-time");
+      const winEl = document.getElementById("bot-replay-window");
+      const fill = document.getElementById("bot-replay-fill");
+      const fmtD = (iso: unknown): string => {
+        if (!iso) return "—";
+        try {
+          const d = new Date(String(iso));
+          return isNaN(d.getTime()) ? "—"
+            : _mskFmtDateR.format(d) + " " + _mskFmtTimeR.format(d);
+        } catch { return "—"; }
+      };
+      if (winEl) winEl.textContent = "тест " + fmtD(rp?.start) + " → " + fmtD(rp?.end);
+      if (timeEl) timeEl.textContent = "последняя свеча " + fmtD(rp?.now_msk || rp?.now);
+      if (pctEl) {
+        const _p = Number(rp?.pct ?? 0);
+        // Если данные кончились раньше окна — говорим прямо, иначе «93%» читается
+        // как «завис», хотя прогон штатно завершён.
+        const _why = _p >= 99.5 ? "" : ` (данные кончились на ${_p.toFixed(0)}%)`;
+        const _closed = Number(rp?.closed ?? 0);
+        pctEl.textContent = "✓ ЗАВЕРШЁН" + _why +
+          (_closed > 0 ? ` · финал закрыл ${_closed} поз.` : "");
+      }
+      if (fill) fill.style.width = "100%";
+      void syncReplayTags(status, true);
+    }
+    return;
+  }
+  void syncReplayTags(status, active);
   const fmt = (iso: unknown): string => {
     if (!iso) return "—";
     try {
@@ -264,6 +405,42 @@ function renderReplayBar(status: any): void {
   if (pctEl) pctEl.textContent = (rp ? pct.toFixed(1) + "%" + (rp.pace ? " · " + rp.pace : "") + " · " : "") +
     "⏱ " + _elapsed + _eta;
   if (fill) fill.style.width = pct.toFixed(1) + "%";
+}
+
+const _replayTagsCache = new Map<string, RepConfigTags>();
+let _replayTagsName = "";
+let _replayTagsPending = "";
+
+async function syncReplayTags(status: any, show: boolean): Promise<void> {
+  const box = $("bot-replay-tags");
+  if (!box) return;
+  const name = String(status?.config?.test_name || "").trim();
+  if (!show || !name) { box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  if (_replayTagsName === name || _replayTagsPending === name) return;
+  const cached = _replayTagsCache.get(name);
+  if (cached) {
+    box.innerHTML = renderRepTags(cached);
+    _replayTagsName = name;
+    return;
+  }
+  _replayTagsPending = name;
+  try {
+    const tags = await fetchJSON<RepConfigTags>(`/api/v1/bot/tests/${encodeURIComponent(name)}/tags`);
+    _replayTagsCache.set(name, tags);
+    if (_replayTagsPending === name) {
+      box.innerHTML = renderRepTags(tags);
+      _replayTagsName = name;
+    }
+  } catch (e) {
+    console.warn("replay tags load error", e);
+    if (_replayTagsPending === name) {
+      box.innerHTML = `<div class="rep-tags"><span class="mini-hint">⚠ не удалось загрузить настройки теста</span></div>`;
+      _replayTagsName = name;
+    }
+  } finally {
+    if (_replayTagsPending === name) _replayTagsPending = "";
+  }
 }
 
 async function pollPositions(): Promise<void> {
@@ -1089,6 +1266,74 @@ async function openTestDrawer(name: string): Promise<void> {
 
 let testPresets: Record<string, Record<string, unknown>> = {};
 
+// Память всех настроек тест-модалки: вчерашний период и выборы не должны
+// сбрасываться при каждом открытии (просьба владельца 02.10).
+const _TS_START_KEY = "dt_ts_start";
+const _TS_END_KEY = "dt_ts_end";
+const _TS_PRESET_KEY = "dt_ts_preset";
+const _TS_LOGDB_KEY = "dt_ts_logdb";
+
+/** Подставить последние использованные настройки в форму теста. */
+function restoreTestForm(): void {
+  const start = $("ts-start") as HTMLInputElement | null;
+  const end = $("ts-end") as HTMLInputElement | null;
+  const preset = $("ts-preset") as HTMLSelectElement | null;
+  const logdb = $("ts-logdb") as HTMLInputElement | null;
+  const s = localStorage.getItem(_TS_START_KEY) ?? "";
+  // Свежие браузеры без сохранёнки: подставляем дефолт — вчера, 04:00 МСК.
+  if (start) start.value = s || _defaultStartLocal();
+  if (end) end.value = localStorage.getItem(_TS_END_KEY) ?? "";
+  if (preset) {
+    const pid = localStorage.getItem(_TS_PRESET_KEY) ?? "";
+    if (pid && Array.from(preset.options).some((o) => o.value === pid)) preset.value = pid;
+  }
+  if (logdb) logdb.checked = localStorage.getItem(_TS_LOGDB_KEY) === "1";
+  updateSpeedHint();
+}
+
+/** Дефолтное начало: вчерашний день, 04:00 по локальному времени (≈ утро МСК). */
+function _defaultStartLocal(): string {
+  const d = new Date(Date.now() - 86400000);
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}T04:00`;
+}
+
+/** Запомнить ВСЕ настройки формы теста (в любой момент, не только на старте). */
+function saveTestFormNow(): void {
+  try {
+    localStorage.setItem(_TS_START_KEY, ($("ts-start") as HTMLInputElement)?.value ?? "");
+    localStorage.setItem(_TS_END_KEY, ($("ts-end") as HTMLInputElement)?.value ?? "");
+    localStorage.setItem(_TS_PRESET_KEY, ($("ts-preset") as HTMLSelectElement)?.value ?? "");
+    localStorage.setItem(_TS_LOGDB_KEY, ($("ts-logdb") as HTMLInputElement)?.checked ? "1" : "0");
+    localStorage.setItem(_TS_ENGINE_KEY, ($("ts-engine") as HTMLSelectElement)?.value ?? "");
+    localStorage.setItem(_TS_INTERVAL_KEY, ($("ts-interval") as HTMLSelectElement)?.value ?? "");
+  } catch { /* приватный режим — просто без памяти */ }
+  updateSpeedHint();
+}
+
+/** Предупреждение о медленном варианте (ансамбль + 1 мин на днях = часы). */
+function updateSpeedHint(): void {
+  const hint = $("ts-speed-hint");
+  if (!hint) return;
+  const eng = ($("ts-engine") as HTMLSelectElement)?.value ?? "";
+  const tf = ($("ts-interval") as HTMLSelectElement)?.value ?? "";
+  const slow = !eng && (tf === "" || tf === "1min");
+  hint.classList.toggle("hidden", !slow);
+}
+
+/** Подставить движок/TF из паспорта пресета (harness) при его выборе в UI. */
+function applyPresetHarness(presetId: string): void {
+  const p = (testPresets[presetId] ?? {}) as { harness?: { robots?: { robot?: string }[]; timeframe?: string } };
+  const harness = p.harness ?? {};
+  const robot = harness.robots?.[0]?.robot ?? "";
+  const tf = harness.timeframe ?? "";
+  const eng = $("ts-engine") as HTMLSelectElement | null;
+  const itf = $("ts-interval") as HTMLSelectElement | null;
+  if (eng && robot && Array.from(eng.options).some((o) => o.value === robot)) eng.value = robot;
+  if (itf && tf && Array.from(itf.options).some((o) => o.value === tf)) itf.value = tf;
+  saveTestFormNow();
+}
+
 async function loadTestPresets(): Promise<void> {
   const sel = $("ts-preset") as HTMLSelectElement | null;
   if (!sel) return;
@@ -1107,6 +1352,42 @@ async function loadTestPresets(): Promise<void> {
   } catch (e) {
     console.warn("presets load error", e);
   }
+}
+
+/** Движки/таймфреймы теста: списки с бэка + память последнего выбора. */
+const _TS_ENGINE_KEY = "dt_ts_engine";
+const _TS_INTERVAL_KEY = "dt_ts_interval";
+
+async function loadEngines(): Promise<void> {
+  const eng = $("ts-engine") as HTMLSelectElement | null;
+  const tf = $("ts-interval") as HTMLSelectElement | null;
+  if (eng && eng.dataset.loaded !== "1") {
+    try {
+      const d = await fetchJSON<{
+        engines: Array<{ id: string; label: string }>;
+        intervals: Array<{ id: string; label: string }>;
+      }>("/api/v1/bot/engines");
+      for (const e of d.engines ?? []) {
+        const o = document.createElement("option");
+        o.value = e.id;
+        o.textContent = e.label;
+        eng.appendChild(o);
+      }
+      for (const i of d.intervals ?? []) {
+        if (!tf) break;
+        const o = document.createElement("option");
+        o.value = i.id;
+        o.textContent = i.label;
+        tf.appendChild(o);
+      }
+      eng.dataset.loaded = "1";
+    } catch (e) {
+      console.warn("engines load error", e);
+    }
+  }
+  // Последний выбор — из localStorage (иначе каждый прогон выбирать заново).
+  if (eng) eng.value = localStorage.getItem(_TS_ENGINE_KEY) ?? "";
+  if (tf) tf.value = localStorage.getItem(_TS_INTERVAL_KEY) ?? "";
 }
 
 function initTestsBlock(): void {
@@ -1642,10 +1923,26 @@ function initBotTab(): void {
   $("bs-close")?.addEventListener("click", () => hideModal("bot-modal-overlay"));
   $("bot-pill-top")?.addEventListener("click", () => showModal("bot-modal-overlay"));
   $("btn-test-new")?.addEventListener("click", () => {
-    void loadTestPresets();
-    showModal("test-modal-overlay");
+    // Списки (пресеты/движки) асинхронные — подставляем прошлый выбор ПОСЛЕ них,
+    // иначе select не примет значение, которого ещё нет в опциях.
+    void (async () => {
+      await Promise.all([loadTestPresets(), loadEngines()]);
+      restoreTestForm();
+      showModal("test-modal-overlay");
+    })();
   });
   $("ts-close")?.addEventListener("click", () => hideModal("test-modal-overlay"));
+  // Любое изменение настроек теста — сразу в память (даже если тест не запускали).
+  for (const _id of ["ts-start", "ts-end", "ts-preset", "ts-logdb", "ts-engine", "ts-interval"]) {
+    $(_id)?.addEventListener("change", saveTestFormNow);
+  }
+  // Выбрал пресет → движок и TF подставляются из его паспорта (harness):
+  // иначе получается «пресет mtf-rsi-v1, а движок rsi_trade_hub» — разные вещи.
+  $("ts-preset")?.addEventListener("change", () => {
+    const pid = ($("ts-preset") as HTMLSelectElement)?.value ?? "";
+    if (pid) applyPresetHarness(pid);
+  });
+  $("pc-close")?.addEventListener("click", () => hideModal("pc-modal-overlay"));
   $("ts-run")?.addEventListener("click", async () => {
     const name = ($("ts-name") as HTMLInputElement)?.value?.trim();
     const start = ($("ts-start") as HTMLInputElement)?.value;
@@ -1653,6 +1950,8 @@ function initBotTab(): void {
     const logdb = ($("ts-logdb") as HTMLInputElement)?.checked ?? false;
     const presetId = ($("ts-preset") as HTMLSelectElement)?.value ?? "";
     const preset = presetId ? testPresets[presetId] : undefined;
+    const engine = ($("ts-engine") as HTMLSelectElement)?.value ?? "";
+    const tf = ($("ts-interval") as HTMLSelectElement)?.value ?? "";
     if (!start) { alert("Укажите начало периода"); return; }
     let finalName = name;
     if (preset) {
@@ -1666,12 +1965,44 @@ function initBotTab(): void {
     const btn = $("ts-run") as HTMLButtonElement;
     btn.disabled = true; btn.textContent = "Запускаю…";
     try {
+      // Пресет и сохранённые ползунки могут расходиться: спрашиваем ДО старта,
+      // по чему ехать. Таймер 15 с — молчание = «по настройкам интерфейса».
+      let presetMode: "preset" | "ui" = "ui";
+      let presetChoice = "";
+      if (preset) {
+        let conflicts: PresetConflict[] = [];
+        try {
+          const pv = await fetchJSON<{ conflicts?: PresetConflict[] }>(
+            "/api/v1/bot/preset/preview",
+            { method: "POST", body: JSON.stringify({ preset }) });
+          conflicts = pv.conflicts ?? [];
+        } catch (e) { console.warn("preset preview error", e); }
+        if (conflicts.length) {
+          const choice = await askPresetOrUi(conflicts, presetId);
+          if (choice === "__closed") return; // окно закрыто — ничего не стартуем
+          presetMode = choice === "preset" ? "preset" : "ui";
+          presetChoice = choice === null ? "timeout" : "user";
+          console.info(`[preset] режим: ${presetMode}; решение: ${presetChoice}; расхождений: ${conflicts.length}`);
+        } else {
+          presetMode = "preset"; // расхождений нет — режимы эквивалентны
+          presetChoice = "user";
+        }
+      }
       const payload: Record<string, unknown> = {
         mode: "test", test_name: finalName,
         replay_start: toUTCISO(start), replay_end: end ? toUTCISO(end) : "",
         replay_log_persist: logdb,
       };
-      if (preset) payload.preset = preset;
+      // Движок/TF одиночного прогона (пусто = ensemble_v4 / 1min). Память всех
+      // настроек — в saveTestFormNow (в т.ч. при любом изменении формы).
+      if (engine) payload.test_engine = engine;
+      if (tf) payload.test_interval = tf;
+      saveTestFormNow();
+      if (preset) {
+        payload.preset = preset;
+        payload.preset_mode = presetMode;
+        payload.preset_choice = presetChoice;
+      }
       await fetchJSON("/api/v1/bot/mode", { method: "POST", body: JSON.stringify(payload) });
       _setActiveModeBtn("test");
       hideModal("test-modal-overlay");

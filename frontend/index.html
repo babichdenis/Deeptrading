@@ -278,6 +278,8 @@
               <div class="bot-replay-track"><div class="bot-replay-fill" id="bot-replay-fill" style="width:0%"></div></div>
             </div>
 
+            <div class="bot-replay-tags hidden" id="bot-replay-tags"></div>
+
             <h3 class="pg-h3">Открытые позиции</h3>
             <table class="runs-table" id="bot-positions-table">
               <thead><tr><th>Вход время</th><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Сумма (свои)</th><th>Текущая</th><th>P&L ₽</th><th>ROI %</th><th>Плечо</th><th>Режим</th><th>Vol</th><th>SL трейл</th><th>TP / P&L при стопе</th><th></th></tr></thead>
@@ -629,6 +631,23 @@
           <input id="ts-name" type="text" placeholder="напр. июль_main" autocomplete="off" />
         </label>
         <label class="bs-field">
+          <span>Движок</span>
+          <select id="ts-engine">
+            <option value="">ensemble_v4 — ансамбль (по умолчанию)</option>
+          </select>
+        </label>
+        <label class="bs-field">
+          <span>Таймфрейм</span>
+          <select id="ts-interval">
+            <option value="">1 мин (по умолчанию)</option>
+          </select>
+        </label>
+        <div class="mini-hint bs-hint" id="ts-speed-hint">
+          ensemble_v4 + 1 мин — самый медленный вариант (многодневное окно может
+          считаться часами). Для быстрых прогонов берите одиночный движок и TF
+          10 мин — или пресет (он подставит своё).
+        </div>
+        <label class="bs-field">
           <span>Начало периода</span>
           <input id="ts-start" type="datetime-local" step="60" />
         </label>
@@ -641,14 +660,45 @@
           <span>Писать логи теста в БД</span>
         </label>
         <div class="mini-hint bs-hint">
-          С пресетом имя будет «&lt;id пресета&gt; &lt;время&gt;» (перезапуск = новый тест, история
-          сохраняется), рядом кладётся сайдкар с настройками — их видно тегами в Анализе.
-          Тот же движок, что в Live/Sandbox, но свечи из БД; время — ваш часовой пояс, уходит в UTC.
+          <b>Пресет</b> — готовая заготовка настроек теста (сессии, деньги, вход/выход,
+          гейты). Если он расходится с сохранёнными настройками интерфейса, при запуске
+          спросим, по чему едем. С пресетом имя будет «&lt;id пресета&gt; &lt;время&gt;»
+          (перезапуск = новый тест, история сохраняется), рядом кладётся сайдкар с
+          настройками — их видно тегами в Анализе. Свечи берутся из БД (реальных заявок
+          нет, выход — paper-заглушка); движок и таймфрейм выше применяются к прогону,
+          ensemble_v4 + 1 мин — как в Live/Sandbox. Время — ваш часовой пояс, уходит в UTC.
         </div>
       </div>
     </div>
     <div class="bot-modal-foot">
       <button class="btn-primary btn-sm" id="ts-run">Запустить</button>
+    </div>
+  </div>
+</div>
+
+<!-- Расхождение «настройки интерфейса vs пресет»: пресет главный, но показываем
+     сразу после старта — иначе прогон тихо едет не по тому, что видно в ползунках. -->
+<div class="modal-overlay hidden" id="pc-modal-overlay">
+  <div class="bot-modal">
+    <div class="bot-modal-head">
+      <b>⚠️ Пресет и настройки интерфейса расходятся</b>
+      <button class="btn-secondary btn-sm" id="pc-close" title="Закрыть">✕</button>
+    </div>
+    <div class="bot-modal-body">
+      <div class="mini-hint bs-hint" id="pc-hint-choice">
+        Пресет <b id="pc-preset-id">—</b> отличается от сохранённых настроек интерфейса
+        в <b id="pc-count">0</b> полях. Выберите, по чему едем. Если не выбрать за
+        <b>15 секунд</b> — тест стартует <b>по настройкам интерфейса</b>.
+      </div>
+      <div id="pc-timer-wrap" class="bs-field">
+        <div class="pc-timerbar"><div id="pc-timerfill" class="pc-timerfill"></div></div>
+        <span class="mini-hint bs-hint">Осталось <b id="pc-seconds">15</b> с</span>
+      </div>
+      <div id="pc-list" class="bs-section"></div>
+    </div>
+    <div class="bot-modal-foot">
+      <button class="btn-primary btn-sm" id="pc-use-preset">Ехать по пресету</button>
+      <button class="btn-secondary btn-sm" id="pc-use-ui">По настройкам интерфейса</button>
     </div>
   </div>
 </div>

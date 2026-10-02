@@ -174,21 +174,41 @@ def fetch_tqbr_market() -> dict:
         return {}
 
 
+_COUNTS_TTL = 300  # сек — счётчики нужны только для.pending (скачать/не хватает)
+_counts_cache: dict = {"ts": 0.0, "keys": frozenset(), "data": {}}
+
+
+async def _candle_counts(db: AsyncSession, figis: list[str]) -> dict[str, int]:
+    """Сколько 1m-свечей в БД по каждому FIGI, с кэшем на _COUNTS_TTL.
+
+    count(*) по interval=1 — это 15+ млн строк и 9-11 секунд, а poll карусели
+    идёт каждые 15 с и без кэша съедал всю БД целиком (в т.ч. при остановленном
+    боте). Кэш ключуется набором FIGI: вселенная меняется редко, а при новом
+    FIGI считаем заново, иначе в UI «нужно скачать» для новых тикеров.
+    При ошибке отдаём прошлое значение (никогда не бросаем наружу)."""
+    keys = frozenset(figis)
+    now = time.monotonic()
+    cached = _counts_cache["data"]
+    if keys and keys == _counts_cache["keys"] and now - _counts_cache["ts"] < _COUNTS_TTL:
+        return cached
+    try:
+        rows = (await db.execute(
+            text("SELECT figi, count(*) FROM candles "
+                 "WHERE figi = ANY(:fs) AND interval = 1 GROUP BY figi"),
+            {"fs": list(figis)},
+        )).all()
+    except Exception:
+        return cached
+    data = {f: int(c) for f, c in rows}
+    _counts_cache.update(ts=now, keys=keys, data=data)
+    return data
+
+
 async def _carousel_status(db: AsyncSession) -> dict:
     """Статус карусели бота, считанный из базы + рантайма. Работает всегда."""
     eligible_rows = (await db.execute(
         text("SELECT figi, ticker, lot_size FROM universe WHERE eligible_tier = 'eligible'")
     )).all()
-
-    candle_rows: dict[str, int] = {}
-    if eligible_rows:
-        figis = [r[0] for r in eligible_rows]
-        rows = (await db.execute(
-            text("SELECT figi, count(*) FROM candles "
-                 "WHERE figi = ANY(:fs) AND interval = 1 GROUP BY figi"),
-            {"fs": figis},
-        )).all()
-        candle_rows = {f: int(c) for f, c in rows}
 
     # активные тикеры в карусели рантайма (когда бот жив)
     active_set: set[str] = set()
@@ -199,6 +219,11 @@ async def _carousel_status(db: AsyncSession) -> dict:
         bot_running = runtime.running
     except Exception:
         pass
+
+    # Счётчики свечей нужны ТОЛЬКО для pending (неактивных) тикеров. Когда бот
+    # идёт по реплею, активны все — тогда запрос не выполняется вовсе.
+    pending_figis = [f for f, _t, _lot in eligible_rows if f not in active_set]
+    candle_rows = await _candle_counts(db, pending_figis) if pending_figis else {}
 
     pending = []
     insufficient = 0
