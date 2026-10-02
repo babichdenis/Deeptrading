@@ -793,6 +793,10 @@ class PaperBotRuntime:
         self._replay_cur: datetime | None = None
         self._replay_to: datetime | None = None
         self._last_replay_log: float = -1.0
+        # Итог завершённого реплея: виртуальные часы снимаются в _finalize_replay,
+        # иначе статус вечно показывал active=true на застывшем проценте.
+        self._replay_finished: bool = False
+        self._replay_summary: dict | None = None
         self._signal_busy: set[str] = set()
         self._skip_logged: dict[str, object] = {}  # figi -> ts последней залогированной причины "нет входа"
         self._held: set[str] = set()
@@ -2752,46 +2756,52 @@ class PaperBotRuntime:
         """Прогресс реплея/теста для прогресс-бара UI (bot-replay-bar).
 
         Возвращает None вне теста/реплея. wall_start = старт прогона
-        (для замера времени теста). Безопасен: любая ошибка -> None,
+        (для замера времени теста). После финализации отдаёт замороженный итог
+        (active=false, finished=true), а не None — иначе UI не отличит «завершён»
+        от «не запускался». Безопасен: любая ошибка -> None,
         статус никогда не ломается.
         """
         try:
             mode = str(self.mode or "")
             is_test = mode == "test" or mode.startswith("test:")
             is_replay = str(getattr(self.config, "feed", "")) == "replay"
-            if not (is_test or is_replay) or not self.running:
+            if not (is_test or is_replay):
                 return None
-
-            def _parse(v):
-                if not v:
-                    return None
-                try:
-                    from datetime import datetime as _dt, timezone as _tz
-                    d = _dt.fromisoformat(str(v).replace("Z", "+00:00"))
-                    return d if d.tzinfo else d.replace(tzinfo=_tz.utc)
-                except Exception:
-                    return None
-
-            start = _parse(getattr(self.config, "replay_start", ""))
-            end = _parse(getattr(self.config, "replay_end", ""))
-            now = self.last_candle_ts
-            pct = 0.0
-            if start is not None and end is not None and end > start and now is not None:
-                total = (end - start).total_seconds()
-                if total > 0:
-                    pct = max(0.0, min(100.0, (now - start).total_seconds() / total * 100))
-            return {
-                "active": True,
-                "start": start.isoformat() if start else None,
-                "end": end.isoformat() if end else None,
-                "now": now.isoformat() if now else None,
-                "now_msk": None,
-                "pct": round(pct, 1),
-                "pace": str(getattr(self.config, "replay_pace", "") or ""),
-                "wall_start": self.started_at.isoformat() if self.started_at else None,
-            }
+            _d = self._replay_status_dict()
+            if not _d.get("active") and not _d.get("finished"):
+                return None
+            _d["wall_start"] = self.started_at.isoformat() if self.started_at else None
+            return _d
         except Exception:
             return None
+
+    def _replay_status_dict(self) -> dict:
+        """Блок replay для статуса: живой прогресс ИЛИ замороженный итог прогона.
+
+        После `_finalize_replay` виртуальные часы снимаются (`_replay_from/_cur`):
+        иначе статус вечно показывал `active=true` на застывшем проценте — прогон
+        завершался, а UI и монитор думали, что он ещё идёт. Итог живёт в
+        `_replay_summary` (окно, процент, сколько позиций закрыто финалом).
+        """
+        _pace = str(getattr(self.config, "replay_pace", "") or "")
+        if self._replay_from is not None and self._replay_cur is not None:
+            _pct = self._replay_progress_pct()
+            return {
+                "active": True, "finished": False,
+                "start": self._replay_from.isoformat(),
+                "end": self._replay_to.isoformat() if self._replay_to else None,
+                "now": self._replay_cur.isoformat(),
+                "now_msk": self._replay_cur.astimezone(timezone(timedelta(hours=3))).isoformat(),
+                "pct": round(_pct, 2) if _pct is not None else None,
+                "pace": _pace, "closed": None,
+            }
+        _sum = getattr(self, "_replay_summary", None) or {}
+        return {
+            "active": False, "finished": bool(getattr(self, "_replay_finished", False)),
+            "start": _sum.get("start"), "end": _sum.get("end"), "now": _sum.get("last_ts"),
+            "now_msk": _sum.get("last_msk"), "pct": _sum.get("pct"),
+            "pace": _pace, "closed": _sum.get("closed"),
+        }
 
     @property
     def status(self) -> dict:
@@ -2879,20 +2889,7 @@ class PaperBotRuntime:
                 "source": self.data_source,
                 "last_candle_ts": self.last_candle_ts.isoformat() if self.last_candle_ts else None,
             },
-            "replay": ({
-                "active": True,
-                "start": self._replay_from.isoformat(),
-                "end": self._replay_to.isoformat(),
-                "now": self._replay_cur.isoformat(),
-                "now_msk": self._replay_cur.astimezone(timezone(timedelta(hours=3))).isoformat(),
-                "pct": round(self._replay_progress_pct(), 2) if self._replay_progress_pct() is not None else None,
-                "pace": str(getattr(self.config, "replay_pace", "") or ""),
-            } if (self._replay_from is not None and self._replay_cur is not None)
-              else {
-                "active": False,
-                "start": None, "end": None, "now": None, "now_msk": None,
-                "pct": None, "pace": str(getattr(self.config, "replay_pace", "") or ""),
-            }),
+            "replay": self._replay_status_dict(),
             "risk": {
                 "state": risk.state,
                 "daily_pnl": round(risk.daily_pnl, 2),
@@ -3068,6 +3065,8 @@ class PaperBotRuntime:
         # --- Replay: стартуем виртуальные часы с начала окна (до первой свечи). ---
         self._replay_from = None
         self._replay_cur = None
+        self._replay_finished = False
+        self._replay_summary = None
         if cfg.feed == "replay":
             try:
                 self._replay_from = datetime.fromisoformat(
@@ -3222,12 +3221,18 @@ class PaperBotRuntime:
                                 "CREATE TABLE IF NOT EXISTS bot_test_runs ("
                                 "name VARCHAR(64) PRIMARY KEY, replay_start TIMESTAMPTZ, "
                                 "replay_end TIMESTAMPTZ, updated_at TIMESTAMPTZ DEFAULT now())"))
+                            # Отметки завершения прогона (появились позже самой таблицы).
+                            await db.execute(_btr_text(
+                                "ALTER TABLE bot_test_runs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ"))
+                            await db.execute(_btr_text(
+                                "ALTER TABLE bot_test_runs ADD COLUMN IF NOT EXISTS closed_replay INT DEFAULT 0"))
                             await db.execute(_btr_text(
                                 "INSERT INTO bot_test_runs (name, replay_start, replay_end, updated_at) "
                                 "VALUES (:n, :s, :e, now()) "
                                 "ON CONFLICT (name) DO UPDATE SET "
                                 "replay_start = EXCLUDED.replay_start, "
-                                "replay_end = EXCLUDED.replay_end, updated_at = now()"
+                                "replay_end = EXCLUDED.replay_end, updated_at = now(), "
+                                "finished_at = NULL, closed_replay = 0"
                             ), {"n": cfg.test_name, "s": self._replay_from, "e": _btr_end})
                             await db.commit()
                     except Exception as _sw_e:
@@ -4847,13 +4852,39 @@ class PaperBotRuntime:
                 _audit_swallow('_finalize_replay@close', _sw_e)
         self._held.clear()
         self._exit_plans.clear()
+        # Итог прогона — до снятия виртуальных часов (процент считается по ним),
+        # иначе статус остаётся active=true на застывшем проценте навсегда.
+        _last_msk = None
+        try:
+            if self._replay_cur is not None:
+                _last_msk = self._replay_cur.astimezone(timezone(timedelta(hours=3))).isoformat()
+        except Exception as _sw_e:
+            _audit_swallow('_finalize_replay@msk', _sw_e)  # audit silent-except
+        self._replay_summary = {
+            "closed": _closed,
+            "start": self._replay_from.isoformat() if self._replay_from else None,
+            "end": self._replay_to.isoformat() if self._replay_to else None,
+            "last_ts": self._replay_cur.isoformat() if self._replay_cur else None,
+            "last_msk": _last_msk,
+            "pct": self._replay_progress_pct(),
+            "test_name": str(getattr(self.config, "test_name", "") or ""),
+        }
+        self._replay_finished = True
+        self._replay_from = None
+        self._replay_cur = None
         if getattr(self.config, "test_name", ""):
             try:
                 from sqlalchemy import text as _btr_text2
                 async with SessionLocal() as db:
+                    # finished_at/closed_replay могли быть добавлены позже таблицы.
                     await db.execute(_btr_text2(
-                        "UPDATE bot_test_runs SET updated_at = now() WHERE name = :n"
-                    ), {"n": self.config.test_name})
+                        "ALTER TABLE bot_test_runs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ"))
+                    await db.execute(_btr_text2(
+                        "ALTER TABLE bot_test_runs ADD COLUMN IF NOT EXISTS closed_replay INT DEFAULT 0"))
+                    await db.execute(_btr_text2(
+                        "UPDATE bot_test_runs SET updated_at = now(), finished_at = now(), "
+                        "closed_replay = :c WHERE name = :n"
+                    ), {"n": self.config.test_name, "c": int(_closed)})
                     await db.commit()
             except Exception as _sw_e:
                 _audit_swallow('_finalize_replay@test_run', _sw_e)
