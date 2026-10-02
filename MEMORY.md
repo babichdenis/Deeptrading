@@ -155,6 +155,15 @@ reconcile loop. НЕ реализовано: StreamingEnsemble (инкремен
 Все 6 реализаций сведены к канону 01.10 (`6ac09ed`, `b367bcc`); детали —
 `docs/roadmap/ARCHITECTURE_STANDARDIZATION_2026-09-30.md`.
 
+**Следствие — граница видимости (решение владельца 01.10, `1364705`):** так как
+метка = НАЧАЛО бакета, бар с меткой T описывает [T, T+TF) и в момент T ещё НЕ
+закрыт. Видимость везде строго **по закрытию: `bar.ts + TF <= as_of`**
+(включительно на самом закрытии). Фильтр `ts <= as_of` — неверен: включал
+незакрытый бар, т.е. заглядывал в минуты, которых рантайм ещё не видел.
+Канон в `bars.bar_is_visible` / `bar_close_ts`; заморозка —
+`tests/test_universe_v2_as_of_boundary.py` (13 тестов, включая look-ahead с
+баром `ts == as_of`). Распространять ту же границу на новые слои.
+
 ---
 
 ## 🔧 ОПЕРАЦИОННЫЕ ЗАМЕТКИ (актуально)
@@ -236,10 +245,12 @@ reconcile loop. НЕ реализовано: StreamingEnsemble (инкремен
 - **Selection** (`selection.py`): `rank_candidates`/`select_top_n` на уже
   отфильтрованных, внешний score, детерминизм (score DESC, ticker ASC).
 - **SectorMembership** (`sectors.py`): metadata/группировка, не фильтр.
-- Все measure принимают `as_of` и видят только `bar.time <= as_of` (look-ahead
-  дисциплина), без БД/брокера/HTTP. One Universe → обе стратегии (e2e-тест).
-- Тесты: `tests/test_universe_v2_*.py` (7 файлов, 56 passed) + ATR parity
-  (`test_atr_canon_parity.py`). Legacy-контур зелёный (147 passed).
+- Все measure принимают `as_of` и видят только ЗАКРЫТЫЕ бары
+  `bar.time + TF <= as_of` — строгая граница вместо `ts <= as_of`, см. канон
+  ТФ-агрегации выше (look-ahead дисциплина), без БД/брокера/HTTP.
+- Тесты: `tests/test_universe_v2_*.py` + ATR parity
+  (`test_atr_canon_parity.py`). Hermetic-база 01.10: **988 passed / 0 failed**
+  (было 911 на P0-коммите `7333a7e`). Legacy-контур зелёный.
 - **Live-DB parity** new==legacy eligible universe отложена (нет автотеста с
   живой БД); 🔜 миграция: runtime, бэктест-скрипты, `vol_carousel`,
   `select_volatile_universe`, raw-SQL select, legacy Universe/top_n.

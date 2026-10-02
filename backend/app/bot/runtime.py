@@ -129,7 +129,7 @@ from app.bot.session import session_state
 from app.config import get_settings
 from app.database import SessionLocal
 from app.engine.costs import CostModel
-from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy, intrabar_exit
+from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy
 from app.engine.models import Candle as EngineCandle, PositionState, Side
 from app.engine.policies import SignalPolicy
 from app.engine.strategies import build_strategy
@@ -536,7 +536,7 @@ def _runtime_preset_overrides(rt: dict) -> dict:
         for g in entry["gates"]:
             if g in TEST_GATES_ON:
                 out[g] = TEST_GATES_ON[g]
-    for field, path in _PRESET_FIELD_PATHS:
+    for fld, path in _PRESET_FIELD_PATHS:
         cur = rt
         for k in path:
             if not isinstance(cur, dict) or k not in cur:
@@ -545,15 +545,15 @@ def _runtime_preset_overrides(rt: dict) -> dict:
             cur = cur[k]
         if cur is _MISS:
             continue
-        if field == "trade_regimes":
+        if fld == "trade_regimes":
             if isinstance(cur, str) and cur.strip().lower() in ("all", "", "any"):
                 continue
             if not isinstance(cur, (list, tuple)):
                 continue
-        if field in ("sessions", "margin_sessions"):
+        if fld in ("sessions", "margin_sessions"):
             if not isinstance(cur, list) or not cur:
                 continue
-        out[field] = cur
+        out[fld] = cur
     return out
 
 
@@ -751,7 +751,7 @@ def _loss_hold_left(now: datetime, count: int, last_ts: datetime | None,
     return left if left > 0 else 0.0
 
 
-from app.engine.sessions import is_session_active as _sessions_allowed, should_force_close as _should_force_close, is_clearing_gap as _is_clearing_gap, weekend_close_due as _weekend_close_due
+from app.engine.sessions import is_session_active as _sessions_allowed, should_force_close as _should_force_close, weekend_close_due as _weekend_close_due
 
 
 class PaperBotRuntime:
@@ -1836,11 +1836,21 @@ class PaperBotRuntime:
         return self._5m_cache.get(figi, [])
 
     def _is_closed(self, c) -> bool:
-        """Только ЗАКРЫТАЯ свеча допускается к торговой логике и записи в БД.
+        """Страж на «бар дошёл до потребителя», а не на полноту интервала.
 
-        Метка бара ts — время ЗАКРЫТИЯ минутного интервала. Свеча считается
-        закрытой, если now(UTC) >= ts (т.е. интервал уже завершился).
-        Незакрытые/текущие обновления текущего бара отбрасываются.
+        Канон проекта: метка бара = НАЧАЛО бакета (см. ADR 0002), т.е. бар с
+        меткой ts закрывается в ts + ТФ. Формально «уже закрыт» означало бы
+        now >= c.ts + ТФ, но здесь сравнение now >= c.ts — и это НЕ описка,
+        а другая (рантаймная) конвенция: «бар с меткой ts отдан в работу в
+        момент ts». Обе конвенции несовместимы, и сменить гейт на ts + ТФ
+        нельзя: в реплее _bot_now() возвращает метку последней поданной
+        свечи, поэтому stricter-вариант отсёк бы ВСЕ бары и бот не торговал бы
+        (parity 0). Гарантию закрытия здесь даёт не сравнение, а источник:
+        feed отдаёт только закрытые бары (waiting_close), а незакрытые
+        отсекает гейт свежести по wall-clock ниже по потоку.
+
+        Не менять это сравнение молча: правка = отдельное решение владельца
+        вместе с переводом реплей-часов на ts + ТФ.
         """
         try:
             now = self._bot_now()
@@ -2009,7 +2019,6 @@ class PaperBotRuntime:
           gate_pass          — входы, прошедшие ensemble-гейты (accepted_decisions)
           executed_entries   — фактически открытые брокером (заполняется при филах)
         """
-        import time as _t
         _out = {
             "raw_setup_signals": 0, "quorum_candidates": 0,
             "gate_pass": 0, "executed_entries": 0,
@@ -2543,9 +2552,6 @@ class PaperBotRuntime:
             _atr = self.atr_now(bb)
             _dsa = (abs(last - sl) / _atr) if (last and sl and _atr) else None
             _dta = (abs(tp - last) / _atr) if (last and tp and _atr) else None
-            # regime сделки = зафиксированный НА ВХОД (self._entry_regime[bb]),
-            # НЕ текущее состояние детектора (иначе "не сразу и не всегда").
-            reg_name = self._entry_regime.get(bb) or (self._regimes.get(bb) or {}).get("state")
             out["positions"].append({
                 "figi": bb, "ticker": self.tickers.get(bb, getattr(p, "ticker", "") or bb[-6:]),
                 "side": "LONG" if long_ else "SHORT", "qty": qty,
@@ -2906,7 +2912,6 @@ class PaperBotRuntime:
             "broker_mode": self.broker_mode,
             "contour": self.active_contour,
             "started_at": self.started_at.isoformat() if self.started_at else None,
-            "replay": self._replay_progress(),
             "error": self.error,
             "config": {
                 "strategy_id": self.config.strategy_id,
@@ -4262,7 +4267,7 @@ class PaperBotRuntime:
     async def _hot_add_universe(self) -> None:
         """Фоновая задача: каждые 60с проверяет eligible тикеры с данными, добавляет в universe."""
         from sqlalchemy import text as _text
-        from app.bot.ensemble_strategy import EnsembleParams, EnsembleV4Strategy
+        from app.bot.ensemble_strategy import EnsembleV4Strategy
         from app.engine.models import Candle as EC
 
         while self.running:

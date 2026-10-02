@@ -141,7 +141,8 @@ async def select_screened_universe(
 
     Возвращает legacy-совместимые dict'ы (figi/ticker/atr_pct/lot_size) —
     их напрямую принимает runtime._startup. as_of обязателен: фичи видят
-    только bars.time <= as_of (look-ahead дисциплина).
+    только ЗАКРЫТЫЕ бары (bar.ts + TF <= as_of, ADR 0002) — look-ahead
+    дисциплина. Поэтому бар, чья метка совпала с as_of, не участвует.
 
     lot_size — реальный лот инструмента (AUDIT P1.2): он приходит из
     instrument_info, а DEFAULT_LOT подставляется только когда лот неизвестен
