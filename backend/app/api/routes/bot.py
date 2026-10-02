@@ -1331,6 +1331,8 @@ async def bot_bars(figi: str, tf: str = "5min", limit: int = 20) -> dict:
 
 _HM_CACHE: dict = {}
 _MSC = ZoneInfo("Europe/Moscow")
+_HM_WH = ("EXTRACT(HOUR FROM ts AT TIME ZONE 'Europe/Moscow') BETWEEN 6 AND 23 "
+          "AND EXTRACT(DOW FROM ts AT TIME ZONE 'Europe/Moscow') BETWEEN 1 AND 5")
 
 
 
@@ -2455,7 +2457,7 @@ async def _hm_compute_meta(db, bb: str, frm) -> (dict[str, dict], float, int):
     _frm36 = _cut - _td(days=32)
     _rows1 = (await db.execute(_t(
         "SELECT ts, open, high, low, close, volume FROM candles "
-        "WHERE figi = :f AND interval = '1' AND ts >= :frm ORDER BY ts"
+        "WHERE figi = :f AND interval = '1' AND ts >= :frm AND " + _HM_WH + " ORDER BY ts"
     ), {"f": bb, "frm": _frm36})).all()
     if len(_rows1) < 400:
         return {}, 0.0, 0
@@ -2515,7 +2517,11 @@ async def bot_heatmap(days: int = 5, meta: int = 0, figi: str | None = None,
     """Часовые бары ВСЕХ акций universe за N дней — для heatmap на вкладке «Анализ».
 
     Берём 1м-свечи из БД (candles, interval='1') и ресемплим в часы (date_trunc).
-    Возвращаем по каждому тикеру только закрытые часовые бары (ts, close).
+    Возвращаем только ТОРГОВЫЕ часы: пн–пт, часы 6–23 МСК (ночь 00:00–06:00 МСК и
+    выходные отсекаются — SESSION_WINDOWS moex_intraday_v1). Сетка часов каноническая
+    (одинаковая у всех тикеров), дыры в данных закрываются forward-fill close
+    (нет пропусков в ячейках; цена «не двигалась» = цвет без изменений).
+    Возвращаем ВСЕ тикеры universe (включая те, у кого нет баров — пустая строка).
     При meta=1 в каждый бар добавляем b (bias дневного ТФ: +1/-1/0) и r (режим H1).
     figi=X — ограничить одним тикером (принимает и tcs-figi, и bbg-код) — для карточки сделки.
 
@@ -2540,11 +2546,20 @@ async def bot_heatmap(days: int = 5, meta: int = 0, figi: str | None = None,
     _replay = str(getattr(runtime.config, "feed", "")) == "replay"
 
     _now = _dt.now(_tz.utc)
-    _ck = ("hm", days, _want_meta, figi or "")
+    _sig = hash(tuple(sorted(str(u.get("figi") or "") for u in univ)))
+    _ck = ("hm", days, _want_meta, figi or "", _sig)
     _cached = _HM_CACHE.get(_ck)
     _force = bool(refresh) and not _replay
     if not _force and not _replay and _cached and (_now - _cached[0]).total_seconds() < 60:
         return _cached[1]
+
+    _grid: list[str] = []
+    _g = _frm.replace(minute=0, second=0, microsecond=0)
+    while _g <= _now:
+        _gm = _g.astimezone(_MSC)
+        if _gm.weekday() < 5 and 6 <= _gm.hour <= 23:
+            _grid.append(_g.isoformat())
+        _g += _td(hours=1)
 
     out = []
     async with _DB() as db:
@@ -2558,21 +2573,41 @@ async def bot_heatmap(days: int = 5, meta: int = 0, figi: str | None = None,
                           (array_agg(open ORDER BY ts ASC))[1] AS o,
                           (array_agg(close ORDER BY ts DESC))[1] AS close
                    FROM candles WHERE figi = :f AND interval = '1' AND ts >= :frm
+                   AND """ + _HM_WH + """
                    GROUP BY 1 ORDER BY 1"""
             ), {"f": bb, "frm": _frm})).all()
-            bars = [{"h": r.h.isoformat(), "o": float(r.o), "c": float(r.close)}
-                    for r in rows if r.h is not None]
+            _by_h: dict[str, tuple[float, float]] = {}
+            for r in rows:
+                if r.h is None:
+                    continue
+                _hh = r.h if r.h.tzinfo else r.h.replace(tzinfo=_tz.utc)
+                _by_h[_hh.astimezone(_tz.utc).isoformat()] = (float(r.o), float(r.close))
+            _pre = (await db.execute(_t(
+                "SELECT close FROM candles WHERE figi = :f AND interval = '1' AND ts < :frm "
+                "ORDER BY ts DESC LIMIT 1"
+            ), {"f": bb, "frm": _frm})).first()
+            bars = []
+            _last_c = float(_pre[0]) if _pre and _pre[0] is not None else None
+            for _hk in _grid:
+                _got = _by_h.get(_hk)
+                if _got is not None:
+                    _o, _c = _got
+                    _last_c = _c
+                elif _last_c is not None:
+                    _o = _c = _last_c
+                else:
+                    continue
+                bars.append({"h": _hk, "o": _o, "c": _c})
             if _want_meta and bars:
                 _meta, _lc, _dok = await _hm_compute_meta(db, bb, _frm)
                 for b in bars:
                     _m = _meta.get(b["h"])
                     if _m:
                         b["b"], b["bh"], b["r"] = _m["b"], _m["bh"], _m["r"]
-            if bars:
-                out.append({"figi": bb,
-                            "ticker": str(u.get("ticker") or "").upper(),
-                            "lot": int(u.get("lot") or 1),
-                            "bars": bars})
+            out.append({"figi": bb,
+                        "ticker": str(u.get("ticker") or "").upper(),
+                        "lot": int(u.get("lot") or 1),
+                        "bars": bars})
     _res = {"ok": True, "days": days, "count": len(out), "all": len(univ),
             "tickers": out}
     if not _replay:
