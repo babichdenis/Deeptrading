@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
-from decimal import Decimal
 import threading
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.engine.costs import CostModel
-from app.engine.models import Side
-from app.models.paper import PaperAccount, PaperTrade
 from app.config import get_settings
-
+from app.engine.costs import CostModel
+from app.models.paper import PaperAccount, PaperTrade
 
 DEFAULT_ACCOUNT = "default"
 
@@ -303,7 +301,7 @@ class LiveBroker:
                     side="LONG" if qty > 0 else "SHORT",
                     qty=abs(int(qty)),
                     entry_price=self._q(pos.average_position_price),
-                    entry_time=datetime.now(timezone.utc),
+                    entry_time=datetime.now(UTC),
                     stop_loss=None,
                     take_profit=None,
                 ))
@@ -321,7 +319,7 @@ class LiveBroker:
                     return int(row[0])
         except Exception:
             pass
-        return 1
+        return 0
 
     async def get_position(self, figi: str) -> LivePosition | None:
         for p in await self.positions():
@@ -436,6 +434,7 @@ class LiveBroker:
     ) -> float | None:
         import asyncio
         from uuid import uuid4
+
         from t_tech.invest import OrderDirection, OrderType
 
         def _place():
@@ -455,15 +454,17 @@ class LiveBroker:
             eop = resp.executed_order_price
             fill = float(eop.units + eop.nano / 1e9) if eop and (eop.units or eop.nano) else None
             if fill and fill > 0:
-                # Apply entry commission (0.3% per T-Investments)
-                entry_commission = fill * qty * self.config.commission_rate if hasattr(self, 'config') else fill * qty * 0.003
-            return fill
-        except Exception:
+                return fill
+            self._log(f"OPEN UNKNOWN {figi[-6:]} {ticker} qty={qty}: executed_order_price empty")
+            return None
+        except Exception as e:
+            self._log(f"OPEN PARSE_ERR {figi[-6:]} {ticker} qty={qty}: {type(e).__name__}: {str(e)[:120]}")
             return None
 
     async def close_position(self, figi: str, price: float, reason: str) -> PaperTrade | None:
         import asyncio
         from uuid import uuid4
+
         from t_tech.invest import OrderDirection, OrderType
 
         pos = await self.get_position(figi)
@@ -472,7 +473,10 @@ class LiveBroker:
         direction = OrderDirection.ORDER_DIRECTION_SELL if pos.side == "LONG" else OrderDirection.ORDER_DIRECTION_BUY
 
         lot = await self._get_lot(figi)
-        order_qty = max(pos.qty // lot, 1) if lot > 0 else pos.qty
+        if lot <= 0:
+            self._log(f"CLOSE LOT_UNKNOWN {figi[-6:]} {getattr(pos, 'ticker', figi[-6:])}: close blocked")
+            return None
+        order_qty = max(pos.qty // lot, 1)
 
         def _place():
             resp = self._api_post_order(
@@ -488,9 +492,14 @@ class LiveBroker:
         resp = await asyncio.to_thread(_place)
         try:
             eop = resp.executed_order_price
-            actual_exit = float(eop.units + eop.nano / 1e9) if eop and (eop.units or eop.nano) else price
-        except Exception:
-            actual_exit = price
+            if eop and (eop.units or eop.nano):
+                actual_exit = float(eop.units + eop.nano / 1e9)
+            else:
+                self._log(f"CLOSE UNKNOWN {figi[-6:]} {getattr(pos, 'ticker', figi[-6:])} qty={order_qty}: executed_order_price empty")
+                return None
+        except Exception as e:
+            self._log(f"CLOSE PARSE_ERR {figi[-6:]} {getattr(pos, 'ticker', figi[-6:])} qty={order_qty}: {type(e).__name__}: {str(e)[:120]}")
+            return None
 
         direction_mult = 1 if pos.side == "LONG" else -1
         gross = (actual_exit - pos.entry_price) * pos.qty * direction_mult
@@ -510,7 +519,7 @@ class LiveBroker:
                 qty=pos.qty,
                 entry_time=pos.entry_time,
                 entry_price=Decimal(str(round(pos.entry_price, 6))),
-                exit_time=datetime.now(timezone.utc),
+                exit_time=datetime.now(UTC),
                 exit_price=Decimal(str(round(actual_exit, 6))),
                 gross_pnl=Decimal(str(round(gross, 6))),
                 commission=Decimal(str(round(commission, 6))),

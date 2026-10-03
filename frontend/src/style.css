@@ -927,6 +927,13 @@ body.embedded .sklad-panel { display: none; }
 .bs-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .bs-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-dim); }
 .bs-grid input { padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+
+/* Кастомные настройки прогона в модалке теста (ts-custom-*) */
+.ts-custom-body { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); display: flex; flex-direction: column; gap: 10px; }
+.ts-custom-body.hidden { display: none; }
+.ts-custom-body .bs-section-title { margin: 2px 0 0; }
+.ts-checks { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.ts-checks label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
 .bs-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-dim); margin-bottom: 10px; }
 .bs-field input { padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
 .bs-hint { margin-top: 12px; }

@@ -626,6 +626,72 @@
             <option value="">без пресета (текущие настройки бота)</option>
           </select>
         </label>
+        <label class="bs-check">
+          <input id="ts-custom-on" type="checkbox" />
+          <span>Свои настройки прогона (кастомный пресет — перебивает пресет выше)</span>
+        </label>
+        <div id="ts-custom-body" class="ts-custom-body hidden">
+          <div class="bs-section-title">Сессии</div>
+          <div class="ts-checks" id="ts-sessions">
+            <label><input type="checkbox" value="morning" />утро</label>
+            <label><input type="checkbox" value="day" />день</label>
+            <label><input type="checkbox" value="evening" />вечер</label>
+          </div>
+          <div class="bs-grid">
+            <label>Overnight<select id="ts-overnight"><option value="">не менять</option><option value="on">вкл</option><option value="off">выкл</option></select></label>
+            <label>EOD закрытие, мин до конца<input id="ts-eod" type="number" placeholder="—" /></label>
+          </div>
+          <div class="bs-section-title">Деньги</div>
+          <div class="bs-grid">
+            <label>Стартовый кэш<input id="ts-cash" type="number" placeholder="—" /></label>
+            <label>Позиция, % от капитала<input id="ts-pospct" type="number" step="0.01" placeholder="—" /></label>
+            <label>Лотов на сделку<input id="ts-qty" type="number" placeholder="—" /></label>
+            <label>Макс. позиций<input id="ts-maxpos" type="number" placeholder="—" /></label>
+            <label>Макс. экспозиция, %<input id="ts-maxexp" type="number" step="1" placeholder="—" /></label>
+          </div>
+          <div class="bs-section-title">Выходы (SL/TP)</div>
+          <div class="bs-grid">
+            <label>Режим SL<select id="ts-slmode"><option value="">не менять</option><option value="atr">ATR</option><option value="fixed">Фикс. %</option></select></label>
+            <label>ATR период<input id="ts-atr-period" type="number" placeholder="—" /></label>
+            <label>ATR множитель<input id="ts-atr-mult" type="number" step="0.1" placeholder="—" /></label>
+            <label>ATR R:R<input id="ts-atr-rr" type="number" step="0.1" placeholder="—" /></label>
+            <label>Stop, %<input id="ts-stop-pct" type="number" step="0.1" placeholder="—" /></label>
+            <label>Target, %<input id="ts-target-pct" type="number" step="0.1" placeholder="—" /></label>
+            <label>Trail активация (крат комисс.)<input id="ts-trail-act" type="number" step="0.1" placeholder="—" /></label>
+            <label>Trail дистанция, ATR<input id="ts-trail-dist" type="number" step="0.1" placeholder="—" /></label>
+          </div>
+          <div class="bs-section-title">Входы (гейты)</div>
+          <label class="bs-field">
+            <span>Гейты</span>
+            <select id="ts-gates-mode">
+              <option value="keep">не менять (текущие настройки бота)</option>
+              <option value="custom">настроить по чекбоксам</option>
+            </select>
+          </label>
+          <div class="ts-checks" id="ts-gates">
+            <label><input type="checkbox" value="imoex_guard" />IMOEX-гард</label>
+            <label><input type="checkbox" value="trend_alignment" />Trend alignment</label>
+            <label><input type="checkbox" value="ai_approval" />AI-одобрение</label>
+            <label><input type="checkbox" value="loss_streak_hold" />Пауза после серии убытков</label>
+            <label><input type="checkbox" value="rank_enabled" />Ранжирование</label>
+            <label><input type="checkbox" value="queue_enabled" />Очередь сделок</label>
+          </div>
+          <div class="bs-grid">
+            <label>Re-entry cooldown, бар<input id="ts-cooldown" type="number" placeholder="—" /></label>
+            <label>Confirm flip<input id="ts-confirm-flip" type="number" placeholder="—" /></label>
+            <label>Блок последнего часа<select id="ts-lasthour"><option value="">не менять</option><option value="on">вкл</option><option value="off">выкл</option></select></label>
+            <label>Волат-фильтр (крат ATR)<input id="ts-volmax" type="number" step="0.1" placeholder="—" /></label>
+          </div>
+          <div class="bs-section-title">Режимы рынка (пусто = не менять)</div>
+          <div class="ts-checks" id="ts-regimes">
+            <label><input type="checkbox" value="NEUTRAL" />NEUTRAL</label>
+            <label><input type="checkbox" value="TREND_UP" />TREND_UP</label>
+            <label><input type="checkbox" value="TREND_DOWN" />TREND_DOWN</label>
+            <label><input type="checkbox" value="HIGH_VOLATILITY" />HIGH_VOLATILITY</label>
+            <label><input type="checkbox" value="RANGE" />RANGE</label>
+          </div>
+          <div class="mini-hint bs-hint">Пустое поле = взять из текущих настроек бота. Гейты: «настроить по чекбоксам» — чекнутые включатся, остальные выключатся (семантика пресета); «не менять» — гейты не трогаем. Собранный пресет попадёт в сайдкар и будет виден тегами в Анализе.</div>
+        </div>
         <label class="bs-field">
           <span>Название теста</span>
           <input id="ts-name" type="text" placeholder="напр. июль_main" autocomplete="off" />

@@ -1272,6 +1272,7 @@ const _TS_START_KEY = "dt_ts_start";
 const _TS_END_KEY = "dt_ts_end";
 const _TS_PRESET_KEY = "dt_ts_preset";
 const _TS_LOGDB_KEY = "dt_ts_logdb";
+const _TS_CUSTOM_ON_KEY = "dt_ts_custom_on";
 
 /** Подставить последние использованные настройки в форму теста. */
 function restoreTestForm(): void {
@@ -1288,6 +1289,12 @@ function restoreTestForm(): void {
     if (pid && Array.from(preset.options).some((o) => o.value === pid)) preset.value = pid;
   }
   if (logdb) logdb.checked = localStorage.getItem(_TS_LOGDB_KEY) === "1";
+  const customOn = $("ts-custom-on") as HTMLInputElement | null;
+  if (customOn) {
+    customOn.checked = localStorage.getItem(_TS_CUSTOM_ON_KEY) === "1";
+    _applyCustomBody();
+  }
+  _applyGatesMode();
   updateSpeedHint();
 }
 
@@ -1305,6 +1312,7 @@ function saveTestFormNow(): void {
     localStorage.setItem(_TS_END_KEY, ($("ts-end") as HTMLInputElement)?.value ?? "");
     localStorage.setItem(_TS_PRESET_KEY, ($("ts-preset") as HTMLSelectElement)?.value ?? "");
     localStorage.setItem(_TS_LOGDB_KEY, ($("ts-logdb") as HTMLInputElement)?.checked ? "1" : "0");
+    localStorage.setItem(_TS_CUSTOM_ON_KEY, ($("ts-custom-on") as HTMLInputElement)?.checked ? "1" : "0");
     localStorage.setItem(_TS_ENGINE_KEY, ($("ts-engine") as HTMLSelectElement)?.value ?? "");
     localStorage.setItem(_TS_INTERVAL_KEY, ($("ts-interval") as HTMLSelectElement)?.value ?? "");
   } catch { /* приватный режим — просто без памяти */ }
@@ -1332,6 +1340,88 @@ function applyPresetHarness(presetId: string): void {
   if (eng && robot && Array.from(eng.options).some((o) => o.value === robot)) eng.value = robot;
   if (itf && tf && Array.from(itf.options).some((o) => o.value === tf)) itf.value = tf;
   saveTestFormNow();
+}
+
+/** Показать/скрыть блок «Свои настройки прогона» по чекбоксу. */
+function _applyCustomBody(): void {
+  const on = ($("ts-custom-on") as HTMLInputElement)?.checked ?? false;
+  $("ts-custom-body")?.classList.toggle("hidden", !on);
+}
+
+/** Чекбоксы гейтов активны только в режиме «настроить по чекбоксам» —
+ * иначе семантика «не трогаем» и они вводят в заблуждение. */
+function _applyGatesMode(): void {
+  const custom = (($("ts-gates-mode") as HTMLSelectElement | null)?.value ?? "") === "custom";
+  document.querySelectorAll<HTMLInputElement>("#ts-gates input[type=checkbox]")
+    .forEach((c) => { c.disabled = !custom; });
+}
+
+/** Собрать runtime-блок кастомного пресета из полей модалки теста.
+ * Пустое поле = «не менять» — ключ вообще не попадает в пресет,
+ * и бэкенд берёт значение из текущих настроек бота. Пути соответствуют
+ * _PRESET_FIELD_PATHS в backend/app/bot/runtime.py. */
+function buildCustomRuntimePreset(): Record<string, unknown> | null {
+  if (!($("ts-custom-on") as HTMLInputElement)?.checked) return null;
+  const rt: Record<string, unknown> = {};
+  const num = (id: string): number | null => {
+    const el = $(id) as HTMLInputElement | null;
+    if (!el || el.value.trim() === "") return null;
+    const v = Number(el.value);
+    return Number.isFinite(v) ? v : null;
+  };
+  const selVal = (id: string): string => (document.getElementById(id) as HTMLSelectElement | null)?.value ?? "";
+  const checked = (root: string): string[] =>
+    Array.from(document.querySelectorAll<HTMLInputElement>(`#${root} input:checked`)).map((c) => c.value);
+
+  // Сессии / overnight / EOD
+  const sessions = checked("ts-sessions");
+  if (sessions.length) rt.sessions = sessions;
+  const ov = selVal("ts-overnight");
+  if (ov) rt.overnight = ov === "on";
+  const eod = num("ts-eod");
+  if (eod !== null) rt.eod_close_min_before = eod;
+
+  // Деньги
+  const money: Record<string, unknown> = {};
+  const put = (o: Record<string, unknown>, k: string, v: unknown): void => { if (v !== null && v !== undefined) o[k] = v; };
+  put(money, "initial_cash", num("ts-cash"));
+  const pospct = num("ts-pospct");
+  if (pospct !== null) money.pos_pct = pospct / 100; // UI в %, бэкенд в доле
+  put(money, "qty_per_trade", num("ts-qty"));
+  put(money, "max_positions", num("ts-maxpos"));
+  put(money, "max_exposure_pct", num("ts-maxexp"));
+  if (Object.keys(money).length) rt.money = money;
+
+  // Выходы (SL/TP)
+  const exits: Record<string, unknown> = {};
+  const slm = selVal("ts-slmode");
+  if (slm) exits.sl_mode = slm;
+  put(exits, "atr_period", num("ts-atr-period"));
+  put(exits, "atr_multiplier", num("ts-atr-mult"));
+  put(exits, "atr_risk_reward", num("ts-atr-rr"));
+  put(exits, "stop_pct", num("ts-stop-pct"));
+  put(exits, "target_pct", num("ts-target-pct"));
+  put(exits, "trail_activation_comm_mult", num("ts-trail-act"));
+  put(exits, "trail_distance_atr", num("ts-trail-dist"));
+  if (Object.keys(exits).length) rt.exits = exits;
+
+  // Входы: гейты (чекнутые включатся, остальные выключатся — семантика пресета)
+  const entry: Record<string, unknown> = {};
+  if (selVal("ts-gates-mode") === "custom") {
+    entry.gates = checked("ts-gates");
+  }
+  put(entry, "cooldown_bars", num("ts-cooldown"));
+  put(entry, "confirm_flip", num("ts-confirm-flip"));
+  const lh = selVal("ts-lasthour");
+  if (lh) entry.last_hour_block = lh === "on";
+  put(entry, "volatility_max_mult", num("ts-volmax"));
+  if (Object.keys(entry).length) rt.entry = entry;
+
+  // Режимы рынка (пусто = не менять)
+  const regimes = checked("ts-regimes");
+  if (regimes.length) rt.regimes = regimes;
+
+  return Object.keys(rt).length ? rt : null;
 }
 
 async function loadTestPresets(): Promise<void> {
@@ -1942,6 +2032,18 @@ function initBotTab(): void {
     const pid = ($("ts-preset") as HTMLSelectElement)?.value ?? "";
     if (pid) applyPresetHarness(pid);
   });
+  // «Свои настройки»: тумблер блока + активность чекбоксов гейтов.
+  // Тумблер сразу пишем в localStorage — иначе состояние живёт только в DOM
+  // до первого изменения любого другого поля формы.
+  $("ts-custom-on")?.addEventListener("change", () => {
+    _applyCustomBody();
+    saveTestFormNow();
+  });
+  $("ts-gates-mode")?.addEventListener("change", _applyGatesMode);
+  // Начальное состояние DOM (до первого restoreTestForm при открытии модалки):
+  // гейты задизейблены («не менять»), блок «Свои настройки» скрыт.
+  _applyGatesMode();
+  _applyCustomBody();
   $("pc-close")?.addEventListener("click", () => hideModal("pc-modal-overlay"));
   $("ts-run")?.addEventListener("click", async () => {
     const name = ($("ts-name") as HTMLInputElement)?.value?.trim();
@@ -1950,16 +2052,28 @@ function initBotTab(): void {
     const logdb = ($("ts-logdb") as HTMLInputElement)?.checked ?? false;
     const presetId = ($("ts-preset") as HTMLSelectElement)?.value ?? "";
     const preset = presetId ? testPresets[presetId] : undefined;
+    // «Свои настройки» → runtime-блок пресета (пустые поля в него не попадают).
+    const customRt = buildCustomRuntimePreset();
+    // Эффективный пресет: выбранный + кастом поверх (кастомные ключи главнее).
+    const effPreset = customRt
+      ? {
+          ...(preset ?? {}),
+          runtime: {
+            ...((preset as Record<string, unknown> | undefined)?.runtime as Record<string, unknown> | undefined ?? {}),
+            ...customRt,
+          },
+        }
+      : preset;
     const engine = ($("ts-engine") as HTMLSelectElement)?.value ?? "";
     const tf = ($("ts-interval") as HTMLSelectElement)?.value ?? "";
     if (!start) { alert("Укажите начало периода"); return; }
     let finalName = name;
-    if (preset) {
+    if (preset || customRt) {
       const stamp = new Date();
       const p2 = (n: number) => String(n).padStart(2, "0");
       const ts = `${stamp.getFullYear()}${p2(stamp.getMonth() + 1)}${p2(stamp.getDate())}` +
         `-${p2(stamp.getHours())}${p2(stamp.getMinutes())}`;
-      if (!finalName) finalName = `${presetId} ${ts}`;
+      if (!finalName) finalName = `${presetId || "custom"} ${ts}`;
     }
     if (!finalName) { alert("Укажите название теста"); return; }
     const btn = $("ts-run") as HTMLButtonElement;
@@ -1969,7 +2083,8 @@ function initBotTab(): void {
       // по чему ехать. Таймер 15 с — молчание = «по настройкам интерфейса».
       let presetMode: "preset" | "ui" = "ui";
       let presetChoice = "";
-      if (preset) {
+      // Кастом — явный выбор владельца: диалог «пресет vs UI» не нужен, едем по effPreset.
+      if (preset && !customRt) {
         let conflicts: PresetConflict[] = [];
         try {
           const pv = await fetchJSON<{ conflicts?: PresetConflict[] }>(
@@ -1998,10 +2113,12 @@ function initBotTab(): void {
       if (engine) payload.test_engine = engine;
       if (tf) payload.test_interval = tf;
       saveTestFormNow();
-      if (preset) {
-        payload.preset = preset;
-        payload.preset_mode = presetMode;
-        payload.preset_choice = presetChoice;
+      if (effPreset) {
+        payload.preset = effPreset;
+        if (!customRt) { // без кастома — как раньше: режим из диалога
+          payload.preset_mode = presetMode;
+          payload.preset_choice = presetChoice;
+        }
       }
       await fetchJSON("/api/v1/bot/mode", { method: "POST", body: JSON.stringify(payload) });
       _setActiveModeBtn("test");
