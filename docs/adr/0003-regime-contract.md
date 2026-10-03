@@ -139,6 +139,8 @@ MarketMeasurements → RegimeObservation (оси + confidence) → Stateful Clas
 - Parity: batch/incremental совпадение обязательно **для каждого префикса** (новый класс тестов), а не только итогового массива; forming-бар — через `clone`, состояние не мутируется.
 - Метрики качества: singleton/transition rate (сейчас 40.1%/47.6%), median run, lag обнаружения смены относительно no-hysteresis; flicker должен падать без неограниченного роста lag. Пороговые цели утверждаются в Stage C.
 - Replay и live используют один и тот же state machine; порядок баров и граница закрытия — ADR-0002.
+- **Reference candidate (решение владельца 2026-10-02):** `mild (2/1)` — текущий V2 reference hysteresis; `default (2/3)` — benchmark для будущего сравнения; `strong (3/5)` отклонён (поглощает 32–52% сырых смен). `NEUTRAL` остаётся в контракте, но его частота — **не** acceptance criterion: однобаровые NEUTRAL закономерно поглощаются hysteresis, специальный механизм сохранения класса не вводится.
+- **C.6 (2026-10-02):** `RegimeProvider` (`app/services/regime_v2/provider.py`) — `legacy` default (production-поведение не меняется), `v2` только для analytics/comparison/signal attribution/research, **НЕ trading-gate**. Reference labels: `backend/tests/fixtures/regime_v2_reference.json` + герметичный тест (`range→trend`, `blip_in_trend`, `trend_flip`, `hv→trend`); batch==incremental для каждого префикса заморожен тестом `test_regime_v2_hysteresis.py`.
 
 ### 10. Backward compatibility: `trade_regimes` и маппинг
 
@@ -147,14 +149,14 @@ MarketMeasurements → RegimeObservation (оси + confidence) → Stateful Clas
 | Приоритет | Условие нового observation | Legacy label |
 |---|---|---|
 | 1 | warmup / нет данных / `confidence < c_unknown` | NEUTRAL |
-| 2 | `volatility = EXTREME` | HIGH_VOLATILITY |
-| 3 | `structure = TRENDING` и `direction = UP` | TREND_UP |
-| 4 | `structure = TRENDING` и `direction = DOWN` | TREND_DOWN |
-| 5 | `structure = RANGE` или `direction = FLAT` | RANGE |
-| 6 | `structure = TRANSITION` (включая конфликт slope/drift) | NEUTRAL |
-| 7 | иначе | NEUTRAL |
+| 2 | `volatility = EXTREME` (явный volatility-mapping) | HIGH_VOLATILITY |
+| 3 | `structure = RANGE` | RANGE |
+| 4 | `structure = TRENDING` и `direction = UP` | TREND_UP |
+| 5 | `structure = TRENDING` и `direction = DOWN` | TREND_DOWN |
+| 6 | `structure = TRENDING` и `direction = FLAT` | NEUTRAL |
+| 7 | `structure = TRANSITION` | NEUTRAL |
 
-- **RANGE/HIGH_VOL конфликт (решение владельца):** `HIGH_VOLATILITY` в derived-метке даёт только `EXTREME`-волатильность; обычный HIGH при подтверждённом TREND отдаётся `TREND_UP/DOWN`. Волатильность — характеристика рынка (ось), а не взаимоисключающий direction label: Stage B не подтвердил persistence будущего диапазона у текущего HV. Замороженные `atr_percentile=78` / `range_mult=2.75` остаются только в legacy-провайдере (behavior-preserving) и не являются порогами v2.
+- **RANGE/HIGH_VOL конфликт (решение владельца):** `HIGH_VOLATILITY` в derived-метке даёт только `EXTREME`-волатильность как отдельно зафиксированный volatility-mapping (не приоритет ради parity); обычный HIGH при подтверждённом TREND отдаётся `TREND_UP/DOWN`. `TRENDING + FLAT → NEUTRAL` (утверждено 2026-10-02): структура есть, направленного bias нет — `NEUTRAL` осмысленная проекция, а не мусорный остаток. Замороженные `atr_percentile=78` / `range_mult=2.75` остаются только в legacy-провайдере (behavior-preserving) и не являются порогами v2. Agreement с legacy — диагностика, не цель.
 - **mixed/UNKNOWN:** оба дают `NEUTRAL`, но `reason` сохраняет причину (`warmup`, `low_confidence`, `transition`), чтобы диагностика не потерялась.
 - `reason`-коды legacy (`drift_up_cons0.83`, `mixed`, …) не являются контрактом API, но adapter на переходный период сохраняет максимально близкие коды для логов/разбора.
 - На время миграции — провайдер метки: `regime_provider = legacy | v2` (default `legacy`). Cutover — только после golden-паритета и подписи владельца. БД-историю сделок не переписываем; `entry_regime` в meta остаётся строкой.

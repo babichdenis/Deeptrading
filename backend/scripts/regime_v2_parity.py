@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.services.ensemble import resample
 from app.services.regime import RegimeDetector
-from app.services.regime_calibration import session_of
+from app.services.regime_calibration import percentiles, session_of
 from app.services.regime_v2.classifier import (
     RegimeV2ClassifierParams,
     classify_row,
@@ -58,6 +58,12 @@ def build_records(bars, tf_sec: int, window: int) -> list[dict]:
             "legacy_reason": lrow["reason"],
             "v2": derive_legacy(obs),
             "direction": obs.direction,
+            "dir_strength": obs.direction_strength,
+            "trend_strength": obs.trend_strength,
+            "er": m.get("er"),
+            "range_atr": m.get("range_atr"),
+            "rv_atr": m.get("rv_atr"),
+            "atr_pct": m.get("atr_pct"),
             "volatility": obs.volatility,
             "structure": obs.structure,
             "confidence": obs.confidence,
@@ -69,6 +75,19 @@ def build_records(bars, tf_sec: int, window: int) -> list[dict]:
 def counter_share(counter: Counter, total: int) -> dict:
     return {k: {"n": counter.get(k, 0), "share": (counter.get(k, 0) / total) if total else 0.0}
             for k in sorted(counter)}
+
+
+def _profile(rows: list[dict], keys: tuple[str, ...]) -> dict:
+    out: dict = {}
+    for k in keys:
+        vals = [r[k] for r in rows if r.get(k) is not None]
+        if vals:
+            out[k] = percentiles(vals)
+    return out
+
+
+RANGE_PROFILE_KEYS = ("dir_strength", "trend_strength", "er", "range_atr", "rv_atr",
+                      "atr_pct", "confidence")
 
 
 def aggregate(records: list[dict]) -> dict:
@@ -98,6 +117,14 @@ def aggregate(records: list[dict]) -> dict:
         for q in (10, 50, 90):
             idx = min(int(len(conf) * q / 100), len(conf) - 1)
             conf_q[f"p{q}"] = conf[idx]
+    range_rows = [r for r in records if r["legacy"] == "RANGE"]
+    range_profiles: dict[str, dict] = {}
+    for st in V2_STATES:
+        grp = [r for r in range_rows if r["v2"] == st]
+        if grp:
+            range_profiles[st] = {"n": len(grp),
+                                  "share_of_legacy_range": len(grp) / len(range_rows) if range_rows else 0.0,
+                                  **_profile(grp, RANGE_PROFILE_KEYS)}
     return {
         "n": n,
         "agreement": agree / n if n else 0.0,
@@ -112,6 +139,7 @@ def aggregate(records: list[dict]) -> dict:
         "confidence_quantiles": conf_q,
         "v2_reasons": dict(sorted(Counter(r["reasons"] for r in records).items(),
                                   key=lambda kv: -kv[1])[:10]),
+        "legacy_range_profiles": range_profiles,
     }
 
 
@@ -162,8 +190,21 @@ def render_report(summary: dict) -> str:
               f"{v2s.get('TREND_UP', 0)} | {v2s.get('TREND_DOWN', 0)} | {v2s.get('RANGE', 0)} | "
               f"{v2s.get('HIGH_VOLATILITY', 0)} | {v2s.get('NEUTRAL', 0)} |")
         a("")
-        a(f"**Оси v2:** direction {agg['direction']}; volatility {agg['volatility']}; "
-          f"structure {agg['structure']}; confidence {agg['confidence_quantiles']}")
+        a("**Оси v2:** direction " + str(agg["direction"]) + "; volatility " + str(agg["volatility"])
+          + "; structure " + str(agg["structure"]) + "; confidence " + str(agg["confidence_quantiles"]))
+        a("")
+        a("**Расшифровка legacy RANGE (чем v2-группы отличаются по measurements):**")
+        a("")
+        a("| v2 группа | n | доля RANGE | trend p50 | dir_str p50 | ER p50 | range/ATR p50 | RV/ATR p50 | conf p50 |")
+        a("|---|---|---|---|---|---|---|---|---|")
+
+        def pp(d, key, q="p50"):
+            return f"{d[key][q]:.3f}" if key in d else "—"
+
+        for st, d in agg["legacy_range_profiles"].items():
+            a(f"| {st} | {d['n']} | {d['share_of_legacy_range'] * 100:.1f}% | "
+              f"{pp(d, 'trend_strength')} | {pp(d, 'dir_strength')} | {pp(d, 'er')} | "
+              f"{pp(d, 'range_atr')} | {pp(d, 'rv_atr')} | {pp(d, 'confidence')} |")
         a("")
         a("**Топ расхождений (legacy -> v2):** " + ", ".join(
             f"{k}: {v}" for k, v in agg["top_disagreements"].items()))

@@ -26,6 +26,7 @@ class RegimeV2ClassifierParams:
     direction_tfs: tuple[int, ...] = (3600,)
     direction_k: float = 1.0
     min_dir_agreement: float = 2 / 3
+    min_direction_strength: float = 0.15
     trend_k_slope: float = 1.0
     trend_strong: float = 0.4
     trend_weak: float = 0.25
@@ -54,7 +55,7 @@ def _vol_bucket(percentile: float | None, p: RegimeV2ClassifierParams) -> str:
 
 
 def _direction(m: Mapping[str, Any], tf_sec: int,
-               p: RegimeV2ClassifierParams) -> tuple[str, float, float, bool]:
+               p: RegimeV2ClassifierParams) -> tuple[str, float, float, str | None]:
     votes: list[int] = []
     for key in DIRECTION_KEYS:
         v = m.get(key)
@@ -67,13 +68,15 @@ def _direction(m: Mapping[str, Any], tf_sec: int,
     agreement = (max(votes.count(1), votes.count(-1)) / len(votes)) if votes else 0.5
     side = "UP" if votes.count(1) > votes.count(-1) else (
         "DOWN" if votes.count(-1) > votes.count(1) else "FLAT")
-    disagreement = bool(votes) and tf_sec in p.direction_tfs and (
-        side == "FLAT" or agreement < p.min_dir_agreement)
-    if tf_sec not in p.direction_tfs or side == "FLAT" or agreement < p.min_dir_agreement:
-        return "FLAT", 0.0, agreement, disagreement
+    if tf_sec not in p.direction_tfs:
+        return "FLAT", 0.0, agreement, None
+    if side == "FLAT" or agreement < p.min_dir_agreement:
+        return "FLAT", 0.0, agreement, ("disagreement" if votes else None)
     mags = [abs(float(m[k])) for k in ("drift_atr", "slope_atr") if m.get(k) is not None]
     strength = _clip01((sum(mags) / len(mags)) / p.direction_k) if mags else 0.0
-    return side, strength, agreement, False
+    if strength < p.min_direction_strength:
+        return "FLAT", 0.0, agreement, "weak"
+    return side, strength, agreement, None
 
 
 def _trend_strength(m: Mapping[str, Any], p: RegimeV2ClassifierParams) -> float:
@@ -97,9 +100,18 @@ def _vol_confidence(percentile: float | None, p: RegimeV2ClassifierParams) -> fl
     return _clip01(dist / p.vol_conf_span)
 
 
+def _bands(trend_strength: float, p: RegimeV2ClassifierParams) -> str:
+    if trend_strength >= p.trend_strong:
+        return "TRENDING"
+    if trend_strength <= p.trend_weak:
+        return "RANGE"
+    return "TRANSITION"
+
+
 def classify_row(ts: datetime, tf_sec: int, m: Mapping[str, Any],
                  session: str | None = None,
-                 params: RegimeV2ClassifierParams | None = None) -> RegimeObservation:
+                 params: RegimeV2ClassifierParams | None = None,
+                 prev_structure: str | None = None) -> RegimeObservation:
     p = params or RegimeV2ClassifierParams()
     reasons: list[str] = []
     if m.get("atr_pct") is None:
@@ -110,9 +122,9 @@ def classify_row(ts: datetime, tf_sec: int, m: Mapping[str, Any],
             session=session, version=p.version,
             measurements=dict(m),
         )
-    direction, dir_strength, dir_agreement, dir_disagree = _direction(m, tf_sec, p)
-    if dir_disagree:
-        reasons.append("direction_disagreement")
+    direction, dir_strength, dir_agreement, dir_note = _direction(m, tf_sec, p)
+    if dir_note:
+        reasons.append(f"direction_{dir_note}")
     trend_strength = _trend_strength(m, p)
     vp = m.get("vol_percentile")
     volatility = _vol_bucket(vp, p)
@@ -121,13 +133,12 @@ def classify_row(ts: datetime, tf_sec: int, m: Mapping[str, Any],
     elif volatility == "EXTREME":
         reasons.append("vol_extreme")
 
-    direction_present = direction in ("UP", "DOWN")
-    if direction_present and trend_strength >= p.trend_strong:
-        structure = "TRENDING"
-    elif not direction_present and trend_strength <= p.trend_weak:
-        structure = "RANGE"
+    if prev_structure == "TRENDING":
+        structure = "TRENDING" if trend_strength >= p.trend_weak else _bands(trend_strength, p)
+    elif prev_structure == "RANGE":
+        structure = "RANGE" if trend_strength <= p.trend_strong else _bands(trend_strength, p)
     else:
-        structure = "TRANSITION"
+        structure = _bands(trend_strength, p)
 
     c_dir = dir_agreement
     c_vol = _vol_confidence(vp, p)
@@ -149,15 +160,23 @@ def classify_row(ts: datetime, tf_sec: int, m: Mapping[str, Any],
 
 def derive_legacy(obs: RegimeObservation,
                   params: RegimeV2ClassifierParams | None = None) -> str:
+    """Контракт LegacyRegimeAdapter (утверждён владельцем 2026-10-02).
+
+    warmup/low-confidence → NEUTRAL; volatility EXTREME → HIGH_VOLATILITY
+    (явный volatility-mapping, не приоритет ради parity); structure RANGE → RANGE;
+    TRENDING+UP/DOWN → TREND_*; TRENDING+FLAT и TRANSITION → NEUTRAL.
+    """
     p = params or RegimeV2ClassifierParams()
     if "warmup" in obs.reason_codes or obs.confidence < p.c_unknown:
         return "NEUTRAL"
     if obs.volatility == "EXTREME":
         return "HIGH_VOLATILITY"
-    if obs.structure == "TRENDING" and obs.direction == "UP":
-        return "TREND_UP"
-    if obs.structure == "TRENDING" and obs.direction == "DOWN":
-        return "TREND_DOWN"
-    if obs.structure == "RANGE" or obs.direction == "FLAT":
+    if obs.structure == "RANGE":
         return "RANGE"
+    if obs.structure == "TRENDING":
+        if obs.direction == "UP":
+            return "TREND_UP"
+        if obs.direction == "DOWN":
+            return "TREND_DOWN"
+        return "NEUTRAL"
     return "NEUTRAL"

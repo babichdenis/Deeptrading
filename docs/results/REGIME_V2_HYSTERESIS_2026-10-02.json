@@ -1,0 +1,213 @@
+{
+  "meta": {
+    "generated_at": "2026-10-02T20:23:12.888187+00:00",
+    "days": 93,
+    "t_from": "2026-07-01T08:00:00+00:00",
+    "t_to": "2026-10-02T08:00:00+00:00",
+    "tickers": [
+      "T",
+      "SBER",
+      "LKOH",
+      "ROSN",
+      "NVTK",
+      "SMLT"
+    ],
+    "tf_labels": [
+      "5m",
+      "1h"
+    ],
+    "window": 12,
+    "lag_window": 24,
+    "variants": [
+      "stateless",
+      "mild",
+      "default",
+      "strong"
+    ],
+    "dsn_host": "192.168.1.7:5432/deeptrading"
+  },
+  "blocks": {
+    "5m": {
+      "metrics": {
+        "legacy": {
+          "bars": 120102,
+          "transitions": 13448,
+          "transitions_per_1000": 111.97149089940217,
+          "runs": 13454,
+          "singleton_share": 0.3989891482087112,
+          "mean_run": 8.926861899806749,
+          "median_run": 2.0
+        },
+        "stateless": {
+          "bars": 120102,
+          "transitions": 32856,
+          "transitions_per_1000": 273.5674676524954,
+          "runs": 32862,
+          "singleton_share": 0.44930314649138825,
+          "mean_run": 3.6547379952528756,
+          "median_run": 2.0
+        },
+        "mild": {
+          "bars": 120102,
+          "transitions": 9098,
+          "transitions_per_1000": 75.75227723102029,
+          "runs": 9104,
+          "singleton_share": 0.00010984182776801405,
+          "mean_run": 13.192223198594025,
+          "median_run": 7.0
+        },
+        "default": {
+          "bars": 120102,
+          "transitions": 8776,
+          "transitions_per_1000": 73.07122279395847,
+          "runs": 8782,
+          "singleton_share": 0.00011386927806877705,
+          "mean_run": 13.67592803461626,
+          "median_run": 7.0
+        },
+        "strong": {
+          "bars": 120102,
+          "transitions": 5742,
+          "transitions_per_1000": 47.80936204226408,
+          "runs": 5748,
+          "singleton_share": 0.0,
+          "mean_run": 20.89457202505219,
+          "median_run": 12.0
+        }
+      },
+      "lag": {
+        "mild": {
+          "raw_changes": 32856,
+          "adopted": 25643,
+          "adopted_share": 0.7804662770878987,
+          "missed": 7213,
+          "lag_p50": 1.0,
+          "lag_p90": 13.0,
+          "lag_mean": 3.37897281909293
+        },
+        "default": {
+          "raw_changes": 32856,
+          "adopted": 25547,
+          "adopted_share": 0.7775444363282201,
+          "missed": 7309,
+          "lag_p50": 1.0,
+          "lag_p90": 13.0,
+          "lag_mean": 3.438994793909265
+        },
+        "strong": {
+          "raw_changes": 32856,
+          "adopted": 22430,
+          "adopted_share": 0.6826759191624057,
+          "missed": 10426,
+          "lag_p50": 0.0,
+          "lag_p90": 12.0,
+          "lag_mean": 3.391217119928667
+        }
+      },
+      "dist_stateless": {
+        "NEUTRAL": 46211,
+        "RANGE": 61894,
+        "HIGH_VOLATILITY": 11997
+      },
+      "dist_default": {
+        "NEUTRAL": 31320,
+        "RANGE": 81347,
+        "HIGH_VOLATILITY": 7435
+      },
+      "bars": 120102
+    },
+    "1h": {
+      "metrics": {
+        "legacy": {
+          "bars": 10685,
+          "transitions": 2907,
+          "transitions_per_1000": 272.06364061768835,
+          "runs": 2913,
+          "singleton_share": 0.4788877445932029,
+          "mean_run": 3.668039821489873,
+          "median_run": 2.0
+        },
+        "stateless": {
+          "bars": 10685,
+          "transitions": 3643,
+          "transitions_per_1000": 340.94525035095927,
+          "runs": 3649,
+          "singleton_share": 0.4867086873115922,
+          "mean_run": 2.928199506714168,
+          "median_run": 2.0
+        },
+        "mild": {
+          "bars": 10685,
+          "transitions": 812,
+          "transitions_per_1000": 75.99438465138043,
+          "runs": 818,
+          "singleton_share": 0.0,
+          "mean_run": 13.06234718826406,
+          "median_run": 8.0
+        },
+        "default": {
+          "bars": 10685,
+          "transitions": 781,
+          "transitions_per_1000": 73.09312119794103,
+          "runs": 787,
+          "singleton_share": 0.0,
+          "mean_run": 13.57687420584498,
+          "median_run": 9.0
+        },
+        "strong": {
+          "bars": 10685,
+          "transitions": 547,
+          "transitions_per_1000": 51.19326158165653,
+          "runs": 553,
+          "singleton_share": 0.0,
+          "mean_run": 19.321880650994576,
+          "median_run": 13.0
+        }
+      },
+      "lag": {
+        "mild": {
+          "raw_changes": 3643,
+          "adopted": 2016,
+          "adopted_share": 0.553390063134779,
+          "missed": 1627,
+          "lag_p50": 1.0,
+          "lag_p90": 3.0,
+          "lag_mean": 1.6651785714285714
+        },
+        "default": {
+          "raw_changes": 3643,
+          "adopted": 2001,
+          "adopted_share": 0.5492725775459786,
+          "missed": 1642,
+          "lag_p50": 0.0,
+          "lag_p90": 3.0,
+          "lag_mean": 1.6256871564217892
+        },
+        "strong": {
+          "raw_changes": 3643,
+          "adopted": 1749,
+          "adopted_share": 0.4800988196541312,
+          "missed": 1894,
+          "lag_p50": 0.0,
+          "lag_p90": 4.0,
+          "lag_mean": 1.6632361349342482
+        }
+      },
+      "dist_stateless": {
+        "NEUTRAL": 2641,
+        "TREND_DOWN": 1592,
+        "HIGH_VOLATILITY": 1026,
+        "RANGE": 4089,
+        "TREND_UP": 1337
+      },
+      "dist_default": {
+        "NEUTRAL": 101,
+        "TREND_DOWN": 2247,
+        "RANGE": 5775,
+        "TREND_UP": 1995,
+        "HIGH_VOLATILITY": 567
+      },
+      "bars": 10685
+    }
+  }
+}

@@ -45,8 +45,23 @@ def test_5m_direction_flat_even_on_uptrend():
     obs = classify_row(TS, 300, row)
     assert obs.direction == "FLAT"
     assert obs.direction_strength == 0.0
-    assert obs.structure == "TRANSITION"
+    assert obs.structure == "TRENDING"
+    assert derive_legacy(obs) == "NEUTRAL"
+
+
+def test_h1_weak_movement_is_range():
+    row = m(drift_atr=0.3, slope_atr=0.2, di_spread=2.0, er=0.15)
+    obs = classify_row(TS, 3600, row)
+    assert obs.direction == "UP"
+    assert obs.structure == "RANGE"
     assert derive_legacy(obs) == "RANGE"
+
+
+def test_weak_direction_below_floor_is_flat():
+    row = m(drift_atr=0.05, slope_atr=0.05, di_spread=1.0, er=0.15)
+    obs = classify_row(TS, 3600, row)
+    assert obs.direction == "FLAT"
+    assert "direction_weak" in obs.reason_codes
 
 
 def test_direction_disagreement_returns_flat():
@@ -71,7 +86,7 @@ def test_range_and_transition():
     mid = classify_row(TS, 300, m(er=0.3, slope_atr=0.2))
     assert mid.structure == "TRANSITION"
     assert "structure_transition" in mid.reason_codes
-    assert derive_legacy(mid) == "RANGE"
+    assert derive_legacy(mid) == "NEUTRAL"
     h1_mid = classify_row(TS, 3600, m(drift_atr=1.0, slope_atr=0.5, di_spread=10.0, er=0.2))
     assert h1_mid.direction == "UP"
     assert h1_mid.structure == "TRANSITION"

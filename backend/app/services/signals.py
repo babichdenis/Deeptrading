@@ -49,15 +49,18 @@ _SIG_CACHE: dict = {}
 _SIG_CACHE_MAX = 256
 
 
-def generate_signals(strategy_id: str, params: dict | None, candles: list[EngineCandle]) -> list[dict]:
+def generate_signals(strategy_id: str, params: dict | None, candles: list[EngineCandle],
+                     window: int | None = 400) -> list[dict]:
     # Кэш по (стратегия, параметры, окно данных): drop_useless и основной прогон
     # вызывают одну и ту же генерацию — второй вызов берёт готовое.
     # Ключ ОБЯЗАН включать контентный отпечаток (_data_version): без него разные
     # наборы с тем же (len, first, last) — разные тикеры одной сессии, тесты —
     # отдавали бы чужие сигналы (поймано L2.6: отравление кэша между тестами).
+    # window входит в ключ: Signal Lab (window=None, полная история) не должен
+    # получать закэшированный результат окна 400 — и наоборот.
     try:
         _key = (strategy_id, json.dumps(params or {}, sort_keys=True),
-                _data_version(candles))
+                _data_version(candles), window)
     except Exception:
         _key = None
     if _key is not None and _key in _SIG_CACHE:
@@ -69,8 +72,9 @@ def generate_signals(strategy_id: str, params: dict | None, candles: list[Engine
     for i in range(1, total + 1):
         # окно фиксированного размера: инкрементальные стратегии видят новый бар
         # по одному разу, оконные используют только хвост — результат тот же,
-        # но без O(n^2) копий (зависание на 1min/120д)
-        lo = max(0, i - 400)
+        # но без O(n^2) копий (зависание на 1min/120д).
+        # window=None — Signal Lab: полная история (медленнее на оконных движках).
+        lo = max(0, i - window) if window else 0
         sig = strategy.on_bar(CandleWindow(candles, lo, i))
         if sig is None or i <= warmup:
             continue
@@ -81,6 +85,7 @@ def generate_signals(strategy_id: str, params: dict | None, candles: list[Engine
                 "status": "CANDIDATE",
                 "reason": sig.reason,
                 "features": sig.features,
+                "kind": getattr(sig, "kind", "entry"),
             }
         )
     if _key is not None:

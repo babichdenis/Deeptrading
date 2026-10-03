@@ -15,6 +15,10 @@ from app.models.bot_setting import BotSetting
 from app.models.instrument import Instrument
 from app.models.reports import ReportRow, ReportRun, ReportSlice, ReportTrade
 from app.models.signals import RunDependency, SignalDecision, StrategyRun, StrategySignal
+from app.models.signal_lab import (
+    LabExperimentRun, LabFixedExit, LabMarketOutcome, LabRegimeObservation,
+    LabSignalEvent, LabTrailingResult,
+)
 from app.models.signal_trace import SignalTraceEvent, SignalTraceOutcome, SignalTraceRun
 
 __all__ = [
@@ -42,4 +46,10 @@ __all__ = [
     "SignalDecision",
     "StrategyRun",
     "StrategySignal",
+    "LabExperimentRun",
+    "LabSignalEvent",
+    "LabMarketOutcome",
+    "LabFixedExit",
+    "LabTrailingResult",
+    "LabRegimeObservation",
 ]
