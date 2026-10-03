@@ -4949,45 +4949,46 @@ class PaperBotRuntime:
         batch = _drain(self._persist_queue)
         batch5 = _drain(self._persist_queue_5m)
         log_rows = _drain(self._log_persist_queue)
-        log_rows_backup = list(log_rows)
-        try:
-            _tp0 = _time.perf_counter()
-            sql = _text(
-                "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
-                "VALUES (:f, 1, :ts, :o, :h, :l, :c, :v) "
-                "ON CONFLICT (figi, interval, ts) DO UPDATE SET "
-                "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
-                "close=EXCLUDED.close, volume=EXCLUDED.volume"
-            )
-            sql5 = _text(
-                "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
-                "VALUES (:f, 5, :ts, :o, :h, :l, :c, :v) "
-                "ON CONFLICT (figi, interval, ts) DO UPDATE SET "
-                "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
-                "close=EXCLUDED.close, volume=EXCLUDED.volume"
-            )
-            async with SessionLocal() as db:
-                for f, ts, o, h, l, cl, v in batch:
-                    await db.execute(sql, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
-                for f, ts, o, h, l, cl, v in batch5:
-                    await db.execute(sql5, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
-                await db.commit()
-                try:
-                    from app.services.candle_integrity import invalidate as _inv
-                    for _batch, _iv in ((batch, 1), (batch5, 5)):
-                        _figs = sorted({x[0] for x in _batch})
-                        _days = sorted({(x[1] + timedelta(hours=3)).date() for x in _batch})
-                        if _figs and _days:
-                            await _inv(db, _figs, _iv, _days)
-                except Exception:
-                    pass
-            _pt = (_time.perf_counter() - _tp0) * 1000
-            self.metrics["persist_ms_total"] += _pt
-            self.metrics["persist_ms_n"] += 1
-            if _pt > self.metrics["persist_ms_max"]:
-                self.metrics["persist_ms_max"] = _pt
-            self._persist_flushes += 1
-            if batch or batch5:
+
+        candle_ok = False
+        if batch or batch5:
+            try:
+                _tp0 = _time.perf_counter()
+                sql = _text(
+                    "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
+                    "VALUES (:f, 1, :ts, :o, :h, :l, :c, :v) "
+                    "ON CONFLICT (figi, interval, ts) DO UPDATE SET "
+                    "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
+                    "close=EXCLUDED.close, volume=EXCLUDED.volume"
+                )
+                sql5 = _text(
+                    "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
+                    "VALUES (:f, 5, :ts, :o, :h, :l, :c, :v) "
+                    "ON CONFLICT (figi, interval, ts) DO UPDATE SET "
+                    "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
+                    "close=EXCLUDED.close, volume=EXCLUDED.volume"
+                )
+                async with SessionLocal() as db:
+                    for f, ts, o, h, l, cl, v in batch:
+                        await db.execute(sql, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
+                    for f, ts, o, h, l, cl, v in batch5:
+                        await db.execute(sql5, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
+                    await db.commit()
+                    try:
+                        from app.services.candle_integrity import invalidate as _inv
+                        for _batch, _iv in ((batch, 1), (batch5, 5)):
+                            _figs = sorted({x[0] for x in _batch})
+                            _days = sorted({(x[1] + timedelta(hours=3)).date() for x in _batch})
+                            if _figs and _days:
+                                await _inv(db, _figs, _iv, _days)
+                    except Exception:
+                        pass
+                _pt = (_time.perf_counter() - _tp0) * 1000
+                self.metrics["persist_ms_total"] += _pt
+                self.metrics["persist_ms_n"] += 1
+                if _pt > self.metrics["persist_ms_max"]:
+                    self.metrics["persist_ms_max"] = _pt
+                self._persist_flushes += 1
                 _s = (batch[0] if batch else batch5[0])
                 self._log(
                     f"TECHINFO FLUSH_ITEM f={_s[0][-6:]} ts={_s[1]} "
@@ -4995,18 +4996,21 @@ class PaperBotRuntime:
                     f"q={len(batch)} q5={len(batch5)}",
                     level="debug",
                 )
-            if self._persist_flushes % 10 == 0:
-                self._log(
-                    f"TECHINFO persist ok q={len(batch)} q5={len(batch5)} "
-                    f"flushes={self._persist_flushes}",
-                    level="debug",
-                )
-        except Exception as e:
-            self._log(f"PERSIST_ERR {type(e).__name__}: {str(e)[:80]}")
-            self._persist_queue.extend(batch)
-            self._persist_queue_5m.extend(batch5)
-            self._log_persist_queue.extendleft(reversed(log_rows_backup))
-        if log_rows:
+                if self._persist_flushes % 10 == 0:
+                    self._log(
+                        f"TECHINFO persist ok q={len(batch)} q5={len(batch5)} "
+                        f"flushes={self._persist_flushes}",
+                        level="debug",
+                    )
+                candle_ok = True
+            except Exception as e:
+                self._log(f"PERSIST_ERR {type(e).__name__}: {str(e)[:80]}")
+                self._persist_queue.extend(batch)
+                self._persist_queue_5m.extend(batch5)
+        else:
+            candle_ok = True
+
+        if log_rows and candle_ok:
             try:
                 async with SessionLocal() as db:
                     _payload = [{"level": l, "source": s, "msg": m, "ts": t + "+03:00"}
@@ -5021,7 +5025,9 @@ class PaperBotRuntime:
                     await db.commit()
             except Exception as e:
                 self._log(f"PERSIST_LOG_ERR {type(e).__name__}: {str(e)[:80]}")
-                self._log_persist_queue.extendleft(reversed(log_rows_backup))
+                self._log_persist_queue.extendleft(reversed(log_rows))
+        elif log_rows:
+            self._log_persist_queue.extendleft(reversed(log_rows))
 
     async def _flush_persist(self) -> None:
         while self.running:
@@ -6462,6 +6468,10 @@ class PaperBotRuntime:
         """Process pending order."""
         order = self.pending_orders.pop(figi, None)
         if order is None or order.status == "CANCELLED":
+            return False
+        if order.status == "PENDING_RECONCILIATION":
+            self._log(f"RECONCILIATION: {order.ticker} ждёт сверки, повторная отправка заблокирована")
+            self.pending_orders[figi] = order
             return False
         cfg = self.config
         # Пауза новых входов: НЕ открываем новые позиции из очереди (закрытия/выходы — можно).

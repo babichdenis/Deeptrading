@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -66,6 +67,13 @@ class LiveBroker:
         self._portfolio_ttl = 15.0
         self._portfolio_retries = 6
         self._portfolio_lock = threading.Lock()
+        self._logger = logging.getLogger("app.bot.live_broker")
+
+    def _log(self, msg: str, level: str = "info") -> None:
+        try:
+            getattr(self._logger, level, self._logger.info)(msg)
+        except Exception:
+            pass
 
     def _get_services(self):
         if self._services is None:
