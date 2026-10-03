@@ -56,7 +56,11 @@ def run_signals(cfg: LabConfig, db_url: str | None = None, jobs: int = 3,
                 "strategy_id": strategy_id,
                 "period_from": cfg.period_from, "period_to": cfg.period_to,
                 "warmup_from": cfg.warmup_from,
-                "tfs": cfg.tfs, "tf_seconds": cfg.tf_seconds,
+                # per-engine ТФ (напр. тяжёлые OSE — только 10min); кэш баров
+                # в воркере всегда строит полный all_tfs, чтобы не перечитывать 1m
+                "tfs": list(cfg.engine_tfs.get(strategy_id) or cfg.tfs),
+                "all_tfs": cfg.tfs,
+                "tf_seconds": cfg.tf_seconds,
                 "engines": cfg.engines, "engine_params": cfg.engine_params,
                 "window": cfg.window, "dataset_key": cfg.dataset_key,
             })

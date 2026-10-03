@@ -119,13 +119,14 @@ _WARMUP_CACHE: dict = {}
 
 
 def _get_tf_bars(args: dict, figi: str) -> dict:
-    key = (args["db_url"], figi, args["warmup_from"], args["period_to"], tuple(args["tfs"]))
+    all_tfs = tuple(args.get("all_tfs") or args["tfs"])
+    key = (args["db_url"], figi, args["warmup_from"], args["period_to"], all_tfs)
     hit = _BARS_CACHE.get(key)
     if hit is not None:
         return hit
     eng = engine_sync(args["db_url"])
     bars_1m = load_1m(eng, figi, args["warmup_from"], args["period_to"])
-    tfbars = {tf: build_tf(bars_1m, tf) for tf in args["tfs"]}
+    tfbars = {tf: build_tf(bars_1m, tf) for tf in all_tfs}
     if len(_BARS_CACHE) >= _BARS_CACHE_MAX:
         _BARS_CACHE.pop(next(iter(_BARS_CACHE)))
     _BARS_CACHE[key] = tfbars

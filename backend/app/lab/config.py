@@ -26,6 +26,7 @@ class LabConfig:
     engines: list[str] = field(default_factory=list)   # после раскрытия "*"
     engines_raw: str = "*"
     engine_params: dict = field(default_factory=dict)
+    engine_tfs: dict = field(default_factory=dict)  # движок → ограниченный список ТФ
     window: int | None = 400
     costs: dict = field(default_factory=lambda: {
         "commission_rate": 0.0005, "slippage_bps": 2.0, "qty": 1})
@@ -67,6 +68,7 @@ def load_config(path: str | Path) -> LabConfig:
         tfs=list(data.get("tfs") or ["1min", "5min", "10min"]),
         engines_raw=data.get("engines", "*"),
         engine_params=dict(data.get("engine_params") or {}),
+        engine_tfs=dict(data.get("engine_tfs") or {}),
         window=(None if data.get("window", 400) is None else int(data.get("window", 400))),
         costs=dict(data.get("costs") or {}),
         horizons=[int(h) for h in (data.get("horizons") or [1, 3, 6, 12, 24])],
@@ -101,6 +103,7 @@ def canonical_payload(cfg: LabConfig, code_version: str = "") -> dict:
         "tfs": cfg.tfs,
         "engines": cfg.engines,
         "engine_params": cfg.engine_params,
+        "engine_tfs": cfg.engine_tfs,
         "window": cfg.window,
         "costs": cfg.costs,
         "horizons": cfg.horizons,
