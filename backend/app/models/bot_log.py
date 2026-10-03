@@ -23,5 +23,5 @@ class BotLog(Base):
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     level: Mapped[str] = mapped_column(String(8), nullable=False, default="info")  # debug/info/warn/error
-    source: Mapped[str] = mapped_column(String(16), nullable=False, default="bot")  # bot/replay/parity
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="bot")  # bot/replay/parity
     msg: Mapped[str] = mapped_column(Text, nullable=False)

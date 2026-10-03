@@ -952,6 +952,7 @@ class PaperBotRuntime:
         self._votes: dict[str, dict] = {}  # figi -> {ts, buy, sell, members} голоса на последнем 5m баре
         self._votes_logged: dict[str, str] = {}  # figi -> ts последнего залогированного набора голосов
         self._persist_task: asyncio.Task | None = None
+        self._task_registry: dict[str, asyncio.Task] = {}
         self.log_candles = True
         self._last_candle_log_ts: float = 0.0
         # --- 5m resample cache (trailing stop optimization) ---
@@ -4933,6 +4934,12 @@ class PaperBotRuntime:
         interval = INTERVAL_NAMES[self.config.interval_name]
         return int(getattr(interval, "value", interval))
 
+    def _spawn_task(self, name: str, coro, critical: bool = True) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._task_registry[name] = task
+        task.add_done_callback(lambda t: self._task_registry.pop(name, None))
+        return task
+
     async def _flush_persist_once(self) -> None:
         from sqlalchemy import text as _text
 
@@ -5192,18 +5199,18 @@ class PaperBotRuntime:
         feed.on_log = lambda msg: self._log(msg, level="debug")
         self.feed = feed
         exited = "stream_exhausted"
-        self._persist_task = asyncio.create_task(self._flush_persist())
-        self._held_sync_task = asyncio.create_task(self._sync_held())
-        self._hot_add_task = asyncio.create_task(self._hot_add_universe())
-        self._vol_carousel_task = asyncio.create_task(self._vol_carousel_loop())
-        self._reconcile_task = asyncio.create_task(self._reconcile_loop())
-        self._session_task = asyncio.create_task(self._session_monitor())
-        self._metrics_task = asyncio.create_task(self._metrics_loop())
-        self._intrabar_task = asyncio.create_task(self._intrabar_exit_loop())
-        self._imoex_task = asyncio.create_task(self._imoex_loop())
-        self._queue_task = asyncio.create_task(self._priority_entry_loop())
-        self._momentum_task = asyncio.create_task(self._momentum_loop())
-        self._guard_task = asyncio.create_task(self._portfolio_guard_loop())
+        self._persist_task = self._spawn_task("persist", self._flush_persist())
+        self._held_sync_task = self._spawn_task("held_sync", self._sync_held())
+        self._hot_add_task = self._spawn_task("hot_add", self._hot_add_universe())
+        self._vol_carousel_task = self._spawn_task("vol_carousel", self._vol_carousel_loop())
+        self._reconcile_task = self._spawn_task("reconcile", self._reconcile_loop())
+        self._session_task = self._spawn_task("session", self._session_monitor())
+        self._metrics_task = self._spawn_task("metrics", self._metrics_loop())
+        self._intrabar_task = self._spawn_task("intrabar", self._intrabar_exit_loop())
+        self._imoex_task = self._spawn_task("imoex", self._imoex_loop())
+        self._queue_task = self._spawn_task("queue", self._priority_entry_loop())
+        self._momentum_task = self._spawn_task("momentum", self._momentum_loop())
+        self._guard_task = self._spawn_task("guard", self._portfolio_guard_loop())
         try:
             async for candle in feed.stream():
                 if not self.running:

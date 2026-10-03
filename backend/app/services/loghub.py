@@ -149,6 +149,21 @@ hub = LogHub()
 
 _HANDLER_ATTACHED = False
 
+_REDACT_PATTERNS = [
+    (re.compile(r'(?i)(bearer\s+)[a-z0-9._\-]+'), r'\1[REDACTED]'),
+    (re.compile(r'(?i)(token["\s:=]+)[a-z0-9._\-]{8,}'), r'\1[REDACTED]'),
+    (re.compile(r'(?i)(password["\s:=]+)[^\s,;]{4,}'), r'\1[REDACTED]'),
+    (re.compile(r'(?i)(api[_-]?key["\s:=]+)[a-z0-9._\-]{8,}'), r'\1[REDACTED]'),
+    (re.compile(r'(?i)(secret["\s:=]+)[^\s,;]{4,}'), r'\1[REDACTED]'),
+    (re.compile(r'(?i)(authorization["\s:=]+)[^\s,;]{8,}'), r'\1[REDACTED]'),
+]
+
+
+def _redact(msg: str) -> str:
+    for pattern, repl in _REDACT_PATTERNS:
+        msg = pattern.sub(repl, msg)
+    return msg
+
 
 class HubHandler(logging.Handler):
     """Затаскивает стандартные logging-записи процесса в LogHub (единый контур).
@@ -156,7 +171,8 @@ class HubHandler(logging.Handler):
     - uvicorn.access вырезаем СРАЗУ — HTTP-поллинг каждую секунду иначе
       утонул бы в access-строках;
     - паразитные info-трассировки (t_tech uuid+метод, portfolio_reconc)
-      фильтруем до попадания в UI.
+      фильтруем до попадания в UI;
+    - чувствительные данные (токены, пароли, ключи) редактируются.
     """
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -166,6 +182,7 @@ class HubHandler(logging.Handler):
             msg = record.getMessage()
             if record.exc_info and record.exc_info[1]:
                 msg = f"{msg} -> {type(record.exc_info[1]).__name__}: {record.exc_info[1]}"
+            msg = _redact(msg)
             source = str(record.name)
             level = (record.levelname or "info").lower()
             if _is_noise(source, msg, level):

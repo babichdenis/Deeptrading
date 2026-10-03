@@ -260,6 +260,20 @@ def create_app() -> FastAPI:
                 return JSONResponse(status_code=401,
                                     content={"detail": "unauthorized"})
         return await call_next(request)
+
+    @app.middleware("http")
+    async def _request_id_middleware(request: Request, call_next):
+        import uuid as _uuid
+        from app.bot.runtime import _request_id_ctx
+
+        rid = request.headers.get("x-request-id") or _uuid.uuid4().hex[:12]
+        token = _request_id_ctx.set(rid)
+        try:
+            response = await call_next(request)
+            response.headers["x-request-id"] = rid
+            return response
+        finally:
+            _request_id_ctx.reset(token)
     app.include_router(instruments.router)
     app.include_router(candles.router)
     app.include_router(candlehub.router)
@@ -283,7 +297,19 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health", tags=["system"])
     async def health() -> dict:
-        return {"status": "ok"}
+        from app.bot.runtime import runtime
+
+        return {
+            "status": "ok",
+            "running": bool(getattr(runtime, "running", False)),
+            "starting": bool(getattr(runtime, "starting", False)),
+            "tasks": {
+                "main": bool(getattr(getattr(runtime, "task", None), "done", lambda: True)() is False),
+                "startup": bool(getattr(getattr(runtime, "startup_task", None), "done", lambda: True)() is False),
+                "persist": bool(getattr(getattr(runtime, "_persist_task", None), "done", lambda: True)() is False),
+                "reconcile": bool(getattr(getattr(runtime, "_reconcile_task", None), "done", lambda: True)() is False),
+            },
+        }
 
     return app
 
