@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import time as _time
 import uuid
@@ -9,6 +10,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+_request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="")
 
 from sqlalchemy import select
 
@@ -98,20 +101,49 @@ def _skip_human(s: str) -> str:
 
 
 # --- audit 2026-09-18: тихие except не должны теряться молча ---------------------
-_AUDIT_SWALLOW_SEEN = set()
+_AUDIT_SWALLOW_SEEN: dict[str, dict] = {}
 
 
 def _audit_swallow(where, exc=None):
-    """Логирует проглоченное исключение; 1 раз на место (анти-флуд для бота)."""
-    if where in _AUDIT_SWALLOW_SEEN:
-        return
-    _AUDIT_SWALLOW_SEEN.add(where)
+    """Rate-limited exception recorder по (component, operation, exception_type).
+
+    Первая ошибка — полный traceback; повторы — counter и sampled summary.
+    """
+    import traceback as _tb
+
+    exc_type = type(exc).__name__ if exc is not None else "-"
+    exc_msg = str(exc)[:200] if exc is not None else ""
+    key = f"{where}:{exc_type}:{exc_msg[:80]}"
+
+    rec = _AUDIT_SWALLOW_SEEN.get(key)
+    if rec is None:
+        rec = {
+            "where": where,
+            "exc_type": exc_type,
+            "exc_msg": exc_msg,
+            "count": 0,
+            "first_seen": _time.time(),
+            "last_seen": _time.time(),
+            "traceback": "".join(_tb.format_exception(type(exc), exc, exc.__traceback__)) if exc is not None else "",
+        }
+        _AUDIT_SWALLOW_SEEN[key] = rec
+
+    rec["count"] += 1
+    rec["last_seen"] = _time.time()
+
     try:
         import logging
-        logging.getLogger(__name__).warning('SILENT-EXCEPT %s: %s: %s',
-            where,
-            type(exc).__name__ if exc is not None else "-",
-            str(exc)[:120] if exc is not None else "")
+        logger = logging.getLogger(__name__)
+        if rec["count"] == 1:
+            logger.warning(
+                "SILENT-EXCEPT %s: %s: %s\n%s",
+                where, exc_type, exc_msg, rec["traceback"][:2000]
+            )
+        elif rec["count"] in (10, 100, 1000):
+            logger.warning(
+                "SILENT-EXCEPT %s: %s: %s (count=%d)",
+                where, exc_type, exc_msg, rec["count"]
+            )
     except Exception:
         pass
 
@@ -864,6 +896,7 @@ class PaperBotRuntime:
         # Итог завершённого реплея: виртуальные часы снимаются в _finalize_replay,
         # иначе статус вечно показывал active=true на застывшем проценте.
         self._replay_finished: bool = False
+        self._replay_status: str | None = None  # P1.2: терминальный статус финализации
         self._replay_summary: dict | None = None
         # Расхождения «настройки UI vs пресет» последнего старта (mode=test):
         # пресет главный, но список показывается в UI модалкой сразу после старта.
@@ -2950,7 +2983,7 @@ class PaperBotRuntime:
         if self._replay_from is not None and self._replay_cur is not None:
             _pct = self._replay_progress_pct()
             return {
-                "active": True, "finished": False,
+                "active": True, "finished": False, "status": None,
                 "start": self._replay_from.isoformat(),
                 "end": self._replay_to.isoformat() if self._replay_to else None,
                 "now": self._replay_cur.isoformat(),
@@ -2961,6 +2994,7 @@ class PaperBotRuntime:
         _sum = getattr(self, "_replay_summary", None) or {}
         return {
             "active": False, "finished": bool(getattr(self, "_replay_finished", False)),
+            "status": getattr(self, "_replay_status", None) or (getattr(self, "_replay_summary", None) or {}).get("status"),
             "start": _sum.get("start"), "end": _sum.get("end"), "now": _sum.get("last_ts"),
             "now_msk": _sum.get("last_msk"), "pct": _sum.get("pct"),
             "pace": _pace, "closed": _sum.get("closed"),
@@ -3241,6 +3275,7 @@ class PaperBotRuntime:
         self._replay_cur = None
         self._replay_finished = False
         self._replay_summary = None
+        self._replay_status = None
         if cfg.feed == "replay":
             try:
                 self._replay_from = datetime.fromisoformat(
@@ -3841,9 +3876,9 @@ class PaperBotRuntime:
         # Хвостовые циклы (persist/imoex/queue/…): если _run уже завершился сам,
         # они остаются висеть и блокируют graceful shutdown uvicorn — гасим явно.
         for _attr in ('_persist_task', '_held_sync_task', '_hot_add_task', '_vol_carousel_task',
-                  '_reconcile_task',
-                      '_session_task', '_metrics_task', '_intrabar_task', '_imoex_task',
-                      '_queue_task', '_momentum_task', '_guard_task'):
+                   '_reconcile_task',
+                       '_session_task', '_metrics_task', '_intrabar_task', '_imoex_task',
+                       '_queue_task', '_momentum_task', '_guard_task'):
             _t = getattr(self, _attr, None)
             if _t and not _t.done():
                 _t.cancel()
@@ -3851,6 +3886,10 @@ class PaperBotRuntime:
                     await _t
                 except (asyncio.CancelledError, Exception):
                     pass
+        try:
+            await asyncio.wait_for(self._flush_persist_once(), timeout=5.0)
+        except Exception:
+            pass
         self.startup_task = None
         self.task = None
         self.starting = False
@@ -4894,105 +4933,125 @@ class PaperBotRuntime:
         interval = INTERVAL_NAMES[self.config.interval_name]
         return int(getattr(interval, "value", interval))
 
-    async def _flush_persist(self) -> None:
+    async def _flush_persist_once(self) -> None:
         from sqlalchemy import text as _text
 
         def _drain(q: deque) -> list:
             return [q.popleft() for _ in range(len(q))]
 
+        batch = _drain(self._persist_queue)
+        batch5 = _drain(self._persist_queue_5m)
+        log_rows = _drain(self._log_persist_queue)
+        log_rows_backup = list(log_rows)
+        try:
+            _tp0 = _time.perf_counter()
+            sql = _text(
+                "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
+                "VALUES (:f, 1, :ts, :o, :h, :l, :c, :v) "
+                "ON CONFLICT (figi, interval, ts) DO UPDATE SET "
+                "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
+                "close=EXCLUDED.close, volume=EXCLUDED.volume"
+            )
+            sql5 = _text(
+                "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
+                "VALUES (:f, 5, :ts, :o, :h, :l, :c, :v) "
+                "ON CONFLICT (figi, interval, ts) DO UPDATE SET "
+                "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
+                "close=EXCLUDED.close, volume=EXCLUDED.volume"
+            )
+            async with SessionLocal() as db:
+                for f, ts, o, h, l, cl, v in batch:
+                    await db.execute(sql, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
+                for f, ts, o, h, l, cl, v in batch5:
+                    await db.execute(sql5, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
+                await db.commit()
+                try:
+                    from app.services.candle_integrity import invalidate as _inv
+                    for _batch, _iv in ((batch, 1), (batch5, 5)):
+                        _figs = sorted({x[0] for x in _batch})
+                        _days = sorted({(x[1] + timedelta(hours=3)).date() for x in _batch})
+                        if _figs and _days:
+                            await _inv(db, _figs, _iv, _days)
+                except Exception:
+                    pass
+            _pt = (_time.perf_counter() - _tp0) * 1000
+            self.metrics["persist_ms_total"] += _pt
+            self.metrics["persist_ms_n"] += 1
+            if _pt > self.metrics["persist_ms_max"]:
+                self.metrics["persist_ms_max"] = _pt
+            self._persist_flushes += 1
+            if batch or batch5:
+                _s = (batch[0] if batch else batch5[0])
+                self._log(
+                    f"TECHINFO FLUSH_ITEM f={_s[0][-6:]} ts={_s[1]} "
+                    f"iv={1 if batch else 5} flushes={self._persist_flushes} "
+                    f"q={len(batch)} q5={len(batch5)}",
+                    level="debug",
+                )
+            if self._persist_flushes % 10 == 0:
+                self._log(
+                    f"TECHINFO persist ok q={len(batch)} q5={len(batch5)} "
+                    f"flushes={self._persist_flushes}",
+                    level="debug",
+                )
+        except Exception as e:
+            self._log(f"PERSIST_ERR {type(e).__name__}: {str(e)[:80]}")
+            self._persist_queue.extend(batch)
+            self._persist_queue_5m.extend(batch5)
+            self._log_persist_queue.extendleft(reversed(log_rows_backup))
+        if log_rows:
+            try:
+                async with SessionLocal() as db:
+                    _payload = [{"level": l, "source": s, "msg": m, "ts": t + "+03:00"}
+                                for (l, s, m, t) in log_rows]
+                    await db.execute(
+                        _text(
+                            "INSERT INTO bot_logs (level, source, ts, msg) "
+                            "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, ts timestamptz, msg text)"
+                        ),
+                        {"rows": json.dumps(_payload, ensure_ascii=False)},
+                    )
+                    await db.commit()
+            except Exception as e:
+                self._log(f"PERSIST_LOG_ERR {type(e).__name__}: {str(e)[:80]}")
+                self._log_persist_queue.extendleft(reversed(log_rows_backup))
+
+    async def _flush_persist(self) -> None:
         while self.running:
             await asyncio.sleep(3.0)
             if (not self._persist_queue and not self._persist_queue_5m
                     and not self._log_persist_queue):
                 continue
-            batch = _drain(self._persist_queue)
-            batch5 = _drain(self._persist_queue_5m)
-            # Логи дреним ВСЕГДА (раньше: если свечей нет — continue, и логи не писались;
-            # при ошибке вставки свечей — тоже). Теперь пишем отдельной транзакцией.
-            log_rows = _drain(self._log_persist_queue)
-            try:
-                _tp0 = _time.perf_counter()
-                sql = _text(
-                    "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
-                    "VALUES (:f, 1, :ts, :o, :h, :l, :c, :v) "
-                    "ON CONFLICT (figi, interval, ts) DO UPDATE SET "
-                    "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
-                    "close=EXCLUDED.close, volume=EXCLUDED.volume"
-                )
-                sql5 = _text(
-                    "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
-                    "VALUES (:f, 5, :ts, :o, :h, :l, :c, :v) "
-                    "ON CONFLICT (figi, interval, ts) DO UPDATE SET "
-                    "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
-                    "close=EXCLUDED.close, volume=EXCLUDED.volume"
-                )
-                async with SessionLocal() as db:
-                    for f, ts, o, h, l, cl, v in batch:
-                        await db.execute(sql, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
-                    for f, ts, o, h, l, cl, v in batch5:
-                        await db.execute(sql5, {"f": f, "ts": ts, "o": o, "h": h, "l": l, "c": cl, "v": v})
-                    await db.commit()
-                    # Watchdog: изменённые минутки инвалидируют baseline затронутых дней
-                    try:
-                        from app.services.candle_integrity import invalidate as _inv
-                        for _batch, _iv in ((batch, 1), (batch5, 5)):
-                            _figs = sorted({x[0] for x in _batch})
-                            _days = sorted({(x[1] + timedelta(hours=3)).date() for x in _batch})
-                            if _figs and _days:
-                                await _inv(db, _figs, _iv, _days)
-                    except Exception:
-                        pass
-                _pt = (_time.perf_counter() - _tp0) * 1000
-                self.metrics["persist_ms_total"] += _pt
-                self.metrics["persist_ms_n"] += 1
-                if _pt > self.metrics["persist_ms_max"]:
-                    self.metrics["persist_ms_max"] = _pt
-                self._persist_flushes += 1
-                if batch or batch5:
-                    _s = (batch[0] if batch else batch5[0])
-                    self._log(
-                        f"TECHINFO FLUSH_ITEM f={_s[0][-6:]} ts={_s[1]} "
-                        f"iv={1 if batch else 5} flushes={self._persist_flushes} "
-                        f"q={len(batch)} q5={len(batch5)}",
-                        level="debug",
-                    )
-                if self._persist_flushes % 10 == 0:
-                    self._log(
-                        f"TECHINFO persist ok q={len(batch)} q5={len(batch5)} "
-                        f"flushes={self._persist_flushes}",
-                        level="debug",
-                    )
-            except Exception as e:
-                self._log(f"PERSIST_ERR {type(e).__name__}: {str(e)[:80]}")
-                # Вернуть данные обратно в очередь, чтобы не потерять
-                self._persist_queue.extend(batch)
-                self._persist_queue_5m.extend(batch5)
-            # Логи — своей транзакцией: ошибка свечей их больше не блокирует.
-            if log_rows:
-                try:
-                    async with SessionLocal() as db:
-                        _payload = [{"level": l, "source": s, "msg": m, "ts": t + "+03:00"}
-                                    for (l, s, m, t) in log_rows]
-                        await db.execute(
-                            _text(
-                                "INSERT INTO bot_logs (level, source, ts, msg) "
-                                "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, ts timestamptz, msg text)"
-                            ),
-                            {"rows": json.dumps(_payload, ensure_ascii=False)},
-                        )
-                        await db.commit()
-                except Exception as e:
-                    self._log(f"PERSIST_LOG_ERR {type(e).__name__}: {str(e)[:80]}")
+            await self._flush_persist_once()
 
-    async def _finalize_replay(self) -> None:
+    async def _finalize_replay(self, exited: str = "stream_exhausted") -> None:
         """Финал реплея: открытые позиции закрываются по последним ценам свечей
-        (replay_end_close), прогон фиксируется в bot_test_runs. Раньше тест
-        «зависал» с открытыми сделками и без итогов в /bot/tests."""
+        (replay_end_close), прогон фиксируется в bot_test_runs с терминальным
+        статусом. Раньше тест «зависал» с открытыми сделками и без итогов в
+        /bot/tests, а аварийный/прерванный прогон выглядел как успешный (P1.2).
+
+        Статусы: COMPLETED — нормальное исчерпание стрима и успешная финализация;
+        CANCELLED — ручная остановка/отмена; FAILED — исключение processing loop;
+        PARTIAL_CLOSE — стрим дошёл до конца, но часть позиций закрыть не удалось.
+        finished/finished_at — только для COMPLETED; незакрытые позиции не теряют
+        held-state (повтор/реверс возможны); повторный вызов — no-op.
+        """
+        if getattr(self, "_replay_status", None):
+            self._log(f"REPLAY FINALIZE: повторный вызов пропущен (статус {self._replay_status})")
+            return
+        if exited.startswith("exception:"):
+            _status = "FAILED"
+        elif exited in ("cancelled", "running_flag_false"):
+            _status = "CANCELLED"
+        else:
+            _status = "COMPLETED"
+        _positions_ok = True
         try:
             _pos_list = list(await self.broker.positions())
         except Exception as _sw_e:
             _audit_swallow('_finalize_replay@positions', _sw_e)
             _pos_list = []
+            _positions_ok = False
         _prices: dict = {}
         try:
             _lp = getattr(self.broker, "last_prices", None)
@@ -5002,12 +5061,17 @@ class PaperBotRuntime:
             _audit_swallow('_finalize_replay@prices', _sw_e)
             _prices = {}
         _closed = 0
+        _close_errors: list[str] = []
         for _p in _pos_list:
             try:
                 _px = float(_prices.get(_p.figi) or float(_p.entry_price or 0.0))
                 _trade = await self.broker.close_position(_p.figi, _px, "replay_end_close")
                 if _trade is None:
+                    _close_errors.append(f"{_p.figi}: close_position() -> None")
                     continue
+                # Успешно закрытое уходит из held-state; незакрытое остаётся (P1.2).
+                self._held.discard(_p.figi)
+                self._exit_plans.pop(_p.figi, None)
                 _closed += 1
                 await self._st_close(_p.figi, float(_trade.exit_price), reason="replay_end_close",
                                      net=float(_trade.net_pnl))
@@ -5024,8 +5088,13 @@ class PaperBotRuntime:
                         pass
             except Exception as _sw_e:
                 _audit_swallow('_finalize_replay@close', _sw_e)
-        self._held.clear()
-        self._exit_plans.clear()
+                _close_errors.append(f"{_p.figi}: {type(_sw_e).__name__}: {str(_sw_e)[:80]}")
+        if not _positions_ok:
+            _close_errors.append("positions(): портфель недоступен")
+        # Незакрытое = всё, что осталось в held-state (успешные закрытия удалены выше).
+        _remaining = sorted(self._held)
+        if _status == "COMPLETED" and (_close_errors or _remaining):
+            _status = "PARTIAL_CLOSE"
         # Итог прогона — до снятия виртуальных часов (процент считается по ним),
         # иначе статус остаётся active=true на застывшем проценте навсегда.
         _last_msk = None
@@ -5036,6 +5105,9 @@ class PaperBotRuntime:
             _audit_swallow('_finalize_replay@msk', _sw_e)  # audit silent-except
         self._replay_summary = {
             "closed": _closed,
+            "status": _status,
+            "remaining_positions": _remaining,
+            "close_errors": _close_errors[:10],
             "start": self._replay_from.isoformat() if self._replay_from else None,
             "end": self._replay_to.isoformat() if self._replay_to else None,
             "last_ts": self._replay_cur.isoformat() if self._replay_cur else None,
@@ -5043,7 +5115,9 @@ class PaperBotRuntime:
             "pct": self._replay_progress_pct(),
             "test_name": str(getattr(self.config, "test_name", "") or ""),
         }
-        self._replay_finished = True
+        self._replay_status = _status
+        # finished=true — только для нормального исчерпания и успешной финализации.
+        self._replay_finished = _status == "COMPLETED"
         self._replay_from = None
         self._replay_cur = None
         if getattr(self.config, "test_name", ""):
@@ -5056,14 +5130,24 @@ class PaperBotRuntime:
                     await db.execute(_btr_text2(
                         "ALTER TABLE bot_test_runs ADD COLUMN IF NOT EXISTS closed_replay INT DEFAULT 0"))
                     await db.execute(_btr_text2(
-                        "UPDATE bot_test_runs SET updated_at = now(), finished_at = now(), "
-                        "closed_replay = :c WHERE name = :n"
-                    ), {"n": self.config.test_name, "c": int(_closed)})
+                        "ALTER TABLE bot_test_runs ADD COLUMN IF NOT EXISTS status VARCHAR(16)"))
+                    # finished_at — только для COMPLETED: аварийный прогон не должен
+                    # выглядеть завершённым.
+                    _fin_sql = "now()" if _status == "COMPLETED" else "NULL"
+                    await db.execute(_btr_text2(
+                        "UPDATE bot_test_runs SET updated_at = now(), finished_at = " + _fin_sql +
+                        ", closed_replay = :c, status = :st WHERE name = :n"
+                    ), {"n": self.config.test_name, "c": int(_closed), "st": _status})
                     await db.commit()
             except Exception as _sw_e:
                 _audit_swallow('_finalize_replay@test_run', _sw_e)
-        self._log(f"REPLAY ЗАВЕРШЁН: закрыто {_closed} поз. по последним ценам (итоги в /bot/tests)")
-        await self._close_trace("replay_finished")
+        _tail = ""
+        if _remaining:
+            _shown = ",".join(f[-6:] for f in _remaining[:5])
+            _tail = f", НЕ закрыто {len(_remaining)}: {_shown}"
+        self._log(f"REPLAY {_status}: закрыто {_closed} поз. по последним ценам"
+                  f"{_tail} (итоги в /bot/tests)")
+        await self._close_trace(f"replay_{_status.lower()}")
 
     async def _run(self) -> None:
         # Feed = источник СВЕЧЕЙ: всегда боевой токен + основной API, потому что
@@ -5160,7 +5244,7 @@ class PaperBotRuntime:
             # Реплей: финализация — закрыть открытые поз., зафиксировать прогон.
             if getattr(self.config, "feed", "") == "replay":
                 try:
-                    await self._finalize_replay()
+                    await self._finalize_replay(exited)
                 except Exception as _sw_e:
                     _audit_swallow('_run@finalize_replay', _sw_e)
             if self._persist_task:
@@ -6442,6 +6526,13 @@ class PaperBotRuntime:
                     except Exception:
                         pass
                 return False
+            if trade is None:
+                order.status = "PENDING_RECONCILIATION"
+                self.pending_orders[figi] = order
+                self._log(f"⛔ ЗАКРЫТИЕ НЕ ПОДТВЕРЖДЕНО {order.ticker}: ждём reconciliation")
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi, ticker=order.ticker,
+                                order_id=order.id, action="close", reason="unknown_broker_result")
+                return False
             actual_exit = price_from_trade(trade) if trade else c.open
             order.status = "FILLED"
             order.filled_at = datetime.now(timezone.utc)
@@ -6552,6 +6643,13 @@ class PaperBotRuntime:
                                      "broker_reject", f"{type(_e).__name__}: {str(_e)[:140]}",
                                      error={"type": type(_e).__name__, "message": str(_e)[:200]},
                                      ts_bar=getattr(c, "ts", None))
+            return False
+        if actual_entry is None:
+            order.status = "PENDING_RECONCILIATION"
+            self.pending_orders[figi] = order
+            self._log(f"⛔ ВХОД НЕ ПОДТВЕРЖДЁН {order.ticker} {order.side}: ждём reconciliation")
+            self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi, ticker=order.ticker,
+                            order_id=order.id, action="open", reason="unknown_broker_result")
             return False
         entry_px = actual_entry if actual_entry and actual_entry > 0 else c.open
         order.status = "FILLED"

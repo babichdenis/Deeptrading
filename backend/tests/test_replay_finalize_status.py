@@ -1,6 +1,7 @@
 """Финал реплея: статус перестаёт вечно показывать active=true (хвост 98.84%)."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -84,5 +85,148 @@ def test_fresh_start_resets_finished_flags():
     rt._replay_finished = False
     rt._replay_summary = None
     d = rt._replay_status_dict()
-    assert d == {"active": False, "finished": False, "start": None, "end": None,
-                 "now": None, "now_msk": None, "pct": None, "pace": "fast", "closed": None}
+    assert d == {"active": False, "finished": False, "status": None, "start": None,
+                 "end": None, "now": None, "now_msk": None, "pct": None,
+                 "pace": "fast", "closed": None}
+
+
+# ---------------------------------------------------------------------------
+# P1.2: терминальные статусы финализации (COMPLETED/CANCELLED/FAILED/PARTIAL_CLOSE)
+# ---------------------------------------------------------------------------
+
+
+class _FakeBroker:
+    """Мини-брокер: позиции, цены и управляемые исходы close_position."""
+
+    def __init__(self, positions=(), closes=None, positions_fail=False):
+        self._positions = list(positions)
+        self._closes = dict(closes or {})
+        self._positions_fail = positions_fail
+        self.closed: list[str] = []
+
+    async def positions(self):
+        if self._positions_fail:
+            raise RuntimeError("portfolio unavailable")
+        return list(self._positions)
+
+    async def last_prices(self, figis):
+        return {f: 123.4 for f in figis}
+
+    async def close_position(self, figi, price, reason):
+        self.closed.append(figi)
+        mode = self._closes.get(figi, "ok")
+        if mode == "fail":
+            raise RuntimeError("order rejected")
+        if mode == "none":
+            return None
+        return SimpleNamespace(exit_price=price, net_pnl=7.5)
+
+
+def _pos(figi: str) -> SimpleNamespace:
+    return SimpleNamespace(figi=figi, entry_price=100.0, ticker=figi, qty=1)
+
+
+def _rt_finalize(broker, *, held=()):
+    rt = PaperBotRuntime.__new__(PaperBotRuntime)
+    rt.config = SimpleNamespace(feed="replay", replay_pace="fast",
+                                replay_start="2026-09-01T04:00:00Z",
+                                replay_end="2026-09-05T21:59:00Z", test_name="")
+    rt.mode = "test:t1"
+    rt.started_at = datetime(2026, 10, 1, 21, 15, tzinfo=_UTC)
+    rt._replay_from = datetime(2026, 9, 1, 4, 0, tzinfo=_UTC)
+    rt._replay_to = datetime(2026, 9, 5, 21, 59, tzinfo=_UTC)
+    rt._replay_cur = datetime(2026, 9, 5, 20, 50, tzinfo=_UTC)
+    rt._replay_finished = False
+    rt._replay_status = None
+    rt._replay_summary = None
+    rt._held = set(held)
+    rt._exit_plans = {f: object() for f in held}
+    rt.broker = broker
+    rt._trace = None
+    logs: list[str] = []
+
+    def _log(msg, *a, **k):
+        logs.append(str(msg))
+
+    rt._log = _log
+
+    async def _st_close(*a, **k):
+        return None
+
+    rt._st_close = _st_close
+    return rt
+
+
+def test_normal_exhaustion_is_completed_and_cleans_held():
+    broker = _FakeBroker(positions=[_pos("F1"), _pos("F2")])
+    rt = _rt_finalize(broker, held=("F1", "F2"))
+    asyncio.run(rt._finalize_replay("stream_exhausted"))
+    assert rt._replay_status == "COMPLETED"
+    assert rt._replay_finished is True
+    assert rt._replay_summary["closed"] == 2
+    assert rt._replay_summary["remaining_positions"] == []
+    assert rt._held == set() and rt._exit_plans == {}
+    assert broker.closed == ["F1", "F2"]
+    assert rt._replay_status_dict()["status"] == "COMPLETED"
+
+
+def test_manual_stop_is_cancelled_not_finished():
+    broker = _FakeBroker(positions=[_pos("F1")])
+    rt = _rt_finalize(broker, held=("F1",))
+    asyncio.run(rt._finalize_replay("running_flag_false"))
+    assert rt._replay_status == "CANCELLED"
+    assert rt._replay_finished is False
+    assert rt._replay_summary["closed"] == 1          # закрытие всё равно пытались сделать
+    d = rt._replay_status_dict()
+    assert d["finished"] is False and d["status"] == "CANCELLED"
+
+
+def test_processing_exception_marks_failed():
+    broker = _FakeBroker()
+    rt = _rt_finalize(broker)
+    asyncio.run(rt._finalize_replay("exception: boom"))
+    assert rt._replay_status == "FAILED"
+    assert rt._replay_finished is False
+
+
+def test_close_failure_keeps_held_state_and_marks_partial():
+    broker = _FakeBroker(positions=[_pos("F1"), _pos("F2")], closes={"F2": "fail"})
+    rt = _rt_finalize(broker, held=("F1", "F2"))
+    asyncio.run(rt._finalize_replay("stream_exhausted"))
+    assert rt._replay_status == "PARTIAL_CLOSE"
+    assert rt._replay_finished is False
+    assert rt._replay_summary["closed"] == 1
+    assert rt._replay_summary["remaining_positions"] == ["F2"]
+    assert rt._held == {"F2"}                          # незакрытое НЕ теряет held-state
+    assert "F2" in rt._exit_plans
+    assert rt._replay_summary["close_errors"]
+    assert "F2" in rt._replay_summary["close_errors"][0]
+
+
+def test_close_none_result_counts_as_remaining():
+    broker = _FakeBroker(positions=[_pos("F1")], closes={"F1": "none"})
+    rt = _rt_finalize(broker, held=("F1",))
+    asyncio.run(rt._finalize_replay("stream_exhausted"))
+    assert rt._replay_status == "PARTIAL_CLOSE"
+    assert rt._replay_summary["remaining_positions"] == ["F1"]
+    assert rt._held == {"F1"}
+
+
+def test_positions_fetch_failure_blocks_completed():
+    broker = _FakeBroker(positions_fail=True)
+    rt = _rt_finalize(broker, held=("F9",))
+    asyncio.run(rt._finalize_replay("stream_exhausted"))
+    assert rt._replay_status == "PARTIAL_CLOSE"        # неизвестный портфель ≠ успешный финал
+    assert rt._replay_summary["remaining_positions"] == ["F9"]
+    assert any("positions" in e for e in rt._replay_summary["close_errors"])
+
+
+def test_double_finalize_is_idempotent():
+    broker = _FakeBroker(positions=[_pos("F1")])
+    rt = _rt_finalize(broker, held=("F1",))
+    asyncio.run(rt._finalize_replay("stream_exhausted"))
+    snapshot = dict(rt._replay_summary)
+    asyncio.run(rt._finalize_replay("stream_exhausted"))
+    assert broker.closed == ["F1"]                     # второй вызов не пере-закрывает
+    assert dict(rt._replay_summary) == snapshot
+    assert rt._replay_status == "COMPLETED"
