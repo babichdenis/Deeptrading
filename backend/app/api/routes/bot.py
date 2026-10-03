@@ -160,7 +160,7 @@ def _get_sandbox_broker():
     return _sandbox_broker
 from app.database import get_db, SessionLocal
 from app.engine.strategies import ParamValidationError, build_strategy
-from app.models.paper import PaperAccount, PaperPosition, PaperTrade
+from app.models.paper import PaperPosition
 
 router = APIRouter(prefix="/api/v1/bot", tags=["bot"])
 
@@ -992,7 +992,6 @@ def _write_env_mode(mode: str, env_path: str = "") -> None:
     ensemble_config.test.<variant>.json брать) — это ops-ручка, её задаёт не UI.
     env_path — только для тестов.
     """
-    import os
     from pathlib import Path
     path = Path(env_path) if env_path else Path(__file__).resolve().parents[3] / ".env"
     migrated = ("BOT_TEST_NAME", "BOT_TEST_START", "BOT_TEST_END",
@@ -1348,7 +1347,6 @@ async def bot_ai_trade(req: AiTradeRequest) -> dict:
     Стакан (spread/imbalance) — общий гейт движка (STAGE S) для всех входов:
       entry_ob_imbalance_max / entry_ob_spread_max.
     """
-    import asyncio as _aio
     ticker = str(req.ticker or "").strip().upper()
     figi = next((u.get("figi") for u in (runtime.universe or [])
                  if str(u.get("ticker", "")).upper() == ticker), None)
@@ -1562,7 +1560,7 @@ async def bot_close_position(figi: str) -> dict:
         cur = _q(sip.current_price)
         lb = _get_sandbox_broker()
         try:
-            trade = await lb.close_position(figi, cur, "manual_close")
+            await lb.close_position(figi, cur, "manual_close")
         except Exception as e:
             raise HTTPException(502, f"ошибка закрытия: {e}")
         runtime._held.discard(figi)
@@ -1572,7 +1570,7 @@ async def bot_close_position(figi: str) -> dict:
     buf = runtime.buffers.get(bbg) or runtime.buffers.get(figi)
     price = float(buf[-1].close) if buf else float(pos.entry_price)
     try:
-        trade = await runtime.broker.close_position(figi, price, "manual_close")
+        await runtime.broker.close_position(figi, price, "manual_close")
     except Exception as e:
         raise HTTPException(502, f"ошибка закрытия: {e}")
     runtime._held.discard(figi)
@@ -1971,7 +1969,7 @@ async def bot_orderbook(figi: str, depth: int = 10) -> dict:
 @router.get("/trading_status")
 async def bot_trading_status() -> dict:
     """Возвращает реальный торговый статус MOEX через market_data.get_trading_status."""
-    from t_tech.invest import Client, SecurityTradingStatus
+    from t_tech.invest import Client
     from app.config import get_settings
     _s = get_settings()
     TOKEN = _s.get_token(_s.bot_mode)

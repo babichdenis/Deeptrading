@@ -7,7 +7,6 @@
 - data gaps (Brent/Gold/USD-RUB) отражены;
 - lead-lag для IMOEX/risk: lag0 есть, лаги корректны.
 """
-import csv
 import json
 import os
 

@@ -43,23 +43,46 @@ jobs:
           python-version: "3.11"
       - name: Install ruff
         run: pip install "ruff>=0.9,<1"
-      - name: Diff changed Python files vs origin/master
+      - name: Diff changed Python files
+        # P0.1 (аудит 2026-10-03): на push в master origin/master уже указывает на
+        # HEAD, старый BASE==HEAD давал пустой diff — job зелёный без проверки.
+        # Теперь: PR — merge-base с base.sha; push — github.event.before; фолбэк HEAD~1.
         id: changed
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          BASE=$(git rev-parse --verify origin/master 2>/dev/null || git rev-parse HEAD~1)
-          git fetch --no-tags --depth=1 origin "$BASE" 2>/dev/null || true
-          {
-            echo "base=$BASE"
-            git diff --name-only "$BASE"...HEAD -- '*.py' || true
-          } >> "$GITHUB_OUTPUT"
-          echo "Changed py files:"; cat "$GITHUB_OUTPUT" | grep -v '^base=' || echo "  (none)"
+          set -euo pipefail
+          ZERO=0000000000000000000000000000000000000000
+          if [ -n "$PR_BASE_SHA" ] && [ "$PR_BASE_SHA" != "$ZERO" ]; then
+            # PR: merge-base, чтобы diff не тащил чужие коммиты из ветки
+            BASE=$(git merge-base "$PR_BASE_SHA" HEAD)
+          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "$ZERO" ] && git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+            # Прямой push: вершина, бывшая до события
+            BASE="$PUSH_BEFORE"
+          elif git rev-parse HEAD~1 >/dev/null 2>&1;
+          then
+            # initial push / отсутствующий before: родитель HEAD
+            BASE=$(git rev-parse HEAD~1)
+          else
+            # единственный коммит в истории — проверять нечего
+            BASE=""
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          if [ -z "$BASE" ]; then
+            : > /tmp/changed_py.nul
+            echo "No base to diff against — nothing to check"
+          else
+            git diff --name-only -z "$BASE...HEAD" -- '*.py' | sed -z 's|^backend/||' > /tmp/changed_py.nul
+            echo "Changed py files:"
+            tr '\0' '\n' < /tmp/changed_py.nul
+          fi
       - name: Blocking ruff on changed files
         if: steps.changed.outputs.base != ''
         run: |
-          FILES=$(git diff --name-only "${{ steps.changed.outputs.base }}...HEAD" -- '*.py' | sed 's|^backend/||' | grep -v '^$' || true)
-          if [ -z "$FILES" ]; then echo "No changed Python files — skip"; exit 0; fi
-          echo "$FILES"
-          python -m ruff check --select F,E9 --isolated $FILES
+          # NUL-delimited: пути с пробелами/спецсимволами не ломаются на word splitting
+          if [ ! -s /tmp/changed_py.nul ]; then echo "No changed Python files — skip"; exit 0; fi
+          xargs -0 -r python -m ruff check --select F,E9 --isolated < /tmp/changed_py.nul
 
   test:
     runs-on: ubuntu-latest

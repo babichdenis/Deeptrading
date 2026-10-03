@@ -82,7 +82,6 @@ def insert_signals(eng, run_id: str, rows: list[dict], chunk: int = 2000) -> int
         "params_hash", "tf", "tf_seconds", "bar_ts", "bar_close_ts", "side", "kind",
         "reason", "features", "path_status",
     }
-    now = _now()
     with eng.begin() as c:
         for i in range(0, len(rows), chunk):
             part = rows[i:i + chunk]

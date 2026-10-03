@@ -52,4 +52,9 @@ __all__ = [
     "LabFixedExit",
     "LabTrailingResult",
     "LabRegimeObservation",
+    "CandleIntegrity",
+    "BotLog",
+    "SignalTraceEvent",
+    "SignalTraceOutcome",
+    "SignalTraceRun",
 ]
