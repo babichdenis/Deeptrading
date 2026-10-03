@@ -5039,13 +5039,25 @@ class PaperBotRuntime:
                 async with SessionLocal() as db:
                     _payload = [{"level": l, "source": s, "msg": m, "ts": t + "+03:00", "request_id": rid or None}
                                 for (l, s, m, t) in log_rows]
-                    await db.execute(
-                        _text(
-                            "INSERT INTO bot_logs (level, source, ts, msg, request_id) "
-                            "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, ts timestamptz, msg text, request_id text)"
-                        ),
-                        {"rows": json.dumps(_payload, ensure_ascii=False)},
-                    )
+                    try:
+                        await db.execute(
+                            _text(
+                                "INSERT INTO bot_logs (level, source, ts, msg, request_id) "
+                                "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, ts timestamptz, msg text, request_id text)"
+                            ),
+                            {"rows": json.dumps(_payload, ensure_ascii=False)},
+                        )
+                    except Exception:
+                        await db.rollback()
+                        _payload = [{"level": l, "source": s[:64], "msg": m, "ts": t + "+03:00"}
+                                    for (l, s, m, t) in log_rows]
+                        await db.execute(
+                            _text(
+                                "INSERT INTO bot_logs (level, source, ts, msg) "
+                                "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, ts timestamptz, msg text)"
+                            ),
+                            {"rows": json.dumps(_payload, ensure_ascii=False)},
+                        )
                     await db.commit()
             except Exception as e:
                 self._log(f"PERSIST_LOG_ERR {type(e).__name__}: {str(e)[:80]}")
