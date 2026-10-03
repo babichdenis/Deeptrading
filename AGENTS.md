@@ -13,7 +13,7 @@
 
 | Машина | IP | Роль |
 |---|---|---|
-| MacBook «код» | 192.168.1.6 | Здесь правим код (opencode); в старых документах числился как .7 |
+| MacBook «код» | 192.168.1.6 | opencode-сессии; сам проект (код/git/бэк/фронт/БД) — на .7, доступ через SMB-шару |
 | MacBook «сервер» | 192.168.1.7 | FastAPI backend + Vite frontend + git (бывший .3) |
 | **БД (Postgres 16, Docker)** | **192.168.1.7 (сервер)** | **БД живёт на сервере: `deeptrading:deeptrading@192.168.1.7:5432/deeptrading`, доступна со всех машин. Старый адрес был `192.168.1.2` — больше не работает. Локальный dev-PG14 на маке-коде (`127.0.0.1:5432`) — песочница, не источник.** |
 | Windows-раннер | 192.168.1.8 | живой бот/таски (`uvicorn_test`), ssh `nadts@192.168.1.8` (бывший .2); :8000 после ребута не поднимался |
@@ -23,8 +23,8 @@
 - НЕ устанавливать node_modules/venv на сетевой диск с этой машины (SMB бьёт тысячи мелких файлов).
   - venv Python: `~/.venvs/deeptrading` (локально на каждой машине свой)
   - npm install запускать только на машине, где диск локальный
-- Код правим здесь — он сразу виден на .3; фронт перезагружается сам (HMR),
-  бэк запущен с --reload.
+- Код правим через SMB-шару — он сразу на .7; фронт перезагружается сам (HMR),
+  бэк запущен с --reload (на .7).
 
 ## Стек
 
@@ -35,7 +35,7 @@
 ## Команды
 
 ```bash
-# Backend (на .3 или локально для отладки)
+# Backend (на .7 или локально для отладки)
 cd backend && zsh dev.sh            # venv + uvicorn --reload на :8000
 # локальный запуск из macOS:
 ~/.venvs/deeptrading/bin/uvicorn app.main:app --reload   # из папки backend/
@@ -43,7 +43,7 @@ cd backend && zsh dev.sh            # venv + uvicorn --reload на :8000
 # Тесты движка (golden scenarios)
 cd backend && ~/.venvs/deeptrading/bin/python -m pytest tests -q
 
-# Frontend (на .3)
+# Frontend (на .7)
 cd frontend && npm install && npm run dev    # :5173
 BACKEND_URL=http://<ip>:8000 npm run dev     # если бэк не локальный
 ```
@@ -59,7 +59,7 @@ sshpass -p 0987 ssh -o StrictHostKeyChecking=no nadts@192.168.1.8 \
   "powershell -NoProfile -Command \"Get-CimInstance Win32_Process -Filter \\\"Name='python.exe' AND CommandLine LIKE '%uvicorn%'\\\" | ForEach-Object { Stop-Process -Id \\\$_.ProcessId -Force -ErrorAction SilentlyContinue }; cmd /c schtasks /run /tn uvicorn_test\""
 # После рестарта wait ~20с и проверка: curl http://192.168.1.8:8000/api/v1/bot/status (running=true)
 # (сейчас :8000 отвечает на сервере .7 — там подняты параллельные дев-бэкенды)
-# Vite на .2: таск `vitebot` (Не убивать kill — респавнится).
+# Vite на .8: таск `vitebot` (Не убивать kill — респавнится).
 # Логи: /bot/logs держит ~300 записей (кольцо); история большего срока — из БД.
 ```
 
