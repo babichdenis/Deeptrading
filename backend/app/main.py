@@ -299,8 +299,15 @@ def create_app() -> FastAPI:
     async def health() -> dict:
         from app.bot.runtime import runtime
 
+        task_errors = getattr(runtime, "_task_errors", {})
+        critical_dead = any(
+            err.get("count", 0) > 0
+            for name, err in task_errors.items()
+            if name in ("persist", "reconcile", "main")
+        )
+
         return {
-            "status": "ok",
+            "status": "degraded" if critical_dead else "ok",
             "running": bool(getattr(runtime, "running", False)),
             "starting": bool(getattr(runtime, "starting", False)),
             "tasks": {
@@ -309,6 +316,50 @@ def create_app() -> FastAPI:
                 "persist": bool(getattr(getattr(runtime, "_persist_task", None), "done", lambda: True)() is False),
                 "reconcile": bool(getattr(getattr(runtime, "_reconcile_task", None), "done", lambda: True)() is False),
             },
+            "task_errors": {k: {"count": v.get("count", 0), "last_error": v.get("error", "")[:100]} for k, v in task_errors.items()},
+        }
+
+    @app.get("/api/live", tags=["system"])
+    async def live() -> dict:
+        return {"status": "ok", "alive": True}
+
+    @app.get("/api/ready", tags=["system"])
+    async def ready() -> dict:
+        from app.bot.runtime import runtime
+        from app.database import engine
+        from sqlalchemy import text as _text
+
+        task_errors = getattr(runtime, "_task_errors", {})
+        critical_dead = any(
+            err.get("count", 0) > 0
+            for name, err in task_errors.items()
+            if name in ("persist", "reconcile", "main")
+        )
+
+        db_ok = False
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(_text("SELECT 1"))
+            db_ok = True
+        except Exception:
+            pass
+
+        if critical_dead or not db_ok:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "not_ready",
+                    "db_ok": db_ok,
+                    "critical_tasks_dead": critical_dead,
+                    "task_errors": {k: {"count": v.get("count", 0)} for k, v in task_errors.items()},
+                },
+            )
+
+        return {
+            "status": "ready",
+            "db_ok": db_ok,
+            "running": bool(getattr(runtime, "running", False)),
         }
 
     return app

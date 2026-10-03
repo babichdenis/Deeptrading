@@ -925,6 +925,7 @@ class PaperBotRuntime:
         }
         self._persist_queue: deque = deque(maxlen=2000)
         self._persist_queue_5m: deque = deque(maxlen=2000)  # (figi, ts, o, h, l, c, v) для 5m
+        self._task_errors: dict[str, dict] = {}
         # --- Метрики движка (для мониторинга/автореакции в status) ---
         self.metrics: dict = {
             "started_ts": None,
@@ -1867,7 +1868,7 @@ class PaperBotRuntime:
             return POS_PCT
 
     def _log(self, msg: str, level: str = "info", source: str = "bot") -> None:
-        from app.services.loghub import hub, msk_now_str
+        from app.services.loghub import hub, msk_now_str, _redact
         ts = msk_now_str()
         # Реплей/тест: время в логе = ВИРТУАЛЬНОЕ время бота (чтобы видеть дату/время свечей).
         try:
@@ -1876,6 +1877,10 @@ class PaperBotRuntime:
                     "%Y-%m-%d %H:%M:%S")
         except Exception:
             pass
+        msg = _redact(msg)
+        rid = _request_id_ctx.get()
+        if rid:
+            msg = f"[rid={rid}] {msg}"
         hub.push(msg, level=level, source=source, ts=ts)
         # Персистентная копия (level/source/msg/ts) — пишется в bot_logs флашером,
         # переживает рестарт и видна в Live через фильтры UI.
@@ -3314,7 +3319,7 @@ class PaperBotRuntime:
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS mode VARCHAR(8) DEFAULT 'sandbox'"))
                 await _db.execute(_text("ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS test_name VARCHAR(64)"))
                 await _db.execute(_text("CREATE INDEX IF NOT EXISTS ix_sandbox_trades_test_name ON sandbox_trades (test_name)"))
-                await _db.execute(_text("CREATE TABLE IF NOT EXISTS bot_logs (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(), level VARCHAR(8) DEFAULT 'info', source VARCHAR(16) DEFAULT 'bot', msg TEXT)"))
+                await _db.execute(_text("CREATE TABLE IF NOT EXISTS bot_logs (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT now(), level VARCHAR(8) DEFAULT 'info', source VARCHAR(64) DEFAULT 'bot', msg TEXT, request_id VARCHAR(32))"))
                 await _db.commit()
             # Восстановить хвост live-логов из bot_logs (переживают рестарт; Live видит
             # постоянные логи через фильтры UI, а не только deque in-memory).
@@ -4935,9 +4940,27 @@ class PaperBotRuntime:
         return int(getattr(interval, "value", interval))
 
     def _spawn_task(self, name: str, coro, critical: bool = True) -> asyncio.Task:
-        task = asyncio.create_task(coro)
+        task = asyncio.create_task(coro, name=name)
         self._task_registry[name] = task
-        task.add_done_callback(lambda t: self._task_registry.pop(name, None))
+
+        def _on_done(t: asyncio.Task) -> None:
+            self._task_registry.pop(name, None)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                self._task_errors[name] = {
+                    "error": str(exc)[:200],
+                    "traceback": "".join(__import__("traceback").format_exception(type(exc), exc, exc.__traceback__))[-2000:],
+                    "count": self._task_errors.get(name, {}).get("count", 0) + 1,
+                    "last_seen": _time.time(),
+                }
+                self._log(f"TASK_DIED {name}: {type(exc).__name__}: {str(exc)[:120]}", level="error")
+                self.events.log("TASK_DIED", task=name, error=str(exc)[:200], critical=critical)
+                if critical:
+                    self._log(f"TASK_DIED {name}: critical task, требуется ручное вмешательство", level="error")
+
+        task.add_done_callback(_on_done)
         return task
 
     async def _flush_persist_once(self) -> None:
@@ -5012,13 +5035,14 @@ class PaperBotRuntime:
 
         if log_rows and candle_ok:
             try:
+                rid = _request_id_ctx.get()
                 async with SessionLocal() as db:
-                    _payload = [{"level": l, "source": s, "msg": m, "ts": t + "+03:00"}
+                    _payload = [{"level": l, "source": s, "msg": m, "ts": t + "+03:00", "request_id": rid or None}
                                 for (l, s, m, t) in log_rows]
                     await db.execute(
                         _text(
-                            "INSERT INTO bot_logs (level, source, ts, msg) "
-                            "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, ts timestamptz, msg text)"
+                            "INSERT INTO bot_logs (level, source, ts, msg, request_id) "
+                            "SELECT * FROM jsonb_to_recordset(:rows) AS t(level text, source text, ts timestamptz, msg text, request_id text)"
                         ),
                         {"rows": json.dumps(_payload, ensure_ascii=False)},
                     )

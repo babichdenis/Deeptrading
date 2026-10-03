@@ -25,3 +25,4 @@ class BotLog(Base):
     level: Mapped[str] = mapped_column(String(8), nullable=False, default="info")  # debug/info/warn/error
     source: Mapped[str] = mapped_column(String(64), nullable=False, default="bot")  # bot/replay/parity
     msg: Mapped[str] = mapped_column(Text, nullable=False)
+    request_id: Mapped[str] = mapped_column(String(32), nullable=True, index=True)

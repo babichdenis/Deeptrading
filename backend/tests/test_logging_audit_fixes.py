@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from types import SimpleNamespace
 
 import pytest
@@ -21,7 +22,6 @@ async def test_live_broker_open_position_unknown_fill_returns_none(monkeypatch):
     broker = LiveBroker.__new__(LiveBroker)
     broker.config = SimpleNamespace(commission_rate=0.003)
     broker._account = "acc"
-    broker._log = lambda *_a, **_k: None
     broker._api_post_order = lambda **_kwargs: SimpleNamespace(executed_order_price=None)
 
     result = await LiveBroker.open_position(
@@ -46,7 +46,6 @@ async def test_live_broker_close_position_blocks_unknown_lot(monkeypatch):
     broker = LiveBroker.__new__(LiveBroker)
     broker.config = SimpleNamespace(commission_rate=0.003)
     broker._account = "acc"
-    broker._log = lambda *_a, **_k: None
     async def _get_lot_stub(_figi: str) -> int:
         return 0
 
@@ -76,14 +75,17 @@ async def test_execute_pending_marks_unknown_open_for_reconciliation(monkeypatch
 
     rt = PaperBotRuntime.__new__(PaperBotRuntime)
 
+    calls = {"open": 0}
+
     async def _open_stub(**_kwargs):
+        calls["open"] += 1
         return None
 
     rt.broker = SimpleNamespace(open_position=_open_stub)
     rt.entries_paused = False
     rt.pending_orders = {}
     rt.events = _DummyEvents()
-    rt._log = lambda *_a, **_k: None
+    rt._log_persist_queue = deque()
     rt._trace = None
     rt._approvals_since = {}
     rt._ai_reject_until = {}
@@ -127,4 +129,11 @@ async def test_execute_pending_marks_unknown_open_for_reconciliation(monkeypatch
     assert result is False
     assert order.status == "PENDING_RECONCILIATION"
     assert "FIGI123" in rt.pending_orders
+    assert any(ev[0] == "ORDER_RECONCILIATION_REQUIRED" for ev in rt.events.items)
+
+    result2 = await rt._execute_pending("FIGI123", c)
+
+    assert result2 is False
+    assert order.status == "PENDING_RECONCILIATION"
+    assert calls["open"] == 1
     assert any(ev[0] == "ORDER_RECONCILIATION_REQUIRED" for ev in rt.events.items)

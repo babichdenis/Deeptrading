@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 MSK = timezone(timedelta(hours=3))
 MAX_RING = 2000
-MAX_SOURCE = 16  # совпадает с width colums source в bot_logs
+MAX_SOURCE = 64  # совпадает с width column source в bot_logs
 MAX_LEVEL = 16
 COLLAPSE_WIN = 8.0  # сек: одинаковые подряд записи схлопываются в один тил ×N
 
@@ -179,10 +179,14 @@ class HubHandler(logging.Handler):
         try:
             if record.name == "uvicorn.access":
                 return
+            from app.bot.runtime import _request_id_ctx
+            rid = _request_id_ctx.get()
             msg = record.getMessage()
             if record.exc_info and record.exc_info[1]:
                 msg = f"{msg} -> {type(record.exc_info[1]).__name__}: {record.exc_info[1]}"
             msg = _redact(msg)
+            if rid:
+                msg = f"[rid={rid}] {msg}"
             source = str(record.name)
             level = (record.levelname or "info").lower()
             if _is_noise(source, msg, level):

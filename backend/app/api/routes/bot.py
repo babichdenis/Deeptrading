@@ -1753,18 +1753,30 @@ async def bot_logs_history(
     sql = _text(
         "SELECT id, "
         "to_char(ts AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD HH24:MI:SS.MS') AS ts_s, "
-        "COALESCE(level,'info') AS lvl, COALESCE(source,'bot') AS src, msg "
+        "COALESCE(level,'info') AS lvl, COALESCE(source,'bot') AS src, msg, "
+        "COALESCE(request_id,'') AS rid "
         f"FROM bot_logs{where_sql} ORDER BY id DESC LIMIT :limit"
     )
     try:
         async with SessionLocal() as db:
             rows = (await db.execute(sql, params)).all()
     except Exception as e:
-        return {"items": [], "error": str(e)[:200], "has_more": False}
+        sql = _text(
+            "SELECT id, "
+            "to_char(ts AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD HH24:MI:SS.MS') AS ts_s, "
+            "COALESCE(level,'info') AS lvl, COALESCE(source,'bot') AS src, msg "
+            f"FROM bot_logs{where_sql} ORDER BY id DESC LIMIT :limit"
+        )
+        try:
+            async with SessionLocal() as db:
+                rows = (await db.execute(sql, params)).all()
+        except Exception as e2:
+            return {"items": [], "error": str(e2)[:200], "has_more": False}
 
     items = [
         {"id": int(r.id), "ts": r.ts_s, "level": (r.lvl or "info")[:16],
-         "source": (r.src or "bot")[:16], "msg": strip_legacy_ts(r.msg or "")}
+         "source": (r.src or "bot")[:64], "msg": strip_legacy_ts(r.msg or ""),
+         "request_id": (getattr(r, "rid", "") or "") or None}
         for r in rows
     ]
     items.reverse()  # старые → новые, для вставки в начало списка
