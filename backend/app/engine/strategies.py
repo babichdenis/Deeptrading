@@ -2,11 +2,32 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Sequence
 
-from app.engine.models import Candle, Signal, Side
 from app.engine.ensemble_v2 import EnsembleVoteParams, EnsembleVoteStrategy
+from app.engine.models import Candle, Side, Signal
+from app.engine.ose.strategy import (
+    OseAllParams,
+    OseAllStrategy,
+    OseBbPowerStrategy,
+    OseBollingerReversStrategy,
+    OseBollingerStrategy,
+    OseBollingerTrailingStrategy,
+    OseCciTradeStrategy,
+    OseEnvelopTrendStrategy,
+    OseMacdReversStrategy,
+    OseMacdTrailStrategy,
+    OsePcVolatilityStrategy,
+    OsePriceChannelStrategy,
+    OseRobotParams,
+    OseRsiContrtrendStrategy,
+    OseRsiTradeStrategy,
+    OseRviTradeStrategy,
+    OseSmaStochParams,
+    OseSmaStochStrategy,
+    OseSmaTrendStrategy,
+)
 from app.engine.regime_ensembles import (
     HighVolatilityEnsembleStrategy,
     HighVolatilityParams,
@@ -20,18 +41,6 @@ from app.engine.regime_ensembles import (
     RangeEnsembleStrategy,
     ShortEnsembleParams,
     ShortEnsembleStrategy,
-)
-from app.engine.ose.strategy import (
-    OseAllParams,
-    OseAllStrategy,
-    OseBollingerStrategy,
-    OseEnvelopTrendStrategy,
-    OsePriceChannelStrategy,
-    OseRobotParams,
-    OseRsiContrtrendStrategy,
-    OseRsiTradeStrategy,
-    OseSmaStochParams,
-    OseSmaStochStrategy,
 )
 from app.engine.wave1 import (
     BollingerReclaimParams,
@@ -573,6 +582,7 @@ class RsiTradeHubStrategy:
 
     def __init__(self, params: RsiTradeHubParams | None = None):
         self.p = params or RsiTradeHubParams()
+        self.reset()  # латентные state-поля (не были инициализированы — баг Signal Lab 2026-10-03)
 
     def reset(self) -> None:
         self._hub_rsi_state = None
@@ -649,7 +659,7 @@ class RsiMtfHubStrategy:
         bmin = max(1, int(self.p.bias_tf_min))
         ep = int(last.ts.timestamp()) // 60
         b0 = (ep // bmin) * bmin
-        b0_ts = datetime.fromtimestamp(b0 * 60, tz=last.ts.tzinfo or timezone.utc)
+        b0_ts = datetime.fromtimestamp(b0 * 60, tz=last.ts.tzinfo or UTC)
         if self._bkt_ts is None or b0_ts != self._bkt_ts:
             self._close_bucket()
             self._bkt_ts = b0_ts
@@ -700,6 +710,7 @@ class EnvelopTrendHubStrategy:
 
     def __init__(self, params: EnvelopTrendHubParams | None = None):
         self.p = params or EnvelopTrendHubParams()
+        self.reset()  # латентные state-поля (не были инициализированы — баг Signal Lab 2026-10-03)
 
     def reset(self) -> None:
         self._closes_cache = []
@@ -772,6 +783,7 @@ class WilliamsRangeHubStrategy:
     version = "1.0.0"
 
     def __init__(self, params: WilliamsRangeHubParams | None = None):
+        self.reset()  # латентные state-поля (не были инициализированы — баг Signal Lab 2026-10-03)
         self.p = params or WilliamsRangeHubParams()
 
     def reset(self) -> None:
@@ -1318,6 +1330,7 @@ class BreakLrChannelHubStrategy:
 
     def __init__(self, params: BreakLrChannelHubParams | None = None):
         self.p = params or BreakLrChannelHubParams()
+        self.reset()  # латентные state-поля (не были инициализированы — баг Signal Lab 2026-10-03)
 
     def reset(self) -> None:
         self._prev_buy = False
@@ -1571,7 +1584,7 @@ class TwoTimeFramesHubStrategy:
         bmin = max(1, int(self.p.big_tf_min))
         ep = int(last.ts.timestamp()) // 60
         b0 = (ep // bmin) * bmin
-        b0_ts = datetime.fromtimestamp(b0 * 60, tz=last.ts.tzinfo or timezone.utc)
+        b0_ts = datetime.fromtimestamp(b0 * 60, tz=last.ts.tzinfo or UTC)
         if self._bkt_ts is None or b0_ts != self._bkt_ts:
             if self._bkt_close is not None:
                 self._big_closes.append(self._bkt_close)
@@ -1720,6 +1733,15 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "ose_rsi_contrtrend": OseRsiContrtrendStrategy,
     "ose_rsi_trade": OseRsiTradeStrategy,
     "ose_bollinger": OseBollingerStrategy,
+    "ose_cci_trade": OseCciTradeStrategy,
+    "ose_bb_power": OseBbPowerStrategy,
+    "ose_rvi_trade": OseRviTradeStrategy,
+    "ose_macd_revers": OseMacdReversStrategy,
+    "ose_macd_trail": OseMacdTrailStrategy,
+    "ose_bollinger_revers": OseBollingerReversStrategy,
+    "ose_bollinger_trailing": OseBollingerTrailingStrategy,
+    "ose_sma_trend": OseSmaTrendStrategy,
+    "ose_pc_volatility": OsePcVolatilityStrategy,
 }
 
 _PARAMS_BY_STRATEGY: dict[str, type] = {
@@ -1764,6 +1786,15 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "ose_rsi_contrtrend": OseRobotParams,
     "ose_rsi_trade": OseRobotParams,
     "ose_bollinger": OseRobotParams,
+    "ose_cci_trade": OseRobotParams,
+    "ose_bb_power": OseRobotParams,
+    "ose_rvi_trade": OseRobotParams,
+    "ose_macd_revers": OseRobotParams,
+    "ose_macd_trail": OseRobotParams,
+    "ose_bollinger_revers": OseRobotParams,
+    "ose_bollinger_trailing": OseRobotParams,
+    "ose_sma_trend": OseRobotParams,
+    "ose_pc_volatility": OseRobotParams,
 }
 
 
@@ -1791,8 +1822,8 @@ def validate_params(strategy_id: str, params: dict | None) -> dict:
                 value = float(value)
             else:
                 value = str(value)
-        except (TypeError, ValueError):
-            raise ParamValidationError(f"param {key}: wrong type, expected {expected}")
+        except (TypeError, ValueError) as err:
+            raise ParamValidationError(f"param {key}: wrong type, expected {expected}") from err
         if "min" in spec and value < spec["min"]:
             raise ParamValidationError(f"param {key}={value} < min {spec['min']}")
         if "max" in spec and value > spec["max"]:

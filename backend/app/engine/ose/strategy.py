@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from app.engine.models import Candle, Signal, Side
+from app.engine.models import Candle, Side, Signal
 
 from .robots import (
     BbPowerTrade,
@@ -47,11 +47,13 @@ from .robots import (
     RsiContrtrend,
     RsiTrade,
     RviTrade,
-    Side as RobotSide,
     SmaStochastic,
     SmaTrendSample,
     StrategyBollinger,
     TesterTab,
+)
+from .robots import (
+    Side as RobotSide,
 )
 
 __all__ = [
@@ -65,6 +67,15 @@ __all__ = [
     "OseRsiContrtrendStrategy",
     "OseRsiTradeStrategy",
     "OseBollingerStrategy",
+    "OseCciTradeStrategy",
+    "OseBbPowerStrategy",
+    "OseRviTradeStrategy",
+    "OseMacdReversStrategy",
+    "OseMacdTrailStrategy",
+    "OseBollingerReversStrategy",
+    "OseBollingerTrailingStrategy",
+    "OseSmaTrendStrategy",
+    "OsePcVolatilityStrategy",
 ]
 
 
@@ -466,6 +477,96 @@ class OseRsiTradeStrategy(_OseSingleRobot):
 class OseBollingerStrategy(_OseSingleRobot):
     strategy_id = "ose_bollinger"
     robot_name = "bollinger"
+
+    def __init__(self, params: OseRobotParams | None = None):
+        super().__init__(params)
+
+
+class OseCciTradeStrategy(_OseSingleRobot):
+    """Волна B: CciTrade (OnScriptIndicators) — CCI-кроссовер с реверсом."""
+
+    strategy_id = "ose_cci_trade"
+    robot_name = "cci_trade"
+
+    def __init__(self, params: OseRobotParams | None = None):
+        super().__init__(params)
+
+
+class OseBbPowerStrategy(_OseSingleRobot):
+    """Волна B: BbPowerTrade (OnScriptIndicators) — Bulls/Bears Power + SMA."""
+
+    strategy_id = "ose_bb_power"
+    robot_name = "bb_power"
+
+    def __init__(self, params: OseRobotParams | None = None):
+        super().__init__(params)
+
+
+class OseRviTradeStrategy(_OseSingleRobot):
+    """Волна B: RviTrade (OnScriptIndicators) — RVI-кроссовер."""
+
+    strategy_id = "ose_rvi_trade"
+    robot_name = "rvi_trade"
+
+    def __init__(self, params: OseRobotParams | None = None):
+        super().__init__(params)
+
+
+class OseMacdReversStrategy(_OseSingleRobot):
+    """Волна B: MacdRevers (OnScriptIndicators) — MACD-реверс."""
+
+    strategy_id = "ose_macd_revers"
+    robot_name = "macd_revers"
+
+    def __init__(self, params: OseRobotParams | None = None):
+        super().__init__(params)
+
+
+class OseMacdTrailStrategy(_OseSingleRobot):
+    """Волна B: MacdTrail (OnScriptIndicators) — MACD с трейлингом."""
+
+    strategy_id = "ose_macd_trail"
+    robot_name = "macd_trail"
+
+    def __init__(self, params: OseRobotParams | None = None):
+        super().__init__(params)
+
+
+class OseBollingerReversStrategy(_OseSingleRobot):
+    """Волна B: BollingerRevers (OnScriptIndicators) — реверс от границ BB."""
+
+    strategy_id = "ose_bollinger_revers"
+    robot_name = "bollinger_revers"
+
+    def __init__(self, params: OseRobotParams | None = None):
+        super().__init__(params)
+
+
+class OseBollingerTrailingStrategy(_OseSingleRobot):
+    """Волна B: BollingerTrailing (OnScriptIndicators) — BB с трейлингом."""
+
+    strategy_id = "ose_bollinger_trailing"
+    robot_name = "bollinger_trailing"
+
+    def __init__(self, params: OseRobotParams | None = None):
+        super().__init__(params)
+
+
+class OseSmaTrendStrategy(_OseSingleRobot):
+    """Волна B: SmaTrendSample (OnScriptIndicators) — SMA-тренд с конвертами."""
+
+    strategy_id = "ose_sma_trend"
+    robot_name = "sma_trend"
+
+    def __init__(self, params: OseRobotParams | None = None):
+        super().__init__(params)
+
+
+class OsePcVolatilityStrategy(_OseSingleRobot):
+    """Волна B: PriceChannelVolatility (OnScriptIndicators) — канал + ATR-волатильность."""
+
+    strategy_id = "ose_pc_volatility"
+    robot_name = "pc_volatility"
 
     def __init__(self, params: OseRobotParams | None = None):
         super().__init__(params)
