@@ -394,7 +394,7 @@ def test_restart_without_window_or_sidecar_is_400(env):
     assert res.status_code == 400
 
 
-def test_mode_writes_sidecar_only_with_preset(env):
+def test_mode_writes_sidecar_fact_preset_without_preset(env):
     req = bot.ModeRequest(mode="test", test_name="unit side",
                           replay_start=PAYLOAD["replay_start"], test_interval="5min",
                           preset=PRESET)
@@ -402,7 +402,14 @@ def test_mode_writes_sidecar_only_with_preset(env):
     assert preset_tags.load_sidecar("unit side")["payload"]["test_interval"] == "5min"
     preset_tags.remove_sidecar("unit side")
 
+    # REAUDIT P1-2: «тишины» больше нет — без пресета сайдкар пишется с
+    # fact-пресетом (id "(api)"), чтобы теги в Анализе показывали фактические
+    # настройки прогона (движок/окно), а не прочерки.
     bare = bot.ModeRequest(mode="test", test_name="unit bare",
                            replay_start=PAYLOAD["replay_start"])
-    assert bot._save_test_sidecar("unit bare", bare, "fast") is False
-    assert preset_tags.load_sidecar("unit bare") is None
+    assert bot._save_test_sidecar("unit bare", bare, "fast") is True
+    sc = preset_tags.load_sidecar("unit bare")
+    assert sc is not None
+    assert sc["preset"]["preset"]["id"] == "(api)"
+    assert sc["payload"]["fact"] is True
+    preset_tags.remove_sidecar("unit bare")

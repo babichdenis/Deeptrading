@@ -43,17 +43,20 @@ class PaperBroker:
             return acc
 
     async def reset(self, initial_cash: float = 10_000.0) -> None:
-        """Полный сброс paper-контура: счёт + ВСЕ позиции и сделки.
+        """Сброс paper-контура: счёт + позиции/сделки ЭТОГО аккаунта.
 
         Раньше чистился только PaperAccount — старые PaperPosition копились от
         прогона к прогону, занимали маржу и «закрывались» без строк в тест-таблицах.
+        REAUDIT P1-6: delete(PaperPosition/PaperTrade) без фильтра трёт строки и
+        чужих аккаунтов — теперь скоуп по account_id (FK каскадный, но явный
+        delete по account_id не зависит от порядка удаления и читается однозначно).
         """
         async with self.sessions() as db:
             acc = await db.scalar(select(PaperAccount).where(PaperAccount.name == DEFAULT_ACCOUNT))
             if acc:
+                await db.execute(delete(PaperPosition).where(PaperPosition.account_id == acc.id))
+                await db.execute(delete(PaperTrade).where(PaperTrade.account_id == acc.id))
                 await db.delete(acc)
-            await db.execute(delete(PaperPosition))
-            await db.execute(delete(PaperTrade))
             await db.commit()
         self._pos_cache.clear()
         self._last_prices.clear()
@@ -72,7 +75,6 @@ class PaperBroker:
         (те же данные, что используют бэктесты). Формат ответа совпадает с
         LiveBroker.get_max_lots, чтобы блок MARGIN в runtime работал одинаково.
         """
-        import asyncio
         from dataclasses import dataclass as _dc
 
         @_dc
@@ -259,7 +261,6 @@ class PaperBroker:
         Плечо берём из instruments.long_lev/short_lev (теоритический максимум) — те же
         данные, что у LiveBroker.get_max_lots и бэктестов.
         """
-        import asyncio
         from sqlalchemy import select as _sel
         from app.models.instrument import Instrument
 

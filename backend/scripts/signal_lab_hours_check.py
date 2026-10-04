@@ -64,10 +64,7 @@ def main():
             data[(label,) + k + (int(row[4]),)] = {
                 "n": int(row[5]), "avg": float(row[6] or 0), "win": float(row[7] or 0)}
 
-    # 1) Профиль по часам для валидированных SELL-семейств (оба периода вместе)
-    fams = [("rsi_reversal", "5min", "NEUTRAL"), ("range_reversion", "1min", "NEUTRAL"),
-            ("range_reversion", "5min", "NEUTRAL"), ("stochastic", "5min", "NEUTRAL"),
-            ("rsi_trade_hub", "5min", "NEUTRAL")]
+    # 1) Профиль по часам для всех SELL NEUTRAL-ячеек (оба периода вместе)
     hours = defaultdict(lambda: [0, 0.0, 0])  # hour -> [n, sum, wins]
     for (period, e, tf, side, lab, hour), v in data.items():
         if side != "SELL":

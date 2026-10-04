@@ -1785,7 +1785,8 @@ async def bot_logs_history(
     try:
         async with SessionLocal() as db:
             rows = (await db.execute(sql, params)).all()
-    except Exception as e:
+    except Exception:
+        # fallback-запрос без request_id (старые строки/миграция не применена)
         sql = _text(
             "SELECT id, "
             "to_char(ts AT TIME ZONE 'Europe/Moscow', 'YYYY-MM-DD HH24:MI:SS.MS') AS ts_s, "

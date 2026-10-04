@@ -96,7 +96,7 @@ async def _execute_buy(broker, intent, figi, qty, pending, strategy_id) -> Execu
         return _rejected(intent,
                          f"BUY on existing {pending.side} position unsupported by PaperBroker (open from zero only)")
     try:
-        await broker.open_position(
+        actual = await broker.open_position(
             figi=figi,
             ticker=intent.instrument.ticker,
             side="BUY",
@@ -109,7 +109,12 @@ async def _execute_buy(broker, intent, figi, qty, pending, strategy_id) -> Execu
     except Exception as exc:  # noqa: BLE001 — см. __docstring про границу
         return ExecutionResult(intent=intent, status=ExecutionStatus.BROKER_ERROR,
                                error=f"{type(exc).__name__}: {exc}")
-    fill = broker.costs.fill_price(float(intent.price), Side.BUY)
+    if actual is None:
+        # P1-1: PaperBroker возвращает None только при «позиция уже существует» —
+        # это детерминированный отказ, а не «результат неизвестен»
+        # (PENDING_RECONCILIATION допустим только в runtime-пути с LiveBroker).
+        return _rejected(intent, "open_position returned None (position already exists)")
+    fill = float(actual)  # фактическая цена входа от брокера, не пересчёт
     return ExecutionResult(
         intent=intent,
         status=ExecutionStatus.FILLED,
@@ -121,7 +126,7 @@ async def _execute_buy(broker, intent, figi, qty, pending, strategy_id) -> Execu
 
 async def _open_short(broker, intent, figi, qty, strategy_id) -> ExecutionResult:
     try:
-        await broker.open_position(
+        actual = await broker.open_position(
             figi=figi,
             ticker=intent.instrument.ticker,
             side="SELL",
@@ -134,7 +139,10 @@ async def _open_short(broker, intent, figi, qty, strategy_id) -> ExecutionResult
     except Exception as exc:  # noqa: BLE001
         return ExecutionResult(intent=intent, status=ExecutionStatus.BROKER_ERROR,
                                error=f"{type(exc).__name__}: {exc}")
-    fill = broker.costs.fill_price(float(intent.price), Side.SELL)
+    if actual is None:
+        # P1-1: см. _execute_buy — None = детерминированный отказ, не reconciliation
+        return _rejected(intent, "open_position returned None (position already exists)")
+    fill = float(actual)  # фактическая цена входа от брокера, не пересчёт
     return ExecutionResult(
         intent=intent,
         status=ExecutionStatus.FILLED,

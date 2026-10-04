@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import time as _time
 from dataclasses import dataclass
 
 
@@ -513,20 +514,45 @@ MARKET_GATES = (gate_liquidity, gate_volatility, gate_orderbook, gate_news_black
 
 _LOGGER = __import__("logging").getLogger("app.bot.gates")
 
+# P1-4 (REAUDIT): INFO на каждый gate rejection затапливает hot path на сотнях
+# тысяч свечей. Per-event отказ — DEBUG; в INFO уходит первый отказ и далее
+# не чаще раза в GATE_FAIL_LOG_PERIOD секунд на гейт, с числом подавленных.
+# Полный агрегат по ключам и так живёт в skip_counts/events рантайма.
+GATE_FAIL_LOG_PERIOD = 60.0
+_clock = _time.monotonic
+_gate_fail_last: dict[str, float] = {}
+_gate_fail_suppressed: dict[str, int] = {}
+
+
+def _log_gate_fail(name: str, r: GateResult, side: str) -> None:
+    """Per-event отказ — DEBUG; INFO — rate-limited (первый + раз в период)."""
+    _LOGGER.debug("GATE FAIL %s key=%s detail=%s side=%s",
+                  name, getattr(r, "key", ""), getattr(r, "detail", ""), side)
+    now = _clock()
+    last = _gate_fail_last.get(name)
+    if last is not None and (now - last) < GATE_FAIL_LOG_PERIOD:
+        _gate_fail_suppressed[name] = _gate_fail_suppressed.get(name, 0) + 1
+        return
+    _n = _gate_fail_suppressed.pop(name, 0)
+    _LOGGER.info("GATE FAIL %s key=%s detail=%s side=%s%s",
+                 name, getattr(r, "key", ""), getattr(r, "detail", ""), side,
+                 f" suppressed={_n}" if _n else "")
+    _gate_fail_last[name] = now
+
 
 def run_gate_chain(gates, ctx) -> GateResult:
-    """Прогнать цепочку гейтов до первого отказа (short-circuit).
+    """Прогнать цепочку гейтов входа до первого отказа (short-circuit).
 
-    Каждый отказ логируется с именем гейта/причиной/стороной — чтобы в тест-реплеях
-    не гадать, какой именно фильтр съел вход. Проходы — на уровне DEBUG.
+    Отказ логируется с именем гейта/причиной/стороной — чтобы в тест-реплеях
+    не гадать, какой именно фильтр съел вход: per-event — DEBUG, INFO —
+    rate-limited (P1-4 REAUDIT). Проходы — на уровне DEBUG.
     """
     _side = getattr(ctx, "side", "?")
     for g in gates:
         r = g(ctx)
         _name = getattr(g, "__name__", repr(g))
         if not r.passed:
-            _LOGGER.info("GATE FAIL %s key=%s detail=%s side=%s",
-                         _name, getattr(r, "key", ""), getattr(r, "detail", ""), _side)
+            _log_gate_fail(_name, r, _side)
             return r
         _LOGGER.debug("GATE pass %s side=%s", _name, _side)
     return GateResult(True)

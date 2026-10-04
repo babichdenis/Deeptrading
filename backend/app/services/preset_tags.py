@@ -8,6 +8,7 @@ UI карточки прогона. Схема пресета и контрак�
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -47,10 +48,19 @@ def load_sidecar(test_name: str) -> dict | None:
 def save_sidecar(test_name: str, preset: dict, payload: dict) -> Path:
     path = sidecar_path(test_name)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(
+    data = json.dumps(
         {"preset": preset, "payload": payload,
          "created_utc": datetime.now(UTC).isoformat()},
-        ensure_ascii=False, indent=2), encoding="utf-8")
+        ensure_ascii=False, indent=2)
+    # P1-5 (audit 7d15183): атомарная запись — tmp + fsync + os.replace.
+    # Crash/конкурентный restart не оставит частичный JSON, который
+    # load_sidecar молча вернул бы как None.
+    tmp = path.parent / (path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
     return path
 
 
