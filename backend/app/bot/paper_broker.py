@@ -43,11 +43,18 @@ class PaperBroker:
             return acc
 
     async def reset(self, initial_cash: float = 10_000.0) -> None:
+        """Полный сброс paper-контура: счёт + ВСЕ позиции и сделки.
+
+        Раньше чистился только PaperAccount — старые PaperPosition копились от
+        прогона к прогону, занимали маржу и «закрывались» без строк в тест-таблицах.
+        """
         async with self.sessions() as db:
             acc = await db.scalar(select(PaperAccount).where(PaperAccount.name == DEFAULT_ACCOUNT))
             if acc:
                 await db.delete(acc)
-                await db.commit()
+            await db.execute(delete(PaperPosition))
+            await db.execute(delete(PaperTrade))
+            await db.commit()
         self._pos_cache.clear()
         self._last_prices.clear()
         await self.ensure_account(initial_cash)
@@ -118,9 +125,12 @@ class PaperBroker:
         stop_loss: float | None,
         take_profit: float | None,
         strategy_id: str,
-    ) -> None:
+    ) -> float | None:
+        # ВАЖНО: возвращаем фактическую цену входа. runtime трактует None как
+        # «результат неизвестен» → PENDING_RECONCILIATION и блокирует повторные
+        # попытки (так терялись входы и не писалась строка в sandbox_trades).
         if await self.get_position(figi) is not None:
-            return
+            return None
         fill = self.costs.fill_price(price, Side.BUY if side == "BUY" else Side.SELL)
         commission = self.costs.commission(fill * qty)
         async with self.sessions() as db:
@@ -144,6 +154,7 @@ class PaperBroker:
             )
             await db.commit()
         self._pos_cache.pop(figi, None)
+        return float(fill)
 
     async def close_position(self, figi: str, price: float, reason: str) -> PaperTrade | None:
         pos = await self.get_position(figi)

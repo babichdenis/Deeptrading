@@ -106,6 +106,47 @@ def _robots(p: dict) -> list[dict[str, str]]:
     return items
 
 
+def fact_preset(run: dict, cfg=None) -> dict:
+    """Пресет-подобная структура для API-запуска БЕЗ пресета.
+
+    Чтобы теги под прогрессбаром никогда не молчали и показывали ФАКТИЧЕСКИЕ
+    настройки прогона: движок, окно, выходы, деньги, вход, издержки — из
+    эффективного конфига (передаётся cfg), а не прочерки.
+    """
+    g = (lambda k, d=None: getattr(cfg, k, d)) if cfg is not None else (lambda k, d=None: d)
+    eng = str(run.get("test_engine") or "").strip() or str(g("strategy_id", "") or "ensemble_v4")
+    interval = str(run.get("test_interval") or "").strip() or str(g("interval_name", "") or "1min")
+    start = str(run.get("replay_start") or "—")
+    end = str(run.get("replay_end") or "").strip() or "конец данных"
+    _comm = g("commission_rate", None)
+    _top_n = int(g("top_n", 0) or 0)
+    return {
+        "preset": {"id": "(api)", "name": "API-запуск без пресета"},
+        "harness": {
+            "period": [start, end], "timeframe": interval,
+            "universe": [""] * _top_n,
+            "costs": {"commission": (f"{float(_comm) * 100:g}%" if _comm is not None else None),
+                      "slippage_bps": g("slippage_bps")},
+        },
+        "targets": {"replay": {"engine": eng, "interval": interval,
+                               "pace": run.get("replay_pace") or "fast"}},
+        "runtime": {
+            "sessions": list(g("sessions", ["day"]) or ["day"]),
+            "overnight": bool(g("overnight", False)),
+            "regimes": list(g("trade_regimes", []) or []),
+            "entry": {"quorum": g("ensemble_quorum"), "confirm_flip": g("confirm_flip"),
+                      "cooldown_bars": g("reentry_cooldown_bars")},
+            "exits": {"sl_mode": g("sl_mode"),
+                      "initial_sl_atr": g("atr_multiplier"),
+                      "trail_activation_comm_mult": g("trail_activation_comm_mult")},
+            "money": {"initial_cash": g("initial_cash"),
+                      "qty_per_trade": g("qty_per_trade"),
+                      "max_positions": _top_n},
+            "bias": {},
+        },
+    }
+
+
 def tag_groups(p: dict) -> list[dict]:
     """Теги настроек, сгруппированные по смыслу (то, что рисует Analytics)."""
     h = p.get("harness") or {}

@@ -1069,16 +1069,22 @@ def _build_autostart_cfg(mode: str, test_name: str = "", replay_start: str = "",
     )
 
 
-def _save_test_sidecar(name: str, req: ModeRequest, pace: str) -> bool:
+def _save_test_sidecar(name: str, req: ModeRequest, pace: str, eff_cfg=None) -> bool:
     """Сайдкар пресета рядом с прогоном (см. app.services.preset_tags).
 
     Источник тегов настроек в Analytics; без preset — тишина (bool = что-то записали).
     """
-    if not getattr(req, "preset", None):
-        return False
-    from app.services.preset_tags import save_sidecar
+    from app.services.preset_tags import fact_preset, save_sidecar
+    # Без пресета пишем «факт-пресет» из параметров запуска — теги не молчат.
+    _preset_obj = getattr(req, "preset", None) or fact_preset({
+        "test_engine": getattr(req, "test_engine", ""),
+        "test_interval": getattr(req, "test_interval", ""),
+        "replay_start": getattr(req, "replay_start", ""),
+        "replay_end": getattr(req, "replay_end", ""),
+        "replay_pace": pace,
+    }, eff_cfg)
     try:
-        save_sidecar(name, req.preset, {
+        save_sidecar(name, _preset_obj, {
             "mode": "test", "test_name": name,
             "replay_start": req.replay_start.strip(), "replay_end": req.replay_end.strip(),
             "replay_pace": pace, "test_engine": req.test_engine.strip(),
@@ -1088,6 +1094,7 @@ def _save_test_sidecar(name: str, req: ModeRequest, pace: str) -> bool:
             # Аналитика рисует настройки тегами — она должна знать, ЧТО применялось.
             "preset_mode": (getattr(req, "preset_mode", "") or ""),
             "preset_choice": (getattr(req, "preset_choice", "") or ""),
+            "fact": not bool(getattr(req, "preset", None)),
         })
     except OSError:
         logger.warning("sidecar write failed for %s", name)
@@ -1108,6 +1115,15 @@ async def bot_set_mode(req: ModeRequest) -> dict:
             raise HTTPException(400, "test_name обязателен для mode=test")
         if not req.replay_start:
             raise HTTPException(400, "replay_start обязателен для mode=test")
+        # Тишины не бывает: без пресета движок/ТФ должны быть заданы явно.
+        # Раньше пустые поля молча падали в ensemble_v4/1min — и никто не знал, что гоняем.
+        if not (getattr(req, "preset", None) or {}):
+            _miss = [f for f in ("test_engine", "test_interval")
+                     if not str(getattr(req, f, "") or "").strip()]
+            if _miss:
+                raise HTTPException(400,
+                    "без пресета обязательны " + ", ".join(_miss) +
+                    " (иначе прогон молча уходит в ensemble_v4/1min)")
         # Имена тестов — ключ для идентификации прогона в БД (единый sanitize = preset_tags).
         from app.services.preset_tags import sanitize
         name = sanitize(name)
@@ -1135,7 +1151,16 @@ async def bot_set_mode(req: ModeRequest) -> dict:
     req.preset_mode = _pmode
     req.preset_choice = _pchoice
     if mode == "test":
-        _save_test_sidecar(name, req, pace)
+        try:
+            _eff_cfg = await _cfg_from_saved(
+                mode, test_name=name,
+                replay_start=req.replay_start.strip(),
+                replay_end=req.replay_end.strip(),
+                replay_pace=pace,
+                replay_log_persist=bool(req.replay_log_persist))
+        except Exception:
+            _eff_cfg = None
+        _save_test_sidecar(name, req, pace, _eff_cfg)
     # Состояние прогона — в data/run_state.json (единственное место, откуда
     # автостарт берёт контур и движок после рестарта). .env — только BOT_MODE,
     # os.environ — кэш для apply_test_overrides, собираемый из этого же файла.

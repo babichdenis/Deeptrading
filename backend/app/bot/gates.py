@@ -511,12 +511,24 @@ TIME_GATES = (gate_entries_paused, gate_session, gate_last_hour, gate_direction,
 MARKET_GATES = (gate_liquidity, gate_volatility, gate_orderbook, gate_news_blackout)
 
 
+_LOGGER = __import__("logging").getLogger("app.bot.gates")
+
+
 def run_gate_chain(gates, ctx) -> GateResult:
-    """Прогнать цепочку гейтов до первого отказа (short-circuit)."""
+    """Прогнать цепочку гейтов до первого отказа (short-circuit).
+
+    Каждый отказ логируется с именем гейта/причиной/стороной — чтобы в тест-реплеях
+    не гадать, какой именно фильтр съел вход. Проходы — на уровне DEBUG.
+    """
+    _side = getattr(ctx, "side", "?")
     for g in gates:
         r = g(ctx)
+        _name = getattr(g, "__name__", repr(g))
         if not r.passed:
+            _LOGGER.info("GATE FAIL %s key=%s detail=%s side=%s",
+                         _name, getattr(r, "key", ""), getattr(r, "detail", ""), _side)
             return r
+        _LOGGER.debug("GATE pass %s side=%s", _name, _side)
     return GateResult(True)
 
 
