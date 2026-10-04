@@ -912,7 +912,7 @@ class PaperBotRuntime:
         #          hit_ts: str, hit_price: float, hit_reason: str}
         self._trail_info: dict[str, dict] = {}
         self._held_since: dict[str, float] = {}  # figi -> время добавления в _held (для grace синка)
-        self._log_persist_queue: deque[tuple[str, str, str, str]] = deque(maxlen=2000)  # (level, source, msg, ts_msk)
+        self._log_persist_queue: deque[tuple[str, str, str, str, str]] = deque(maxlen=2000)  # (level, source, msg, ts_msk, request_id)
         self.stream_manager: StreamManager | None = None
         self.carousel_diag: dict = {
             "eligible_count": 0,
@@ -1891,7 +1891,9 @@ class PaperBotRuntime:
         # в истории логов UI, переживает рестарт).
         if (str(getattr(self.config, "feed", "")) != "replay"
                 or bool(getattr(self.config, "replay_log_persist", False))):
-            self._log_persist_queue.append((level, source, msg, ts))
+            # RECHECK P1: RID фиксируем на enqueue (producer boundary) — ContextVar
+            # фоновой persist-task'а не соответствует задаче, создавшей запись.
+            self._log_persist_queue.append((level, source, msg, ts, rid))
 
 
     _last_session_gate_log: float = 0.0
@@ -5076,10 +5078,9 @@ class PaperBotRuntime:
 
         if log_rows and candle_ok:
             try:
-                rid = _request_id_ctx.get()
                 async with SessionLocal() as db:
-                    _payload = [{"level": l, "source": s, "msg": m, "ts": t + "+03:00", "request_id": rid or None}
-                                for (l, s, m, t) in log_rows]
+                    _payload = [{"level": l, "source": s, "msg": m, "ts": t + "+03:00", "request_id": r or None}
+                                for (l, s, m, t, r) in log_rows]
                     try:
                         await db.execute(
                             _text(
@@ -5091,7 +5092,7 @@ class PaperBotRuntime:
                     except Exception:
                         await db.rollback()
                         _payload = [{"level": l, "source": s[:64], "msg": m, "ts": t + "+03:00"}
-                                    for (l, s, m, t) in log_rows]
+                                    for (l, s, m, t, r) in log_rows]
                         await db.execute(
                             _text(
                                 "INSERT INTO bot_logs (level, source, ts, msg) "
@@ -5984,6 +5985,16 @@ class PaperBotRuntime:
                                             side=side, reason="submit"))
             except Exception:
                 pass
+        # P0 (RECHECK 2026-10-04): пока unresolved-ордер ждёт сверки, ЛЮБОЙ новый
+        # open/close по инструменту запрещён — иначе он вытеснит запись из
+        # pending_orders[figi], guard в _execute_pending перестанет видеть
+        # PENDING_RECONCILIATION и возможна дубль-экспозиция.
+        _cur = self.pending_orders.get(figi)
+        if _cur is not None and getattr(_cur, "status", "") == "PENDING_RECONCILIATION":
+            self._log(f"ЗАЩИТА СВЕРКИ: {ticker} unresolved-ордер не разрешён — {action} {side} отклонён")
+            self.events.log("ORDER_BLOCKED_RECONCILIATION", figi=figi, ticker=ticker,
+                            action=action, side=side, pending_id=str(getattr(_cur, "id", "")))
+            return
         cfg = self.config
         # Инверсия уже применена на уровне сигнала (см. _process_candle) — здесь НЕ дублируем.
         qty = cfg.qty_per_trade
@@ -6057,6 +6068,12 @@ class PaperBotRuntime:
                 _med_s = _srt[len(_srt) // 2]
             _imb_lim_s = float(getattr(cfg, "entry_ob_imbalance_max", 0.3) or 0.0)
             _spr_lim_s = float(getattr(cfg, "entry_ob_spread_max", 25.0) or 0.0)
+            # В реплее/тесте стакан из fetch_orderbook — ЖИВОЙ (сейчас), а не на дату
+            # прогона: проверять по нему исторические входы нельзя, гейт пропускаем
+            # (иначе он глушит входы и тест-таблицы пустые; см. Signal Trace 01.10).
+            if str(getattr(cfg, "feed", "")) == "replay":
+                _imb_lim_s = 0.0
+                _spr_lim_s = 0.0
             _ob_s = None
             if _imb_lim_s > 0 or _spr_lim_s > 0:
                 try:
@@ -6077,7 +6094,13 @@ class PaperBotRuntime:
             _mc = MarketContext(cfg=cfg, side=side, turnover=_to_s, atr_pct=_atr_s,
                                 atr_pct_median=_med_s, orderbook=_ob_s,
                                 news_blackout_reason=_nb_reason)
-            _res_s = run_gate_chain(MARKET_GATES, _mc)
+            # gate_orderbook читает лимиты из cfg, а не из локалов выше, поэтому
+            # в реплее исключаем его из цепочки целиком (живой стакан ≠ дата прогона).
+            _gates_s = MARKET_GATES
+            if str(getattr(cfg, "feed", "")) == "replay":
+                _gates_s = tuple(g for g in MARKET_GATES
+                                 if getattr(g, "__name__", "") != "gate_orderbook")
+            _res_s = run_gate_chain(_gates_s, _mc)
             if not _res_s.passed:
                 self._reject_entry("signal", _res_s.key, _res_s.detail, figi, ticker)
                 self._trace_order_reject(figi, ticker, action, side, f"gate_signal:{_res_s.key}", _res_s.detail)

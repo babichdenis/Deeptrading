@@ -137,3 +137,42 @@ async def test_execute_pending_marks_unknown_open_for_reconciliation(monkeypatch
     assert order.status == "PENDING_RECONCILIATION"
     assert calls["open"] == 1
     assert any(ev[0] == "ORDER_RECONCILIATION_REQUIRED" for ev in rt.events.items)
+
+
+@pytest.mark.asyncio
+async def test_submit_order_blocks_new_orders_while_reconciliation_pending():
+    """RECHECK P0: unresolved-ордер нельзя вытеснить новым — guard в _submit_order."""
+    from app.bot.runtime import PaperBotRuntime
+
+    rt = PaperBotRuntime.__new__(PaperBotRuntime)
+    rt._trace = None
+    rt.pending_orders = {"FIGI123": SimpleNamespace(id="o1", status="PENDING_RECONCILIATION")}
+    rt.events = _DummyEvents()
+    rt._log = lambda *_a, **_k: None
+
+    await rt._submit_order("FIGI123", "TEST", "open", "BUY")
+
+    assert "FIGI123" in rt.pending_orders
+    assert rt.pending_orders["FIGI123"].status == "PENDING_RECONCILIATION"
+    assert any(ev[0] == "ORDER_BLOCKED_RECONCILIATION" for ev in rt.events.items)
+
+
+def test_live_broker_degraded_marks_clear_on_success():
+    """RECHECK P1: успешный вызов сбрасывает stale degraded-метку."""
+    from app.bot.live_broker import LiveBroker
+
+    broker = LiveBroker.__new__(LiveBroker)
+    broker.degraded = {"margin_attributes": {"ts": 0.0, "error": "X"}}
+    broker._mark_ok("margin_attributes")
+    assert "margin_attributes" not in broker.degraded
+
+
+def test_filter_sparse_signals_no_ctx_no_nameerror():
+    """RECHECK CI: F821 Undefined name ctx — регресс-тест без контекста."""
+    from datetime import datetime, timezone
+
+    from app.services.ensemble import _filter_sparse_signals
+
+    sigs = [{"ts": datetime.now(timezone.utc), "side": "BUY"}]
+    out = _filter_sparse_signals(sigs, [], 300, 0.5, 0.0)
+    assert out == []

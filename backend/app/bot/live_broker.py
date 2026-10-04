@@ -254,6 +254,13 @@ class LiveBroker:
             "error": f"{type(exc).__name__}: {exc}" if exc else "",
         }
 
+    def _mark_ok(self, component: str) -> None:
+        """RECHECK P1: сброс деградации после успешного вызова — иначе
+        историческая ошибка выглядит как текущее состояние в /bot/status."""
+        d = getattr(self, "degraded", None)
+        if d is not None:
+            d.pop(component, None)
+
     async def margin_attributes(self) -> dict:
         """Маржинальные атрибуты счёта: liquid_portfolio, starting_margin, minimal_margin.
 
@@ -272,7 +279,9 @@ class LiveBroker:
             }
 
         try:
-            return await asyncio.to_thread(_f)
+            out = await asyncio.to_thread(_f)
+            self._mark_ok("margin_attributes")
+            return out
         except Exception as e:
             self._mark_degraded("margin_attributes", e)
             return {}
@@ -403,7 +412,9 @@ class LiveBroker:
             return out
 
         try:
-            return await asyncio.to_thread(_fetch)
+            out = await asyncio.to_thread(_fetch)
+            self._mark_ok("last_prices")
+            return out
         except Exception as e:
             self._mark_degraded("last_prices", e)
             return {}
@@ -419,6 +430,7 @@ class LiveBroker:
 
         try:
             resp = await asyncio.to_thread(_fetch)
+            self._mark_ok("trading_status")
             return str(resp.trading_status)
         except Exception as e:
             self._mark_degraded("trading_status", e)
@@ -436,6 +448,7 @@ class LiveBroker:
 
         try:
             resp = await asyncio.to_thread(_fetch)
+            self._mark_ok("main_session_active")
             total = len(resp.trading_statuses)
             if total == 0:
                 return False

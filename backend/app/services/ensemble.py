@@ -163,7 +163,8 @@ def _bar_stats_1m(candles: list[EngineCandle], tf_sec: int) -> dict:
 
 
 def _filter_sparse_signals(sigs: list[dict], candles: list[EngineCandle], tf_sec: int,
-                           min_density: float, min_turnover: float) -> list[dict]:
+                           min_density: float, min_turnover: float,
+                           ctx=None) -> list[dict]:
     """Убрать сигналы на разряженных барах.
 
     min_density — минимальная доля присутствующих 1м-минут внутри tf-бара (0..1);
@@ -851,7 +852,7 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
         sid = s["strategy_id"]
         tf_sec = TF_SECONDS.get(s.get("tf", "5min"), 300)
         sigs = _gensig(ctx, sid, s.get("params"), tf_sec, candles)
-        sigs = _filter_sparse_signals(sigs, candles, tf_sec, _min_density, _min_turnover)
+        sigs = _filter_sparse_signals(sigs, candles, tf_sec, _min_density, _min_turnover, ctx)
         # Фильтр по режиму: стратегия активна только в разрешённых режимах.
         _allowed = _rsf.get(sid)
         if _allowed is not None and regime_bars:
