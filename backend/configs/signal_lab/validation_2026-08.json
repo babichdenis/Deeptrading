@@ -1,0 +1,163 @@
+{
+ "run_key": "slab-2026-08-validation-v1",
+ "stage": "validation",
+ "dataset_key": "moex_1m",
+ "period_from": "2026-08-01T00:00:00+00:00",
+ "period_to": "2026-08-31T23:59:59+00:00",
+ "warmup_from": "2026-07-01T00:00:00+00:00",
+ "universe": [
+  "SBER",
+  "ROSN",
+  "T",
+  "GAZP",
+  "LKOH",
+  "NVTK",
+  "AFLT",
+  "SMLT",
+  "SNGSP",
+  "TRNFP",
+  "MAGN",
+  "GMKN",
+  "RUAL",
+  "MTSS",
+  "NLMK",
+  "CHMF",
+  "ASTR",
+  "SFIN",
+  "YDEX",
+  "MVID",
+  "VKCO",
+  "TATN",
+  "ALRS",
+  "PLZL",
+  "RNFT",
+  "OZON",
+  "VTBR",
+  "SIBN",
+  "AFKS",
+  "PHOR"
+ ],
+ "tfs": [
+  "1min",
+  "5min",
+  "10min"
+ ],
+ "engines": "*",
+ "window": 400,
+ "costs": {
+  "commission_rate": 0.0005,
+  "slippage_bps": 2.0,
+  "qty": 1
+ },
+ "horizons": [
+  1,
+  3,
+  6,
+  12,
+  24
+ ],
+ "timeout_bars": 24,
+ "atr_period": 14,
+ "exit_profiles": [
+  {
+   "code": "sl1_tp2",
+   "sl_atr": 1.0,
+   "tp_atr": 2.0
+  },
+  {
+   "code": "sl1.5_tp3",
+   "sl_atr": 1.5,
+   "tp_atr": 3.0
+  },
+  {
+   "code": "sl2_tp4",
+   "sl_atr": 2.0,
+   "tp_atr": 4.0
+  },
+  {
+   "code": "sl3_tp6",
+   "sl_atr": 3.0,
+   "tp_atr": 6.0
+  }
+ ],
+ "trailing_profiles": [
+  {
+   "code": "bot_atr_comm4",
+   "policy_id": "atr_stop",
+   "params": {
+    "period": 14,
+    "multiplier": 4.0,
+    "risk_reward": 4.0,
+    "trail_activation_comm_mult": 4.0,
+    "trail_distance_r": 2.5,
+    "trail_compress_r": 1.0,
+    "trail_min_factor": 0.6,
+    "trail_min_atr": 1.5,
+    "trail_vol_boost": 0.3
+   }
+  },
+  {
+   "code": "atr_stop_r_mode",
+   "policy_id": "atr_stop",
+   "params": {
+    "period": 14,
+    "multiplier": 2.0,
+    "risk_reward": 2.0,
+    "trail_activation_r": 1.0,
+    "trail_distance_r": 2.0
+   }
+  },
+  {
+   "code": "atr_trailing_legacy",
+   "policy_id": "atr_trailing",
+   "params": {
+    "period": 14,
+    "initial_stop_atr": 2.0,
+    "activation_atr": 1.0,
+    "trail_distance_atr": 2.0
+   }
+  },
+  {
+   "code": "exit_manager_default",
+   "policy_id": "exit_manager",
+   "params": {
+    "default_atr_mult_stop": 2.0,
+    "default_atr_mult_trail": 2.5,
+    "default_risk_reward": 2.0,
+    "max_bars_in_trade": 40,
+    "enable_trailing": true,
+    "enable_time": true,
+    "enable_regime": true
+   }
+  }
+ ],
+ "sessions": [
+  "morning",
+  "day",
+  "evening"
+ ],
+ "overnight": false,
+ "engine_tfs": {
+  "ose_all": [
+   "10min"
+  ],
+  "ose_price_channel": [
+   "10min"
+  ],
+  "ose_sma_stoch": [
+   "10min"
+  ],
+  "ose_envelop_trend": [
+   "10min"
+  ],
+  "ose_rsi_contrtrend": [
+   "10min"
+  ],
+  "ose_rsi_trade": [
+   "10min"
+  ],
+  "ose_bollinger": [
+   "10min"
+  ]
+ }
+}

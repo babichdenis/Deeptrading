@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -31,6 +32,10 @@ class LabBar:
 def sync_url(url: str | None = None) -> str:
     if url:
         return url
+    # Удалённые воркеры (машина .8) берут DSN из окружения — секрет не в коде.
+    env = (os.environ.get("LAB_DB_URL") or "").strip()
+    if env:
+        return env
     return get_settings().database_url.replace("+asyncpg", "")
 
 

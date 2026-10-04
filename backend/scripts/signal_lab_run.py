@@ -34,12 +34,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Signal Lab runner")
     ap.add_argument("--config", required=True, help="путь к JSON-конфигу прогона")
     ap.add_argument("--phase", default="signals",
-                    choices=["signals", "outcomes", "fixed", "trailing", "regime", "all"])
+                    choices=["signals", "outcomes", "fixed", "trailing", "events", "regime", "all"])
     ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--tickers", default="", help="override: список тикеров через запятую")
     ap.add_argument("--engines", default="", help="override: список strategy_id через запятую")
     ap.add_argument("--date-from", default="", help="override period_from (ISO)")
     ap.add_argument("--date-to", default="", help="override period_to (ISO)")
+    ap.add_argument("--run-id", default="", help="для фаз outcomes/fixed/trailing: id прогона")
     ap.add_argument("--db-url", default="", help="override DSN (без +asyncpg)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -52,6 +53,7 @@ def main() -> int:
         db_url=(args.db_url or None), jobs=args.jobs,
         engines=engines, tickers=tickers,
         date_from=(args.date_from or None), date_to=(args.date_to or None),
+        run_id=(args.run_id or None),
         dry_run=args.dry_run,
     )
     print(json.dumps(out, ensure_ascii=False, indent=2, default=str))

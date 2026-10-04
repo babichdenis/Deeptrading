@@ -97,6 +97,39 @@ class LabSignalEvent(Base):
     created_at: Mapped[str] = mapped_column(String(40), default="")
 
 
+class LabSignalEventRun(Base):
+    """Событие = непрерывная серия одинаковых сигналов (figi × tf × engine).
+
+    Сырые сигналы (lab_signal_events) остаются как есть; этот слой нужен, чтобы
+    не считать «каждый бар состояния» отдельным входом (плотность 1.00 у половины
+    движков искажала все средние). Новый event при смене стороны, появлении после
+    паузы (разрыв последовательности) или старте. canonical entry = start_ts.
+    """
+    __tablename__ = "lab_signal_event_runs"
+    __table_args__ = (
+        UniqueConstraint("run_id", "figi", "strategy_id", "tf", "start_ts",
+                         name="uq_lab_event"),
+        Index("ix_lab_events_run_engine_tf", "run_id", "strategy_id", "tf"),
+        Index("ix_lab_events_figi_start", "figi", "start_ts"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("lab_experiment_runs.id", ondelete="CASCADE"))
+    figi: Mapped[str] = mapped_column(String(32))
+    ticker: Mapped[str] = mapped_column(String(32), default="")
+    strategy_id: Mapped[str] = mapped_column(String(64))
+    tf: Mapped[str] = mapped_column(String(8))
+    tf_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    side: Mapped[str] = mapped_column(String(8))
+    start_ts: Mapped[str] = mapped_column(String(40))
+    start_close_ts: Mapped[str] = mapped_column(String(40), default="")
+    end_ts: Mapped[str] = mapped_column(String(40), default="")
+    duration_bars: Mapped[int] = mapped_column(Integer, default=1)
+    signal_count: Mapped[int] = mapped_column(Integer, default=1)
+    start_signal_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("lab_signal_events.id", ondelete="CASCADE"))
+    created_at: Mapped[str] = mapped_column(String(40), default="")
+
+
 class LabMarketOutcome(Base):
     """Path-independent исход горизонта: future_return и MFE/MAE по стороне."""
     __tablename__ = "lab_market_outcomes"

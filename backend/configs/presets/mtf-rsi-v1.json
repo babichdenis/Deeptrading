@@ -21,7 +21,7 @@
   "runtime": {
     "sessions": ["morning", "day", "evening"],
     "overnight": false,
-    "money": {"initial_cash": 100000, "qty_per_trade": 1, "pos_pct": 0.4, "max_positions": 5},
+    "money": {"initial_cash": 10000, "qty_per_trade": 1, "pos_pct": 0.4, "max_positions": 5},
     "exits": {"sl_mode": "atr", "atr_period": 14, "initial_sl_atr": 4.0,
               "trail_activation_comm_mult": null},
     "entry": {"quorum": null, "confirm_flip": 2, "cooldown_bars": 15,

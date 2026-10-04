@@ -17,7 +17,7 @@ from app.models.reports import ReportRow, ReportRun, ReportSlice, ReportTrade
 from app.models.signals import RunDependency, SignalDecision, StrategyRun, StrategySignal
 from app.models.signal_lab import (
     LabExperimentRun, LabFixedExit, LabMarketOutcome, LabRegimeObservation,
-    LabSignalEvent, LabTrailingResult,
+    LabSignalEvent, LabSignalEventRun, LabTrailingResult,
 )
 from app.models.signal_trace import SignalTraceEvent, SignalTraceOutcome, SignalTraceRun
 
@@ -48,6 +48,7 @@ __all__ = [
     "StrategySignal",
     "LabExperimentRun",
     "LabSignalEvent",
+    "LabSignalEventRun",
     "LabMarketOutcome",
     "LabFixedExit",
     "LabTrailingResult",

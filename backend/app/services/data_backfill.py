@@ -46,20 +46,33 @@ def _engine():
 
 
 def _moex_candles(ticker: str, d: str) -> list[dict]:
-    url = (f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR"
-           f"/securities/{ticker}/candles.json?from={d}&till={d}&interval=1")
-    data = json.loads(urllib.request.urlopen(url, timeout=20).read())
-    cols = {n: i for i, n in enumerate(data["candles"]["columns"])}
-    out = []
-    for r in data["candles"]["data"]:
-        ts = r[cols["begin"]]
-        if isinstance(ts, str):
-            ts = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
-        out.append({
-            "open": r[cols["open"]], "high": r[cols["high"]],
-            "low": r[cols["low"]], "close": r[cols["close"]],
-            "volume": r[cols["volume"]], "ts": ts,
-        })
+    """1m-свечи MOEX ISS за день.
+
+    ISS пагинирует выдачу по 500 строк — листаем до конца (иначе теряется
+    вечерняя сессия: за полный день ~1010 баров). begin отдаётся в MSK —
+    приводим к UTC (канон таблицы candles, как пишет путь T-Invest).
+    """
+    out: list[dict] = []
+    start = 0
+    while True:
+        url = (f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR"
+               f"/securities/{ticker}/candles.json?from={d}&till={d}&interval=1"
+               f"&start={start}")
+        data = json.loads(urllib.request.urlopen(url, timeout=20).read())
+        cols = {n: i for i, n in enumerate(data["candles"]["columns"])}
+        rows = data["candles"]["data"]
+        for r in rows:
+            ts = r[cols["begin"]]
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts).replace(tzinfo=MSK).astimezone(timezone.utc)
+            out.append({
+                "open": r[cols["open"]], "high": r[cols["high"]],
+                "low": r[cols["low"]], "close": r[cols["close"]],
+                "volume": r[cols["volume"]], "ts": ts,
+            })
+        if len(rows) < 500:
+            break
+        start += len(rows)
     return out
 
 
