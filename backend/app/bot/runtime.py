@@ -932,6 +932,7 @@ class PaperBotRuntime:
             "bar_ms_total": 0.0, "bar_ms_n": 0, "bar_ms_max": 0.0,
             "ensemble_ms_total": 0.0, "ensemble_ms_n": 0, "ensemble_ms_max": 0.0,
             "persist_ms_total": 0.0, "persist_ms_n": 0, "persist_ms_max": 0.0,
+            "persist_failures": 0, "persist_dropped": 0, "persist_queue_depth": 0,
             "last_alert": None,
             "alerts": [],
         }
@@ -2321,6 +2322,10 @@ class PaperBotRuntime:
         self._entry_regime[figi] = _er_norm
         # Карточка входа (reason/голоса/режим) — для ЛЮБОГО движка, см. _entry_card.
         _meta_row = self._entry_card(figi, meta, _er_norm)
+        import logging as _lg
+        _lg.getLogger("app.bot.runtime").info(
+            "ST_OPEN enter figi=%s mode=%s test=%s", figi, self.broker_mode,
+            getattr(self.config, "test_name", "") or "")
         try:
             async with SessionLocal() as db:
                 # Идемпотентность: один открытый ряд на figi. Если уже есть
@@ -2354,6 +2359,9 @@ class PaperBotRuntime:
                     test_name=getattr(self.config, "test_name", "") or None,
                 ))
                 await db.commit()
+                _lg.getLogger("app.bot.runtime").info(
+                    "ST_OPEN persist ok figi=%s mode=%s test=%s", figi,
+                    self.broker_mode, getattr(self.config, "test_name", "") or "")
                 # Funnel: фактический вход (executed_entries) — инкремент стратегии figi
                 try:
                     _st_f = self.strategies.get(figi)
@@ -2362,6 +2370,10 @@ class PaperBotRuntime:
                 except Exception:
                     pass
         except Exception as _sw_e:
+            _lg.getLogger("app.bot.runtime").error(
+                "ST_OPEN persist FAILED figi=%s mode=%s test=%s: %r",
+                figi, self.broker_mode,
+                getattr(self.config, "test_name", "") or "", _sw_e, exc_info=True)
             _audit_swallow('_st_open@L1588', _sw_e)  # audit silent-except
             pass
 
@@ -2379,6 +2391,11 @@ class PaperBotRuntime:
                     .limit(1)
                 )
                 row = res.scalar_one_or_none()
+                import logging as _lgk
+                if row is None:
+                    _lgk.getLogger("app.bot.runtime").warning(
+                        "ST_CLOSE: нет открытой строки figi=%s mode=%s test=%s (открытие не записалось?)",
+                        figi, self.broker_mode, getattr(self.config, "test_name", "") or "")
                 if row is not None:
                     row.exit_time = self._bot_now()
                     row.exit_price = float(exit_price)
@@ -2492,6 +2509,11 @@ class PaperBotRuntime:
                         _audit_swallow('_st_close@L1628', _sw_e)  # audit silent-except
                         pass
         except Exception as _sw_e:
+            import logging as _lgc
+            _lgc.getLogger("app.bot.runtime").error(
+                "ST_CLOSE persist FAILED figi=%s mode=%s test=%s: %r",
+                figi, self.broker_mode,
+                getattr(self.config, "test_name", "") or "", _sw_e, exc_info=True)
             _audit_swallow('_st_close@L1630', _sw_e)  # audit silent-except
             pass
 
@@ -3351,6 +3373,7 @@ class PaperBotRuntime:
             "bar_ms_total": 0.0, "bar_ms_n": 0, "bar_ms_max": 0.0,
             "ensemble_ms_total": 0.0, "ensemble_ms_n": 0, "ensemble_ms_max": 0.0,
             "persist_ms_total": 0.0, "persist_ms_n": 0, "persist_ms_max": 0.0,
+            "persist_failures": 0, "persist_dropped": 0, "persist_queue_depth": 0,
             "last_alert": None,
             "alerts": [],
         }
@@ -4661,6 +4684,7 @@ class PaperBotRuntime:
                     "persist_q": len(self._persist_queue),
                     "persist_q5": len(self._persist_queue_5m),
                     "universe_active": len(self.strategies),
+                    "broker_degraded": dict(getattr(self.broker, "degraded", None) or {}),
                     "ts": datetime.now(timezone.utc).isoformat(),
                 })
 
@@ -4963,11 +4987,21 @@ class PaperBotRuntime:
         task.add_done_callback(_on_done)
         return task
 
+    @staticmethod
+    def _dq_overflow(q: deque, n_items: int) -> int:
+        """P0.3: сколько записей вытеснит maxlen deque при добавлении n_items."""
+        return max(0, len(q) + n_items - q.maxlen) if q.maxlen else 0
+
     async def _flush_persist_once(self) -> None:
         from sqlalchemy import text as _text
 
         def _drain(q: deque) -> list:
             return [q.popleft() for _ in range(len(q))]
+
+        # P0.3: глубина очередей persist — видна в /bot/status (metrics).
+        self.metrics["persist_queue_depth"] = (
+            len(self._persist_queue) + len(self._persist_queue_5m) + len(self._log_persist_queue)
+        )
 
         batch = _drain(self._persist_queue)
         batch5 = _drain(self._persist_queue_5m)
@@ -5027,6 +5061,13 @@ class PaperBotRuntime:
                     )
                 candle_ok = True
             except Exception as e:
+                # P0.3: requeue возвращает батч, но при переполнении maxlen deque
+                # тихо вытесняет старейшие записи — считаем и то, и другое.
+                self.metrics["persist_dropped"] += (
+                    self._dq_overflow(self._persist_queue, len(batch))
+                    + self._dq_overflow(self._persist_queue_5m, len(batch5))
+                )
+                self.metrics["persist_failures"] += 1
                 self._log(f"PERSIST_ERR {type(e).__name__}: {str(e)[:80]}")
                 self._persist_queue.extend(batch)
                 self._persist_queue_5m.extend(batch5)
@@ -5060,6 +5101,8 @@ class PaperBotRuntime:
                         )
                     await db.commit()
             except Exception as e:
+                self.metrics["persist_dropped"] += self._dq_overflow(self._log_persist_queue, len(log_rows))
+                self.metrics["persist_failures"] += 1
                 self._log(f"PERSIST_LOG_ERR {type(e).__name__}: {str(e)[:80]}")
                 self._log_persist_queue.extendleft(reversed(log_rows))
         elif log_rows:
@@ -5646,7 +5689,7 @@ class PaperBotRuntime:
         # Дорого, поэтому только на 5m-границе и пока нет данных.
         if _reg_state is None and c.ts.minute % 5 == 0:
             try:
-                from app.services.regime import compute_regime as _CR5
+                from app.services.regime_v2.active import compute_regime_active as _CR5
                 _tl, _, _ = _CR5(list(buffer), 3600)  # режим строго на H1
                 if _tl:
                     _r = _tl[-1]
