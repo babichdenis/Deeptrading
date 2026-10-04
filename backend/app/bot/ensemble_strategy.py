@@ -134,7 +134,7 @@ class EnsembleV4Strategy:
             try:
                 _key = last.ts.replace(minute=0, second=0, microsecond=0)
                 if self._regime_cache.get("key") != _key:
-                    from app.services.regime import compute_regime as _CR
+                    from app.services.regime_v2.active import compute_regime_active as _CR
                     _states, _, _ = _CR(list(candles), 3600)
                     _st = _states[-1]["state"] if _states else None
                     self._regime_cache = {"key": _key, "state": _st}

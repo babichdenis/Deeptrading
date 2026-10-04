@@ -141,6 +141,7 @@ MarketMeasurements → RegimeObservation (оси + confidence) → Stateful Clas
 - Replay и live используют один и тот же state machine; порядок баров и граница закрытия — ADR-0002.
 - **Reference candidate (решение владельца 2026-10-02):** `mild (2/1)` — текущий V2 reference hysteresis; `default (2/3)` — benchmark для будущего сравнения; `strong (3/5)` отклонён (поглощает 32–52% сырых смен). `NEUTRAL` остаётся в контракте, но его частота — **не** acceptance criterion: однобаровые NEUTRAL закономерно поглощаются hysteresis, специальный механизм сохранения класса не вводится.
 - **C.6 (2026-10-02):** `RegimeProvider` (`app/services/regime_v2/provider.py`) — `legacy` default (production-поведение не меняется), `v2` только для analytics/comparison/signal attribution/research, **НЕ trading-gate**. Reference labels: `backend/tests/fixtures/regime_v2_reference.json` + герметичный тест (`range→trend`, `blip_in_trend`, `trend_flip`, `hv→trend`); batch==incremental для каждого префикса заморожен тестом `test_regime_v2_hysteresis.py`.
+- **2026-10-03 (решение владельца, тестовый период):** `regime_provider=v2` включён на **всём контуре** (live/бэктест/реплей/гейты/heatmap/Signal Lab) через `backend/configs/regime.json`. Это осознанно расширяет прежнее «V2 — не trading-gate» на время тестирования; откат — правкой файла на `legacy`. Env для переключателя не используется. Hermetic-тесты пиннят provider=legacy (conftest), чтобы CI не зависел от операторского файла.
 
 ### 10. Backward compatibility: `trade_regimes` и маппинг
 
@@ -159,7 +160,7 @@ MarketMeasurements → RegimeObservation (оси + confidence) → Stateful Clas
 - **RANGE/HIGH_VOL конфликт (решение владельца):** `HIGH_VOLATILITY` в derived-метке даёт только `EXTREME`-волатильность как отдельно зафиксированный volatility-mapping (не приоритет ради parity); обычный HIGH при подтверждённом TREND отдаётся `TREND_UP/DOWN`. `TRENDING + FLAT → NEUTRAL` (утверждено 2026-10-02): структура есть, направленного bias нет — `NEUTRAL` осмысленная проекция, а не мусорный остаток. Замороженные `atr_percentile=78` / `range_mult=2.75` остаются только в legacy-провайдере (behavior-preserving) и не являются порогами v2. Agreement с legacy — диагностика, не цель.
 - **mixed/UNKNOWN:** оба дают `NEUTRAL`, но `reason` сохраняет причину (`warmup`, `low_confidence`, `transition`), чтобы диагностика не потерялась.
 - `reason`-коды legacy (`drift_up_cons0.83`, `mixed`, …) не являются контрактом API, но adapter на переходный период сохраняет максимально близкие коды для логов/разбора.
-- На время миграции — провайдер метки: `regime_provider = legacy | v2` (default `legacy`). Cutover — только после golden-паритета и подписи владельца. БД-историю сделок не переписываем; `entry_regime` в meta остаётся строкой.
+- На время миграции — провайдер метки: `regime_provider = legacy | v2` (default `legacy`). Выбор живёт в конфиг-файле `backend/configs/regime.json` (`{"provider": ..., "v2_window": ...}`), **не в `.env`** — env только секреты/токены (решение владельца 2026-10-03). Cutover — только после golden-паритета и подписи владельца. БД-историю сделок не переписываем; `entry_regime` в meta остаётся строкой.
 
 **Инвентарь потребителей (проверено по коду 2026-10-02):**
 

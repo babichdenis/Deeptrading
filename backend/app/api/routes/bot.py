@@ -2606,7 +2606,7 @@ async def _hm_compute_meta(db, bb: str, frm) -> (dict[str, dict], float, int):
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     from sqlalchemy import text as _t
     from app.engine.models import Candle as _EC
-    from app.services.regime import compute_regime as _CR
+    from app.services.regime_v2.active import compute_regime_active as _CR
     _cut = _dt.now(_tz.utc) - _td(minutes=1)
     _frm36 = _cut - _td(days=32)
     _rows1 = (await db.execute(_t(

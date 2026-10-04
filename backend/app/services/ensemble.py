@@ -1983,10 +1983,11 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict,
         if _is_replay:
             regime_row, timeline, _ = ctx.regime(regime_tf_sec, regime_cfg)
         else:
-            from app.services.regime import detect_regime
-            regime_row, timeline, _ = detect_regime(regime_bars, **{k: v for k, v in regime_cfg.items()
-                                                                     if k in ("slope_threshold", "adx_threshold",
-                                                                              "atr_percentile_threshold", "range_mult")})
+            from app.services.regime_v2.active import detect_regime_active
+            regime_row, timeline, _ = detect_regime_active(regime_bars, regime_tf_sec, **{
+                k: v for k, v in regime_cfg.items()
+                if k in ("slope_threshold", "adx_threshold",
+                         "atr_percentile_threshold", "range_mult")})
         _regime_gated = False
 
     # --- размер позиции и оракул ---

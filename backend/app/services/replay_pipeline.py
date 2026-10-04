@@ -242,7 +242,12 @@ class ReplayState(EnsembleContext):
             kw = {k: v for k, v in (cfg or {}).items()
                   if k in ("slope_threshold", "adx_threshold",
                            "atr_percentile_threshold", "range_mult")}
-            self._regime_state = RegimeState(**kw)
+            from app.services.regime_v2.active import is_v2 as _is_v2
+            if _is_v2():
+                from app.services.regime_v2.stream import RegimeV2StateStream
+                self._regime_state = RegimeV2StateStream(tf_sec)
+            else:
+                self._regime_state = RegimeState(**kw)
             self._regime_tf = tf_sec
             self._regime_live = []
             self._regime_live_closed = 0

@@ -6,10 +6,33 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from app.engine.models import Candle
 from app.services.regime import RegimeDetector
+from app.services.regime_v2 import active
 from app.services.regime_v2.hysteresis import HysteresisParams
 from app.services.regime_v2.provider import RegimeProvider
 
 T0 = datetime(2026, 8, 1, 7, 0, tzinfo=UTC)
+
+
+def test_active_provider_missing_file_is_legacy(tmp_path, monkeypatch):
+    monkeypatch.setattr(active, "CONFIG_PATH", tmp_path / "no_such_regime.json")
+    assert active.provider_name() == "legacy"
+    assert active.is_v2() is False
+
+
+def test_active_provider_reads_config_file(tmp_path, monkeypatch):
+    cfg = tmp_path / "regime.json"
+    cfg.write_text('{"provider": "v2", "v2_window": 24}', encoding="utf-8")
+    monkeypatch.setattr(active, "CONFIG_PATH", cfg)
+    assert active.provider_name() == "v2"
+    assert active.is_v2() is True
+    assert active.load_config()["v2_window"] == 24
+
+
+def test_active_provider_invalid_falls_back_legacy(tmp_path, monkeypatch):
+    cfg = tmp_path / "regime.json"
+    cfg.write_text('{"provider": "xxx"}', encoding="utf-8")
+    monkeypatch.setattr(active, "CONFIG_PATH", cfg)
+    assert active.provider_name() == "legacy"
 
 
 def _bars(closes: list[float]) -> list[Candle]:
