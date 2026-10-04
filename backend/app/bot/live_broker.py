@@ -239,6 +239,21 @@ class LiveBroker:
         mv = await self.market_value()
         return max(0.0, eq - mv)
 
+    def _mark_degraded(self, component: str, exc: Exception | None = None) -> None:
+        """P1.3: фиксация деградации фолбэка (margin/prices/status).
+
+        Раньше API-ошибки тихо превращались в {} / "" / False и runtime
+        продолжал работать на неполных данных. Теперь факт деградации
+        записывается в self.degraded и виден в /bot/status.
+        """
+        d = getattr(self, "degraded", None)
+        if d is None:
+            d = self.degraded = {}
+        d[component] = {
+            "ts": time.time(),
+            "error": f"{type(exc).__name__}: {exc}" if exc else "",
+        }
+
     async def margin_attributes(self) -> dict:
         """Маржинальные атрибуты счёта: liquid_portfolio, starting_margin, minimal_margin.
 
@@ -258,7 +273,8 @@ class LiveBroker:
 
         try:
             return await asyncio.to_thread(_f)
-        except Exception:
+        except Exception as e:
+            self._mark_degraded("margin_attributes", e)
             return {}
 
     async def free_funds(self) -> float:
@@ -388,7 +404,8 @@ class LiveBroker:
 
         try:
             return await asyncio.to_thread(_fetch)
-        except Exception:
+        except Exception as e:
+            self._mark_degraded("last_prices", e)
             return {}
 
     async def get_trading_status(self, figi: str) -> str:
@@ -403,7 +420,8 @@ class LiveBroker:
         try:
             resp = await asyncio.to_thread(_fetch)
             return str(resp.trading_status)
-        except Exception:
+        except Exception as e:
+            self._mark_degraded("trading_status", e)
             return ""
 
     async def main_session_active(self) -> bool:
@@ -426,7 +444,8 @@ class LiveBroker:
                 if int(x.trading_status) == 5  # SECURITY_TRADING_STATUS_NORMAL_TRADING
             )
             return n_trading / total > 0.5
-        except Exception:
+        except Exception as e:
+            self._mark_degraded("main_session_active", e)
             return False
 
     async def open_position(

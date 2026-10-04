@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     # Для публичного/строгого режима задать явно, напр. http://localhost:5173.
     cors_origins: str = ""
     run_migrations_on_start: bool = False  # alembic upgrade head при старте приложения
+    bot_logs_retention_days: int = 30  # P2.2: TTL таблицы bot_logs (0 = чистка выключена)
 
     # --- Волатильная карусель (double-carousel) ---
     # Периодически ранжирует весь TQBR по дневной волатильности RNG% из MOEX ISS

@@ -205,6 +205,31 @@ async def lifespan(app: FastAPI):
 
     _daily_task = asyncio.create_task(_daily_bars_keepalive())
 
+    # bot_logs retention (P2.2): раз в 6 часов удаляем строки старше
+    # BOT_LOGS_RETENTION_DAYS (0 = выключено). Индекс по ts уже есть в модели.
+    async def _botlogs_retention() -> None:
+        import logging as _logging
+        from sqlalchemy import text as _text
+        _log = _logging.getLogger("uvicorn")
+        await asyncio.sleep(30.0)
+        while True:
+            try:
+                from app.config import get_settings
+                _days = get_settings().bot_logs_retention_days
+                if _days > 0:
+                    async with engine.begin() as conn:
+                        _res = await conn.execute(
+                            _text("DELETE FROM bot_logs WHERE ts < now() - make_interval(days => :d)"),
+                            {"d": _days},
+                        )
+                        if _res.rowcount:
+                            _log.info("bot_logs retention: удалено %s строк старше %s дн.", _res.rowcount, _days)
+            except Exception as e:
+                _log.warning("bot_logs retention: %s", str(e)[:120])
+            await asyncio.sleep(6 * 3600.0)
+
+    _retention_task = asyncio.create_task(_botlogs_retention())
+
     try:
         yield
     finally:
@@ -217,7 +242,8 @@ async def lifespan(app: FastAPI):
             pass
         _imoex_task.cancel()
         _daily_task.cancel()
-        for _t in (_imoex_task, _daily_task):
+        _retention_task.cancel()
+        for _t in (_imoex_task, _daily_task, _retention_task):
             try:
                 await _t
             except (asyncio.CancelledError, Exception):
