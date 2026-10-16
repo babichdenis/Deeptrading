@@ -1,0 +1,12 @@
+{
+  "date": "2026-10-16",
+  "prototype": "03 compact header",
+  "scope": "Static layout preservation, not browser or application tests",
+  "source_ids": 249,
+  "preserved_source_ids": 249,
+  "source_native_controls": 159,
+  "missing_source_ids": [],
+  "missing_source_controls": [],
+  "working_frontend_changed": false,
+  "browser_visual_check": "not performed; previous browser action blocked by policy"
+}

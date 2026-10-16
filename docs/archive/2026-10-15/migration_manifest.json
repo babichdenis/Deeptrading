@@ -1,0 +1,192 @@
+{
+  "date": "2026-10-15",
+  "scope": "Documentation only; no bot, network, DB, code, running tests, frozen inputs or run artifacts changed",
+  "archived": [
+    {
+      "original": "AGENTS.md",
+      "archive": "docs/archive/2026-10-15/originals/AGENTS.snapshot.md",
+      "original_sha256": "17c5fe0060c9357619ab3d71388a9f6ded6a74ab6e1b4352f674b1c0ed801173",
+      "archive_sha256": "37e960645d61570972cda1bdd1c683f0a7162300fc9d6f20431ed1353e75dac4",
+      "redacted": true,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "MEMORY.md",
+      "archive": "docs/archive/2026-10-15/originals/MEMORY.md",
+      "original_sha256": "345f1deee1e9f8a06f1f100aa6cdaf3a7c36dc5b30491e4c74153bb2db94f827",
+      "archive_sha256": "f57be5f6b656cc80102adac5c8ee6adb33f909d30eba68b2742e2d1d3865bb4d",
+      "redacted": true,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/PROGRESS.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/PROGRESS.md",
+      "original_sha256": "0fa6aea0ab29b9918f294cd329ec3be5c316bceb31a438adb41f0b067855f0a3",
+      "archive_sha256": "0fa6aea0ab29b9918f294cd329ec3be5c316bceb31a438adb41f0b067855f0a3",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "STATUS.md",
+      "archive": "docs/archive/2026-10-15/originals/STATUS.md",
+      "original_sha256": "786b77c5b84cbd3e90c09dd117b2b464988f8596e8a5cc43a3a892725e4f391f",
+      "archive_sha256": "786b77c5b84cbd3e90c09dd117b2b464988f8596e8a5cc43a3a892725e4f391f",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "PROJECT_STATE.md",
+      "archive": "docs/archive/2026-10-15/originals/PROJECT_STATE.md",
+      "original_sha256": "1f2ba605ba2904f1a6739c24e9b1df3f203daaa924caf3d7876e6fae1d76b21e",
+      "archive_sha256": "1f2ba605ba2904f1a6739c24e9b1df3f203daaa924caf3d7876e6fae1d76b21e",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "ROADMAP.md",
+      "archive": "docs/archive/2026-10-15/originals/ROADMAP.md",
+      "original_sha256": "c3af3b3f75e30b8fe660cab743999930b491a553e3f0938d1d61340c34179a36",
+      "archive_sha256": "c3af3b3f75e30b8fe660cab743999930b491a553e3f0938d1d61340c34179a36",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "BUILDER_CHANNEL.md",
+      "archive": "docs/archive/2026-10-15/originals/BUILDER_CHANNEL.md",
+      "original_sha256": "07db11a76d3f60cdf396f76e7acefb41b612d708281be97a06c14110b09669e4",
+      "archive_sha256": "07db11a76d3f60cdf396f76e7acefb41b612d708281be97a06c14110b09669e4",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "README.txt",
+      "archive": "docs/archive/2026-10-15/originals/README.txt",
+      "original_sha256": "2add70be84c3d68a15be42af1061039d3be40ab2ad9f0ad4c9b4c74298706457",
+      "archive_sha256": "2add70be84c3d68a15be42af1061039d3be40ab2ad9f0ad4c9b4c74298706457",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "main_plan.md",
+      "archive": "docs/archive/2026-10-15/originals/main_plan.md",
+      "original_sha256": "46aef7665577a732246a2ff612a7efa08588f2563b549b0f56d3f9f4d17568c2",
+      "archive_sha256": "46aef7665577a732246a2ff612a7efa08588f2563b549b0f56d3f9f4d17568c2",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/agents/DEEPSEEK_EXECUTOR.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/agents/DEEPSEEK_EXECUTOR.md",
+      "original_sha256": "65207bebec8cb2b81835005a142cbcfbddb11aec0f306daa86a5a71f1d58eede",
+      "archive_sha256": "65207bebec8cb2b81835005a142cbcfbddb11aec0f306daa86a5a71f1d58eede",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/agents/MY3_GLOBAL_DISCOVERY.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/agents/MY3_GLOBAL_DISCOVERY.md",
+      "original_sha256": "3f04d01f3c36b29bcf04e5df2ee7b824026de48138eeca97e816cd5109584d4c",
+      "archive_sha256": "3f04d01f3c36b29bcf04e5df2ee7b824026de48138eeca97e816cd5109584d4c",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/agents/MY3_RESEARCH_LEAD.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/agents/MY3_RESEARCH_LEAD.md",
+      "original_sha256": "738c6124947cc010447b86b87ed252622a3b9b7064741ac536fa1b2c27bb9e0a",
+      "archive_sha256": "738c6124947cc010447b86b87ed252622a3b9b7064741ac536fa1b2c27bb9e0a",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/agents/RESEARCH_WORKFLOW.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/agents/RESEARCH_WORKFLOW.md",
+      "original_sha256": "4389f73362debc36b5ce8fe78b043e7c4ba9f11c529baff4f27b6f7a497cad58",
+      "archive_sha256": "4389f73362debc36b5ce8fe78b043e7c4ba9f11c529baff4f27b6f7a497cad58",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/roadmap/NEXT_STEPS_2026-09-12.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/roadmap/NEXT_STEPS_2026-09-12.md",
+      "original_sha256": "0bded77bde4f0e76bc33879978594e26b51f946914d6b3e0d610a2ebe242fba7",
+      "archive_sha256": "0bded77bde4f0e76bc33879978594e26b51f946914d6b3e0d610a2ebe242fba7",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/roadmap/NOTE_TO_AGENT2.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/roadmap/NOTE_TO_AGENT2.md",
+      "original_sha256": "c2794cbfe653d2b8393a08fab452654ea4c5b8d13b85dd12d9e510c1f4a652c3",
+      "archive_sha256": "c2794cbfe653d2b8393a08fab452654ea4c5b8d13b85dd12d9e510c1f4a652c3",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/roadmap/TEAM_ZONES.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/roadmap/TEAM_ZONES.md",
+      "original_sha256": "c9a38f3f21b3fb7fb73c6709446ca982ba44ca1c91d307c913d4eebc2036177a",
+      "archive_sha256": "c9a38f3f21b3fb7fb73c6709446ca982ba44ca1c91d307c913d4eebc2036177a",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/roadmap/MIGRATION_TO_2.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/roadmap/MIGRATION_TO_2.md",
+      "original_sha256": "59e8a9ef5a48ae3c0875bfe8eec12d9bdadd53b30938eb4a66b40d0b501e515f",
+      "archive_sha256": "59e8a9ef5a48ae3c0875bfe8eec12d9bdadd53b30938eb4a66b40d0b501e515f",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/roadmap/DEV_PLAN.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/roadmap/DEV_PLAN.md",
+      "original_sha256": "1b318d6c3f34f1c26ebeae5e1c4d331c6ae82691054d6f7bdecb59813e80bb65",
+      "archive_sha256": "1b318d6c3f34f1c26ebeae5e1c4d331c6ae82691054d6f7bdecb59813e80bb65",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/roadmap/MTF_V4_2026.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/roadmap/MTF_V4_2026.md",
+      "original_sha256": "d4e6d4f6c7ab82354ce0aaaa53a918484ab447097931836db44593db28736f3b",
+      "archive_sha256": "d4e6d4f6c7ab82354ce0aaaa53a918484ab447097931836db44593db28736f3b",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/research/WEEK_AHEAD.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/research/WEEK_AHEAD.md",
+      "original_sha256": "e3a0156c8d4d49aea570b2e83a7c0a99372bb120dc35d1515720ec20967edb1a",
+      "archive_sha256": "e3a0156c8d4d49aea570b2e83a7c0a99372bb120dc35d1515720ec20967edb1a",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/research/EXPERIMENT_QUEUE.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/research/EXPERIMENT_QUEUE.md",
+      "original_sha256": "722561bf2f3690172af93e99c9109f1bce2d7b36fc5a48fab3e96c2cb0290c91",
+      "archive_sha256": "722561bf2f3690172af93e99c9109f1bce2d7b36fc5a48fab3e96c2cb0290c91",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "docs/research/RESEARCH_MAP.md",
+      "archive": "docs/archive/2026-10-15/originals/docs/research/RESEARCH_MAP.md",
+      "original_sha256": "77278405aedeb5c2ad1c862a3788398886401fd6594a5838f1fee182bf3b2e44",
+      "archive_sha256": "77278405aedeb5c2ad1c862a3788398886401fd6594a5838f1fee182bf3b2e44",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    },
+    {
+      "original": "backend/textdocs/STATUS.md",
+      "archive": "docs/archive/2026-10-15/originals/backend/textdocs/STATUS.md",
+      "original_sha256": "7b9fe4cfc55c031a7a9c04a381c4392cb34958c13740f7efbebf05fe1b673d68",
+      "archive_sha256": "7b9fe4cfc55c031a7a9c04a381c4392cb34958c13740f7efbebf05fe1b673d68",
+      "redacted": false,
+      "reason": "Исторический документ, заменён тематической базой знаний."
+    }
+  ],
+  "inventory_scope": "Authored Markdown/text documents in project root, docs, backend docs/textdocs/orchestrator/scripts/research and tg-orchestrator, test; excludes generated reports, dependencies (.venv*), caches and binary/vendor documents. New knowledge pages are indexed separately in README.",
+  "original_document_count": 212
+}

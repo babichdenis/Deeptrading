@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from t_tech.invest import CandleInterval, Client
@@ -10,6 +11,8 @@ from t_tech.invest.utils import quotation_to_decimal
 from app.config import get_settings
 from app.models.candle import Candle
 from app.models.instrument import Instrument
+from app.services import candle_ingestion_contract as cic
+from app.services import candle_integrity
 
 INTERVAL_NAMES: dict[str, CandleInterval] = {
     "1min": CandleInterval.CANDLE_INTERVAL_1_MIN,
@@ -133,44 +136,96 @@ async def upsert_instruments(db: AsyncSession, items: list[dict]) -> int:
     return len(items)
 
 
-async def upsert_candles(db: AsyncSession, rows: list[dict]) -> int:
-    saved = 0
-    batch_size = 1000
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i : i + batch_size]
-        stmt = pg_insert(Candle).values(batch)
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_candles_figi_interval_ts",
-            set_={
-                "open": stmt.excluded.open,
-                "high": stmt.excluded.high,
-                "low": stmt.excluded.low,
-                "close": stmt.excluded.close,
-                "volume": stmt.excluded.volume,
-            },
-        )
-        await db.execute(stmt)
-        saved += len(batch)
-    try:
-        from datetime import timezone as _tz
+async def upsert_candles(db: AsyncSession, rows: list[dict], *,
+                         window: tuple[datetime, datetime] | None = None) -> int:
+    """Записать пакет свечей с контрактной проверкой. Возвращает число принятых
+    уникальных валидных строк (совместимо с прежним int-контрактом)."""
+    res = await upsert_candles_detailed(db, rows, window=window)
+    return res.accepted
 
-        from app.services.candle_integrity import invalidate as _inv
-        _figs = sorted({r.get("figi") for r in rows if r.get("figi")})
-        _ivals = sorted({int(r.get("interval") or 1) for r in rows})
-        _days = set()
-        for _r in rows:
-            _ts = _r.get("ts")
-            if _ts is None:
-                continue
-            if getattr(_ts, "tzinfo", None) is None:
-                _ts = _ts.replace(tzinfo=_tz.utc)
-            _days.add((_ts + timedelta(hours=3)).date())
-        for _iv in _ivals:
-            await _inv(db, _figs, _iv, sorted(_days))
+
+async def upsert_candles_detailed(db: AsyncSession, rows: list[dict], *,
+                                  window: tuple[datetime, datetime] | None = None
+                                  ) -> cic.UpsertResult:
+    """Атомарная запись пакета с полным различием inserted/unchanged/corrected.
+
+    Владение транзакцией: функция выполняет validate+dedup -> pre-SELECT ->
+    запись -> invalidate -> commit в ОДНОЙ транзакции сессии `db`. Частичного
+    COMMIT нет: любая ошибка (валидация/конфликт/запись/invalidate) прерывает
+    ДО commit. При ошибке функция САМА откатывает транзакцию (rollback), чтобы
+    вызывающий не мог закоммитить неуспешный пакет при переиспользовании сессии.
+    Ошибки invalidate НЕ подавляются — пробрасываются вызывающему.
+    """
+    try:
+        clean = cic.assert_valid_batch(list(rows), window=window)
+        if not clean:
+            return cic.UpsertResult()
+
+        # pre-SELECT существующих строк по диапазону ts на figi+interval (эффективно по индексу,
+        # без громоздкого IN-списка на больших бэктфиллах); точное совпадение — по natural key.
+        groups: dict[tuple, list[dict]] = {}
+        for r in clean:
+            groups.setdefault((r["figi"], int(r["interval"])), []).append(r)
+        emap = {}
+        for (figi, ival), grp in groups.items():
+            lo = min(cic.utc_ts(r["ts"]) for r in grp)
+            hi = max(cic.utc_ts(r["ts"]) for r in grp)
+            existing = (await db.execute(
+                select(Candle).where(
+                    Candle.figi == figi, Candle.interval == ival,
+                    Candle.ts >= lo, Candle.ts <= hi)
+            )).scalars().all()
+            for c in existing:
+                emap[(c.figi, int(c.interval), cic.utc_ts(c.ts))] = c
+
+        to_write: list[dict] = []
+        inserted = unchanged = corrected = 0
+        for r in clean:
+            key = cic.row_key(r)
+            cur = emap.get(key)
+            if cur is None:
+                inserted += 1
+                to_write.append(r)
+            elif cic.same_content(r, cur):
+                unchanged += 1
+            else:
+                corrected += 1
+                to_write.append(r)
+
+        batch_size = 1000
+        for i in range(0, len(to_write), batch_size):
+            batch = to_write[i : i + batch_size]
+            stmt = pg_insert(Candle).values(batch)
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_candles_figi_interval_ts",
+                set_={
+                    "open": stmt.excluded.open,
+                    "high": stmt.excluded.high,
+                    "low": stmt.excluded.low,
+                    "close": stmt.excluded.close,
+                    "volume": stmt.excluded.volume,
+                },
+            )
+            await db.execute(stmt)
+
+        # Инвалидация кэша целостности затронутых дней — в ТОЙ ЖЕ транзакции, без подавления.
+        _days = sorted({(cic.utc_ts(r["ts"]) + timedelta(hours=3)).date() for r in clean})
+        for (figs_g, _iv) in groups.keys():
+            await candle_integrity.invalidate(db, [figs_g], _iv, _days)
+
+        await db.commit()
+        return cic.UpsertResult(
+            accepted=len(clean), inserted=inserted, unchanged=unchanged,
+            corrected=corrected, written=inserted + corrected, rejected=0,
+        )
     except Exception:
-        pass
-    await db.commit()
-    return saved
+        # Откатить незакоммиченные изменения, чтобы вызывающий не мог закоммитить
+        # неуспешный пакет (например, invalidate упал после INSERT).
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        raise
 
 
 def decimal_default(value: Decimal) -> float:

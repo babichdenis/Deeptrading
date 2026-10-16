@@ -32,6 +32,12 @@ async def _cfg_from_saved(mode: str = "sandbox", test_name: str = "", replay_sta
             except Exception:
                 pass
     cfg.mode = mode
+    # ensemble_v4 — это НЕ одиночная стратегия: для него всегда ensemble-путь,
+    # иначе старт падает с "no strategies loaded (all tickers failed)".
+    import os as _os
+    _eng_env = (_os.environ.get("TEST_ENGINE") or "").strip()
+    if mode == "test" and (not _eng_env or _eng_env == "ensemble_v4"):
+        cfg.use_ensemble = True
     cfg.feed = "replay" if mode == "test" else "stream"
     if mode == "test":
         cfg.test_name = test_name

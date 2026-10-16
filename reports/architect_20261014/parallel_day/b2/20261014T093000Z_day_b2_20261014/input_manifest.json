@@ -1,0 +1,112 @@
+{
+  "branch": "day_b2_20261014",
+  "generated_utc": "2026-10-14T09:44:01Z",
+  "dataset": {
+    "path": "backend/reports/architect_20261012/ml_mtf_1/b1/20261013T221949Z_v3_full",
+    "manifest_sha256": "d46d7d24fa17d9d391c6807c16dd90f60f58a2e994a287b85b19f62ac5858570",
+    "dataset_version": "ml_mtf_1_v3",
+    "feature_schema_version": "1m_mtf_v3",
+    "label_cfg_hash": "a898948ff9f0d027",
+    "eligibility_policy": {
+      "tz": "Europe/Moscow",
+      "weekdays": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "open": "10:00",
+      "close": "18:40",
+      "decision_strictly_before": "18:44"
+    },
+    "eligibility_policy_hash": "b8f7f9cd0498d4b9",
+    "code_sha256": "121388e4dd46d575f71507e13f230e3e83da9a36900f5bbf7a32b1b8d48387fa",
+    "params_hash": "7bc511c8862b9fc1a56fbb0a32b60ca774c4e560eb3326c73c5d15a2f856faf7",
+    "feature_rows": 2557100,
+    "target_rows": 511159,
+    "n_tickers_ok": 30,
+    "n_predictors": 58,
+    "predictor_columns_sha256": "f4d52d9085e61ae8f0a9b250d02bad583f6d7a3ab7332a5c8817a17e929a5b98",
+    "metadata_columns": [
+      "row_id",
+      "figi",
+      "ticker",
+      "decision_ts",
+      "feature_max_available_ts",
+      "feature_schema_version",
+      "n_min_1m",
+      "n_min_5m",
+      "n_min_600s",
+      "n_min_1800s",
+      "n_min_3600s",
+      "voice_status_rsi_reversal",
+      "voice_status_macd_cross",
+      "voice_status_range_compression_breakout",
+      "voice_status_pullback_ema",
+      "voice_status_vwap_reclaim",
+      "voice_status_vwap_reversion",
+      "voice_status_donchian_breakout",
+      "voice_status_volume_drop",
+      "voice_status_kama_trend"
+    ],
+    "start": "2025-10-01T04:00:00+00:00",
+    "end": "2026-10-09T00:00:00+00:00"
+  },
+  "snapshot": {
+    "path": "backend/reports/architect_20261011/research_core_v2/b1/20261011T1947Z/snapshot",
+    "manifest_sha256": "9964b08ff83a3820efb04862fb09e0ae31653a211a759f6360b91ad999681577",
+    "tool": "research_snapshot_v2",
+    "generated_utc": "2026-10-11T20:11:50Z",
+    "params": {
+      "start": "2025-10-01T00:00:00+00:00",
+      "end": "2026-10-09T00:00:00+00:00",
+      "daily_start": "2024-10-01T00:00:00+00:00",
+      "daily_end": "2026-10-09T00:00:00+00:00"
+    },
+    "universe_sha256": "08e4c87fc0d771ee38b96ef89401a4401a376aa5401543f6b417007a6777bcc8",
+    "n_universe_elite": 31,
+    "code_sha256": "01a1dfc1caa22ce390335e4f21fb2f7ba1369fcb60c94578e486520cb6882e32",
+    "corporate_actions_status": "UNVERIFIED",
+    "calendar_status": "NOT_VERIFIED",
+    "db_tx_read_only": "on"
+  },
+  "daypack": {
+    "path": "backend/research/daypack_20261014",
+    "manifest_sha256": "55c143bdebdb26463a5a836e2424f9314d93057312703d803cc5d2f2ea7fd90f",
+    "files": {
+      "acceptance.py": "7c0ad66160e320ff14d4ab33cbea62bfd502a734f96916e0671062bf55dab224",
+      "__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "costs.py": "2bc995c3da0650aa67e92d90f242ab5ffef1c3ed29739cc8f03156ff6dbf11e0",
+      "frozen_portfolio.py": "2d322988a3704e656643018118b9c3a14e9ab7f57f254f3b0492e043a742496b",
+      "execution_core.py": "d4f11d280b8f6507935bba550a150cf41cb113ac1f79d6eda6bc584aaafcb80a",
+      "evaluate.py": "5188d55d62646f4b1863e15ac27e24a8459efda0b0d1dcce017aa225ca2e97d2"
+    },
+    "read_only": true,
+    "deviation": "none"
+  },
+  "code": {
+    "script": "backend/scripts/research_day_b2.py",
+    "script_sha256": "8ebb6845c7c9b739ac53b174c27168b0986c5914b58f4ff024ffcc2fa5132186",
+    "python": "3.11.11"
+  },
+  "universe": {
+    "n_universe": 31,
+    "dataset_tickers_ok": 30,
+    "missing_tickers": []
+  },
+  "policy": {
+    "tz": "Europe/Moscow",
+    "weekdays": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "session_start_msK": "10:00",
+    "decision_strictly_before_msK": "18:44",
+    "decision_grid": "5m closes (targets = 5m ряды)",
+    "source": "dataset eligibility_policy (bypass label maturity)"
+  }
+}

@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import math
 from typing import Iterable
 
 
@@ -19,13 +20,15 @@ def bar_ok(open_, high, low, close, volume=None) -> bool:
         c = float(close)
     except (TypeError, ValueError):
         return False
+    if not all(math.isfinite(v) for v in (o, h, lo, c)):
+        return False
     if o <= 0 or c <= 0 or h <= 0 or lo <= 0:
         return False
     if h < lo or h < o or h < c or lo > o or lo > c:
         return False
     if volume is not None:
         try:
-            if float(volume) < 0:
+            if not math.isfinite(float(volume)) or float(volume) < 0:
                 return False
         except (TypeError, ValueError):
             pass

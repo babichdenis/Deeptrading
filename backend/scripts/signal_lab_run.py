@@ -34,7 +34,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Signal Lab runner")
     ap.add_argument("--config", required=True, help="путь к JSON-конфигу прогона")
     ap.add_argument("--phase", default="signals",
-                    choices=["signals", "outcomes", "fixed", "trailing", "events", "regime", "all"])
+                    choices=["signals", "outcomes", "fixed", "trailing", "events", "regime", "report", "all"])
     ap.add_argument("--jobs", type=int, default=3)
     ap.add_argument("--tickers", default="", help="override: список тикеров через запятую")
     ap.add_argument("--engines", default="", help="override: список strategy_id через запятую")

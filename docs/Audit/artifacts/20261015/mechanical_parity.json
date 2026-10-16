@@ -1,0 +1,17 @@
+{
+  "_oracle_fixed_qty": true,
+  "_mfe_mae": true,
+  "_counterfactual_reentries": true,
+  "_counterfactual_hold": true,
+  "_oracle_coverage": true,
+  "BotConfig": true,
+  "BotOrder": true,
+  "sector_meta": true,
+  "portfolio_snapshot": true,
+  "market_regime": true,
+  "trade_history": true,
+  "daily_bias_map": true,
+  "mtf_macd_map": true,
+  "hm_map": true,
+  "momentum_map": true
+}

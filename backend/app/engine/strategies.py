@@ -28,6 +28,8 @@ from app.engine.ose.strategy import (
     OseSmaStochStrategy,
     OseSmaTrendStrategy,
 )
+
+from app.engine.strategies_timegrid import TimeGridParams, TimeGridStrategy
 from app.engine.regime_ensembles import (
     HighVolatilityEnsembleStrategy,
     HighVolatilityParams,
@@ -1742,6 +1744,7 @@ STRATEGY_REGISTRY: dict[str, type] = {
     "ose_bollinger_trailing": OseBollingerTrailingStrategy,
     "ose_sma_trend": OseSmaTrendStrategy,
     "ose_pc_volatility": OsePcVolatilityStrategy,
+    "time_grid": TimeGridStrategy,
 }
 
 _PARAMS_BY_STRATEGY: dict[str, type] = {
@@ -1795,6 +1798,7 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "ose_bollinger_trailing": OseRobotParams,
     "ose_sma_trend": OseRobotParams,
     "ose_pc_volatility": OseRobotParams,
+    "time_grid": TimeGridParams,
 }
 
 

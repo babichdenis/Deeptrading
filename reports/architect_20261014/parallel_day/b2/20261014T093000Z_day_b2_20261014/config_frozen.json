@@ -1,0 +1,148 @@
+{
+  "branch": "day_b2_20261014",
+  "frozen_utc": "2026-10-14T09:44:01Z",
+  "frozen_stage": "before train/val and before eval",
+  "seed": 42,
+  "horizons_minutes": [
+    30,
+    60,
+    120
+  ],
+  "thresholds": [
+    0.0,
+    0.0005,
+    0.001
+  ],
+  "models": {
+    "ridge": {
+      "kind": "Pipeline",
+      "steps": [
+        "median_imputer",
+        "standard_scaler",
+        "ridge"
+      ],
+      "params": {
+        "alpha": 1.0
+      }
+    },
+    "hgb": {
+      "kind": "Pipeline",
+      "steps": [
+        "median_imputer",
+        "hist_gradient_boosting_regressor"
+      ],
+      "params": {
+        "max_iter": 150,
+        "max_leaf_nodes": 15,
+        "l2_regularization": 1.0,
+        "min_samples_leaf": 200,
+        "early_stopping": false,
+        "random_state": 42,
+        "learning_rate": 0.1
+      }
+    }
+  },
+  "feature_sets": {
+    "cont5": {
+      "n": 7,
+      "rule": "predictor_columns ending with _5m"
+    },
+    "all_tf": {
+      "n": 58,
+      "rule": "dataset predictor_columns, без quality/metadata"
+    }
+  },
+  "quality_columns_excluded": [
+    "row_id",
+    "figi",
+    "ticker",
+    "decision_ts",
+    "feature_max_available_ts",
+    "feature_schema_version",
+    "n_min_1m",
+    "n_min_5m",
+    "n_min_600s",
+    "n_min_1800s",
+    "n_min_3600s",
+    "voice_status_rsi_reversal",
+    "voice_status_macd_cross",
+    "voice_status_range_compression_breakout",
+    "voice_status_pullback_ema",
+    "voice_status_vwap_reclaim",
+    "voice_status_vwap_reversion",
+    "voice_status_donchian_breakout",
+    "voice_status_volume_drop",
+    "voice_status_kama_trend"
+  ],
+  "splits": {
+    "train": "<= 2026-05-31 MSK",
+    "val": "2026-06-01 .. 2026-07-31 MSK",
+    "eval": "2026-08-01 .. 2026-10-08 MSK",
+    "embargo_minutes": 120,
+    "label_end_rule": "entry_ts + max(h, 120) < next section start",
+    "embargo_applied": "union of label_end rule and 120m embargo"
+  },
+  "economics": {
+    "side": "LONG_ONLY",
+    "entry": "open 1m бара со start-ts = decision_ts (raw next-open)",
+    "exit": "min(entry + horizon, 18:44 MSK), только точная минута",
+    "no_entry": "SKIP",
+    "no_exit": "INCOMPLETE (endpoint unknown, не 0)",
+    "primary_costs": {
+      "id": "c5_s2",
+      "commission_bps": 5.0,
+      "slippage_bps": 2.0
+    },
+    "sensitivity_costs": {
+      "id": "c10_s5",
+      "commission_bps": 10.0,
+      "slippage_bps": 5.0
+    },
+    "slots": 5,
+    "slot_weight": 0.2,
+    "qty_rule": "0.2 * initial_capital / raw_entry",
+    "leverage": false,
+    "reinvestment": false,
+    "tie_break": "exits before entries, then FIGI order"
+  },
+  "selection": {
+    "criterion": "mean known event net on val among selected at cost 5/2 (screening metric with overlap, НЕ portfolio PnL)",
+    "min_known_events": 200,
+    "min_known_dates": 20,
+    "max_unknown_endpoint_fraction": 0.05,
+    "unknown_denominator": "all selected intended entries",
+    "on_failure": "NO_SELECTION / cash (пороги и support не снижаются)",
+    "freeze": "primary + top3 + best_ridge + best_cont5 до eval; смена победителя по eval запрещена"
+  },
+  "baselines": [
+    "cash",
+    "always_long"
+  ],
+  "cost_sensitivity": [
+    "c5_s2",
+    "c10_s5"
+  ],
+  "robustness": {
+    "paired_daily": "common calendar axis + explicit coverage",
+    "bootstrap": {
+      "n": 500,
+      "block_session_days": 5,
+      "seed": 42,
+      "note": "descriptive interval, не множественная коррекция"
+    },
+    "sensitivity": [
+      "without_best_ticker",
+      "without_best_day"
+    ]
+  },
+  "resources": {
+    "cpu_threads": 1,
+    "max_ram_gb": 1.5,
+    "checkpoint": "per ticker / per fit / per config",
+    "resume_hash_checked": true
+  },
+  "input_manifest_sha256_target": "см. input_manifest.json",
+  "attempt_accounting": "все policy attempts сохраняются (12 fits x 3 thresholds)",
+  "input_manifest_sha256": "2ebe968cd2951b4fc1132bc068efb38eb394c3e536854b80f1eb3203a9ceb00b",
+  "config_written_before_train_and_eval": true
+}

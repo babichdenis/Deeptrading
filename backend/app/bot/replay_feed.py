@@ -53,6 +53,7 @@ class ReplayFeed(CandleFeed):
         self.end = end
         self.session_factory = session_factory
         self._now: datetime | None = None
+        self.on_day_boundary = None
 
     @property
     def now(self) -> datetime | None:
@@ -78,84 +79,102 @@ class ReplayFeed(CandleFeed):
             f"replay stream start {_s.isoformat()} end={(_e.isoformat() if _e else '…')} "
             f"pace={self.pace} figis={len(self.figis)} target_tf={self.interval_name} (source=1m)"
         )
-        from sqlalchemy import select as _select
+        from sqlalchemy import func, select as _select
         from app.models.candle import Candle
         from app.marketdata.resampler import Resampler
 
         # Канонический источник — всегда минутки; старший TF строит Resampler.
-        q = _select(Candle).where(
-            Candle.figi.in_(self.figis),
-            Candle.interval == 1,
-            Candle.ts >= _s,
-        )
-        if _e is not None:
-            q = q.where(Candle.ts <= _e)
-        q = q.order_by(Candle.ts, Candle.figi)
-
-        rows = []
-        try:
-            async with self.session_factory() as db:
-                rows = (await db.execute(q)).scalars().all()
-        except Exception as ex:
-            self._emit(f"replay stream DB ERROR {type(ex).__name__}: {str(ex)[:120]}")
-            return
-
-        self._emit(f"replay loaded rows={len(rows)}")
-        if not rows:
-            return
-
+        # Загрузка идёт посуточными кусками по ТЕКУЩЕМУ списку figis, чтобы
+        # add_figis/remove_figis вступали в силу со следующего дня.
         rs = None if self.interval_name == "1min" else Resampler(self.interval_name)
         if rs is not None:
             self._emit(f"resampler: 1m -> {self.interval_name} (period={rs.period_minutes}m)")
 
-        # Группируем по минуте (ts до секунды=0): порядок выдачи — минута → figi.
-        # Пропуски минут (нет сделок/данных) просто пропускаются.
-        by_ts: dict[datetime, list[Candle]] = defaultdict(list)
-        for r in rows:
-            k = r.ts.replace(microsecond=0, second=0)
-            by_ts[k].append(r)
+        data_end = _e
+        if data_end is None:
+            try:
+                async with self.session_factory() as db:
+                    _mx = await db.execute(
+                        _select(func.max(Candle.ts)).where(
+                            Candle.figi.in_(self.figis),
+                            Candle.interval == 1,
+                            Candle.ts >= _s,
+                        )
+                    )
+                    data_end = _mx.scalar()
+            except Exception as ex:
+                self._emit(f"replay stream DB ERROR {type(ex).__name__}: {str(ex)[:120]}")
+                return
+        if data_end is None:
+            self._emit("replay loaded rows=0")
+            return
+        if data_end.tzinfo is None:
+            data_end = data_end.replace(tzinfo=timezone.utc)
 
-        first = min(by_ts)
-        last = max(by_ts)
-        if _e is not None:
-            # Не крутим пустые минуты за пределами фактических данных окна.
-            last = min(last, _e.replace(microsecond=0, second=0))
-        cur = first
-        # wall-режим: держим реальный темп ОТНОСИТЕЛЬНО старта реплея
-        # (сравнение с wall-clock now не работает для исторических дат).
         _wall_t0: float | None = None
         _wall_first: datetime | None = None
-        while cur <= last:
+        total_rows = 0
+        chunk_start = _s.replace(hour=0, minute=0, second=0, microsecond=0)
+        while chunk_start <= data_end:
             if self._stop_requested:
                 self._emit("replay stream stopped by request")
                 return
-            for r in by_ts.get(cur, ()):  # noqa: B905
-                cc = ClosedCandle(
-                    figi=r.figi,
-                    ts=r.ts,
-                    open=float(r.open),
-                    high=float(r.high),
-                    low=float(r.low),
-                    close=float(r.close),
-                    volume=float(r.volume),
-                )
-                self._now = r.ts
-                # Resampler отдаёт закрытый бар ПРЕДЫДУЩЕГО бакета, когда приходит
-                # первый бар нового бакета; для 1min отдаём бар как есть.
-                out = rs.feed(cc) if rs is not None else cc
-                if self.pace == "wall":
-                    if _wall_t0 is None:
-                        _wall_t0 = _time.monotonic()
-                        _wall_first = r.ts
-                    _target = (r.ts - _wall_first).total_seconds()
-                    _wait = _target - (_time.monotonic() - _wall_t0)
-                    if _wait > 0:
-                        await asyncio.sleep(_wait)
-                if out is not None:
-                    yield out
-                    if self._stop_requested:
-                        return
-            cur += timedelta(seconds=60)
+            chunk_end = chunk_start + timedelta(days=1)
+            if not self.figis:
+                self._emit("replay stream: figis empty, stop")
+                break
+            q = _select(Candle).where(
+                Candle.figi.in_(self.figis),
+                Candle.interval == 1,
+                Candle.ts >= max(chunk_start, _s),
+                Candle.ts < chunk_end,
+                Candle.ts <= data_end,
+            )
+            q = q.order_by(Candle.ts, Candle.figi)
+            try:
+                async with self.session_factory() as db:
+                    rows = (await db.execute(q)).scalars().all()
+            except Exception as ex:
+                self._emit(f"replay stream DB ERROR {type(ex).__name__}: {str(ex)[:120]}")
+                return
+            total_rows += len(rows)
+            by_ts: dict[datetime, list[Candle]] = defaultdict(list)
+            for r in rows:
+                k = r.ts.replace(microsecond=0, second=0)
+                by_ts[k].append(r)
+            for k in sorted(by_ts):
+                if self._stop_requested:
+                    self._emit("replay stream stopped by request")
+                    return
+                for r in by_ts[k]:
+                    cc = ClosedCandle(
+                        figi=r.figi,
+                        ts=r.ts,
+                        open=float(r.open),
+                        high=float(r.high),
+                        low=float(r.low),
+                        close=float(r.close),
+                        volume=float(r.volume),
+                    )
+                    self._now = r.ts
+                    out = rs.feed(cc) if rs is not None else cc
+                    if self.pace == "wall":
+                        if _wall_t0 is None:
+                            _wall_t0 = _time.monotonic()
+                            _wall_first = r.ts
+                        _target = (r.ts - _wall_first).total_seconds()
+                        _wait = _target - (_time.monotonic() - _wall_t0)
+                        if _wait > 0:
+                            await asyncio.sleep(_wait)
+                    if out is not None:
+                        yield out
+                        if self._stop_requested:
+                            return
+            chunk_start = chunk_end
+            if self.on_day_boundary is not None:
+                await self.on_day_boundary(chunk_start)
+
+        self._emit(f"replay loaded rows={total_rows}")
         # Конец окна реплея: закрываем последний накопленный бакет целевого TF.
         if rs is not None:
             for out in rs.flush():

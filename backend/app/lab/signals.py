@@ -78,7 +78,7 @@ def signals_task(args: dict) -> dict:
         eng = engine_sync(args["db_url"])
         bars_1m = load_1m(eng, figi, args["warmup_from"], args["period_to"])
         if not bars_1m:
-            result["error"] = "no_1m_bars"
+            result["error"] = "no_1m_bars figi=" + figi + " from=" + str(args["warmup_from"]) + " to=" + str(args["period_to"])
             return result
         period_from = _parse(args["period_from"])
         period_to = _parse(args["period_to"])

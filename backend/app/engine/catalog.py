@@ -547,6 +547,17 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "big_tf_min": {"type": "int", "default": 60, "min": 10, "max": 1440},
         },
     ),
+    "time_grid": StrategyCard(
+        id="time_grid", name="Time Grid (вход по времени)", family="scripted", wave=1,
+        long_rule="Сигнал BUY на баре с меткой времени из расписания",
+        short_rule="Сигнал SELL на баре с меткой времени из расписания",
+        timeframes=("5min", "15min", "hour"), status="AVAILABLE",
+        params_schema={
+            "schedule": {"type": "str", "default": "06:55:short,18:45:long"},
+            "weekdays_only": {"type": "int", "default": 1, "min": 0, "max": 1},
+            "gap_skip_pct": {"type": "float", "default": 0.0, "min": 0.0, "max": 50.0},
+        },
+    ),
 }
 
 

@@ -719,23 +719,42 @@ def _run_grid(configs, exits, figis, period, args, *, jobs: int, artifacts: bool
 
 
 def _wf_metrics(raw: list[dict], configs) -> dict[str, dict]:
+    """Агрегаты по label из валидных raw-строк (A2-C1: aggregate_rows).
+
+    В отличие от _metrics_from_rows (EXP-путь не трогаем): проверка
+    raw-полей до арифметики, неизвестное дополнительное число → null,
+    переполнение сумм помечается "_problem" (вырезается в run_wf).
+    """
+    import wf_selection as wfs  # локально: модуль не зависит от пути запуска
     out: dict[str, dict] = {}
     for label, _rn, _kw in configs:
-        rows = [r for r in raw if r.get("strategy") == label and "error" not in r]
-        out[label] = _metrics_from_rows(rows)
+        rows = [r for r in raw if isinstance(r, dict)
+                and r.get("strategy") == label and not wfs.raw_row_problem(r)]
+        out[label] = wfs.aggregate_rows(rows)
     return out
+
+
+def _af(metrics: dict, flt: dict) -> dict:
+    if not flt:
+        return {"passed": True, "checks": []}
+    return _apply_filters(metrics, flt)
 
 
 def run_wf(args) -> int:
     """Walk-forward: IS (сетка → фильтр → top-K) → OOS → матрица выживаемости → robustness."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import ose_exit_matrix as oem
+    import wf_selection as wfs
     spec = _spec_normalize(_load_spec(args.spec))
     wf = spec.get("wf") or {}
     iters = int(wf.get("iterations", 3))
     pct = float(wf.get("percent_oos", 25))
     top_k = int(wf.get("top_k", 3))
     rank_by = str(wf.get("rank_by", "net_pnl"))
+    if rank_by not in wfs.RANK_FIELDS:
+        print(f"неизвестный rank_by: {rank_by!r} "
+              f"(разрешены: {', '.join(sorted(wfs.RANK_FIELDS))})")
+        return 1
     last_is = bool(wf.get("last_in_sample", False))
     rob_cfg = wf.get("robustness") or {}
     configs = _spec_configs(spec)
@@ -772,32 +791,96 @@ def run_wf(args) -> int:
     t0 = time.time()
     phase_results: list[dict] = []
     selected_per_iter: list[dict] = []
+    expected_keys = {(xc, tk) for xc in exits for _f, tk in figis}
+    labels = [label for label, _rn, _kw in configs]
     for typ, a, b in phases:
         raw = _run_grid(configs, exits, figis, [a, b], args, jobs=args.jobs,
                         artifacts=False, cache=cache_on, code_sha=code_sha)
-        errs = [r for r in raw if "error" in r]
-        if errs:
-            print(f"  ⚠ {len(errs)} прогонов с ошибкой (в метриках учтены как 0), "
-                  f"напр.: {errs[0].get('error', '')[:120]}")
-        by_label = _wf_metrics(raw, configs)
-        passed = [l for l in by_label
-                  if (not filters or _apply_filters(by_label[l], filters)["passed"])]
-        phase_results.append({"type": typ, "period": [a, b], "by_label": by_label, "passed": passed})
+        problems = [r for r in raw if wfs.raw_row_problem(r)]
+        if problems:
+            print(f"  ⚠ {len(problems)} прогонов непригодны (ошибка/нечисла) — "
+                  f"кандидаты с неполным покрытием ticker×exit не допускаются, "
+                  f"напр.: {wfs.raw_row_problem(problems[0])[:120]}")
+        valid_rows = [r for r in raw if not wfs.raw_row_problem(r)]
+        by_label = _wf_metrics(valid_rows, configs)
+        # A2-C1 р4: единый контракт проверки (идентичность → покрытие →
+        # числа) в каждой фазе; структурированные повреждения сохраняются
+        # в phases, строковая причина сопровождается детализацией.
+        breakdown = wfs.coverage_breakdown(raw, labels, expected_keys)
+        incomplete = wfs.coverage_reasons(raw, labels, expected_keys,
+                                          breakdown=breakdown)
+        # A2-C1: переполнение агрегатов (сумма/частное конечных входов не
+        # конечны) — кандидат не допускается с явной причиной; "_problem"
+        # не сериализуется.
+        for _lbl in list(by_label):
+            _pr = (by_label[_lbl] or {}).pop("_problem", "")
+            if _pr:
+                incomplete[_lbl] = (incomplete[_lbl] + " " + _pr
+                                    if _lbl in incomplete
+                                    else "aggregate_overflow " + _pr)
+        # A2-C1 р4: записи без атрибуции (не dict / без strategy) и
+        # неизвестные стратегии обнаруживаются до арифметики; unknown
+        # в агрегаты не попадает, фаза неполна для всех кандидатов.
+        identity = wfs.identity_problems(raw, labels)
+        _id_parts = []
+        if identity["non_dict"]:
+            _id_parts.append(f"non_dict={identity['non_dict']}")
+        if identity["unlabeled"]:
+            _id_parts.append(f"unlabeled={identity['unlabeled']}")
+        if identity["unknown_labels"]:
+            _id_parts.append("unknown=" + ",".join(
+                wfs.sanitize_text(s, 40) for s in identity["unknown_labels"][:5]))
+        if _id_parts:
+            reason = "incomplete_runs identity " + " ".join(_id_parts)
+            incomplete.update({l: incomplete[l] + " " + reason if l in incomplete else reason
+                               for l in labels})
+        err_labels = sorted({str(r.get("strategy", "")) for r in raw
+                             if isinstance(r, dict)
+                             and wfs.raw_row_problem(r).startswith("worker_error")})
+        runs_ok = {label: sum(1 for r in raw
+                              if isinstance(r, dict) and r.get("strategy") == label
+                              and not wfs.raw_row_problem(r))
+                   for label in labels}
         if typ == "IS":
-            ranked = sorted(passed or list(by_label),
-                            key=lambda l: -(by_label[l].get(rank_by) or -1e18))
-            sel = ranked[:top_k]
+            verdict = wfs.select_is(by_label, filters, _af, rank_by, top_k,
+                                    incomplete=incomplete)
+            phase_results.append({"type": typ, "period": [a, b], "by_label": by_label,
+                                  "passed": verdict["passed"], "status": verdict["status"],
+                                  "rejected": verdict["rejected"],
+                                  "worker_errors": err_labels,
+                                  "runs_ok": runs_ok,
+                                  "expected_runs": len(expected_keys),
+                                  "unattributed": identity["non_dict"] + identity["unlabeled"],
+                                  "unknown_labels": identity["unknown_labels"],
+                                  "identity": identity, "damage": breakdown})
+            sel = verdict["selected"]
             selected_per_iter.append({"iter": len(selected_per_iter) + 1, "is_period": [a, b],
-                                      "selected": sel, "is_metrics": {l: by_label[l] for l in sel}})
-            note = "" if passed else "  (фильтр не прошёл никто — берём топ без фильтра)"
+                                      "selected": sel, "status": verdict["status"],
+                                      "is_metrics": {l: by_label[l] for l in sel}})
+            note = "" if sel else f"  ({verdict['status']} — OOS этой итерации будет пуст)"
             print(f"  IS #{len(selected_per_iter)} ({a}..{b}): выбрано {sel}{note}")
         else:
+            phase_results.append({"type": typ, "period": [a, b], "by_label": by_label,
+                                  "passed": [], "worker_errors": err_labels,
+                                  "runs_ok": runs_ok,
+                                  "expected_runs": len(expected_keys),
+                                  "unattributed": identity["non_dict"] + identity["unlabeled"],
+                                  "unknown_labels": identity["unknown_labels"],
+                                  "identity": identity, "damage": breakdown})
             if selected_per_iter:
                 sel = selected_per_iter[-1]["selected"]
+                rows = wfs.oos_rows(sel, by_label, errors=err_labels,
+                                    incomplete=incomplete)
                 selected_per_iter[-1].setdefault("oos", []).append(
-                    {"period": [a, b], "metrics": {l: by_label[l] for l in sel}})
-                print(f"  OOS ({a}..{b}): " + ", ".join(
-                    f"{l.split(' ')[0]} net={by_label[l]['net_pnl']:+.1f}" for l in sel))
+                    {"period": [a, b], "rows": rows,
+                     "metrics": {r["label"]: r["metrics"] for r in rows}})
+                print(f"  OOS ({a}..{b}): " + (", ".join(
+                    f"{r['label'].split(' ')[0]}[{r['status']}]"
+                    + (f" net={r['metrics']['net_pnl']:+.1f}"
+                       if r["status"] == wfs.STATUS_OK
+                       and wfs.is_number((r.get("metrics") or {}).get("net_pnl"))
+                       else f" {r.get('reason', '')}")
+                    for r in rows) or "—"))
     # --- сводка IS→OOS + OOS-матрица ---
     print("\n=== WF: IS → OOS ===")
     sel_stats: dict[str, dict] = {}
@@ -805,15 +888,38 @@ def run_wf(args) -> int:
         print(f"IS #{it['iter']} {it['is_period'][0]}..{it['is_period'][1]}")
         for l in it["selected"]:
             im = it["is_metrics"][l]
-            st = sel_stats.setdefault(l, {"oos_nets": [], "is_nets": []})
+            st = sel_stats.setdefault(l, {"oos_nets": [], "is_nets": [], "valid": 0,
+                                          "incomplete": 0, "worker_errors": 0,
+                                          "oos_windows": []})
             st["is_nets"].append(im["net_pnl"])
             chunks = []
             for oos in it.get("oos", []):
-                om = oos["metrics"][l]
-                st["oos_nets"].append(om["net_pnl"])
-                chunks.append(f"{oos['period'][0]}..{oos['period'][1]}: {om['net_pnl']:+.1f}")
+                row = next((r for r in oos.get("rows", []) if r["label"] == l), None)
+                if row is None:
+                    continue
+                status = row.get("status", wfs.STATUS_OK)
+                window = {"period": oos["period"], "status": status,
+                          "reason": row.get("reason", "")}
+                row_metrics = row.get("metrics") or {}
+                if status == wfs.STATUS_OK and wfs.is_number(row_metrics.get("net_pnl")):
+                    net = row_metrics["net_pnl"]
+                    st["oos_nets"].append(net)
+                    st["valid"] += 1
+                    window["net_pnl"] = net
+                    chunks.append(f"{oos['period'][0]}..{oos['period'][1]}: {net:+.1f}")
+                else:
+                    window["net_pnl"] = None
+                    if status == wfs.STATUS_WORKER_ERRORS:
+                        st["worker_errors"] += 1
+                    else:
+                        st["incomplete"] += 1
+                    chunks.append(f"{oos['period'][0]}..{oos['period'][1]}: [{status} "
+                                  f"{row.get('reason', '')}]")
+                st["oos_windows"].append(window)
             print(f"  {l:<44} IS={im['net_pnl']:+9.1f} → OOS " + ("; ".join(chunks) or "—"))
-    print("\n=== OOS-матрица (выживаемость) ===")
+    print("\n=== OOS-матрица (выживаемость; валидные окна) ===")
+    total_incomplete = sum(st["incomplete"] + st["worker_errors"]
+                           for st in sel_stats.values())
     for l, st in sorted(sel_stats.items(),
                         key=lambda kv: -(sum(kv[1]["oos_nets"]) if kv[1]["oos_nets"] else -1e18)):
         nets = sorted(st["oos_nets"])
@@ -821,20 +927,28 @@ def run_wf(args) -> int:
             continue
         pos = sum(1 for x in nets if x > 0)
         med = nets[len(nets) // 2]
+        bad = st["incomplete"] + st["worker_errors"]
+        note = f" неполных/ошибок={bad}" if bad else ""
         print(f"  {l:<44} OOS-периодов={len(nets)} положительных={pos} median={med:+.1f} "
               f"worst={min(nets):+.1f} dispersion={max(nets) - min(nets):.1f} "
-              f"IS_sum={sum(st['is_nets']):+.1f} OOS_sum={sum(nets):+.1f}")
+              f"IS_sum={sum(st['is_nets']):+.1f} OOS_sum={sum(nets):+.1f}{note}")
+    if total_incomplete:
+        print(f"  ⚠ неполнота проверки: {total_incomplete} окон без валидного "
+              f"PnL исключены из сумм/медиан и выбора robustness")
     # --- robustness: соседи лучшего по OOS конфига на полном периоде ---
     robustness: list[dict] = []
-    if rob_cfg and sel_stats:
-        best_label = max(sel_stats, key=lambda l: (sum(sel_stats[l]["oos_nets"])
-                                                   if sel_stats[l]["oos_nets"] else -1e18))
+    valid_stats = {l: st for l, st in sel_stats.items() if st["valid"]}
+    if rob_cfg and not valid_stats:
+        print("\nRobustness пропущен: нет валидных OOS-окон ни у одного конфига")
+    if rob_cfg and valid_stats:
+        best_label = max(valid_stats, key=lambda l: sum(valid_stats[l]["oos_nets"]))
         best = next((c for c in configs if c[0] == best_label), None)
         delta_pct = float(rob_cfg.get("delta_pct", 20))
         if best is not None:
             _lbl, _rn, kwargs = best
             base_resolved = (_resolved_params(_rn, kwargs) if _rn in ROBOTS else dict(kwargs))
-            print(f"\n=== Robustness: соседи ±{delta_pct:g}% вокруг {best_label} (полный период) ===")
+            print(f"\n=== Robustness (post_selection, диагностика): соседи ±{delta_pct:g}% "
+                  f"вокруг {best_label} ===")
             neighbors: list[tuple[str, dict]] = [("base", dict(kwargs))]
             for k, v in base_resolved.items():
                 if isinstance(v, bool) or not isinstance(v, (int, float)) or v == 0:
@@ -859,12 +973,55 @@ def run_wf(args) -> int:
             print(f"  (окно robustness: {rob_period[0]}..{rob_period[1]})")
             raw = _run_grid(nconfigs, exits, figis, rob_period, args, jobs=args.jobs,
                             artifacts=False, cache=cache_on, code_sha=code_sha)
+            rob_labels = [c[0] for c in nconfigs]
+            # A2-C1 р4: тот же контракт проверки (идентичность/покрытие/
+            # числа), что и в IS/OOS: не-dict/без strategy/чужие стратегии
+            # делают неполными всех соседей, а не игнорируются.
+            rob_breakdown = wfs.coverage_breakdown(raw, rob_labels, expected_keys)
+            rob_incomplete = wfs.coverage_reasons(raw, rob_labels, expected_keys,
+                                                  breakdown=rob_breakdown)
+            rob_identity = wfs.identity_problems(raw, rob_labels)
+            _rid_parts = []
+            if rob_identity["non_dict"]:
+                _rid_parts.append(f"non_dict={rob_identity['non_dict']}")
+            if rob_identity["unlabeled"]:
+                _rid_parts.append(f"unlabeled={rob_identity['unlabeled']}")
+            if rob_identity["unknown_labels"]:
+                _rid_parts.append("unknown=" + ",".join(
+                    wfs.sanitize_text(s, 40) for s in rob_identity["unknown_labels"][:5]))
+            if _rid_parts:
+                reason = "incomplete_runs identity " + " ".join(_rid_parts)
+                rob_incomplete.update({l: rob_incomplete[l] + " " + reason
+                                       if l in rob_incomplete else reason
+                                       for l in rob_labels})
             for label, _rn2, _kw in nconfigs:
-                rows = [r for r in raw if r.get("strategy") == label and "error" not in r]
-                m = _metrics_from_rows(rows)
                 tag = label.split("[", 1)[1].rstrip("]")
+                if label in rob_incomplete:
+                    entry = {"neighbor": tag, "net_pnl": None, "trades": None,
+                             "pf": None, "win_rate": None,
+                             "status": wfs.STATUS_INCOMPLETE,
+                             "reason": rob_incomplete[label],
+                             "basis": "post_selection"}
+                    if rob_breakdown.get(label):
+                        entry["damage"] = rob_breakdown[label]
+                    robustness.append(entry)
+                    print(f"  {tag:<22} INCOMPLETE — {rob_incomplete[label]}")
+                    continue
+                rows = [r for r in raw if isinstance(r, dict)
+                        and r.get("strategy") == label and not wfs.raw_row_problem(r)]
+                m = wfs.aggregate_rows(rows)
+                overflow = m.pop("_problem", "")
+                if overflow:
+                    robustness.append({"neighbor": tag, "net_pnl": None, "trades": None,
+                                       "pf": None, "win_rate": None,
+                                       "status": wfs.STATUS_INCOMPLETE,
+                                       "reason": "aggregate_overflow " + overflow,
+                                       "basis": "post_selection"})
+                    print(f"  {tag:<22} INCOMPLETE — aggregate_overflow {overflow}")
+                    continue
                 robustness.append({"neighbor": tag, "net_pnl": m["net_pnl"], "trades": m["trades"],
-                                   "pf": m["profit_factor"], "win_rate": m["win_rate"]})
+                                   "pf": m["profit_factor"], "win_rate": m["win_rate"],
+                                   "status": wfs.STATUS_OK, "basis": "post_selection"})
                 print(f"  {tag:<22} net={m['net_pnl']:+9.1f} trades={m['trades']:<4} "
                       f"pf={m['profit_factor']} wr={m['win_rate']}%")
     dur = time.time() - t0
@@ -877,18 +1034,24 @@ def run_wf(args) -> int:
             "costs": {"commission": args.commission, "slippage_bps": args.slippage_bps,
                       "qty": args.qty, "capital": args.capital},
             "universe": [t for _, t in figis], "code_sha": code_sha,
+            "expected_runs_per_label": len(expected_keys),
+            "robustness_basis": "post_selection_diagnostic",
             "duration_sec": round(dur, 1),
         },
         "phases": phase_results,
         "selected": selected_per_iter,
-        "oos_matrix": [{"config": l, "oos_nets": st["oos_nets"], "is_nets": st["is_nets"]}
+        "oos_matrix": [{"config": l, "oos_nets": st["oos_nets"], "is_nets": st["is_nets"],
+                        "valid_windows": st["valid"], "incomplete_windows": st["incomplete"],
+                        "worker_error_windows": st["worker_errors"],
+                        "windows": st["oos_windows"]}
                        for l, st in sel_stats.items()],
         "robustness": robustness,
     }
     out_dir = Path((spec.get("outputs") or {}).get("dir") or "reports/experiments")
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"WF_{spec['name']}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.json"
-    out.write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
+    out.write_text(json.dumps(summary, ensure_ascii=False, indent=1, allow_nan=False),
+                   encoding="utf-8")
     print(f"\nsaved: {out} · {dur:.0f}s")
     return 0
 

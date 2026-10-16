@@ -1,0 +1,1448 @@
+{
+  "date": "2026-10-16",
+  "prototype": "workbench-v2",
+  "source_files": [
+    {
+      "path": "frontend/index.html",
+      "sha256": "03bcb1c760a0036dbb4d626fae120feba741aafe46ec2825785cf72d11ab9e3d"
+    },
+    {
+      "path": "frontend/src/main.ts",
+      "sha256": "fdb9838f37b6036745134c6170a6ec13afa4e79e474a85dc20e3efb35afc0fd7"
+    },
+    {
+      "path": "frontend/src/api.ts",
+      "sha256": "8d88a375ceff61bd289cd430131f912b6682ff465fbab70e71561fe3ec4ce235"
+    },
+    {
+      "path": "frontend/src/analytics/reports.ts",
+      "sha256": "50b688fa7b1de06980264e3a1abb913cd5a79ece1d2f82f0ebb2000674bd1bac"
+    },
+    {
+      "path": "frontend/src/lab.ts",
+      "sha256": "8ee5428945f879b5b96eb9333d4f72dc789a2f4667a30067debe84df4357b738"
+    },
+    {
+      "path": "frontend/src/enslab.ts",
+      "sha256": "1b3465f37e48647967fb0f61d961b5b5585f99887cd69207f694e8a6fdf1b506"
+    },
+    {
+      "path": "frontend/src/test.ts",
+      "sha256": "abd363734a08680749bef554578e13dd7589818ab5673e743eac247a68a50c9b"
+    },
+    {
+      "path": "frontend/src/labchart.ts",
+      "sha256": "2fb491738a36aad466dd00394d6a6243472b9fd8565df6862ea4eb8a9034960a"
+    },
+    {
+      "path": "frontend/src/ws.ts",
+      "sha256": "e41b33c080cd0a6fd0f8657eed5bc0094ce8b59f78bf15d9b324470e37efebba"
+    },
+    {
+      "path": "frontend/src/style.css",
+      "sha256": "dec3bc033ce60bc55fb874e0183fba12db9101f0d625855fa882bbdfc96b40db"
+    }
+  ],
+  "static_ids": [
+    "app",
+    "topbar",
+    "top-nav",
+    "bs-session",
+    "bs-moex",
+    "bs-moex-dot",
+    "bs-trading-status",
+    "ai-mode-select",
+    "bot-pill-top",
+    "bot-state-text",
+    "bot-mode",
+    "topbar-right",
+    "topbar-status",
+    "mode-switch",
+    "btn-bot-pause",
+    "btn-bot-toggle",
+    "btn-bot-settings",
+    "bs-equity",
+    "bs-cash",
+    "bs-positions-value",
+    "bs-pnl",
+    "bs-currencies",
+    "bs-shares",
+    "sg-morning",
+    "sg-day",
+    "sg-evening",
+    "sg-overnight",
+    "rec-on",
+    "dg-long",
+    "dg-short",
+    "mg-morning",
+    "mg-day",
+    "mg-evening",
+    "mg-lev",
+    "mg-lev-label",
+    "rg-neutral",
+    "rg-trendup",
+    "rg-trenddown",
+    "rg-highvol",
+    "rg-range",
+    "sz-pos",
+    "sz-pos-label",
+    "sz-max",
+    "sz-max-label",
+    "sz-eq",
+    "sz-eq-label",
+    "workspace",
+    "sidebar",
+    "sidebar-collapse",
+    "sidebar-body",
+    "page-chart",
+    "chart-toolbar",
+    "symbol-ticker",
+    "symbol-name",
+    "ohlc-legend",
+    "ct-intervals",
+    "btn-indicators",
+    "indicators-menu",
+    "btn-logscale",
+    "btn-sync",
+    "embed-chart-area",
+    "tooltip",
+    "embedded-chart",
+    "sklad-panel",
+    "sklad-status",
+    "cb-markers",
+    "btn-run-strategies",
+    "btn-sklad-clear",
+    "wh-scroll",
+    "strategy-cards",
+    "block-params",
+    "pipe-holder",
+    "sklad-gates",
+    "gates-status",
+    "btn-gates-refresh",
+    "gates-container",
+    "sklad-logic",
+    "logic-status",
+    "btn-logic-refresh",
+    "logic-container",
+    "page-bot",
+    "bot-chart-section",
+    "bot-chart-wrap",
+    "bot-chart-frame",
+    "bot-resizer",
+    "bot-replay-bar",
+    "bot-replay-window",
+    "bot-replay-time",
+    "bot-replay-pct",
+    "bot-replay-fill",
+    "bot-replay-tags",
+    "bot-positions-table",
+    "bot-trades-table",
+    "bot-test-block",
+    "bot-test-search",
+    "btn-test-refresh",
+    "btn-test-delete-selected",
+    "bot-test-selcount",
+    "btn-test-new",
+    "bot-test-checkall",
+    "bot-test-count",
+    "bot-tests-table",
+    "bot-test-drawer",
+    "btd-title",
+    "btd-sub",
+    "btd-open-analysis",
+    "btd-close",
+    "btd-cards",
+    "btd-body",
+    "page-analytics",
+    "an-pane-live",
+    "stats-test",
+    "an-sizing",
+    "stats-refresh",
+    "stats-from",
+    "stats-to",
+    "stats-mode",
+    "stats-apply",
+    "stats-cmp-toggle",
+    "stats-cmp-panel",
+    "stats-cmp-list",
+    "stats-cmp-run",
+    "stats-cmp-result",
+    "an-aigate",
+    "an-aireport",
+    "an-heatmap",
+    "an-movers",
+    "an-portfolio",
+    "stats-body",
+    "an-pane-reports",
+    "rep-sub",
+    "rep-source",
+    "rep-kind",
+    "rep-query",
+    "rep-refresh",
+    "rep-list",
+    "rep-runhead",
+    "rep-actions",
+    "rep-pane-strategies",
+    "rep-pane-slices",
+    "rep-dims",
+    "rep-slices",
+    "rep-pane-trades",
+    "rep-trades-filters",
+    "rep-trades-summary",
+    "rep-trades",
+    "rep-trades-more",
+    "rep-pane-market",
+    "rep-market-filters",
+    "rep-market",
+    "sidebar-right",
+    "rail-collapse",
+    "sr-pane-market",
+    "sr-count",
+    "sr-ts",
+    "sr-query",
+    "sr-min-t",
+    "sr-univ-only",
+    "votes-config-btn",
+    "sr-refresh",
+    "votes-editor",
+    "sr-carousel-panel",
+    "sr-table",
+    "sr-tbody",
+    "sr-pane-aigate",
+    "ag-sub",
+    "ag-refresh",
+    "ag-prompt-btn",
+    "ag-full",
+    "ag-prompt",
+    "ag-prompt-info",
+    "ag-prompt-edit",
+    "ag-prompt-reset",
+    "ag-prompt-save",
+    "ag-prompt-status",
+    "ag-summary",
+    "ag-list",
+    "ag-resizer",
+    "ag-watch-sub",
+    "ag-notes",
+    "ag-send-input",
+    "ag-send-status",
+    "ag-send-btn",
+    "bot-modal-overlay",
+    "bs-close",
+    "bs-src-hint",
+    "bs-optuna-section",
+    "bs-sl-override",
+    "bs-rr-override",
+    "bs-atr-section",
+    "bs-atr-period",
+    "bs-atr-mult",
+    "bs-atr-rr",
+    "bs-fixed-section",
+    "bs-sl",
+    "bs-tp",
+    "bs-topn",
+    "bs-commission",
+    "bs-reentry",
+    "bs-confirm-flip",
+    "bs-quorum",
+    "bs-save",
+    "test-modal-overlay",
+    "ts-close",
+    "ts-preset",
+    "ts-custom-on",
+    "ts-custom-body",
+    "ts-sessions",
+    "ts-overnight",
+    "ts-eod",
+    "ts-cash",
+    "ts-pospct",
+    "ts-qty",
+    "ts-maxpos",
+    "ts-maxexp",
+    "ts-slmode",
+    "ts-atr-period",
+    "ts-atr-mult",
+    "ts-atr-rr",
+    "ts-stop-pct",
+    "ts-target-pct",
+    "ts-trail-act",
+    "ts-trail-dist",
+    "ts-gates-mode",
+    "ts-gates",
+    "ts-cooldown",
+    "ts-confirm-flip",
+    "ts-lasthour",
+    "ts-volmax",
+    "ts-regimes",
+    "ts-name",
+    "ts-engine",
+    "ts-interval",
+    "ts-speed-hint",
+    "ts-start",
+    "ts-end",
+    "ts-logdb",
+    "ts-run",
+    "pc-modal-overlay",
+    "pc-close",
+    "pc-hint-choice",
+    "pc-preset-id",
+    "pc-count",
+    "pc-timer-wrap",
+    "pc-timerfill",
+    "pc-seconds",
+    "pc-list",
+    "pc-use-preset",
+    "pc-use-ui"
+  ],
+  "static_controls": [
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "select",
+      "id": "ai-mode-select",
+      "type": null,
+      "name": null,
+      "title": "Режим AI (промпты — на вкладке AI-гейт, кнопка 📄)"
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "btn-bot-pause",
+      "type": null,
+      "name": null,
+      "title": "Остановить НОВЫЕ входы; открытые позиции продолжают жить (SL/TP работают)"
+    },
+    {
+      "tag": "button",
+      "id": "btn-bot-toggle",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "btn-bot-settings",
+      "type": null,
+      "name": null,
+      "title": "Настройки бота"
+    },
+    {
+      "tag": "input",
+      "id": "sg-morning",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "sg-day",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "sg-evening",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "sg-overnight",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "rec-on",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "dg-long",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "dg-short",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "mg-morning",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "mg-day",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "mg-evening",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "mg-lev",
+      "type": "range",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "rg-neutral",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "rg-trendup",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "rg-trenddown",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "rg-highvol",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "rg-range",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "sz-pos",
+      "type": "range",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "sz-max",
+      "type": "range",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "sz-eq",
+      "type": "range",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "sidebar-collapse",
+      "type": null,
+      "name": null,
+      "title": "Свернуть панель"
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": "button",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": "button",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": "button",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": "button",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": "button",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "btn-indicators",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "btn-logscale",
+      "type": null,
+      "name": null,
+      "title": "Логарифмическая шкала цен"
+    },
+    {
+      "tag": "button",
+      "id": "btn-sync",
+      "type": null,
+      "name": null,
+      "title": "Загрузить свежие данные с биржи"
+    },
+    {
+      "tag": "input",
+      "id": "cb-markers",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "btn-run-strategies",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "btn-sklad-clear",
+      "type": null,
+      "name": null,
+      "title": "Снять все галочки"
+    },
+    {
+      "tag": "button",
+      "id": "btn-gates-refresh",
+      "type": null,
+      "name": null,
+      "title": "Обновить"
+    },
+    {
+      "tag": "button",
+      "id": "btn-logic-refresh",
+      "type": null,
+      "name": null,
+      "title": "Обновить"
+    },
+    {
+      "tag": "input",
+      "id": "bot-test-search",
+      "type": "search",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "btn-test-refresh",
+      "type": null,
+      "name": null,
+      "title": "Обновить список"
+    },
+    {
+      "tag": "button",
+      "id": "btn-test-delete-selected",
+      "type": null,
+      "name": null,
+      "title": "Удалить отмеченные тесты"
+    },
+    {
+      "tag": "button",
+      "id": "btn-test-new",
+      "type": null,
+      "name": null,
+      "title": "Запустить новый тест"
+    },
+    {
+      "tag": "input",
+      "id": "bot-test-checkall",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "btd-open-analysis",
+      "type": null,
+      "name": null,
+      "title": "Открыть в Аналитике (теги настроек, срезы)"
+    },
+    {
+      "tag": "button",
+      "id": "btd-close",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "stats-refresh",
+      "type": null,
+      "name": null,
+      "title": "Обновить"
+    },
+    {
+      "tag": "input",
+      "id": "stats-from",
+      "type": "date",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "stats-to",
+      "type": "date",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "select",
+      "id": "stats-mode",
+      "type": null,
+      "name": null,
+      "title": "Источник данных"
+    },
+    {
+      "tag": "button",
+      "id": "stats-apply",
+      "type": null,
+      "name": null,
+      "title": "Применить период"
+    },
+    {
+      "tag": "button",
+      "id": "stats-cmp-toggle",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "stats-cmp-run",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "select",
+      "id": "rep-source",
+      "type": null,
+      "name": null,
+      "title": "Откуда прогоны"
+    },
+    {
+      "tag": "select",
+      "id": "rep-kind",
+      "type": null,
+      "name": null,
+      "title": "Вид прогона"
+    },
+    {
+      "tag": "input",
+      "id": "rep-query",
+      "type": "search",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "rep-refresh",
+      "type": null,
+      "name": null,
+      "title": "Перечитать список прогонов"
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "rail-collapse",
+      "type": null,
+      "name": null,
+      "title": "Свернуть панель"
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "sr-query",
+      "type": "search",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "sr-min-t",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "sr-univ-only",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "votes-config-btn",
+      "type": null,
+      "name": null,
+      "title": "Состав кворума (управление движком)"
+    },
+    {
+      "tag": "button",
+      "id": "sr-refresh",
+      "type": null,
+      "name": null,
+      "title": "Обновить с биржи"
+    },
+    {
+      "tag": "button",
+      "id": "ag-refresh",
+      "type": null,
+      "name": null,
+      "title": "Обновить"
+    },
+    {
+      "tag": "button",
+      "id": "ag-prompt-btn",
+      "type": null,
+      "name": null,
+      "title": "Показать промпт нейросети"
+    },
+    {
+      "tag": "button",
+      "id": "ag-full",
+      "type": null,
+      "name": null,
+      "title": "На весь экран"
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": null,
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "textarea",
+      "id": "ag-prompt-edit",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "ag-prompt-reset",
+      "type": null,
+      "name": null,
+      "title": "Вернуть дефолт воркера (очистить переопределение)"
+    },
+    {
+      "tag": "button",
+      "id": "ag-prompt-save",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "textarea",
+      "id": "ag-send-input",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "ag-send-btn",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "bs-close",
+      "type": null,
+      "name": null,
+      "title": "Закрыть"
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "radio",
+      "name": "sl-mode",
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "radio",
+      "name": "sl-mode",
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "radio",
+      "name": "sl-source",
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "radio",
+      "name": "sl-source",
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-sl-override",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-rr-override",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-atr-period",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-atr-mult",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-atr-rr",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-sl",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-tp",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-topn",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-commission",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-reentry",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-confirm-flip",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "bs-quorum",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "bs-save",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "ts-close",
+      "type": null,
+      "name": null,
+      "title": "Закрыть"
+    },
+    {
+      "tag": "select",
+      "id": "ts-preset",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-custom-on",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "select",
+      "id": "ts-overnight",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-eod",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-cash",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-pospct",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-qty",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-maxpos",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-maxexp",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "select",
+      "id": "ts-slmode",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-atr-period",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-atr-mult",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-atr-rr",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-stop-pct",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-target-pct",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-trail-act",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-trail-dist",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "select",
+      "id": "ts-gates-mode",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-cooldown",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-confirm-flip",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "select",
+      "id": "ts-lasthour",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-volmax",
+      "type": "number",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": null,
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-name",
+      "type": "text",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "select",
+      "id": "ts-engine",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "select",
+      "id": "ts-interval",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-start",
+      "type": "datetime-local",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-end",
+      "type": "datetime-local",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "input",
+      "id": "ts-logdb",
+      "type": "checkbox",
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "ts-run",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "pc-close",
+      "type": null,
+      "name": null,
+      "title": "Закрыть"
+    },
+    {
+      "tag": "button",
+      "id": "pc-use-preset",
+      "type": null,
+      "name": null,
+      "title": null
+    },
+    {
+      "tag": "button",
+      "id": "pc-use-ui",
+      "type": null,
+      "name": null,
+      "title": null
+    }
+  ],
+  "tabs": [
+    {
+      "data-page": "bot"
+    },
+    {
+      "data-page": "chart"
+    },
+    {
+      "data-page": "analytics"
+    },
+    {
+      "data-antab": "live"
+    },
+    {
+      "data-antab": "reports"
+    },
+    {
+      "data-reptab": "strategies"
+    },
+    {
+      "data-reptab": "slices"
+    },
+    {
+      "data-reptab": "trades"
+    },
+    {
+      "data-reptab": "market"
+    },
+    {
+      "data-srtab": "market"
+    },
+    {
+      "data-srtab": "aigate"
+    }
+  ],
+  "scope": "Static layout cloned from actual index.html. Dynamic fixtures independently render documented panels; no runtime main.ts or API clients executed. Dormant Lab/test files inventoried separately, not falsely added to current navigation."
+}

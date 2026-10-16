@@ -1,0 +1,80 @@
+{
+  "backend/app/bot/runtime.py": {
+    "before_lines": 7399,
+    "after_lines": 6657,
+    "before_sha256": "fd4d6d423baf40cd75f577d933ae999b1e136a016bf37f01ff78dc85b607b43d",
+    "after_sha256": "c44b457ab9c47db2f425552a1380ac81ac93db9f5e58d6167ad5712e0d0a3201"
+  },
+  "backend/app/services/ensemble.py": {
+    "before_lines": 2205,
+    "after_lines": 1915,
+    "before_sha256": "c76176a87e0e791945db098df5ddbdfb0ee46d24a66512f06be92c51507c30e1",
+    "after_sha256": "1d1b3cb3919bebb67f8c3f39594f7ea72fab3b23863b008fa5cc74dfd1bc8337"
+  },
+  "frontend/src/main.ts": {
+    "before_lines": 6097,
+    "after_lines": 5245,
+    "before_sha256": "03c4c0c0f2f968124c8f77bd21e6e49c63c5813441b77989bbdeac3f606afdba",
+    "after_sha256": "fdb9838f37b6036745134c6170a6ec13afa4e79e474a85dc20e3efb35afc0fd7"
+  },
+  "backend/app/bot/runtime_models.py": {
+    "before_lines": 0,
+    "after_lines": 196,
+    "before_sha256": null,
+    "after_sha256": "ad03718a51e07bb38131c87c9b2f01566301eee9a29c6ba4a3d1a49d2a97d786"
+  },
+  "backend/app/bot/runtime_telemetry.py": {
+    "before_lines": 0,
+    "after_lines": 424,
+    "before_sha256": null,
+    "after_sha256": "0fadd864b6dfcb52dce0a346b32a5181965650ab81a6b3b06077f3727a941a38"
+  },
+  "backend/app/bot/runtime_persistence.py": {
+    "before_lines": 0,
+    "after_lines": 157,
+    "before_sha256": null,
+    "after_sha256": "2e14d8d2c1b418a02cd25baee680daf3a6af97789fb4314cc079f6cc1c9a6160"
+  },
+  "backend/app/bot/runtime_diagnostics.py": {
+    "before_lines": 0,
+    "after_lines": 44,
+    "before_sha256": null,
+    "after_sha256": "b0ccd8246b0cfbb901940fd647a385d46cf6d5ea80471d989327cce401872185"
+  },
+  "backend/app/services/ensemble_diagnostics.py": {
+    "before_lines": 0,
+    "after_lines": 310,
+    "before_sha256": null,
+    "after_sha256": "2a997f0f9073b716f2d23861f97d65b2cf4933d2e0711319467f4099de5e2cb5"
+  },
+  "backend/tests/test_runtime_persistence_refactor.py": {
+    "before_lines": 0,
+    "after_lines": 166,
+    "before_sha256": null,
+    "after_sha256": "b19c589051b4021f2fc71d357758bdd20584914dc2bff50c7185cf1879aef2a5"
+  },
+  "frontend/src/analytics/reports.ts": {
+    "before_lines": 0,
+    "after_lines": 861,
+    "before_sha256": null,
+    "after_sha256": "50b688fa7b1de06980264e3a1abb913cd5a79ece1d2f82f0ebb2000674bd1bac"
+  },
+  "frontend/src/shared/http.ts": {
+    "before_lines": 0,
+    "after_lines": 9,
+    "before_sha256": null,
+    "after_sha256": "1ff6e50f80702f96b609fd42722b3891ec8bc9e18f1daef1da4523d567215bb8"
+  },
+  "frontend/src/shared/dom.ts": {
+    "before_lines": 0,
+    "after_lines": 9,
+    "before_sha256": null,
+    "after_sha256": "f28d8ec57d7955a06907bb1c691e764b73e10bae8305d63748b71f66fb8ea17c"
+  },
+  "frontend/src/shared/debounce.ts": {
+    "before_lines": 0,
+    "after_lines": 10,
+    "before_sha256": null,
+    "after_sha256": "0c0d1f8128ae3aaace11798f1f65fa9f77350a6f83d4563c6c0e7bd47f444d06"
+  }
+}

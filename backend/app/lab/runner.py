@@ -444,4 +444,7 @@ def run_phase(cfg: LabConfig, phase: str, **kwargs) -> dict:
         return run_events(cfg, **kwargs)
     if phase == "regime":
         return run_regime(cfg, **kwargs)
+    if phase == "report":
+        from app.lab.report import run_report
+        return run_report(cfg, **kwargs)
     raise NotImplementedError(f"фаза {phase} — следующий этап (M5)")

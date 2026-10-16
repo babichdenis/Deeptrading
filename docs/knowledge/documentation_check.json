@@ -1,0 +1,11 @@
+{
+  "date": "2026-10-15",
+  "local_links_checked": 401,
+  "broken_links": [],
+  "archive_hash_mismatches": [],
+  "archive_copies": 23,
+  "chat_original_prefix_preserved": true,
+  "observed_concurrent_source_changes": [],
+  "application_tests_started": false,
+  "validation_scope": "Only generated/current documents, archive hashes, preserved journal prefix and inventoried untouched source documents. Historical-body links and research artifact content were not revalidated."
+}

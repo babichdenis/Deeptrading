@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Deeptrading — макет торгового терминала</title>
+  <link rel="stylesheet" href="./theme.css">
+  <script src="./preview.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#overview">Перейти к обзору</a>
+<aside class="sidebar" aria-label="Навигация проекта">
+  <a class="brand" href="#overview" aria-label="Deeptrading, обзор"><span class="brand-mark" aria-hidden="true">d<span>·</span></span><span>deeptrading<small>RESEARCH TERMINAL</small></span></a>
+  <div class="workspace"><span class="workspace-icon">D</span><div>Рабочее пространство<small>Личный портфель</small></div><span class="chevron" aria-hidden="true">⌄</span></div>
+  <p class="nav-caption">ТЕРМИНАЛ</p>
+  <nav class="nav">
+    <a href="#overview" class="nav-item selected" aria-current="page"><span class="nav-symbol" aria-hidden="true">◫</span>Обзор<span class="nav-key">01</span></a>
+    <a href="#positions" class="nav-item"><span class="nav-symbol" aria-hidden="true">▤</span>Позиции<span class="count">3</span></a>
+    <button class="nav-item" data-dialog="research"><span class="nav-symbol" aria-hidden="true">⌁</span>Исследования<span class="nav-key">03</span></button>
+    <button class="nav-item" data-dialog="data"><span class="nav-symbol" aria-hidden="true">▱</span>Данные<span class="nav-key">04</span></button>
+  </nav>
+  <div class="sidebar-note"><span class="tiny-label">СЕССИЯ / MOEX</span><strong><i class="dot green"></i>Основная</strong><div class="session-track"><span></span></div><div class="session-time"><span>10:00</span><span>18:45 МСК</span></div></div>
+  <div class="sidebar-bottom"><div class="demo-label"><span class="demo-square"></span>ДЕМОНСТРАЦИЯ</div><p>Все числа вымышлены.<br>Соединения со счётом нет.</p><button class="nav-item" data-dialog="settings"><span class="nav-symbol" aria-hidden="true">⚙</span>Настройки макета</button><div class="profile"><span class="avatar">Д</span><div>Денис<small>Локальное пространство</small></div><span class="profile-dot"></span></div></div>
+</aside>
+<div class="shell">
+  <header class="topbar"><div class="breadcrumb">Рабочее пространство <span>/</span><strong>Обзор</strong></div><div class="topbar-meta"><span><i class="dot green"></i>Демо-поток</span><span class="vertical-rule"></span><span class="mono">15 ОКТ 2026</span><button class="icon-button" data-dialog="help" aria-label="О макете">?</button></div></header>
+  <main id="overview">
+    <section class="page-heading"><div><div class="eyebrow">ПОРТФЕЛЬ / ОСНОВНАЯ СЕССИЯ</div><h1>Торговый обзор<span class="title-dot">.</span></h1><p>Капитал, открытые позиции и решения системы.</p></div><div class="heading-actions"><span class="status-pill" id="bot-status"><i class="dot green"></i>Демо-бот активен</span><button class="button secondary" id="pause-button" aria-pressed="false"><span id="pause-icon" aria-hidden="true">Ⅱ</span><span id="pause-label">Пауза входов</span></button><button class="button icon-button" data-dialog="settings" aria-label="Настройки макета">⚙</button></div></section>
+    <div class="demo-banner"><span><span class="demo-tag">МАКЕТ</span>Пример нового интерфейса. Цены, сделки и результаты демонстрационные.</span><span class="banner-note">Solid Glass · направление дизайна</span></div>
+    <section class="metrics" aria-label="Показатели демонстрационного портфеля">
+      <article class="metric surface"><div class="metric-top"><span>Капитал портфеля</span><span class="metric-code">01 / EQUITY</span></div><div class="metric-number">124 386<span>,00 ₽</span></div><div class="metric-bottom"><span>Свободно <b>87 130 ₽</b></span><svg class="sparkline" viewBox="0 0 100 25" aria-hidden="true"><path d="M0 22 9 19 17 21 25 13 34 16 43 10 51 12 62 8 71 10 81 3 91 6 100 2"/></svg></div></article>
+      <article class="metric surface"><div class="metric-top"><span>Результат за день</span><span class="metric-code">02 / NET</span></div><div class="metric-number positive">+1 386<span>,00 ₽</span></div><div class="metric-bottom"><span class="positive">↗ +1,13%</span><span>после расходов</span></div></article>
+      <article class="metric surface"><div class="metric-top"><span>Открытые позиции</span><span class="metric-code">03 / EXPOSURE</span></div><div class="metric-number">3<span> / 5 слотов</span></div><div class="metric-bottom"><span>В рынке <b>37 256 ₽</b></span><span>30% капитала</span></div></article>
+      <article class="metric surface"><div class="metric-top"><span>Риск по стопам</span><span class="metric-code">04 / RISK</span></div><div class="metric-number">0,80<span>% капитала</span></div><div class="metric-bottom"><span>995 ₽ <span class="muted">из 3 110 ₽</span></span><span class="mini-track"><span></span></span></div></article>
+    </section>
+    <div class="workspace-grid">
+      <div class="primary-column">
+        <section class="surface chart-panel" aria-labelledby="chart-title">
+          <div class="chart-heading"><div class="instrument-heading"><span class="ticker-logo" id="ticker-logo">S</span><div><div class="instrument-title"><h2 id="chart-title">SBER</h2><span id="instrument-name">Сбербанк</span><span class="exchange-label">MOEX</span></div><div class="quote"><strong id="quote-value">280,64</strong><span>₽</span><span class="positive" id="quote-change">+0,71%</span></div></div></div><label class="ticker-picker"><span class="sr-only">Выбрать инструмент</span><select id="ticker-select"><option value="SBER">SBER · Сбербанк</option><option value="LKOH">LKOH · Лукойл</option><option value="ROSN">ROSN · Роснефть</option></select></label></div>
+          <div class="chart-toolbar"><div class="segmented" aria-label="Вид графика"><button class="active" data-chart="price" aria-pressed="true">Цена</button><button data-chart="equity" aria-pressed="false">Капитал</button></div><div class="chart-legend"><span><i class="legend-line"></i>EMA 20</span><span><i class="legend-entry"></i>Вход</span></div><div class="timeframes" aria-label="Таймфрейм"><button data-tf="1" aria-pressed="false">1м</button><button class="active" data-tf="5" aria-pressed="true">5м</button><button data-tf="15" aria-pressed="false">15м</button><button data-tf="60" aria-pressed="false">1ч</button></div></div>
+          <div class="chart-area" id="chart-area"><svg id="market-chart" viewBox="0 0 1000 340" role="img" aria-label="Демонстрационный свечной график Сбербанка"></svg></div>
+          <div class="chart-footer"><span><i class="dot green"></i>Синтетические данные · <span id="bar-count">72 бара</span></span><span id="chart-context">5м · сделки внутри дня</span><span class="mono">UTC+3 / MSK</span></div>
+        </section>
+        <section class="surface positions-panel" id="positions" aria-labelledby="positions-title"><div class="section-heading"><div><h2 id="positions-title">Открытые позиции <span class="heading-count">3</span></h2><p>Текущий результат и защитные уровни</p></div><label class="search"><span aria-hidden="true">⌕</span><span class="sr-only">Найти позицию по тикеру</span><input id="position-search" type="search" placeholder="Найти тикер" autocomplete="off"></label></div><div class="table-scroll" tabindex="0" role="region" aria-label="Таблица позиций, доступна горизонтальная прокрутка"><table><thead><tr><th scope="col">Инструмент</th><th scope="col">Сторона</th><th scope="col" class="numeric">Кол-во</th><th scope="col" class="numeric">Вход / цена</th><th scope="col" class="numeric">Стоп</th><th scope="col" class="numeric">Результат¹</th><th scope="col">Сигнал</th></tr></thead><tbody id="positions-body"></tbody></table></div><div class="table-bottom"><span id="position-count">3 позиции</span><span>¹ Нереализованный результат до расходов на закрытие</span></div></section>
+      </div>
+      <aside class="context-column" aria-label="Контекст и события">
+        <section class="surface market-context"><div class="section-heading compact"><h2>Контекст рынка</h2><span class="subtle-badge">ДЕМО</span></div><div class="market-row"><div><strong>IMOEX</strong><span>Индекс Мосбиржи</span></div><div class="market-number"><strong>2 746,28</strong><span class="positive">+0,42%</span></div></div><div class="regime"><span class="regime-arrow" aria-hidden="true">↗</span><div><strong>Умеренный рост</strong><span>Направление · 30 минут</span></div><span class="subtle-badge">30м</span></div><div class="breadth"><div><span>Динамика акций</span><span><b class="positive">18 ↑</b> / <b class="negative">12 ↓</b></span></div><div class="breadth-track"><span></span></div></div><div class="context-note">Описание состояния рынка.<br>Не является прогнозом доходности.</div></section>
+        <section class="surface journal"><div class="section-heading compact"><h2>Журнал решений</h2><span class="journal-live"><i class="dot green"></i>ДЕМО</span></div><div class="journal-filters" aria-label="Тип событий"><button class="active" data-events="all" aria-pressed="true">Все</button><button data-events="trade" aria-pressed="false">Сделки</button><button data-events="system" aria-pressed="false">Система</button></div><div id="events-list" class="events-list" aria-live="polite"></div><div class="journal-footer">Только события этого макета</div></section>
+        <section class="research-note"><span class="tiny-label">ИССЛЕДОВАТЕЛЬСКИЙ КОНТУР</span><div><span class="research-mark" aria-hidden="true">⌁</span><h2>От гипотезы к сделке</h2></div><p>Сравнивайте стратегии на одинаковых датах и после всех расходов.</p><button class="text-button" data-dialog="research">Открыть исследования <span aria-hidden="true">↗</span></button></section>
+      </aside>
+    </div>
+    <footer class="page-footer"><span><span class="footer-mark">d·</span>Deeptrading <span class="muted">/</span> Design preview 01</span><span>Демонстрация интерфейса · реальная торговля не подключена</span></footer>
+  </main>
+</div>
+<dialog id="detail-dialog" aria-labelledby="dialog-title"><div class="dialog-top"><span class="tiny-label">DEEPTRADING / PREVIEW</span><button id="dialog-close" class="icon-button" aria-label="Закрыть окно">×</button></div><h2 id="dialog-title"></h2><div id="dialog-content"></div></dialog>
+<div id="toast" class="toast" role="status"></div>
+</body>
+</html>

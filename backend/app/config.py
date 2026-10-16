@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     vol_carousel_lot_min: float = 1.0           # мин. стоимость лота (₽) — отсечка мусора
     vol_carousel_blacklist: str = ""            # тикеры-исключения через запятую
 
+    # --- Отбор бумаг по силе хода за N дней (move_select) ---
+    # Выбирает N падающих или N растущих бумаг по окну 1/2/... дней и метрике силы
+    # (суммарный ход / RSI / диапазон). Каждое решение пишется в JSONL-журнал.
+    # ВЫКЛЮЧЕН ПО УМОЛЧАНИЮ. Работает только в режиме реплея (feed=replay).
+    move_select_enabled: bool = False           # мастер-переключатель
+    move_select_config: str = ""                # JSON с параметрами (пусто = configs/presets/universe-move-v1.json)
+
     @field_validator("log_debug_engine", mode="before")
     @classmethod
     def _empty_bool(cls, v):

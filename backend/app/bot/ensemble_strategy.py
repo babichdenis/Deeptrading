@@ -45,6 +45,13 @@ class EnsembleParams:
     # --- per-ticker optuna-параметры (расширение; дефолты == прежний хардкод) ---
     sl_mult: float = 2.0
     rr: float = 2.0
+    # --- выход: трейлинг (None = фикс SL/TP) ---
+    trail_activation_comm_mult: float | None = None
+    trail_distance_r: float = 2.5
+    trail_compress_r: float = 1.0
+    trail_min_factor: float = 0.6
+    trail_min_atr: float = 1.5
+    trail_vol_boost: float = 0.3
     vol_thr: float = 0.0
     neutral_mode: str | None = None
     entry_confirm_bars: int = 0  # ждать N подряд подтверждающих свечей в сторону входа; 0 = без подтверждения
@@ -163,8 +170,16 @@ class EnsembleV4Strategy:
                 "carry_overnight": True,
                 "opposite_hold": False,
                 "exit_policy": {"id": "atr_stop",
-                                "params": {"period": 14, "multiplier": self.p.sl_mult,
-                                           "risk_reward": self.p.rr}},
+                                "params": {
+                                    "period": 14, "multiplier": self.p.sl_mult,
+                                    "risk_reward": self.p.rr,
+                                    **({"trail_activation_comm_mult": self.p.trail_activation_comm_mult,
+                                        "trail_distance_r": self.p.trail_distance_r,
+                                        "trail_compress_r": self.p.trail_compress_r,
+                                        "trail_min_factor": self.p.trail_min_factor,
+                                        "trail_min_atr": self.p.trail_min_atr,
+                                        "trail_vol_boost": self.p.trail_vol_boost}
+                                       if self.p.trail_activation_comm_mult else {})}},
                 "commission_rate": 0.0005,
                 "slippage_bps": 2.0,
                 "capital": self.p.capital,

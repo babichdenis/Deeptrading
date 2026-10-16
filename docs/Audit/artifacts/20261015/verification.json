@@ -1,0 +1,30 @@
+{
+  "persistence_logging_universe_tests": {
+    "passed": 33,
+    "seconds": 106.92
+  },
+  "persistence_cache_oracle_tests": {
+    "passed": 12,
+    "seconds": 127.91
+  },
+  "persistence_after_invalidation_commit": {
+    "passed": 7,
+    "seconds": 49.34
+  },
+  "test_groups_overlap": true,
+  "typescript": "PASS",
+  "vite_production_build": "PASS",
+  "vite_js_bytes_kb": 351.19,
+  "debounce": {
+    "events": 20,
+    "reloads": 1
+  },
+  "db_calls_mock_only": {
+    "rows": 101,
+    "before_calls": 101,
+    "after_calls": 2
+  },
+  "production_db_benchmark": false,
+  "browser_e2e": false,
+  "git_status_available": false
+}
