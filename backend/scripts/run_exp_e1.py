@@ -9,7 +9,7 @@ S1 = signal_exit OFF (opposite_hold=True)  — держим позицию, пр
 кроме одного переключателя opposite_hold.
 """
 import sys, json, hashlib
-sys.path.insert(0, '/Users/Denis/Dev/Deeptrading/backend')
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]) + '')
 from datetime import datetime, timezone
 from app.services.research_pack import _load_candles
 from app.services.ensemble import compute_ensemble
@@ -97,7 +97,7 @@ report = {
     'passed': passed,
     'generated_at': datetime.now(timezone.utc).isoformat(),
 }
-out = '/Users/Denis/Dev/Deeptrading/backend/reports/e1_signal_exit_202603_202604.json'
+out = str(__import__("pathlib").Path(__file__).resolve().parents[1]) + '/reports/e1_signal_exit_202603_202604.json'
 with open(out,'w') as f:
     json.dump(report, f, ensure_ascii=False, indent=2)
 print(json.dumps({'S0': a0, 'S1': a1, 'coverage_pct': cov, 'passed': passed}, ensure_ascii=False, indent=1))

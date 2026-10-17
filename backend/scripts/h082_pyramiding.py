@@ -1,5 +1,5 @@
 import sys, json
-sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from bisect import bisect_right
 from datetime import datetime, timezone
 import numpy as np

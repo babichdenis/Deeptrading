@@ -34,7 +34,7 @@ def _find_ml_file(name: str, env_key: str) -> str:
         str(_ML_DIR / name),
         str(_BACKEND_DIR / name),
         str(_BACKEND_DIR / "reports" / name),
-        f"/Users/Denis/Dev/tinvest_study/{name}",
+        str(_Path.home() / "Dev" / "tinvest_study" / name),
     ]
     for c in cands:
         if c and os.path.exists(c):

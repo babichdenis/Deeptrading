@@ -1,5 +1,5 @@
 import sys, json, asyncio, asyncpg
-sys.path.insert(0,"/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0,str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from app.services.research_pack import _load_candles
 from app.services.ensemble import compute_ensemble
 from datetime import datetime, timezone
@@ -47,7 +47,7 @@ def main():
             r={"figi":figi,"error":str(e)[:200]}
         out["candidates"][figi]=r
         print(i, figi, r.get("ticker"), "net=",r.get("net"),"trades=",r.get("trades"),"win=",r.get("win_rate"), flush=True)
-    json.dump(out, open("/Users/Denis/Dev/Deeptrading/backend/reports/h080_sieve.json","w"), indent=2, default=str)
+    json.dump(out, open(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/h080_sieve.json","w"), indent=2, default=str)
     # summary rank
     ranked=[(v.get("net") or -1e9, v.get("trades") or 0, k) for k,v in out["candidates"].items() if v.get("net") is not None]
     ranked.sort(reverse=True)

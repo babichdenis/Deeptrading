@@ -1,7 +1,7 @@
 import sys, json, glob
 import numpy as np
 
-FILES = sorted(glob.glob("/Users/Denis/Dev/Deeptrading/backend/reports/_h082_*.json"))
+FILES = sorted(glob.glob(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/_h082_*.json"))
 rows = []
 for f in FILES:
     rows += json.load(open(f))
@@ -52,5 +52,5 @@ gate = (ratio is not None and ratio >= 1.15)
 out = dict(n_total=len(rows), overall=overall, by_window=by_window,
            gate_passed=bool(gate),
            gate_rule="pyr_ret_mean / base_ret_mean >= 1.15 (coverage=1.0, pyramiding applies to all trades)")
-json.dump(out, open("/Users/Denis/Dev/Deeptrading/backend/reports/h082_pyramiding.json","w"), indent=2, ensure_ascii=False)
+json.dump(out, open(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/h082_pyramiding.json","w"), indent=2, ensure_ascii=False)
 print(json.dumps(out, indent=2, ensure_ascii=False))

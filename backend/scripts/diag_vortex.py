@@ -1,7 +1,7 @@
 import sys, json
 from bisect import bisect_right
 from datetime import datetime, timezone, timedelta
-sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 import numpy as np
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine

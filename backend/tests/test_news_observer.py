@@ -96,8 +96,9 @@ def test_constants_contract():
 
 
 def test_db_path_must_be_local():
+    bad = r"\\server\share\news.sqlite" if sys.platform == "win32" else "/Volumes/Dev/news.sqlite"
     with pytest.raises(ValueError, match="ARCHIVE_PATH_NOT_LOCAL"):
-        noc.ensure_local_db_path("/Volumes/Dev/news.sqlite")
+        noc.ensure_local_db_path(bad)
 
 
 def test_parse_utc_naive_not_utc():

@@ -391,7 +391,8 @@ def ensure_local_db_path(db_path: str | Path) -> Path:
         raise ValueError("путь к БД обязателен (--db)")
     rp = Path(p.resolve()) if p.exists() else Path(os.path.abspath(str(p)))
     s = str(rp)
-    if s.startswith("/Volumes/") or s.startswith("/net/") or s.startswith("/Network/"):
+    if s.startswith("/Volumes/") or s.startswith("/net/") or s.startswith("/Network/") \
+            or s.startswith("\\\\") or s.startswith("//"):
         raise ValueError("ARCHIVE_PATH_NOT_LOCAL: SQLite-архив только на локальном диске, не на SMB")
     return p
 

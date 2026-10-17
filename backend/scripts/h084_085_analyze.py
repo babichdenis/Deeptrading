@@ -1,7 +1,7 @@
 import json, glob
 import numpy as np
 
-FILES = sorted(glob.glob("/Users/Denis/Dev/Deeptrading/backend/reports/_h084_085_*.json"))
+FILES = sorted(glob.glob(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/_h084_085_*.json"))
 data = [json.load(open(f)) for f in FILES]
 syms = [d["vpin"]["figi"] for d in data]
 print("tickers", syms)
@@ -19,7 +19,7 @@ h084 = dict(per_ticker={v["figi"]: {"full_ret":round(v["full_ret"],4),"filt_ret"
             pooled_coverage=round(cov_pool,3),
             gate_passed=bool(ratio_pool is not None and ratio_pool>=1.15 and cov_pool>=0.5),
             note="VPIN top-decile filter removes ~10% toxic-flow trades; no net/trade improvement")
-json.dump(h084, open("/Users/Denis/Dev/Deeptrading/backend/reports/h084_microstructure.json","w"), indent=2)
+json.dump(h084, open(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/h084_microstructure.json","w"), indent=2)
 
 # H-085 Factor IC aggregation
 sigs = list(data[0]["ic"].keys())
@@ -36,5 +36,5 @@ h085 = dict(n_total=int(np.array([d["n_total"] for d in data]).sum()),
             significant=[s for s in sigs if sig_detail[s]["significant"]],
             detail=sig_detail,
             note="Only ATR/NATR show significant IC (t>>2). rsi/macd/roc/cci/vortex NOT significant as standalone IC.")
-json.dump(h085, open("/Users/Denis/Dev/Deeptrading/backend/reports/h085_factor_ic.json","w"), indent=2)
+json.dump(h085, open(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/h085_factor_ic.json","w"), indent=2)
 print(json.dumps({"h084":h084,"h085":h085}, indent=2, ensure_ascii=False))

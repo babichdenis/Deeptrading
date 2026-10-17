@@ -1,6 +1,6 @@
 import sys, json, glob
 import numpy as np
-sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from app.services.research_pack import _load_candles
 from datetime import datetime, timezone
 
@@ -87,7 +87,7 @@ def amihud_5m(bars1m):
 
 def _wait_h082():
     import time, os
-    targets={v:f"/Users/Denis/Dev/Deeptrading/backend/reports/_h082_{v}.json" for v in FIGIS.values()}
+    targets={v:str(__import__("pathlib").Path(__file__).resolve().parents[1]) + f"/reports/_h082_{v}.json" for v in FIGIS.values()}
     for _ in range(300):
         ok=True
         for p in targets.values():
@@ -115,7 +115,7 @@ def main():
              natr=atr(H,L,C,14)/C*100, roc=roc(C,10), cci=cci(H,L,C,20), vortex=vortex(H,L,C,14))
     tidx={t:i for i,t in enumerate(ts)}
     trades=[]
-    for f in glob.glob("/Users/Denis/Dev/Deeptrading/backend/reports/_h082_*.json"):
+    for f in glob.glob(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/_h082_*.json"):
         for r in json.load(open(f)):
             if r["figi"]==sym: trades.append(r)
     def tsec(tsiso): return int(datetime.fromisoformat(tsiso.replace("Z","+00:00")).timestamp())
@@ -157,7 +157,7 @@ def main():
         val=ic(s,fr); ic_res[k]=round(float(val),3) if val==val else None
     n=len(rows); icir={k: round(v*np.sqrt(n),2) if v is not None else None for k,v in ic_res.items()}
     out=dict(vpin=vpin_res, ic=ic_res, icir=icir, n_total=n)
-    json.dump(out, open(f"/Users/Denis/Dev/Deeptrading/backend/reports/_h084_085_{sym}.json","w"), indent=2)
+    json.dump(out, open(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + f"/reports/_h084_085_{sym}.json","w"), indent=2)
     print(json.dumps(out, indent=2))
 
 if __name__=="__main__": main()

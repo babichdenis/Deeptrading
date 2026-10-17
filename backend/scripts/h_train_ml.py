@@ -12,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 import warnings
 warnings.filterwarnings("ignore")
 
-REPORTS = "/Users/Denis/Dev/Deeptrading/backend/reports"
+REPORTS = str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports"
 
 
 def load_data(path):

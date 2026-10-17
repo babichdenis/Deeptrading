@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
 
 ENG = "postgresql+asyncpg://deeptrading:deeptrading@192.168.1.54:5432/deeptrading"
-REPORTS = "/Users/Denis/Dev/Deeptrading/backend/reports"
+REPORTS = str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports"
 
 
 async def load_candles(figi, interval, t_from, t_to):

@@ -1,12 +1,12 @@
 import sys, os, json, csv, bisect, asyncio, statistics
 from datetime import datetime, timezone, timedelta
-sys.path.insert(0,"/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0,str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
 import numpy as np
 
-TRADES="/Users/Denis/Dev/Deeptrading/backend/reports/gold_window_202601_202607/trades.csv"
-TCOST="/Users/Denis/Dev/Deeptrading/backend/reports/h079_tcost.json"
+TRADES=str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/gold_window_202601_202607/trades.csv"
+TCOST=str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/h079_tcost.json"
 FIGIS=["BBG008F2T3T2","BBG004S681M2","BBG004S683W7","BBG004S68CP5","BBG004S681B4"]
 T0=datetime(2025,12,1,tzinfo=timezone.utc); T1=datetime(2026,8,1,tzinfo=timezone.utc)
 ENG="postgresql+asyncpg://deeptrading:deeptrading@192.168.1.54:5432/deeptrading"
@@ -93,7 +93,7 @@ def main():
     for total in (30000,50000):
         out[f"total_{total}"]={"no_tcost":simulate(trades,natr_lookup,stock_ts,total,False),
                                "with_tcost":simulate(trades,natr_lookup,stock_ts,total,True)}
-    json.dump(out,open("/Users/Denis/Dev/Deeptrading/backend/reports/h079_tcost_step2.json","w"),indent=2)
+    json.dump(out,open(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/h079_tcost_step2.json","w"),indent=2)
     for k,v in out.items():
         print(k,"no_tcost_net=",v["no_tcost"]["portfolio_net"],"with_tcost_net=",v["with_tcost"]["portfolio_net"],
               "erosion_rub=",round(v["no_tcost"]["portfolio_net"]-v["with_tcost"]["portfolio_net"],2),

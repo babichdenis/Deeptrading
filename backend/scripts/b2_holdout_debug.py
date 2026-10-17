@@ -7,7 +7,7 @@ ret30 compares against the prior day and the first bar can fake a down-run),
 which would signal an artifact rather than a real dip.
 """
 import sys, warnings
-sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend/scripts")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/scripts")
 warnings.filterwarnings("ignore")
 import numpy as np, pandas as pd
 import subprocess, os
@@ -23,7 +23,7 @@ CARRIERS = ["SFIN", "SBER", "ROSN", "NVTK", "SMLT", "T", "SNGS", "SNGSP", "TRNFP
 def load(figi):
     sql = f"SELECT ts, open, high, low, close, volume FROM candles WHERE interval=1 AND figi='{figi}' ORDER BY ts"
     env = dict(os.environ, PGPASSWORD="deeptrading")
-    out = subprocess.run(["/usr/local/bin/psql", "-h", "127.0.0.1", "-U", "deeptrading", "-d", "deeptrading",
+    out = subprocess.run(["psql", "-h", "127.0.0.1", "-U", "deeptrading", "-d", "deeptrading",
                           "-At", "-F", ",", "-c", sql], capture_output=True, text=True, env=env, check=True).stdout
     names = ["ts", "open", "high", "low", "close", "volume"]
     df = pd.read_csv(StringIO(out), names=names, parse_dates=["ts"])
@@ -33,7 +33,7 @@ def load(figi):
 def figi_of(ticker):
     sql = f"SELECT figi FROM instruments WHERE ticker='{ticker}'"
     env = dict(os.environ, PGPASSWORD="deeptrading")
-    return subprocess.run(["/usr/local/bin/psql", "-h", "127.0.0.1", "-U", "deeptrading", "-d", "deeptrading",
+    return subprocess.run(["psql", "-h", "127.0.0.1", "-U", "deeptrading", "-d", "deeptrading",
                            "-At", "-c", sql], capture_output=True, text=True, env=env, check=True).stdout.strip()
 
 

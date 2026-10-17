@@ -3,7 +3,7 @@
 import asyncio
 import bisect
 import os, sys
-sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from datetime import datetime, timezone
 from app.database import SessionLocal
 from app.engine.exits import AtrStopPolicy, intrabar_exit

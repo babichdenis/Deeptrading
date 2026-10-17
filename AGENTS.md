@@ -4,8 +4,8 @@
 
 ## Рабочая среда
 
-- Проект `/Volumes/Dev/Deeptrading` — SMB-шара сервера 192.168.1.7. На нём основной checkout, backend/frontend и PostgreSQL 16:5432. Mac «код» — .6, Windows runner — .8.
-- Локальный PG14 `127.0.0.1:5432` на .6 — песочница, не источник данных. Старая IP-карта .2/.3 не актуальна. Подробности: [OPERATIONS](docs/knowledge/OPERATIONS.md).
+- Основной checkout — на сервере .7 в `/Users/Denis/Dev/Deeptrading` (локальный диск; с .6 он виден как SMB-шара `/Volumes/Dev/Deeptrading`). Там же backend/frontend и боевая PostgreSQL 16 в Docker-контейнере `deeptrading-db` (`127.0.0.1:5432`, БД `deeptrading`). Mac «код» — .6.
+- Рабочая копия на Windows .8: проект `X:\Deeptrading` и своя PostgreSQL 16.15 на `127.0.0.1:5432` (роль и БД `deeptrading`); восстановлена из дампа .7 2026-10-17. Локальный PG14 на .6 — песочница, не источник данных. Старая IP-карта .2/.3 не актуальна. Подробности: [OPERATIONS](docs/knowledge/OPERATIONS.md).
 - Не устанавливать venv/node_modules через SMB. Python окружение локально `~/.venvs/deeptrading`; npm install/ci — только там, где диск проекта локальный.
 - Изменения на шаре видны серверу сразу и могут подхватиться autoreload. Не затирать чужие файлы/процессы. Если шара отключена, не продолжать на старой локальной копии.
 - Пароли, токены и account secrets — в непубликуемом окружении/хранилище, не в правилах, отчётах или CLI-логах. SDK: `t-tech-investments`, импорт `t_tech.invest`.

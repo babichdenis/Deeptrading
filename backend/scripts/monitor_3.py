@@ -13,7 +13,7 @@ import httpx
 
 API = "http://127.0.0.1:8000"
 LOG = "/tmp/monitor3.log"
-BACKEND = "/Users/Denis/Dev/Deeptrading/backend"
+BACKEND = str(__import__("pathlib").Path(__file__).resolve().parents[1])
 INTERVAL = 300  # 5 мин
 MSK = timezone(timedelta(hours=3))
 

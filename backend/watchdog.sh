@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /Users/Denis/Dev/Deeptrading/backend
+cd "$(dirname "$0")"
 while true; do
   if ! lsof -ti :8000 >/dev/null 2>&1; then
     echo "$(date) Backend down, restarting" >> /tmp/backend_watchdog.log

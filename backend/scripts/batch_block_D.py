@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) if "__file__" in globals() else os.getcwd()
 if "__file__" not in globals():
-    BACKEND = "/Users/Denis/Dev/Deeptrading/backend"
+    BACKEND = str(__import__("pathlib").Path(__file__).resolve().parents[1])
 REPORTS = os.path.join(BACKEND, "reports")
 DATA = os.path.join(BACKEND, "data")
 FIGIS = {"RUAL": "BBG008F2T3T2", "SNGP": "BBG004S681M2", "AFLT": "BBG004S683W7",

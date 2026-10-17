@@ -53,7 +53,7 @@ def _load_universe() -> list[dict]:
     )
     env = dict(os.environ, PGPASSWORD=PG_PASSWORD)
     out = subprocess.run(
-        ["/usr/local/bin/psql", "-h", PG_HOST, "-U", PG_USER, "-d", PG_NAME, "-At", "-F", "|", "-c", sql],
+        ["psql", "-h", PG_HOST, "-U", PG_USER, "-d", PG_NAME, "-At", "-F", "|", "-c", sql],
         capture_output=True, text=True, env=env, check=True,
     ).stdout
     rows = []
@@ -68,7 +68,7 @@ def _load_ticker(figi: str, full: bool = False) -> pd.DataFrame:
     sql = f"SELECT {cols} FROM candles WHERE interval=1 AND figi='{figi}' ORDER BY ts"
     env = dict(os.environ, PGPASSWORD=PG_PASSWORD)
     out = subprocess.run(
-        ["/usr/local/bin/psql", "-h", PG_HOST, "-U", PG_USER, "-d", PG_NAME, "-At", "-F", ",", "-c", sql],
+        ["psql", "-h", PG_HOST, "-U", PG_USER, "-d", PG_NAME, "-At", "-F", ",", "-c", sql],
         capture_output=True, text=True, env=env, check=True,
     ).stdout
     from io import StringIO

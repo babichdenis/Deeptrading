@@ -16,7 +16,7 @@
 import sys, json, math, asyncio
 from bisect import bisect_right
 from datetime import datetime, timezone, timedelta
-sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 
 import numpy as np
 from sqlalchemy import text
@@ -200,7 +200,7 @@ def load_macro(eng_url):
         print("  IMOEX load fail:", ex); out["IMOEX"] = []
     import os, csv
     for name, fn in (("GOLD","gold_5m.csv"),("BRENT","brent_5m.csv"),("USDRUB","usdrub_5m.csv")):
-        p = f"/Users/Denis/Dev/Deeptrading/backend/data/{fn}"
+        p = str(__import__("pathlib").Path(__file__).resolve().parents[1]) + f"/data/{fn}"
         if os.path.exists(p):
             try:
                 ts=[]; cl=[]

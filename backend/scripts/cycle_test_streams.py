@@ -18,7 +18,7 @@ from uuid import uuid4
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 
 TOKEN = os.environ.get("SANDBOX") or os.environ.get("TINKOFF_TOKEN")
 ACC = "413306e6-f634-4aef-a553-c84e764b298a"

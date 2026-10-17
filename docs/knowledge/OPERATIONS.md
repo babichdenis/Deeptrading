@@ -7,10 +7,12 @@
 | Машина | Адрес | Роль |
 |---|---|---|
 | MacBook «код» | 192.168.1.6 | Сессии разработки, доступ к серверному проекту через SMB |
-| MacBook «сервер» | 192.168.1.7 | Основной checkout, backend/frontend, Docker PostgreSQL 16:5432 |
-| Windows runner | 192.168.1.8 | Отдельная копия, задачи `uvicorn_test` / `vitebot` |
+| MacBook «сервер» | 192.168.1.7 | Основной checkout `/Users/Denis/Dev/Deeptrading`, backend/frontend, боевая Docker PostgreSQL 16 (`deeptrading-db`, `127.0.0.1:5432`) |
+| Windows .8 | 192.168.1.8 | Копия проекта `X:\Deeptrading`, своя PostgreSQL 16.15 (`127.0.0.1:5432`), backend/frontend |
 
-`/Volumes/Dev/Deeptrading` — серверная SMB-шара. `127.0.0.1:5432` на машине «код» — песочница PG14, не источник рабочих данных. Старые адреса `.2`/`.3` и серверная роль `.8` из прежних документов не использовать. Наличие роли не означает, что бот или порт сейчас работает.
+Проект на .7 лежит на локальном диске (`/Users/Denis/Dev/Deeptrading`) и доступен машине «код» как SMB-шара `/Volumes/Dev/Deeptrading`; работа через шару ломает git (SIGBUS), предпочитать локальный checkout сервера. Боевые данные — только в PostgreSQL 16 контейнера `deeptrading-db` на .7. `127.0.0.1:5432` на машине «код» — песочница PG14, не источник рабочих данных.
+
+На Windows .8 развёрнута рабочая копия: проект `X:\Deeptrading`, отдельная нативная PostgreSQL 16.15 на `127.0.0.1:5432` (роль и БД `deeptrading`, данные восстановлены из дампа .7 2026-10-17), Python 3.11.9 в `X:\Deeptrading\backend\.venv`, `node_modules` установлены. Помощники запуска — `X:\run\run_backend.ps1` и `X:\run\run_frontend.ps1`. Старые адреса `.2`/`.3` не использовать. Наличие роли не означает, что бот или порт сейчас работает.
 
 ## Окружение
 
@@ -20,7 +22,9 @@ Backend: Python 3.11, FastAPI, SQLAlchemy 2 async, asyncpg. SDK `t-tech-investme
 
 ## Команды для отдельного согласованного запуска
 
-Из каталога backend: `~/.venvs/deeptrading/bin/uvicorn app.main:app --reload` либо `zsh dev.sh` с подходящим локальным окружением. Frontend на сервере: `npm run dev` из frontend. Эти команды — справка, не стартовый шаг новой сессии.
+Из каталога backend на .7: `~/.venvs/deeptrading/bin/uvicorn app.main:app --reload` либо `zsh dev.sh` с подходящим локальным окружением. Frontend на сервере: `npm run dev` из frontend.
+
+На Windows .8: бэкенд — `X:\Deeptrading\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --loop asyncio` (быстрый путь — `X:\run\run_backend.ps1`), фронт — `npm run dev` из `X:\Deeptrading\frontend` (`X:\run\run_frontend.ps1`). Для прогонов из БД бэкенду нужен `CANDLE_PREFLIGHT=off`, иначе старт уходит в `GetCandles`. Эти команды — справка, не стартовый шаг новой сессии.
 
 Сервис frontend на сервере по прежним операционным заметкам управляется launchd `com.denys.vite-frontend`; Windows — планировщиком. Не убивать произвольные процессы пользователя и не перезапускать всё ради проверки одного файла. Изменения на SMB видны серверу сразу; его autoreload может подхватить правку.
 

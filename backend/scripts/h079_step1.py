@@ -1,6 +1,6 @@
 import sys, json
 import numpy as np
-sys.path.insert(0,"/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0,str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from app.services.research_pack import _load_candles
 from datetime import datetime, timezone
 
@@ -60,7 +60,7 @@ def main():
         vals=[res[n]["cost_pct_at_grid"][str(int(N))] for n in res]
         agg[str(int(N))]=round(float(np.mean(vals)),5)
     out=dict(per_ticker=res, aggregate_mean=agg, note="Kissell-style transient+permanent fit on 2026 H1 1m bars; cost = |next-close gap| vs participation; +commission 5bps. SHADOW estimate.")
-    json.dump(out, open("/Users/Denis/Dev/Deeptrading/backend/reports/h079_tcost.json","w"), indent=2)
+    json.dump(out, open(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/h079_tcost.json","w"), indent=2)
     print(json.dumps(out, indent=2))
 
 if __name__=="__main__": main()

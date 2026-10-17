@@ -4,7 +4,7 @@
   "active_running_experiment": null,
   "blocked_on": "My3",
   "next_action_owner": "executor",
-  "next_action": "/Volumes/Dev/Deeptrading/backend/orchestrator/executor_task_screening_allocation.md",
+  "next_action": "backend/orchestrator/executor_task_screening_allocation.md",
   "pending_decision": null,
   "history": [
     {

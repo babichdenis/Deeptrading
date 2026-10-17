@@ -1,6 +1,6 @@
 import sys, json
 import numpy as np
-sys.path.insert(0,"/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0,str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from app.services.research_pack import _load_candles
 from datetime import datetime, timezone
 
@@ -65,7 +65,7 @@ def main():
         out[NAMES[(f1,f2)]]=dict(beta=round(beta,4), adf_tstat=round(tstat,2), adf_p=round(p,4),
                                   stationary=bool(p<0.05), n_trades=len(tr), net=round(net,2),
                                   win=round(win,3), h058_pvalue=round(pval,3))
-    json.dump(out, open("/Users/Denis/Dev/Deeptrading/backend/reports/h078_stat_arb.json","w"), indent=2)
+    json.dump(out, open(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/h078_stat_arb.json","w"), indent=2)
     print(json.dumps(out, indent=2))
 
 if __name__=="__main__": main()

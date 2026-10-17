@@ -5,12 +5,12 @@ T-cost from H-079 included. Financing cost NOT modeled (minute-scale holds -> ne
 """
 import sys, os, json, csv, bisect, asyncio, statistics
 from datetime import datetime, timezone, timedelta
-sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import text
 import numpy as np
 
-REPORTS = "/Users/Denis/Dev/Deeptrading/backend/reports"
+REPORTS = str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports"
 TRADES = os.path.join(REPORTS, "gold_window_202601_202607", "trades.csv")
 TCOST = os.path.join(REPORTS, "h079_tcost.json")
 FIGIS = ["BBG008F2T3T2", "BBG004S681M2", "BBG004S683W7", "BBG004S68CP5", "BBG004S681B4"]

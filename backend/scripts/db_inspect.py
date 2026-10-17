@@ -1,4 +1,4 @@
-import sys; sys.path.insert(0,"/Users/Denis/Dev/Deeptrading/backend")
+import sys; sys.path.insert(0,str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 import asyncio, asyncpg
 from app.config import get_settings
 async def f():

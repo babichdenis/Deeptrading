@@ -1,5 +1,5 @@
 import sys, json
-sys.path.insert(0,"/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0,str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from app.services.research_pack import _load_candles
 from app.services.ensemble import compute_ensemble
 from datetime import datetime, timezone

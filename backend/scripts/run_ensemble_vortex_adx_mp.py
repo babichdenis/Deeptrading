@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 import asyncio
 
-_BACKEND = "/Users/Denis/Dev/Deeptrading/backend"
+_BACKEND = str(__import__("pathlib").Path(__file__).resolve().parents[1])
 
 def aggregate_5m(raw):
     buckets = {}

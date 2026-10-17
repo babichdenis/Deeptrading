@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal debug: check first few MTSS signals for intrabar_exit."""
 import asyncio, bisect, os, sys
-sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from datetime import datetime, timezone
 from app.database import SessionLocal
 from app.engine.exits import AtrStopPolicy, intrabar_exit

@@ -17,7 +17,7 @@ import sys, time
 import pandas as pd, numpy as np
 from collections import defaultdict, Counter
 
-sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from app.engine.models import Candle, Signal, Side, Position, PositionState, ExitReason
 from app.engine.policies import SignalPolicyConfig
 from app.engine.exits import FixedSlTpPolicy

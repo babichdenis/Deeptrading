@@ -1,9 +1,9 @@
 #!/bin/bash
-TASK=/Users/Denis/Dev/Deeptrading/backend/orchestrator/executor_task.md
+cd "$(dirname "$0")/.."
+TASK="$PWD/orchestrator/executor_task.md"
 STATE=/tmp/last_task_ref.txt
 LOG=/tmp/monitor_executor.log
-ALERT=/Users/Denis/Dev/Deeptrading/backend/reports/_new_task_alert.txt
-cd /Users/Denis/Dev/Deeptrading/backend
+ALERT="$PWD/reports/_new_task_alert.txt"
 while true; do
   if [ -f "$TASK" ]; then
     ref=$(grep -m1 "executor_task_" "$TASK" | tr -d "[:space:]")

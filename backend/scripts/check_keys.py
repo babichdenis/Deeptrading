@@ -1,4 +1,4 @@
-import sys; sys.path.insert(0, "/Users/Denis/Dev/Deeptrading/backend")
+import sys; sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 from app.services.ensemble import compute_ensemble
 from app.engine.models import Candle
 from datetime import datetime

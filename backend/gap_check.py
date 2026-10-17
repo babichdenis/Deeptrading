@@ -2,7 +2,7 @@ import asyncio
 import sys
 from datetime import datetime, timedelta, timezone
 
-sys.path.insert(0, "/Volumes/Dev/Deeptrading/backend")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[0]))
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine

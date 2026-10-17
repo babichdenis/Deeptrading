@@ -2,7 +2,7 @@ import sys, json, glob
 import numpy as np
 
 CAP = 10000.0
-FILES = sorted(glob.glob("/Users/Denis/Dev/Deeptrading/backend/reports/_h082_*.json"))
+FILES = sorted(glob.glob(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/_h082_*.json"))
 data = {}
 for f in FILES:
     for r in json.load(open(f)):
@@ -72,5 +72,5 @@ out = dict(n_figi=len(figis), windows=[w[0] for w in windows],
            hrp=agg["hrp"], equal=agg["eq"], cap25_approx=agg["cap"],
            herfindahl=dict(hrp=agg["herfindahl_hrp"], equal=agg["herfindahl_eq"]),
            details=details)
-json.dump(out, open("/Users/Denis/Dev/Deeptrading/backend/reports/h083_hrp.json","w"), indent=2, ensure_ascii=False)
+json.dump(out, open(str(__import__("pathlib").Path(__file__).resolve().parents[1]) + "/reports/h083_hrp.json","w"), indent=2, ensure_ascii=False)
 print(json.dumps(out, indent=2, ensure_ascii=False))
