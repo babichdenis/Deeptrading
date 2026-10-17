@@ -3008,12 +3008,13 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
     async def _candle_preflight(self) -> None:
         """Watchdog 1m-данных окна теста: check (+докачка T-Invest).
 
-        env CANDLE_PREFLIGHT=off|warn|fill|strict; default — fill для mode=test/feed=replay.
+        env CANDLE_PREFLIGHT=off|warn|fill|strict; default — warn для mode=test/feed=replay
+        (реплей читает БД как есть; докачка при необходимости включается явным env).
         """
         import os as _os
         mode = str(_os.environ.get("CANDLE_PREFLIGHT", "") or "").strip().lower()
         if not mode:
-            mode = "fill" if (str(getattr(self.config, "feed", "")) == "replay"
+            mode = "warn" if (str(getattr(self.config, "feed", "")) == "replay"
                               and str(getattr(self.config, "mode", "")) == "test") else "off"
         if mode == "off":
             return
@@ -3196,10 +3197,12 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 async with sem:
                     return await _load_one(u)
 
-            # IMOEX (индекс): всегда держим свежие 1м свечи в БД (режим/bias/MOEX-контекст)
+            # IMOEX (индекс): свежие 1м свечи в БД (режим/bias/MOEX-контекст); реплей — только БД
             try:
-                from app.bot.moex import ensure_imoex_candles
-                _n_imoex = await ensure_imoex_candles(days=10)
+                _n_imoex = 0
+                if str(getattr(self.config, "feed", "")) != "replay":
+                    from app.bot.moex import ensure_imoex_candles
+                    _n_imoex = await ensure_imoex_candles(days=10)
                 if _n_imoex:
                     self._log(f"IMOEX: догружено {_n_imoex} 1м свечей")
             except Exception as e:
@@ -4681,18 +4684,26 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         feed.on_log = lambda msg: self._log(msg, level="debug")
         self.feed = feed
         exited = "stream_exhausted"
+        _skip_wall_clock_loops = bool(
+            isinstance(feed, ReplayFeed)
+            and str(getattr(self.config, "replay_pace", "") or "") != "wall"
+        )
+        if _skip_wall_clock_loops:
+            self._log("ДЕТЕРМИНИРОВАННЫЙ РЕПЛЕЙ: wall-clock циклы выключены "
+                      "(held_sync, vol_carousel, intrabar, queue, momentum, guard) — "
+                      "итог зависит только от свечей БД")
         self._persist_task = self._spawn_task("persist", self._flush_persist())
-        self._held_sync_task = self._spawn_task("held_sync", self._sync_held())
         self._hot_add_task = self._spawn_task("hot_add", self._hot_add_universe())
-        self._vol_carousel_task = self._spawn_task("vol_carousel", self._vol_carousel_loop())
         self._reconcile_task = self._spawn_task("reconcile", self._reconcile_loop())
         self._session_task = self._spawn_task("session", self._session_monitor())
         self._metrics_task = self._spawn_task("metrics", self._metrics_loop())
-        self._intrabar_task = self._spawn_task("intrabar", self._intrabar_exit_loop())
         self._imoex_task = self._spawn_task("imoex", self._imoex_loop())
-        self._queue_task = self._spawn_task("queue", self._priority_entry_loop())
-        self._momentum_task = self._spawn_task("momentum", self._momentum_loop())
-        self._guard_task = self._spawn_task("guard", self._portfolio_guard_loop())
+        self._held_sync_task = None if _skip_wall_clock_loops else self._spawn_task("held_sync", self._sync_held())
+        self._vol_carousel_task = None if _skip_wall_clock_loops else self._spawn_task("vol_carousel", self._vol_carousel_loop())
+        self._intrabar_task = None if _skip_wall_clock_loops else self._spawn_task("intrabar", self._intrabar_exit_loop())
+        self._queue_task = None if _skip_wall_clock_loops else self._spawn_task("queue", self._priority_entry_loop())
+        self._momentum_task = None if _skip_wall_clock_loops else self._spawn_task("momentum", self._momentum_loop())
+        self._guard_task = None if _skip_wall_clock_loops else self._spawn_task("guard", self._portfolio_guard_loop())
         if getattr(self, "_move_selected", None) is not None and isinstance(feed, ReplayFeed):
             feed.on_day_boundary = self._move_reselect_day
         try:
