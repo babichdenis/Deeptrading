@@ -2649,6 +2649,109 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             _audit_swallow('_restore_swing@L2250', _sw_e)  # audit silent-except
             pass
 
+    def _reset_run_state(self) -> None:
+        self.universe = []
+        self.stream_universe = []
+        self.orders = deque(maxlen=200)
+        self.candles_seen = 0
+        self.signals_seen = 0
+        self._candles_received = 0
+        self._last_q_report_ts = 0.0
+        self._persist_flushes = 0
+        self.last_candle_ts = None
+        self.data_source = "—"
+        self.feed = None
+        self._daily_pnl_cache = None
+        self._replay_from = None
+        self._replay_cur = None
+        self._replay_to = None
+        self._last_replay_log = -1.0
+        self._replay_finished = False
+        self._replay_status = None
+        self._replay_summary = None
+        self._signal_busy = set()
+        self._skip_logged = {}
+        self._held = set()
+        self._swing = set()
+        self._peak_pnl = {}
+        self._trail_info = {}
+        self._held_since = {}
+        self._last_closed_bar = {}
+        self._last_persist_bar = {}
+        self._opposite_count = {}
+        self._last_signal_side = {}
+        self._bias_exit_ts = {}
+        self._last_exit_bar = {}
+        self._bar_counter = 0
+        self._just_opened_this_candle = set()
+        self._entry_bar_index = {}
+        self._no_trade_stats = {}
+        self._regimes = {}
+        self._entry_regime = {}
+        self._votes = {}
+        self._votes_logged = {}
+        self._exit_plans = {}
+        self._exit_side = {}
+        self._exit_entry_px = {}
+        self._exit_qty = {}
+        self._trail_active = {}
+        self._trail_stop = {}
+        self._exit_target = {}
+        self._prev_close = {}
+        self._day_jumps = {}
+        self._bad_day = {}
+        self._candles_rejected = 0
+        self._imoex_buf = []
+        self._imoex_state = None
+        self._imoex_last_tick = ""
+        self._imoex_tick_err = ""
+        self._imoex_beta = {}
+        self._imoex_stale_warn_ts = 0.0
+        self._approvals_since = {}
+        self._loss_streak = {}
+        self._last_loss_ts = {}
+        self._global_loss_streak = 0
+        self._global_last_loss_ts = None
+        self._ai_reject_until = {}
+        self._ai_reject_reason = {}
+        self._ai_reject_last_log = {}
+        self._ai_reject_cnt = {}
+        self._pos_leverage = {}
+        self._sector_meta = {}
+        self._sector_meta_ts = 0.0
+        self._pf_cache = None
+        self._regime_cache = None
+        self._hist_cache = {}
+        self._hist_ts = 0.0
+        self._turnover_cache = {}
+        self._turnover_ts = 0.0
+        self._cand_queue = {}
+        self._equity_peak = 0.0
+        self._mtf_cache = {}
+        self._mtf_ts = 0.0
+        self._hm_cache = {}
+        self._hm_ts = 0.0
+        self._momentum_done = None
+        self._momentum_cache = {}
+        self._momentum_ts = 0.0
+        self._daily_bias_cache = {}
+        self._daily_bias_ts = 0.0
+        self._overnight_cache = None
+        self._overnight_ts = 0.0
+        self._dd_level_done = 0
+        self._ai_decisions = deque(maxlen=50)
+        self._ai_notes = deque(maxlen=50)
+        self._ai_prompt = {}
+        self._ai_report = {}
+        self._move_selected = None
+        self._move_leaving = set()
+        self._5m_cache = {}
+        self._5m_last_close = {}
+        self._last_candle_log_ts = 0.0
+        self._persist_queue.clear()
+        self._persist_queue_5m.clear()
+        self._log_persist_queue.clear()
+
     async def start(self, cfg: BotConfig) -> dict:
         # ensemble_v4 — не одиночная стратегия: всегда ensemble-путь в тесте.
         if str(getattr(cfg, 'mode', '')) == 'test' and str(getattr(cfg, 'strategy_id', '')) == 'ensemble_v4':
@@ -2656,7 +2759,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         if self.running or self.starting:
             raise RuntimeError("bot already running")
         self.config = cfg
-        self._pf_cache = None  # контур мог смениться — не отдаём портфель прошлого счёта
+        self._reset_run_state()
         await self._restore_swing()
         # Восстанавливаем сохранённые настройки (переживают перезапуск/старт без фронта).
         try:
