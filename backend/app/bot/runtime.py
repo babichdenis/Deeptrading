@@ -361,6 +361,20 @@ _PRESET_FIELD_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
 _MISS = object()
 
 
+def _giveback_step(upnl: float, peak: float | None, notional: float,
+                   act_pct: float, giv_pct: float) -> tuple[float, bool]:
+    """Пик close-based upnl и триггер trail-гивбэка (opt-in).
+
+    Активация: пик ≥ act_pct% от notional. Триггер: текущий upnl ≤ пик − giv_pct% от notional.
+    Пик обновляется первым (running max, как в SQL-симуляции), затем проверка триггера.
+    """
+    new_peak = upnl if peak is None else max(float(peak), upnl)
+    if act_pct <= 0.0 or giv_pct <= 0.0 or notional <= 0.0:
+        return new_peak, False
+    activated = new_peak >= act_pct / 100.0 * notional
+    return new_peak, bool(activated and upnl <= new_peak - giv_pct / 100.0 * notional)
+
+
 def _runtime_preset_overrides(rt: dict) -> dict:
     """runtime-блок пресета («ветки») -> оверрайды cfg (только whitelist).
 
@@ -795,6 +809,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         # мин. при шорте) + MAE; обновляется в _step_exit на каждом баре,
         # пишется в exit_meta при закрытии (_st_close).
         self._peak_pnl: dict[str, dict] = {}   # figi -> {pnl, ts, price, atr_abs, atr_pct, mae}
+        self._gb_peak: dict[str, float] = {}   # figi -> пик close-based upnl (₽) для trail-гивбэка
         # --- Broken candle validation (mirrors _validate_candles in ensemble.py) ---
         self._prev_close: dict[str, float] = {}  # figi -> last VALID close
         self._day_jumps: dict[str, dict[str, int]] = {}  # figi -> {msk_date: jump_count}
@@ -2674,6 +2689,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         self._held = set()
         self._swing = set()
         self._peak_pnl = {}
+        self._gb_peak = {}
         self._trail_info = {}
         self._held_since = {}
         self._last_closed_bar = {}
@@ -6389,6 +6405,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         # Старт пика P&L: от входа, лучший ход = 0.
         self._peak_pnl[figi] = {"pnl": 0.0, "ts": c.ts, "price": float(entry_px),
                                 "atr_abs": None, "atr_pct": None, "mae": 0.0}
+        self._gb_peak[figi] = 0.0
         # Виртуальный трейл — строго с нуля на каждой позиции. Раньше _trail_info
         # жил до _st_close, а часть путей закрытия (_st_close bypass: closed_at_broker,
         # duplicate_cleanup) его не вычищала → новая позиция по тому же figi
@@ -6424,6 +6441,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         self._trail_stop.pop(figi, None)
         self._exit_target.pop(figi, None)
         self._pos_leverage.pop(figi, None)
+        self._gb_peak.pop(figi, None)
 
     async def _ensure_exit_state(self, figi: str, c, pos) -> None:
         """Ленивая инициализация учёта выхода, если позиция есть у брокера,
@@ -6499,6 +6517,26 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                       f"src={'db' if _db_sl is not None else 'atr'}")
         except Exception as _ei_e:
             self._log(f"exit-init error {figi[-6:]}: {_ei_e}")
+
+    def _giveback_exit(self, figi: str, c, state, entry_px: float, qty_sh: int
+                       ) -> tuple[float | None, str]:
+        """Выход по откату от пика (trail_activation_pct/trail_giveback_pct, по close закрытого бара)."""
+        p = getattr(self.config, "params", None) or {}
+        try:
+            act = float(p.get("trail_activation_pct") or 0.0)
+            giv = float(p.get("trail_giveback_pct") or 0.0)
+        except (TypeError, ValueError):
+            return None, ""
+        if act <= 0.0 or giv <= 0.0 or entry_px <= 0 or qty_sh <= 0:
+            return None, ""
+        sgn = 1.0 if state == PositionState.LONG else -1.0
+        upnl = (float(c.close) - float(entry_px)) * qty_sh * sgn
+        notional = float(entry_px) * qty_sh
+        peak, hit = _giveback_step(upnl, self._gb_peak.get(figi), notional, act, giv)
+        self._gb_peak[figi] = peak
+        if hit:
+            return float(c.close), "trail_exit"
+        return None, ""
 
     async def _step_exit(self, figi: str, c, pos) -> bool:
         """Единый шаг управления выходом позиции на одном баре.
@@ -6782,6 +6820,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             self._log(f"инфо-трейл общий error {figi[-6:]}: {_tge}")
 
         price, reason = _ibe(c, state, stop, tp, close_based=bool(trail_active))
+        if price is None:
+            price, reason = self._giveback_exit(figi, c, state, entry_px, qty_sh)
         if price is None:
             return False
         # Выход — строго по цене intrabar_exit (стоп/гэп/close/target), БЕЗ подмены

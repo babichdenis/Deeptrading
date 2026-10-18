@@ -556,6 +556,8 @@ STRATEGY_CATALOG: dict[str, StrategyCard] = {
             "schedule": {"type": "str", "default": "06:55:short,18:45:long"},
             "weekdays_only": {"type": "int", "default": 1, "min": 0, "max": 1},
             "gap_skip_pct": {"type": "float", "default": 0.0, "min": 0.0, "max": 50.0},
+            "trail_activation_pct": {"type": "float", "default": 0.0, "min": 0.0, "max": 100.0},
+            "trail_giveback_pct": {"type": "float", "default": 0.0, "min": 0.0, "max": 100.0},
         },
     ),
 }

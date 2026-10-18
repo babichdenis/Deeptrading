@@ -59,6 +59,8 @@ class TimeGridParams:
     schedule: str = "06:55:short,18:45:long"
     weekdays_only: int = 1
     gap_skip_pct: float = 0.0
+    trail_activation_pct: float = 0.0
+    trail_giveback_pct: float = 0.0
 
 
 class TimeGridStrategy:

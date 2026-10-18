@@ -30,6 +30,7 @@ def _pollute(rt: PaperBotRuntime) -> None:
     rt._exit_target["FIGI1"] = 1.0
     rt._entry_bar_index["FIGI1"] = 5
     rt._peak_pnl["FIGI1"] = {"pnl": 1.0}
+    rt._gb_peak["FIGI1"] = 7.5
     rt._prev_close["FIGI1"] = 100.0
     rt._day_jumps["FIGI1"] = {"2026-10-08": 2}
     rt._bad_day["FIGI1"] = {"2026-10-08": True}
@@ -70,6 +71,7 @@ def test_reset_run_state_clears_all_leaks():
     assert rt._exit_target == {}
     assert rt._entry_bar_index == {}
     assert rt._peak_pnl == {}
+    assert rt._gb_peak == {}
     assert rt._prev_close == {}
     assert rt._day_jumps == {}
     assert rt._bad_day == {}
