@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "replay_only": true,
+  "direction": "fall",
+  "n": 10,
+  "lookback_days": 1,
+  "metric": "cum_ret",
+  "tf": "day",
+  "rsi_period": 14,
+  "shortable_only": true,
+  "min_turnover": 0.0,
+  "exclude_tickers": "GMKN",
+  "log_dir": "reports/universe_move"
+}
