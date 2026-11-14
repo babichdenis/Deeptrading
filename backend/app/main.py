@@ -78,7 +78,8 @@ async def lifespan(app: FastAPI):
             _mode, _src, _state.get("test_engine") or "ensemble_v4",
             _state.get("test_interval") or "1min", _state.get("test_name") or "-")
 
-        if not runtime.running:
+        _autostart = os.environ.get("BOT_AUTOSTART", "1").strip().lower() not in ("0", "false", "no", "off")
+        if not runtime.running and _autostart:
             cfg = BotConfig(
                 strategy_id="ensemble_v4",
                 interval_name="1min",
