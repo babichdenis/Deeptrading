@@ -32,6 +32,21 @@ class StrategyCard:
 
 
 STRATEGY_CATALOG: dict[str, StrategyCard] = {
+    "b2_rsi_h1": StrategyCard(
+        id="b2_rsi_h1",
+        name="B2 RSI Hourly Cross",
+        family="reversal",
+        wave=1,
+        long_rule="RSI14(H1) cross down through oversold",
+        short_rule="RSI14(H1) cross up through overbought",
+        timeframes=("hour",),
+        status="AVAILABLE",
+        params_schema={
+            "period": {"type": "int", "default": 14, "min": 2, "max": 100},
+            "oversold": {"type": "float", "default": 30.0, "min": 5, "max": 50},
+            "overbought": {"type": "float", "default": 70.0, "min": 50, "max": 95},
+        },
+    ),
     "rsi_reversal": StrategyCard(
         id="rsi_reversal",
         name="RSI Reversal",

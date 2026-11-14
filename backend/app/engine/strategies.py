@@ -1693,10 +1693,63 @@ class CanonEnsembleStrategy:
         return None
 
 
+@dataclass(frozen=True)
+class B2RsiH1Params:
+    period: int = 14
+    oversold: float = 30.0
+    overbought: float = 70.0
+
+
+class B2RsiH1Strategy:
+    strategy_id = "b2_rsi_h1"
+    version = "1.0.0"
+
+
+    def __init__(self, params: B2RsiH1Params | None = None):
+        self.params = params or B2RsiH1Params()
+
+
+    def warmup_bars(self) -> int:
+        return self.params.period * 12 + 14
+
+
+    def reset(self) -> None:
+        return None
+
+
+    def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
+        if not candles:
+            return None
+        bar = candles[-1]
+        hour_closes: list[float] = []
+        last_h = None
+        for c in candles:
+            h = c.ts.replace(minute=0, second=0, microsecond=0)
+            if last_h is None or h != last_h:
+                hour_closes.append(float(c.close))
+                last_h = h
+            else:
+                hour_closes[-1] = float(c.close)
+        if len(hour_closes) < self.params.period + 2:
+            return None
+        rsi = _rsi_last(hour_closes, self.params.period)
+        prev_rsi = _rsi_last(hour_closes[:-1], self.params.period)
+        if rsi is None or prev_rsi is None:
+            return None
+        if prev_rsi > self.params.oversold >= rsi:
+            return Signal(self.strategy_id, Side.BUY, bar.ts, "b2_h1_rsi30_dn",
+                          {"rsi": round(rsi, 4), "prev_rsi": round(prev_rsi, 4)})
+        if prev_rsi < self.params.overbought <= rsi:
+            return Signal(self.strategy_id, Side.SELL, bar.ts, "b2_h1_rsi70_up",
+                          {"rsi": round(rsi, 4), "prev_rsi": round(prev_rsi, 4)})
+        return None
+
+
 STRATEGY_REGISTRY: dict[str, type] = {
     "macd_cross": MacdCrossStrategy,
     "donchian_breakout": DonchianBreakoutStrategy,
     "rsi_reversal": RsiReversalStrategy,
+    "b2_rsi_h1": B2RsiH1Strategy,
     "stochastic": StochasticStrategy,
     "bollinger_reclaim": BollingerReclaimStrategy,
     "pullback_ema": PullbackEmaStrategy,
@@ -1751,6 +1804,7 @@ _PARAMS_BY_STRATEGY: dict[str, type] = {
     "macd_cross": MacdCrossParams,
     "donchian_breakout": DonchianParams,
     "rsi_reversal": RsiReversalParams,
+    "b2_rsi_h1": B2RsiH1Params,
     "stochastic": StochasticParams,
     "bollinger_reclaim": BollingerReclaimParams,
     "pullback_ema": PullbackEmaParams,
