@@ -1471,6 +1471,19 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         _src = str(ec.get("sl_source", "manual") or "manual")
         _sl_key = "sl_override" if _src == "optuna" else "sl_mult"
         _rr_key = "rr_override" if _src == "optuna" else "rr"
+        _skip_side = ""
+        try:
+            _cu_path = Path(r"X:\run\custom_universe.json")
+            if _cu_path.exists():
+                for _c in json.loads(_cu_path.read_text(encoding="utf-8")):
+                    if _c.get("figi") == figi:
+                        if _c.get("side") == "short":
+                            _skip_side = "BUY"
+                        elif _c.get("side") == "long":
+                            _skip_side = "SELL"
+                        break
+        except Exception:
+            _skip_side = ""
         return EnsembleParams(
         figi=figi, lot=int(lot) if lot else 10, capital=capital,
         quorum=int(ec.get("quorum", 2)), session="all", sessions=sessions,
@@ -1478,9 +1491,9 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         setups=_setups,
         sl_mult=(float(ec.get(_sl_key) or 0.0) or float(getattr(self.config, "ensemble_sl_mult", 0.0) or 0.0) or float(opt.get("sl_mult", 2.0))),
         rr=(float(ec.get(_rr_key) or 0.0) or float(getattr(self.config, "ensemble_rr", 0.0) or 0.0) or float(opt.get("rr", 4.0))),
-        trail_activation_comm_mult=(float(ec.get("trail_activation_comm_mult") or 0.0)
-                                    or float(getattr(self.config, "trail_activation_comm_mult", 0.0) or 0.0)
-                                    or None),
+        trail_activation_comm_mult=(lambda _v: (0.0 if _v >= 1e6 else _v) or None)(
+            float(ec.get("trail_activation_comm_mult") or 0.0)
+            or float(getattr(self.config, "trail_activation_comm_mult", 0.0) or 0.0)),
         trail_distance_r=float(getattr(self.config, "trail_distance_atr", 0.0) or 0.0) or 2.5,
         trail_compress_r=float(getattr(self.config, "trail_compress_r", 0.0) or 0.0) or 1.0,
         trail_min_factor=float(getattr(self.config, "trail_min_factor", 0.0) or 0.0) or 0.6,
@@ -1499,6 +1512,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             bias_mode=str(ec.get("bias_mode") or "veto"),
             bias_by_state=dict(ec.get("bias_by_state") or {}),
             ticker=str(ticker or ""),
+            skip_entry_side=_skip_side,
             regime_setups_filter=ec.get("regime_setups_filter") or {},
             trade_regimes=list(getattr(self.config, "trade_regimes", []) or []),
             ml_filter=ec.get("ml_filter") or {},
@@ -3188,7 +3202,25 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 figi_by_ticker, cfg, self._replay_from or self._bot_now(),
                 lambda msg, level="info": self._log(msg, level=level, source="universe"),
             )
-            if _move_universe:
+            _custom_uni = None
+            try:
+                _cu_path = Path(r"X:\run\custom_universe.json")
+                if _cu_path.exists():
+                    _custom_uni = json.loads(_cu_path.read_text(encoding="utf-8"))
+            except Exception:
+                _custom_uni = None
+            if _custom_uni:
+                self.universe = [dict(_c) for _c in _custom_uni]
+                self._custom_locks = {
+                    str(_c["figi"]): ("BUY" if _c.get("side") == "short" else "SELL")
+                    for _c in _custom_uni if _c.get("side") in ("short", "long")}
+                self._log(
+                    "UNIVERSE-CUSTOM: %d бумаг · %s" % (
+                        len(self.universe),
+                        ", ".join("%s(%s)" % (str(_c.get("ticker", "?")), _c.get("side", ""))
+                                 for _c in self.universe)),
+                    level="info", source="universe")
+            elif _move_universe:
                 self.universe = _move_universe
                 self._move_selected = {str(u["figi"]) for u in self.universe}
                 self._move_leaving = set()
@@ -5129,7 +5161,15 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     _s = str(self._exit_side.get(figi) or "").upper()
                     _pos_side = "BUY" if _s == "LONG" else ("SELL" if _s == "SHORT" else "")
                 if hasattr(strategy, "p") and hasattr(strategy.p, "skip_entry_side"):
-                    strategy.p.skip_entry_side = _pos_side
+                    _lock_skip = ""
+                    try:
+                        _lock_skip = (getattr(self, "_custom_locks", None) or {}).get(figi, "")
+                    except Exception:
+                        _lock_skip = ""
+                    if figi in self._held:
+                        strategy.p.skip_entry_side = _pos_side or _lock_skip
+                    else:
+                        strategy.p.skip_entry_side = _lock_skip
             except Exception as _sw_e:
                 _audit_swallow('_process_candle@L3913', _sw_e)  # audit silent-except
                 pass
@@ -6155,6 +6195,79 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                         return False
                 except Exception as _ce:
                     self._log(f"КОНФИРМ: ошибка проверки {type(_ce).__name__}: {str(_ce)[:90]}")
+        # --- Фильтр BUY по дневке (research): перепроданность дневки, волатильность дня,
+        # положительный импульс H1. Env: ENTRY_FILTER_D1 (+ _ATR_MIN / _RSI_MAX). Fail-open.
+        if (order.action == "open"
+                and str(order.side).upper() in ("BUY", "LONG", "OPEN_LONG")):
+            import os as _fos
+            _d1_on = (_fos.environ.get("ENTRY_FILTER_D1") or "").strip().lower() in (
+                "1", "true", "on", "yes")
+            if _d1_on:
+                try:
+                    from app.bot.entry_filter_d1 import (BUY_ATR_MIN, D1_INTERVAL, H1_SECONDS,
+                                                         buy_verdict, h1_ret3, previous_day_features)
+                    from app.services.ensemble import resample as _frs
+                    _fstep = STEP_SEC.get(getattr(cfg, "interval_name", ""), 300)
+                    _fref = c.ts if getattr(c.ts, "tzinfo", None) else c.ts.replace(tzinfo=timezone.utc)
+                    _fref = _fref + timedelta(seconds=_fstep)
+                    _fatr = float(_fos.environ.get("ENTRY_FILTER_D1_ATR_MIN") or BUY_ATR_MIN)
+                    _frsi = float(_fos.environ.get("ENTRY_FILTER_D1_RSI_MAX") or 45.0)
+                    async with SessionLocal() as _fdb:
+                        _fdaily = await _lc(_fdb, figi, D1_INTERVAL,
+                                            date_from=_fref - timedelta(days=120))
+                    _fdr, _fda = previous_day_features(_fdaily, _fref)
+                    _fbuf = list(self.buffers.get(figi) or [])
+                    _fh1 = _frs(_fbuf, H1_SECONDS) if _fbuf else []
+                    _fhr = h1_ret3(_fh1, _fref)
+                    _fv = buy_verdict(_fdr, _fda, _fhr, atr_min=_fatr, rsi_max=_frsi)
+                    self.events.log("ENTRY_FILTER_D1", figi=figi, ticker=order.ticker,
+                                    decision="allow" if _fv.allowed else "reject",
+                                    reason=_fv.reason, d_rsi=_fv.d_rsi, d_atr=_fv.d_atr,
+                                    h_ret3=_fv.h_ret3)
+                    if not _fv.allowed:
+                        order.status = "CANCELLED"
+                        self._log(f"ФИЛЬТР D1: вход {order.ticker} отменён — {_fv.reason}")
+                        self._trace_order_reject(figi, order.ticker, order.action, str(order.side),
+                                                 "entry_filter_d1_reject", _fv.reason,
+                                                 ts_bar=getattr(c, "ts", None))
+                        return False
+                except Exception as _fe:
+                    self._log(f"ФИЛЬТР D1: ошибка проверки {type(_fe).__name__}: "
+                              f"{str(_fe)[:90]} (fail-open)")
+        if (order.action == "open"
+                and str(order.side).upper() in ("SELL", "SHORT", "OPEN_SHORT")):
+            import os as _fos2
+            _d1s_on = (_fos2.environ.get("ENTRY_FILTER_D1_SELL") or "").strip().lower() in (
+                "1", "true", "on", "yes")
+            if _d1s_on:
+                try:
+                    from app.bot.entry_filter_d1 import (H1_SECONDS, M5_SECONDS, h1_ret3,
+                                                         m5_ret12, sell_verdict)
+                    from app.services.ensemble import resample as _frs2
+                    _fstep2 = STEP_SEC.get(getattr(cfg, "interval_name", ""), 300)
+                    _fref2 = c.ts if getattr(c.ts, "tzinfo", None) else c.ts.replace(tzinfo=timezone.utc)
+                    _fref2 = _fref2 + timedelta(seconds=_fstep2)
+                    _fh3 = float(_fos2.environ.get("ENTRY_FILTER_D1_SELL_H3") or -0.001)
+                    _fm5 = float(_fos2.environ.get("ENTRY_FILTER_D1_SELL_M5") or -0.0006)
+                    _sbuf = list(self.buffers.get(figi) or [])
+                    _sh1 = _frs2(_sbuf, H1_SECONDS) if _sbuf else []
+                    _sm5b = _frs2(_sbuf, M5_SECONDS) if _sbuf else []
+                    _shr = h1_ret3(_sh1, _fref2)
+                    _smr = m5_ret12(_sm5b, _fref2)
+                    _sv = sell_verdict(_shr, _smr, h3_max=_fh3, m5_max=_fm5)
+                    self.events.log("ENTRY_FILTER_D1_SELL", figi=figi, ticker=order.ticker,
+                                    decision="allow" if _sv.allowed else "reject",
+                                    reason=_sv.reason, h_ret3=_sv.h_ret3, m5_ret12=_sv.m5_ret12)
+                    if not _sv.allowed:
+                        order.status = "CANCELLED"
+                        self._log(f"ФИЛЬТР D1 SELL: вход {order.ticker} отменён — {_sv.reason}")
+                        self._trace_order_reject(figi, order.ticker, order.action, str(order.side),
+                                                 "entry_filter_d1_sell_reject", _sv.reason,
+                                                 ts_bar=getattr(c, "ts", None))
+                        return False
+                except Exception as _fe2:
+                    self._log(f"ФИЛЬТР D1 SELL: ошибка проверки {type(_fe2).__name__}: "
+                              f"{str(_fe2)[:90]} (fail-open)")
         # Пауза новых входов: НЕ открываем новые позиции из очереди (закрытия/выходы — можно).
         if order.action == "open" and self.entries_paused:
             order.status = "CANCELLED"
@@ -6297,8 +6410,17 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 plan = exit_policy.plan_entry(side, _fill, [])
                 plan.take_profit = None
             elif cfg.sl_mode == "fixed":
-                exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
-                plan = exit_policy.plan_entry(side, _fill, [])
+                from app.bot.exit_trail_r import r_trail_kwargs as _rtr
+                _rtr_kw = _rtr()
+                if _rtr_kw:
+                    exit_policy = AtrStopPolicy(period=cfg.atr_period, multiplier=_sl_mult,
+                                                risk_reward=_rr, **_rtr_kw)
+                    _b1 = list(self.buffers.get(figi, []))
+                    buf_raw = self._get_5m_bars(figi, _b1) or _b1
+                    plan = exit_policy.plan_entry(side, _fill, buf_raw)
+                else:
+                    exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
+                    plan = exit_policy.plan_entry(side, _fill, [])
             else:
                 exit_policy = AtrStopPolicy(period=cfg.atr_period, multiplier=_sl_mult,
                                             risk_reward=_rr,
@@ -6314,10 +6436,29 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 buf_raw = self._get_5m_bars(figi, _b1) or _b1
                 plan = exit_policy.plan_entry(side, _fill, buf_raw)
         else:
-            exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
+            import os as _os
+            _sl1r = (_os.environ.get("SL1R") or "").strip().lower()
             _cm = CostModel(commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps)
             _fill = _cm.fill_price(float(c.open), side)
-            plan = exit_policy.plan_entry(side, _fill, [])
+            if _sl1r and _sl1r not in ("0", "false", "off", "no"):
+                exit_policy = FixedSlTpPolicy(stop_pct=0.022, target_pct=50.0)
+                plan = exit_policy.plan_entry(side, _fill, [])
+            else:
+                from app.bot.exit_trail_r import r_trail_kwargs as _rtr3
+                _rtr3_kw = _rtr3()
+                if _rtr3_kw:
+                    _s3 = self.strategies.get(figi)
+                    _rr3 = getattr(_s3.p, "rr", None) if _s3 is not None else None
+                    exit_policy = AtrStopPolicy(period=cfg.atr_period,
+                                                 multiplier=cfg.initial_sl_atr,
+                                                 risk_reward=float(_rr3) if _rr3 else cfg.atr_risk_reward,
+                                                 **_rtr3_kw)
+                    _b3 = list(self.buffers.get(figi, []))
+                    buf_raw3 = self._get_5m_bars(figi, _b3) or _b3
+                    plan = exit_policy.plan_entry(side, _fill, buf_raw3)
+                else:
+                    exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
+                    plan = exit_policy.plan_entry(side, _fill, [])
         try:
             actual_entry = await self.broker.open_position(
                 figi=figi,
@@ -6458,7 +6599,19 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             _side = "LONG" if str(getattr(pos, "side", "LONG")).upper() in ("LONG", "BUY") else "SHORT"
             _side_enum = Side.BUY if _side == "LONG" else Side.SELL
             _entry_px = self._exit_entry_px.get(figi) or float(getattr(pos, "entry_price", 0) or c.open)
-            if cfg.sl_mode == "fixed":
+            from app.bot.exit_trail_r import r_trail_kwargs as _rtr2
+            _rtr2_kw = _rtr2()
+            if _rtr2_kw:
+                _strat = self.strategies.get(figi)
+                _rrc = getattr(_strat.p, "rr", None) if _strat is not None else None
+                _pol = AtrStopPolicy(period=cfg.atr_period,
+                                     multiplier=cfg.initial_sl_atr,
+                                     risk_reward=float(_rrc) if _rrc else cfg.atr_risk_reward,
+                                     **_rtr2_kw)
+                _buf = self.buffers.get(figi)
+                _bars1 = list(_buf) if _buf else [c]
+                _pl = _pol.plan_entry(_side_enum, _entry_px, _bars1)
+            elif cfg.sl_mode == "fixed":
                 _pol = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
                 _pl = _pol.plan_entry(_side_enum, _entry_px, [])
             else:
@@ -6601,10 +6754,15 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         upd = getattr(policy, "update_stop", None)
         act = getattr(policy, "trailing_activated", None)
         trail_active = bool(self._trail_active.get(figi, False))
+        # R-режим трейлинга (env TRAIL_R_ACT/TRAIL_R_DIST): активация внутри
+        # update_stop по ходу в R; вызываем его на каждом баре, а не только
+        # после комиссионной активации (trailing_activated в R-режиме = False).
+        _r_mode = (getattr(policy, "trail_activation_comm_mult", 1.0) is None
+                   and getattr(policy, "trail_activation_r", None) is not None)
 
         # 1) Если трейлинг уже активен — подтягиваем стоп за ценой (ratchet).
         new_stop = None
-        if trail_active and upd is not None:
+        if (trail_active or _r_mode) and upd is not None:
             try:
                 _pk_px = None
                 try:
@@ -6625,9 +6783,16 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                                     stop=new_stop, prev_stop=old_stop)
                     self._trail_stop[figi] = new_stop
                     await self._st_update_sl(figi, new_stop, trail_active=True)
+                    if _r_mode and not trail_active:
+                        self._trail_active[figi] = True
+                        trail_active = True
+                        self._exit_target.pop(figi, None)
+                        self._log(f"ТРЕЙЛИНГ ВКЛ.(R) {figi[-6:]} стоп={new_stop:.2f}")
+                        self.events.log("TRAILING_ACTIVATED", figi=figi, ticker=pos.ticker,
+                                        reason=f"R-mode act trail={new_stop:.2f}")
 
         # 2) Активация трейлинга при pnl >= комиссия_входа × 4.
-        if not trail_active and act is not None:
+        if not trail_active and act is not None and not _r_mode:
             try:
                 if act(trail_side, float(entry_px), qty_sh, comm, act_bars):
                     self._trail_active[figi] = True
