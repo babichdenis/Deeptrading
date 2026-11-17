@@ -63,3 +63,23 @@ A/B по `gap_skip_pct`: 0.0 → 801 сделка / +3 599,74 ₽; 1.0 → 702 �
 ## Предыдущая история
 
 [Полная прежняя хроника](archive/2026-10-15/originals/docs/PROGRESS.md) сохранена. Более старые предметные отчёты — в [каталоге](knowledge/DOCUMENT_INDEX.md); решения по исследовательским сдачам — в корневом [chat](../chat.md).
+
+
+## 2026-11-15 · макроисследование, ARCH-06
+Исправлены net profit factor и строгая валидация CSV в macro_regime_attribution_v3.py. Новый test_macro_v3_validation.py: 5 tests OK через python3, git diff --check OK. На всех четырёх сохранённых макрорядах выявлены нарушения временного порядка. Пересчёт и сверка данных назначены builder; прежние run-артефакты сохранены.
+
+
+## 2026-11-15 · ARCH-10
+Macro v3: новый output-dir с сохранением старых результатов, plus-one Monte-Carlo p-values с валидацией и metadata. 9 focused tests OK, CLI help и diff-check OK. Хэши и команды в chat.md. Зависимость сделок и исторический пересчёт остаются задачами исследования.
+
+
+## 2026-11-15 · ARCH-11
+12 исправлений надёжности macro v3 и last_closed_bar, включая замену legacy ADX на канонический Wilder без просмотра будущего, валидацию сделок, freshness/coverage, CLI snapshots и проверяемую публикацию. 21 focused unittest OK, py_compile и diff-check OK. Четыре файла переданы через chat с hashes; старые результаты требуют отдельного пересчёта, engine/runtime не изменялись.
+
+
+## 2026-11-15 · ARCH-12
+H058/H059: исправлены 10 блоков статистики, формирования групп и публикации результатов. 13 focused tests и 21 macro regression OK, py_compile OK; Ruff не установлен в python3. Сдача двух файлов и ограничения IID/closed cashflow DD опубликованы в chat; исторические результаты не пересчитаны.
+
+
+## 2026-11-15 · ARCH-13
+Entry quality: 10 блоков исправлений причинности признаков, полной EMA, окна отката, entry-anchored early MAE, unknown/gaps, net PF и immutable reports. 13 focused tests OK, py_compile/diff-check OK. DB исторический пересчёт не выполнен; задача передачи и ограничения в chat.
