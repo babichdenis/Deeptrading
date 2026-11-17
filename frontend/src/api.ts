@@ -1,4 +1,4 @@
-const API = ["5173", "5174"].includes(window.location.port) ? `http://${window.location.hostname}:8000` : "";
+const API = "";
 
 export interface CandleDto {
   ts: string;

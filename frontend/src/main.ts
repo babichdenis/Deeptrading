@@ -8,9 +8,7 @@ import { fetchAnalysis, fetchCatalog, computeSignals, fetchTestStats, fetchTests
 
 const IS_EMBEDDED = new URLSearchParams(window.location.search).get("embedded") === "1";
 
-const API = window.location.port === "5173" || window.location.port === "5174"
-  ? `http://${window.location.hostname}:8000`
-  : "";
+const API = "";
 
 void API;
 
