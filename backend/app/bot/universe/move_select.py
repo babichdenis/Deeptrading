@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +25,10 @@ DEFAULT_LOG_DIR = "reports/universe_move"
 SOURCE_INTERVAL = {"day": 24, "hour": 4}
 DIRECTIONS = ("fall", "rise", "any")
 METRICS = ("cum_ret", "rsi", "range")
+
+
+class LiquidityEvidenceUnavailable(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -53,6 +58,8 @@ class MoveSelectConfig:
             raise ValueError(f"move_select.n: {self.n} < 1")
         if self.lookback_days < 1:
             raise ValueError(f"move_select.lookback_days: {self.lookback_days} < 1")
+        if not math.isfinite(self.min_turnover) or self.min_turnover < 0:
+            raise ValueError("move_select.min_turnover must be finite and non-negative")
         if self.rsi_period < 2:
             raise ValueError(f"move_select.rsi_period: {self.rsi_period} < 2")
         return self
@@ -143,6 +150,11 @@ def _rsi_last(rows: Sequence[tuple], period: int) -> float | None:
 
 
 def _move_score(rows: Sequence[tuple], cfg: MoveSelectConfig) -> dict[str, float | None]:
+    warmup_rows = rows
+    dates = sorted({r[0].astimezone(timezone.utc).date() for r in rows})
+    enough_days = len(dates) >= cfg.lookback_days
+    window_dates = set(dates[-cfg.lookback_days:]) if enough_days else set()
+    rows = [r for r in rows if r[0].astimezone(timezone.utc).date() in window_dates]
     opens = [r[1] for r in rows]
     highs = [r[2] for r in rows]
     lows = [r[3] for r in rows]
@@ -158,7 +170,7 @@ def _move_score(rows: Sequence[tuple], cfg: MoveSelectConfig) -> dict[str, float
         bottom = min(lows)
         if last_close > 0:
             rng = (top - bottom) / last_close
-    return {"cum_ret": cum_ret, "rsi": _rsi_last(rows, cfg.rsi_period), "range": rng,
+    return {"cum_ret": cum_ret, "rsi": _rsi_last(warmup_rows, cfg.rsi_period) if enough_days else None, "range": rng,
             "first_open": first_open, "last_close": last_close, "bars": float(len(rows))}
 
 
@@ -184,15 +196,27 @@ async def _load_margin(db) -> dict[str, bool]:
 
 async def _load_candles(db, figis: Sequence[str], interval: int,
                         t0: datetime, t1: datetime) -> dict[str, list[tuple]]:
+    from math import ceil
+    from app.engine.candlehub import tf_to_seconds
+    from app.services.candle_hub_orchestrator import interval_to_tf
+    from .bars import _reader
+
+    if t0.utcoffset() is None or t1.utcoffset() is None:
+        raise ValueError("Move selection requires aware timestamps")
+    if t0 >= t1:
+        raise ValueError("Move selection requires a positive history window")
     if not figis:
         return {}
-    rows = await db.execute(text(
-        "SELECT figi, ts, open, high, low, close FROM candles "
-        "WHERE interval = :iv AND ts >= :t0 AND ts < :t1 AND figi = ANY(:figis) "
-        "ORDER BY figi, ts"), {"iv": interval, "t0": t0, "t1": t1, "figis": list(figis)})
+    tf = interval_to_tf(interval)
+    seconds = tf_to_seconds(tf)
+    limit = ceil((t1 - t0).total_seconds() / seconds) + 1
     out: dict[str, list[tuple]] = {}
-    for figi, ts, o, h, l, c in rows.all():
-        out.setdefault(figi, []).append((ts, float(o), float(h), float(l), float(c)))
+    for figi in dict.fromkeys(figis):
+        bars = await _reader().tail_bars(db, figi, tf, limit, as_of=t1)
+        rows = [(bar.ts, float(bar.open), float(bar.high), float(bar.low), float(bar.close))
+                for bar in bars if t0 <= bar.ts and bar.ts + timedelta(seconds=seconds) <= t1]
+        if rows:
+            out[figi] = rows
     return out
 
 
@@ -225,6 +249,8 @@ async def try_select_move_universe(db, figi_by_ticker: dict[str, str], *, feed: 
         return []
     try:
         return await select_move_universe(db, figi_by_ticker, cfg, as_of, run_id, emit)
+    except LiquidityEvidenceUnavailable:
+        raise
     except Exception as exc:
         if emit:
             emit(f"move_select: ошибка отбора ({exc}), берём legacy-юниверс", "warn")
@@ -238,6 +264,10 @@ async def select_move_universe(db, figi_by_ticker: dict[str, str], cfg: MoveSele
     cfg.validate()
     if not cfg.enabled:
         return []
+    if cfg.min_turnover > 0:
+        raise LiquidityEvidenceUnavailable(
+            "min_turnover cannot be enforced: as-of RUB turnover evidence is unavailable; "
+            "stored candle volume has no confirmed unit")
     run_id = run_id or as_of.strftime("%Y%m%dT%H%M%SZ")
     log = MoveSelectLogger(cfg.log_dir, run_id, emit)
     try:
@@ -245,7 +275,8 @@ async def select_move_universe(db, figi_by_ticker: dict[str, str], cfg: MoveSele
         margin = await _load_margin(db)
         interval = SOURCE_INTERVAL[cfg.tf]
         t1 = as_of
-        t0 = as_of - timedelta(days=cfg.lookback_days + 7)
+        history_days = max(cfg.lookback_days + 7, cfg.rsi_period * 2 + 7)
+        t0 = as_of - timedelta(days=history_days)
 
         candidates: list[str] = []
         rejected: list[tuple[str, str]] = []

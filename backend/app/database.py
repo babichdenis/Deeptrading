@@ -21,3 +21,9 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 async def get_db() -> AsyncGenerator[AsyncSession]:
     async with SessionLocal() as session:
         yield session
+
+
+def create_bootstrap_schema(bind):
+    """Leave migration-managed execution ledgers to explicit versioned migrations."""
+    tables = [table for table in Base.metadata.tables.values() if not table.info.get('migration_managed')]
+    Base.metadata.create_all(bind, tables=tables)

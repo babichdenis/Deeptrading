@@ -56,6 +56,17 @@ STEP_SEC = {"1min": 60, "5min": 300, "10min": 600, "15min": 900, "30min": 1800, 
 logger = logging.getLogger("candle_feed")
 
 
+def closed_candle_timeout(interval_name: str) -> float:
+    return float(max(75, STEP_SEC[interval_name] + 15))
+
+
+def polling_candle_closed(candle, interval_name: str, as_of: datetime) -> bool:
+    if candle.time.utcoffset() is None or as_of.utcoffset() is None:
+        raise ValueError("Aware candle and observation times required")
+    return (getattr(candle, "is_complete", False) is True
+            and candle.time + timedelta(seconds=STEP_SEC[interval_name]) <= as_of)
+
+
 class CandleFeed:
     def __init__(self, token: str, interval_name: str, figis: list[str], target: str | None = None):
         self.token = token
@@ -135,6 +146,9 @@ class CandleFeed:
                 await upsert_candles(db, buf)
             _info = self._persist_human(buf)
             self._emit(f"записано в БД свечей: {_info}")
+        except asyncio.CancelledError:
+            self._persist_buf[:0] = buf
+            raise
         except Exception as e:
             self._emit(f"persist_fail {type(e).__name__}: {str(e)[:120]}")
             self._persist_buf.extend(buf)
@@ -164,13 +178,7 @@ class CandleFeed:
 
     async def stream(self) -> AsyncIterator[ClosedCandle]:
         self._emit(f"stream start interval={self.interval_name} figis={len(self.figis)} target={self.target or 'prod'}")
-        # Первая свеча должна прийти быстро; если стрим «молчит» (не падает,
-        # но и не отдаёт данные) — это тоже потеря поставки, уходим в polling.
-        # waiting_close() отдаёт бар ТОЛЬКО при закрытии минутной свечи — при
-        # старте в середине минуты первый бар придёт через 30-60с. Таймаут
-        # 75с (больше максимального ожидания закрытия) держит живой стрим и
-        # не даёт упасть в polling с перемоткой исторического баклога.
-        first_candle_timeout = 75.0
+        first_candle_timeout = closed_candle_timeout(self.interval_name)
         # Сколько секунд держим polling-фолбэк между попытками восстановить gRPC.
         poll_recovery_sec = 120.0
         attempt = 0
@@ -290,6 +298,10 @@ class CandleFeed:
                         rtype = type(resp).__name__
                         logger.debug("CandleFeed stream resp type=%s (no candle)", rtype)
                         continue
+                    if candle.interval != interval:
+                        logger.warning("CandleFeed interval mismatch figi=%s expected=%s received=%s",
+                                       candle.figi, interval, candle.interval)
+                        continue
                     cc = ClosedCandle(
                         figi=candle.figi,
                         ts=candle.time.replace(tzinfo=timezone.utc),
@@ -329,10 +341,12 @@ class CandleFeed:
                         resp = await client.market_data.get_candles(
                             figi=figi,
                             interval=INTERVAL_ENUM[self.interval_name],
-                            from_=datetime.now(timezone.utc) - timedelta(minutes=step_sec * 4),
+                            from_=datetime.now(timezone.utc) - timedelta(seconds=step_sec * 4),
                             to=datetime.now(timezone.utc),
                         )
                         for c in resp.candles:
+                            if not polling_candle_closed(c, self.interval_name, datetime.now(timezone.utc)):
+                                continue
                             key = (figi, c.time)
                             if key in seen:
                                 continue

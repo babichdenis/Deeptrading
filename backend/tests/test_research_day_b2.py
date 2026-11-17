@@ -622,7 +622,7 @@ def test_stage_g_end_to_end(tmp_path):
     assert res["prereg"]["h2_no_chase"] is False
 
     res2 = rdb.stage_g_diagnostics(repo, run, sel, eval_out, True)
-    on_disk = json.loads((out / "stage_g_summary.json").read_text())
+    on_disk = json.loads((out / "stage_g_summary.json").read_text(encoding="utf-8"))
     assert res2 == on_disk
     md = (out / "DIAGNOSTICS.md").read_text(encoding="utf-8")
     assert "H1 · CS-IC" in md and "H3 · repeat" in md

@@ -173,7 +173,7 @@ async def select_volatile_universe(
     for entry in snapshot.entries:
         figi = entry.ref.figi
         await ensure_candles(db, figi, "day", days)
-        bars = await load_all_bars(db, figi, interval=SOURCE_INTERVAL_TRADEABLE)
+        bars = await load_bars(db, figi, interval=SOURCE_INTERVAL_TRADEABLE, limit=feature_window)
         pct, valid = atr_pct(bars, feature_window)
         items.append(
             ScreenItem(

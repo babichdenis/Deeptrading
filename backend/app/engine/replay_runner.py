@@ -47,6 +47,8 @@ class IncrementalRunner:
         prefix = list(candles_prefix)
         if len(prefix) < len(self.history):
             raise ValueError("история обязана только расти (сброс = новый runner)")
+        if any(previous != current for previous, current in zip(self.history, prefix)):
+            raise ValueError("historical prefix changed; reset runner before replay")
         self.history.extend(prefix[len(self.history):])
         if not self.history:
             return

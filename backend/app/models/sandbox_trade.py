@@ -32,3 +32,7 @@ class SandboxTrade(Base):
     leverage: Mapped[float] = mapped_column(Float, default=1.0)
     mode: Mapped[str] = mapped_column(String(8), default="sandbox")  # sandbox | live | paper
     test_name: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # Идентификатор брокерского счёта, от которого записана строка (live/sandbox).
+    # NULL = старая история или paper/replay; NULL-строки не приписываются никакому
+    # новому счёту задним числом (ARCH155). Длина с запасом под UUID и внешние id.
+    broker_account_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)

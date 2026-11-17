@@ -49,7 +49,7 @@
             <span class="topbar-status" id="topbar-status">—</span>
           </div>
           <div class="hdr-actions" aria-label="Управление">
-            <div class="mode-switch" id="mode-switch" title="Режим бота (переключает контур и перезапускает бота)">
+            <div class="mode-switch" id="mode-switch" title="Режим бота (выбирает контур; стратегию НЕ запускает)">
               <button class="mode-btn" data-mode="live"><span class="m-dot live"></span>Live</button>
               <button class="mode-btn" data-mode="sandbox"><span class="m-dot sandbox"></span>Sandbox</button>
               <button class="mode-btn" data-mode="test"><span class="m-dot test"></span>Тест</button>
@@ -57,7 +57,10 @@
             <button class="pause-btn" id="btn-bot-pause" title="Остановить НОВЫЕ входы; открытые позиции продолжают жить (SL/TP работают)">⏸ Пауза входов</button>
             <button class="btn-primary btn-sm" id="btn-bot-toggle">▶ Запустить бота</button>
             <button class="btn-secondary btn-xs" id="btn-bot-settings" title="Настройки бота">⚙</button>
-            <span class="botbar-hint mini-hint">sandbox · 10k₽</span>
+            <span class="botbar-hint mini-hint hidden" id="bot-action-note" title=""></span>
+            <span class="botbar-hint mini-hint hidden" id="bot-risk-note" title=""></span>
+            <span class="botbar-hint mini-hint" id="botbar-hint">sandbox</span>
+            <span class="botbar-hint mini-hint" id="botbar-universe" title=""></span>
           </div>
         </div>
         <section class="stats-row" aria-label="Ключевые метрики">
@@ -96,10 +99,10 @@
               <div class="metric-value"><span id="bs-currencies">—</span></div>
             </div>
           </article>
-          <article class="metric-card" title="Нетто-стоимость акций — минус = долг по шортам">
+          <article class="metric-card" title="Нетто-стоимость позиций в акциях по данным брокера. Это стоимость активов, не прибыль и не отдельная сумма шортов.">
             <div class="metric-icon red"><i data-lucide="trending-down"></i></div>
             <div>
-<div class="metric-label">ШОРТЫ</div>
+<div class="metric-label">АКЦИИ</div>
                 <div class="metric-value"><span id="bs-shares">—</span></div>
               </div>
             </article>
@@ -122,6 +125,7 @@
             <div class="separator"></div>
 
             <div class="filter-group margin-group" title="Сессии, где торговля идёт с маржой (плечом)">
+              <label class="pill" title="Использовать маржинальное кредитование (плечо). Выкл — только на свои средства"><input type="checkbox" id="mg-master" checked><i data-lucide="shield-check"></i><span>Маржа</span></label>
               <div class="margin-pills">
                 <label class="pill" title="Утренняя маржа"><input type="checkbox" id="mg-morning"><i data-lucide="shield"></i><span>Утро</span></label>
                 <label class="pill" title="Дневная маржа"><input type="checkbox" id="mg-day" checked><i data-lucide="shield"></i><span>День</span></label>
@@ -282,7 +286,7 @@
 
             <h3 class="pg-h3">Открытые позиции</h3>
             <table class="runs-table" id="bot-positions-table">
-              <thead><tr><th>Вход время</th><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Сумма (свои)</th><th>Текущая</th><th>P&L ₽</th><th>ROI %</th><th>Плечо</th><th>Режим</th><th>Vol</th><th>SL трейл</th><th>TP / P&L при стопе</th><th></th></tr></thead>
+              <thead><tr><th>Вход время</th><th>Акция</th><th>Side</th><th>Qty</th><th>Вход</th><th>Сумма позиции</th><th>Текущая</th><th>P&L ₽</th><th>P&L / сумма, %</th><th>Плечо расч.</th><th>Режим</th><th>Vol</th><th>SL трейл</th><th>TP / P&L при стопе</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
 

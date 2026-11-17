@@ -287,14 +287,14 @@ def test_hot_add_never_touches_db_in_replay():
     runtime_mod = inspect.getmodule(PaperBotRuntime)
     original = runtime_mod.SessionLocal
     runtime_mod.SessionLocal = _BoomSession
+    loop = asyncio.get_event_loop_policy().new_event_loop()
     try:
         rt = SimpleNamespace(
             running=True, config=BotConfig(feed="replay"), universe=[{"figi": "F1"}],
         )
-        task = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-            _run_briefly(PaperBotRuntime._hot_add_universe, rt)
-        )
+        task = loop.run_until_complete(_run_briefly(PaperBotRuntime._hot_add_universe, rt))
     finally:
+        loop.close()
         runtime_mod.SessionLocal = original
 
     assert called.hot is False

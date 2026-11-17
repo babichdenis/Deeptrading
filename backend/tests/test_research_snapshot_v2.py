@@ -1,4 +1,4 @@
-"""RESEARCH-CORE-V2 (B1): тесты research_snapshot_v2 на изолированной БД.
+﻿"""RESEARCH-CORE-V2 (B1): тесты research_snapshot_v2 на изолированной БД.
 
 Герметично против тестовой БД (PIPELINE_TEST_DATABASE_URL, PG14 локальная или
 deeptrading_b1_test): time bounds, повторная идентичность, immutable
@@ -120,15 +120,15 @@ def test_time_bounds_and_invalid_rows(conn, tmp_path):
     out = tmp_path / "snap1"
     assert _run_export(url, _universe_file(tmp_path), out) == 0
     csv1 = out / "csv" / "T1__m1.csv"
-    rows = list(csv.DictReader(csv1.open()))
+    rows = list(csv.DictReader(csv1.open(encoding="utf-8", newline="")))
     ts_list = [r["ts"] for r in rows]
     # 4 валидные строки в окне; невалидная (open=0) исключена; внеоконная исключена
     assert len(rows) == 4
     assert all(t < "2026-06-09" for t in ts_list)
-    manifest = json.loads((out / "manifest.json").read_text())
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     m1 = manifest["per_ticker"]["T1"]["m1"]
     assert m1["written_rows"] == 4 and m1["invalid_rows"] == 1
-    inv = list(csv.DictReader((out / "invalid_rows.csv").open()))
+    inv = list(csv.DictReader((out / "invalid_rows.csv").open(encoding="utf-8", newline="")))
     assert inv and inv[0]["reason"] == "nonpositive_open"
 
 
@@ -155,10 +155,10 @@ def test_derived_daily_and_partial_marking(conn, tmp_path):
     assert _run_export(url, _universe_file(tmp_path), out) == 0
     # у T1 db daily есть → derived пустой
     der1 = out / "csv" / "T1__d1_derived.csv"
-    assert len(list(csv.DictReader(der1.open()))) == 0
+    assert len(list(csv.DictReader(der1.open(encoding="utf-8", newline="")))) == 0
     # у T2 db daily нет → derived из 1m, partial (сессия не полная)
     der2 = out / "csv" / "T2__d1_derived.csv"
-    rows2 = list(csv.DictReader(der2.open()))
+    rows2 = list(csv.DictReader(der2.open(encoding="utf-8", newline="")))
     assert len(rows2) == 1
     assert rows2[0]["source"] == "derived_from_1m"
     assert rows2[0]["partial"] == "partial_session"

@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from app.engine.costs import CostModel
-from app.engine.exits import ExitPolicy, breakeven_stop, early_abort_exit, intrabar_exit, partial_take_exit
+from app.engine.exits import ExitPolicy
+from app.engine.protection import ProtectionState, advance_protection, evaluate_protection
 from app.engine.ledger import TradeLedger
 from app.engine.models import (
     Candle,
@@ -41,11 +42,15 @@ class EngineConfig:
     partial_fraction: float = 0.5  # частичный тейк: доля закрываемой позиции (0..1]
     partial_to_be: bool = True   # частичный тейк: после него стоп переносится на вход (безубыток)
 
+    trailing_close_based: bool = False
+
     def validate(self) -> None:
         """Invariant-проверка конфига (ENG-015, audit 2026-09-29).
 
         Падаем сразу и с понятным текстом вместо AttributeError посреди прогона.
         """
+        if type(self.trailing_close_based) is not bool:
+            raise ValueError("trailing_close_based must be a boolean")
         if int(self.qty) <= 0:
             raise ValueError(f"qty must be > 0, got {self.qty}")
         if self.mode not in ("both", "long", "short"):
@@ -289,63 +294,51 @@ class EngineRunner:
             # известным ДО этого бара. BE/trailing пересчитываются в конце бара
             # (фаза 2) по его close и вступают в силу со СЛЕДУЮЩЕГО бара —
             # иначе close текущего бара ретроактивно управлял бы его low/high.
-            tp = None if self._trailing_active else st.position.target
-            price, reason = intrabar_exit(
-                bar, st.position.state, st.position.initial_stop, tp,
+            protection_decision = evaluate_protection(
+                bar,
+                ProtectionState(st.position.initial_stop, st.position.target, self._trailing_active),
+                side=_side_for_pol,
+                entry_price=st.position.entry_price,
+                entry_risk=self._entry_risk,
+                bars_held=st.position.bars_held,
                 wick_tol=self.cfg.wick_tol,
+                trailing_close_based=self.cfg.trailing_close_based,
+                abort_r=self.cfg.abort_r,
+                abort_max_bars=self.cfg.abort_max_bars,
+                partial_r=self.cfg.partial_r,
+                partial_eligible=st.position.qty > 0 and self._partial_done != _pos_key,
             )
-            if price is None and self.cfg.abort_r > 0 and self._entry_risk is not None:
-                _ap, _ar = early_abort_exit(
-                    bar,
-                    _side_for_pol,
-                    st.position.entry_price,
-                    risk=self._entry_risk,
-                    bars_held=st.position.bars_held,
-                    max_bars=self.cfg.abort_max_bars,
-                    abort_r=self.cfg.abort_r,
+            price, reason = protection_decision.exit_price, protection_decision.exit_reason
+            _pp = protection_decision.partial_price
+            if _pp is not None:
+                _closed = self._close_partial(
+                    i, bar.ts, st.position, _pp, self.cfg.partial_fraction, st.ledger,
                 )
-                if _ap is not None:
-                    price, reason = _ap, _ar
-            if (
-                price is None
-                and self.cfg.partial_r > 0
-                and self._entry_risk is not None
-                and st.position.qty > 0
-                and self._partial_done != _pos_key
-            ):
-                _pp = partial_take_exit(
-                    bar, _side_for_pol, st.position.entry_price,
-                    risk=self._entry_risk, partial_r=self.cfg.partial_r,
-                )
-                if _pp is not None:
-                    _closed = self._close_partial(
-                        i, bar.ts, st.position, _pp, self.cfg.partial_fraction, st.ledger,
-                    )
-                    self._partial_done = _pos_key
-                    st.ledger.log(i, bar.ts, "DECISION",
-                               f"PARTIAL_TAKE r={self.cfg.partial_r} closed={_closed} left={st.position.qty}")
-                    if st.position.qty <= 0:
-                        st.last_exit_side = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
-                        st.last_exit_bar = i
-                        st.exit_candidate = None
-                        st.position = None
-                    elif self.cfg.partial_to_be:
-                        _moved = False
-                        if st.position.state is PositionState.LONG and (
-                            st.position.initial_stop is None
-                            or st.position.initial_stop < st.position.entry_price
-                        ):
-                            st.position.initial_stop = st.position.entry_price
-                            _moved = True
-                        elif st.position.state is PositionState.SHORT and (
-                            st.position.initial_stop is None
-                            or st.position.initial_stop > st.position.entry_price
-                        ):
-                            st.position.initial_stop = st.position.entry_price
-                            _moved = True
-                        if _moved:
-                            st.ledger.log(i, bar.ts, "DECISION",
-                                       f"PARTIAL_STOP_TO_BE -> {st.position.entry_price:.6f}")
+                self._partial_done = _pos_key
+                st.ledger.log(i, bar.ts, "DECISION",
+                           f"PARTIAL_TAKE r={self.cfg.partial_r} closed={_closed} left={st.position.qty}")
+                if st.position.qty <= 0:
+                    st.last_exit_side = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
+                    st.last_exit_bar = i
+                    st.exit_candidate = None
+                    st.position = None
+                elif self.cfg.partial_to_be:
+                    _moved = False
+                    if st.position.state is PositionState.LONG and (
+                        st.position.initial_stop is None
+                        or st.position.initial_stop < st.position.entry_price
+                    ):
+                        st.position.initial_stop = st.position.entry_price
+                        _moved = True
+                    elif st.position.state is PositionState.SHORT and (
+                        st.position.initial_stop is None
+                        or st.position.initial_stop > st.position.entry_price
+                    ):
+                        st.position.initial_stop = st.position.entry_price
+                        _moved = True
+                    if _moved:
+                        st.ledger.log(i, bar.ts, "DECISION",
+                                   f"PARTIAL_STOP_TO_BE -> {st.position.entry_price:.6f}")
             if price is not None:
                 st.last_exit_side = Side.BUY if st.position.state is PositionState.LONG else Side.SELL
                 st.last_exit_bar = i
@@ -354,54 +347,34 @@ class EngineRunner:
             elif st.position is not None:
                 # --- Фаза 2 (ENG-002): пересчёт защитных уровней по ЗАКРЫТОМУ
                 # бару; действуют со следующего бара.
-                if self.cfg.be_trigger_r > 0 and self._entry_risk is not None:
-                    _be = breakeven_stop(
-                        _side_for_pol,
-                        st.position.entry_price,
-                        st.position.initial_stop,
-                        CandleWindow(candles, 0, i + 1),
-                        risk=self._entry_risk,
-                        trigger_r=self.cfg.be_trigger_r,
-                        offset_pct=self.cfg.be_offset_pct,
-                    )
-                    if _be != st.position.initial_stop:
-                        st.position.initial_stop = _be
-                        st.ledger.log(i, bar.ts, "DECISION",
-                                   f"BREAKEVEN_STOP -> {_be:.6f}")
-                update_stop = getattr(self.exit_policy, "update_stop", None)
-                if update_stop is not None:
-                    _peak_px = None
-                    try:
-                        _ei = int(st.position.entry_index)
-                        if 0 <= _ei <= i:
-                            _seg = candles[_ei : i + 1]
-                            _peak_px = (max(b.high for b in _seg) if _side_for_pol is Side.BUY
-                                        else min(b.low for b in _seg))
-                    except Exception:
-                        _peak_px = None
-                    st.position.initial_stop = update_stop(
-                        _side_for_pol,
-                        st.position.entry_price,
-                        st.position.initial_stop,
-                        CandleWindow(candles, 0, i + 1),
-                        qty=st.position.qty,
-                        commission=st.position.entry_commission,
-                        peak_price=_peak_px,
-                    )
-                if not self._trailing_active:
-                    activate = getattr(self.exit_policy, "trailing_activated", None)
-                    _act_res = activate(
-                        _side_for_pol,
-                        st.position.entry_price,
-                        st.position.qty,
-                        st.position.entry_commission,
-                        CandleWindow(candles, 0, i + 1),
-                    ) if activate is not None else False
-                    if _act_res:
-                        self._trailing_active = True
-                        st.position.target = None
-                        st.ledger.log(i, bar.ts, "DECISION",
-                                   "TRAILING_ACTIVATED pnl>=comm*4, signal/tp выходят отключены")
+                peak_price = None
+                entry_index = int(st.position.entry_index)
+                if 0 <= entry_index <= i:
+                    segment = candles[entry_index : i + 1]
+                    peak_price = (max(b.high for b in segment) if _side_for_pol is Side.BUY
+                                  else min(b.low for b in segment))
+                protection = advance_protection(
+                    self.exit_policy,
+                    ProtectionState(st.position.initial_stop, st.position.target, self._trailing_active),
+                    side=_side_for_pol,
+                    entry_price=st.position.entry_price,
+                    qty=st.position.qty,
+                    entry_commission=st.position.entry_commission,
+                    closed_bars=CandleWindow(candles, 0, i + 1),
+                    peak_price=peak_price,
+                    entry_risk=self._entry_risk,
+                    be_trigger_r=self.cfg.be_trigger_r,
+                    be_offset_pct=self.cfg.be_offset_pct,
+                )
+                st.position.initial_stop = protection.state.stop
+                st.position.target = protection.state.target
+                self._trailing_active = protection.state.trailing_active
+                if protection.breakeven_changed:
+                    st.ledger.log(i, bar.ts, "DECISION",
+                                  f"BREAKEVEN_STOP -> {protection.breakeven_stop:.6f}")
+                if protection.trailing_activated:
+                    st.ledger.log(i, bar.ts, "DECISION",
+                                  "TRAILING_ACTIVATED pnl>=comm*4, signal/tp выходят отключены")
 
         if st.position is not None:
             st.position.bars_held += 1

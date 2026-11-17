@@ -44,7 +44,7 @@ class RuntimePersistenceMixin:
                 )
                 sql5 = _text(
                     "INSERT INTO candles (figi, interval, ts, open, high, low, close, volume) "
-                    "VALUES (:f, 5, :ts, :o, :h, :l, :c, :v) "
+                    "VALUES (:f, 2, :ts, :o, :h, :l, :c, :v) "
                     "ON CONFLICT (figi, interval, ts) DO UPDATE SET "
                     "open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, "
                     "close=EXCLUDED.close, volume=EXCLUDED.volume"
@@ -59,7 +59,7 @@ class RuntimePersistenceMixin:
                     await db.commit()
                     try:
                         from app.services.candle_integrity import invalidate as _inv
-                        for _batch, _iv in ((batch, 1), (batch5, 5)):
+                        for _batch, _iv in ((batch, 1), (batch5, 2)):
                             _figs = sorted({x[0] for x in _batch})
                             _days = sorted({(x[1] + timedelta(hours=3)).date() for x in _batch})
                             if _figs and _days:
@@ -76,7 +76,7 @@ class RuntimePersistenceMixin:
                 _s = (batch[0] if batch else batch5[0])
                 self._log(
                     f"TECHINFO FLUSH_ITEM f={_s[0][-6:]} ts={_s[1]} "
-                    f"iv={1 if batch else 5} flushes={self._persist_flushes} "
+                    f"iv={1 if batch else 2} flushes={self._persist_flushes} "
                     f"q={len(batch)} q5={len(batch5)}",
                     level="debug",
                 )

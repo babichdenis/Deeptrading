@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -37,6 +38,7 @@ MISSING_FIELD = "missing_field"
 OUTSIDE_WINDOW = "outside_window"
 WRONG_FIGI = "wrong_figi"          # строка не того инструмента (не принадлежит запросу)
 WRONG_INTERVAL = "wrong_interval"  # строка другого интервала (не принадлежит запросу)
+JUMP_TOO_BIG = "jump_too_big"      # цена несовместима с соседним баром (чужой ряд/масштаб)
 
 
 class CandleContractError(ValueError):
@@ -79,6 +81,7 @@ class UpsertResult:
     """Различие inserted/unchanged/corrected + сколько принято и реально записано."""
 
     accepted: int = 0   # уникальные валидные строки (после валидации и дедупа)
+    normalized: int = 0  # сколько строк расширено до согласованного OHLC на входе
     inserted: int = 0
     unchanged: int = 0
     corrected: int = 0
@@ -190,6 +193,62 @@ def validate_rows(rows: Iterable[dict], *, window: tuple[datetime, datetime] | N
     return out
 
 
+def jump_threshold() -> float:
+    """Порог несовместимости соседних закрытий: доля (0.40 = 40%). ENV CANDLE_JUMP_MAX_PCT.
+
+    Значение <= 0 отключает проверку: это нужно при перезаливе исторического
+    диапазона, когда опорой стал бы уже испорченный бар.
+    """
+    try:
+        pct = float(os.environ.get("CANDLE_JUMP_MAX_PCT", "40"))
+    except (TypeError, ValueError):
+        pct = 40.0
+    if pct <= 0:
+        return 0.0
+    return max(1.0, pct) / 100.0
+
+
+def validate_jumps(rows: list[dict], anchors: dict[tuple, float], *,
+                   jump_thr: float | None = None
+                   ) -> tuple[list[dict], list[RowRejection]]:
+    """Отсечь бары, чья цена несовместима с соседом того же инструмента.
+
+    Структурная проверка (validate_row) пропускает строку, корректную внутри себя,
+    но чужую по цене: в БД .8 так легли 5106 баров (MVID с ценой LKOH 4212–4239
+    на 22–23.08.2026, HYDR с ценой 0.24–0.32 при 318 в июне–августе). Здесь бар
+    сверяется с предыдущим закрытием того же (figi, interval): сначала с `anchors`
+    (последний известный бар ДО пакета), затем с предыдущим принятым баром пакета.
+
+    Отброшенный бар не становится опорой для следующего, иначе одна битая серия
+    узаконила бы весь остаток. Возвращает (принятые, отказы). Не бросает.
+    """
+    thr = jump_threshold() if jump_thr is None else jump_thr
+    if thr <= 0:
+        return list(rows), []
+    order = sorted(range(len(rows)),
+                   key=lambda i: (rows[i].get("figi"), int(rows[i]["interval"]),
+                                  _utc(rows[i]["ts"])))
+    last: dict[tuple, float] = dict(anchors)
+    keep = [False] * len(rows)
+    rejections: list[RowRejection] = []
+    for i in order:
+        r = rows[i]
+        key = (r.get("figi"), int(r["interval"]))
+        try:
+            close = float(r["close"])
+        except (TypeError, ValueError):
+            continue  # структурная валидация уже отсеяла такие строки
+        prev = last.get(key)
+        if prev is not None and prev > 0 and close > 0:
+            if abs(close / prev - 1.0) > thr:
+                rejections.append(RowRejection(i, JUMP_TOO_BIG,
+                                               (key[0], key[1], _utc(r["ts"]))))
+                continue
+        last[key] = close
+        keep[i] = True
+    return [rows[i] for i in range(len(rows)) if keep[i]], rejections
+
+
 # ------------------------------------------------------------------ дубли в пакете
 def split_duplicates(rows: list[dict]) -> tuple[list[dict], list[tuple[tuple, int, int]]]:
     """(deduped, conflicts). Одинаковые дубли отбрасываются (идемпотентно),
@@ -225,6 +284,21 @@ def assert_valid_batch(rows: list[dict], *, window: tuple[datetime, datetime] | 
     if conflicts:
         raise ConflictingDuplicateError(conflicts)
     return deduped
+
+
+def normalize_ohlc(row: dict) -> tuple[dict, bool]:
+    """Привести бар в согласие с контрактом. Делегирует в candlehub — политика одна.
+
+    Решение о том, что делать с баром, у которого тело вышло за high/low,
+    принимает ВХОД ХАБА (`app.engine.candlehub.normalize_row_for_ingest`).
+    Здесь остаётся только привычная для вызывающих обёртка: у акций и у индексов
+    (MOEX ISS) не должно быть двух разных политик.
+
+    Возвращает (бар, был_ли_исправлен). Исходный словарь не меняется.
+    """
+    from app.engine.candlehub import normalize_row_for_ingest
+
+    return normalize_row_for_ingest(row)
 
 
 def assert_request_scope(rows: list[dict], *, figi: str, interval: int,

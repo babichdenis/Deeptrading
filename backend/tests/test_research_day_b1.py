@@ -53,7 +53,7 @@ def full_run(tmp_path_factory):
 
 
 def test_contract_fields_present(full_run):
-    result = json.loads((full_run["out"] / "RESULT.json").read_text())
+    result = json.loads((full_run["out"] / "RESULT.json").read_text(encoding="utf-8"))
     required = ["branch", "run", "config", "input_hashes", "primary", "status",
                 "selection_criterion", "attempt_count", "universe", "summary", "splits",
                 "atoms_chosen", "baselines", "checks", "failed_checks",
@@ -74,7 +74,7 @@ def test_contract_fields_present(full_run):
 
 def test_selection_respects_limits(full_run):
     stats = pd.read_csv(full_run["out"] / "atoms.csv")
-    frozen = json.loads((full_run["out"] / "rules_frozen.json").read_text())
+    frozen = json.loads((full_run["out"] / "rules_frozen.json").read_text(encoding="utf-8"))
     chosen = frozen["atoms_chosen"]
     assert len(chosen) <= b1.MAX_ATOMS
     picked = stats[stats["atom_id"].isin(chosen)]
@@ -100,7 +100,7 @@ def test_rules_all_multiframe_and_distinct_columns(full_run):
 
 
 def test_primary_rule_is_valid(full_run):
-    frozen = json.loads((full_run["out"] / "rules_frozen.json").read_text())
+    frozen = json.loads((full_run["out"] / "rules_frozen.json").read_text(encoding="utf-8"))
     if frozen["primary"] is None:
         pytest.skip("NO_SELECTION: primary rule отсутствует по критерию")
     ids = tuple(frozen["primary"]["atoms"].split(";"))

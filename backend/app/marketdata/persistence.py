@@ -78,13 +78,9 @@ class CandlePersistence:
 
     @staticmethod
     def _tf_to_interval(timeframe: str) -> int:
-        """Конвертировать таймфрейм в interval value для БД."""
-        mapping = {
-            "1min": 1, "5min": 5, "10min": 10, "15min": 15,
-            "30min": 30, "hour": 60, "2h": 120, "4h": 240,
-            "day": 24 * 60, "week": 7 * 24 * 60, "month": 30 * 24 * 60,
-        }
-        return mapping.get(timeframe, 1)
+        from app.services.candle_hub_orchestrator import tf_to_interval
+
+        return tf_to_interval(timeframe)
 
     @property
     def stats(self) -> dict:

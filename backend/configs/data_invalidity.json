@@ -1,0 +1,735 @@
+{
+  "generated_at": "2026-11-15T13:48:29.125779+00:00",
+  "reason": "units_mismatch_and_low_close_swap",
+  "note": "Цена меньше биржевой (ISS) примерно в 4.27 раза, объём больше примерно в 200 раз, low и close перепутаны. Перестановкой полей не чинится: единицы остаются неверными.",
+  "ranges": [
+    {
+      "figi": "BBG003LYCMB1",
+      "ticker": "SFIN",
+      "interval": 1,
+      "ts_from": "2024-01-03T09:00:00+02:00",
+      "ts_to": "2025-12-31T22:49:00+02:00",
+      "bad_bars": 115098
+    },
+    {
+      "figi": "BBG004730N88",
+      "ticker": "SBER",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:16:00+02:00",
+      "ts_to": "2025-11-23T22:49:00+02:00",
+      "bad_bars": 196011
+    },
+    {
+      "figi": "BBG004731354",
+      "ticker": "ROSN",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:18:00+02:00",
+      "ts_to": "2025-12-31T22:48:00+02:00",
+      "bad_bars": 225439
+    },
+    {
+      "figi": "BBG004731489",
+      "ticker": "GMKN",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:18:00+02:00",
+      "ts_to": "2025-12-31T21:25:00+02:00",
+      "bad_bars": 141470
+    },
+    {
+      "figi": "BBG0047315D0",
+      "ticker": "SNGS",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:16:00+02:00",
+      "ts_to": "2025-12-31T02:22:00+02:00",
+      "bad_bars": 175707
+    },
+    {
+      "figi": "BBG0047315Y7",
+      "ticker": "SBERP",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:16:00+02:00",
+      "ts_to": "2025-12-31T22:21:00+02:00",
+      "bad_bars": 199540
+    },
+    {
+      "figi": "BBG00475K2X9",
+      "ticker": "HYDR",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:16:00+02:00",
+      "ts_to": "2025-12-31T22:49:00+02:00",
+      "bad_bars": 187812
+    },
+    {
+      "figi": "BBG00475K6C3",
+      "ticker": "CHMF",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:22:00+02:00",
+      "ts_to": "2025-12-31T22:44:00+02:00",
+      "bad_bars": 171842
+    },
+    {
+      "figi": "BBG00475KHX6",
+      "ticker": "TRNFP",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:42:00+02:00",
+      "ts_to": "2025-12-31T21:04:00+02:00",
+      "bad_bars": 177799
+    },
+    {
+      "figi": "BBG00475KKY8",
+      "ticker": "NVTK",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:21:00+02:00",
+      "ts_to": "2025-12-31T01:54:00+02:00",
+      "bad_bars": 181416
+    },
+    {
+      "figi": "BBG004S681B4",
+      "ticker": "NLMK",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:24:00+02:00",
+      "ts_to": "2024-12-31T22:26:00+02:00",
+      "bad_bars": 72493
+    },
+    {
+      "figi": "BBG004S681M2",
+      "ticker": "SNGSP",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:17:00+02:00",
+      "ts_to": "2024-12-31T21:23:00+02:00",
+      "bad_bars": 76998
+    },
+    {
+      "figi": "BBG004S681W1",
+      "ticker": "MTSS",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:17:00+02:00",
+      "ts_to": "2025-12-31T22:08:00+02:00",
+      "bad_bars": 161081
+    },
+    {
+      "figi": "BBG004S682Z6",
+      "ticker": "RTKM",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:21:00+02:00",
+      "ts_to": "2025-12-31T21:02:00+02:00",
+      "bad_bars": 137953
+    },
+    {
+      "figi": "BBG004S683W7",
+      "ticker": "AFLT",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:23:00+02:00",
+      "ts_to": "2024-12-31T22:49:00+02:00",
+      "bad_bars": 65640
+    },
+    {
+      "figi": "BBG004S68473",
+      "ticker": "IRAO",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:24:00+02:00",
+      "ts_to": "2025-12-31T22:31:00+02:00",
+      "bad_bars": 195724
+    },
+    {
+      "figi": "BBG004S68507",
+      "ticker": "MAGN",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:18:00+02:00",
+      "ts_to": "2025-12-31T22:48:00+02:00",
+      "bad_bars": 175957
+    },
+    {
+      "figi": "BBG004S68696",
+      "ticker": "RASP",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:56:00+02:00",
+      "ts_to": "2025-12-31T19:31:00+02:00",
+      "bad_bars": 69721
+    },
+    {
+      "figi": "BBG004S68CP5",
+      "ticker": "MVID",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:18:00+02:00",
+      "ts_to": "2024-12-31T22:41:00+02:00",
+      "bad_bars": 67846
+    },
+    {
+      "figi": "BBG0063FKTD9",
+      "ticker": "LENT",
+      "interval": 1,
+      "ts_from": "2024-01-03T09:03:00+02:00",
+      "ts_to": "2025-12-31T22:37:00+02:00",
+      "bad_bars": 75607
+    },
+    {
+      "figi": "BBG008F2T3T2",
+      "ticker": "RUAL",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:20:00+02:00",
+      "ts_to": "2024-12-31T22:32:00+02:00",
+      "bad_bars": 70153
+    },
+    {
+      "figi": "BBG00F6NKQX3",
+      "ticker": "SMLT",
+      "interval": 1,
+      "ts_from": "2024-01-02T09:21:00+02:00",
+      "ts_to": "2025-12-31T22:38:00+02:00",
+      "bad_bars": 160488
+    },
+    {
+      "figi": "BBG00QKJSX05",
+      "ticker": "RENI",
+      "interval": 1,
+      "ts_from": "2024-01-03T09:03:00+02:00",
+      "ts_to": "2025-12-31T22:44:00+02:00",
+      "bad_bars": 94250
+    },
+    {
+      "figi": "RU000A106T36",
+      "ticker": "ASTR",
+      "interval": 1,
+      "ts_from": "2024-01-03T09:13:00+02:00",
+      "ts_to": "2025-11-27T22:46:00+02:00",
+      "bad_bars": 144103
+    },
+    {
+      "figi": "TCS80A107UL4",
+      "ticker": "T",
+      "interval": 1,
+      "ts_from": "2024-01-03T09:02:00+02:00",
+      "ts_to": "2025-12-31T22:49:00+02:00",
+      "bad_bars": 161016
+    },
+    {
+      "figi": "BBG003LYCMB1",
+      "ticker": "SFIN",
+      "interval": 2,
+      "ts_from": "2025-07-26T01:30:00+02:00",
+      "ts_to": "2025-12-31T22:30:00+02:00",
+      "bad_bars": 11581
+    },
+    {
+      "figi": "BBG004730N88",
+      "ticker": "SBER",
+      "interval": 2,
+      "ts_from": "2024-06-22T19:40:00+02:00",
+      "ts_to": "2025-12-28T21:15:00+02:00",
+      "bad_bars": 70552
+    },
+    {
+      "figi": "BBG004731354",
+      "ticker": "ROSN",
+      "interval": 2,
+      "ts_from": "2024-06-22T19:50:00+02:00",
+      "ts_to": "2025-12-31T22:35:00+02:00",
+      "bad_bars": 74872
+    },
+    {
+      "figi": "BBG004731489",
+      "ticker": "GMKN",
+      "interval": 2,
+      "ts_from": "2024-06-23T09:15:00+02:00",
+      "ts_to": "2025-12-31T20:25:00+02:00",
+      "bad_bars": 49778
+    },
+    {
+      "figi": "BBG0047315D0",
+      "ticker": "SNGS",
+      "interval": 2,
+      "ts_from": "2024-06-22T18:30:00+02:00",
+      "ts_to": "2025-12-31T02:20:00+02:00",
+      "bad_bars": 61904
+    },
+    {
+      "figi": "BBG0047315Y7",
+      "ticker": "SBERP",
+      "interval": 2,
+      "ts_from": "2024-06-22T17:50:00+02:00",
+      "ts_to": "2025-12-31T21:25:00+02:00",
+      "bad_bars": 60843
+    },
+    {
+      "figi": "BBG00475K2X9",
+      "ticker": "HYDR",
+      "interval": 2,
+      "ts_from": "2024-06-22T17:35:00+02:00",
+      "ts_to": "2025-12-31T22:45:00+02:00",
+      "bad_bars": 68987
+    },
+    {
+      "figi": "BBG00475K6C3",
+      "ticker": "CHMF",
+      "interval": 2,
+      "ts_from": "2024-06-22T20:40:00+02:00",
+      "ts_to": "2025-12-31T22:40:00+02:00",
+      "bad_bars": 62626
+    },
+    {
+      "figi": "BBG00475KHX6",
+      "ticker": "TRNFP",
+      "interval": 2,
+      "ts_from": "2025-07-26T01:10:00+02:00",
+      "ts_to": "2025-12-31T21:00:00+02:00",
+      "bad_bars": 15611
+    },
+    {
+      "figi": "BBG00475KKY8",
+      "ticker": "NVTK",
+      "interval": 2,
+      "ts_from": "2025-07-26T01:15:00+02:00",
+      "ts_to": "2025-12-31T01:50:00+02:00",
+      "bad_bars": 18011
+    },
+    {
+      "figi": "BBG004S681B4",
+      "ticker": "NLMK",
+      "interval": 2,
+      "ts_from": "2024-06-22T17:05:00+02:00",
+      "ts_to": "2024-12-31T20:55:00+02:00",
+      "bad_bars": 17755
+    },
+    {
+      "figi": "BBG004S681M2",
+      "ticker": "SNGSP",
+      "interval": 2,
+      "ts_from": "2024-06-22T18:35:00+02:00",
+      "ts_to": "2024-12-31T21:20:00+02:00",
+      "bad_bars": 17980
+    },
+    {
+      "figi": "BBG004S681W1",
+      "ticker": "MTSS",
+      "interval": 2,
+      "ts_from": "2024-06-22T21:20:00+02:00",
+      "ts_to": "2025-12-31T22:05:00+02:00",
+      "bad_bars": 56494
+    },
+    {
+      "figi": "BBG004S682Z6",
+      "ticker": "RTKM",
+      "interval": 2,
+      "ts_from": "2025-07-26T01:10:00+02:00",
+      "ts_to": "2025-12-31T20:25:00+02:00",
+      "bad_bars": 13212
+    },
+    {
+      "figi": "BBG004S683W7",
+      "ticker": "AFLT",
+      "interval": 2,
+      "ts_from": "2024-06-22T18:00:00+02:00",
+      "ts_to": "2024-12-31T20:25:00+02:00",
+      "bad_bars": 16252
+    },
+    {
+      "figi": "BBG004S68473",
+      "ticker": "IRAO",
+      "interval": 2,
+      "ts_from": "2025-07-25T22:25:00+02:00",
+      "ts_to": "2025-12-31T21:55:00+02:00",
+      "bad_bars": 17849
+    },
+    {
+      "figi": "BBG004S68507",
+      "ticker": "MAGN",
+      "interval": 2,
+      "ts_from": "2025-07-25T22:40:00+02:00",
+      "ts_to": "2025-12-31T22:45:00+02:00",
+      "bad_bars": 17035
+    },
+    {
+      "figi": "BBG004S68696",
+      "ticker": "RASP",
+      "interval": 2,
+      "ts_from": "2025-07-26T09:00:00+02:00",
+      "ts_to": "2025-12-31T19:30:00+02:00",
+      "bad_bars": 4814
+    },
+    {
+      "figi": "BBG004S68CP5",
+      "ticker": "MVID",
+      "interval": 2,
+      "ts_from": "2024-06-22T17:10:00+02:00",
+      "ts_to": "2024-12-31T22:05:00+02:00",
+      "bad_bars": 11943
+    },
+    {
+      "figi": "BBG0063FKTD9",
+      "ticker": "LENT",
+      "interval": 2,
+      "ts_from": "2025-07-25T22:35:00+02:00",
+      "ts_to": "2025-12-31T22:35:00+02:00",
+      "bad_bars": 8524
+    },
+    {
+      "figi": "BBG008F2T3T2",
+      "ticker": "RUAL",
+      "interval": 2,
+      "ts_from": "2024-06-22T20:35:00+02:00",
+      "ts_to": "2024-12-31T22:30:00+02:00",
+      "bad_bars": 15853
+    },
+    {
+      "figi": "BBG00F6NKQX3",
+      "ticker": "SMLT",
+      "interval": 2,
+      "ts_from": "2025-07-26T01:25:00+02:00",
+      "ts_to": "2025-12-31T22:35:00+02:00",
+      "bad_bars": 14203
+    },
+    {
+      "figi": "BBG00QKJSX05",
+      "ticker": "RENI",
+      "interval": 2,
+      "ts_from": "2025-07-26T04:25:00+02:00",
+      "ts_to": "2025-12-31T22:40:00+02:00",
+      "bad_bars": 11212
+    },
+    {
+      "figi": "RU000A106T36",
+      "ticker": "ASTR",
+      "interval": 2,
+      "ts_from": "2025-07-25T22:20:00+02:00",
+      "ts_to": "2025-12-31T22:10:00+02:00",
+      "bad_bars": 13028
+    },
+    {
+      "figi": "TCS80A107UL4",
+      "ticker": "T",
+      "interval": 2,
+      "ts_from": "2025-07-26T01:10:00+02:00",
+      "ts_to": "2025-12-31T22:30:00+02:00",
+      "bad_bars": 19116
+    },
+    {
+      "figi": "BBG003LYCMB1",
+      "ticker": "SFIN",
+      "interval": 4,
+      "ts_from": "2024-06-21T09:00:00+02:00",
+      "ts_to": "2025-12-31T12:00:00+02:00",
+      "bad_bars": 1606
+    },
+    {
+      "figi": "BBG0047315D0",
+      "ticker": "SNGS",
+      "interval": 4,
+      "ts_from": "2024-06-23T09:00:00+02:00",
+      "ts_to": "2025-12-30T21:00:00+02:00",
+      "bad_bars": 2900
+    },
+    {
+      "figi": "BBG0047315Y7",
+      "ticker": "SBERP",
+      "interval": 4,
+      "ts_from": "2024-06-23T09:00:00+02:00",
+      "ts_to": "2025-12-31T13:00:00+02:00",
+      "bad_bars": 2424
+    },
+    {
+      "figi": "BBG00475K2X9",
+      "ticker": "HYDR",
+      "interval": 4,
+      "ts_from": "2024-06-23T13:00:00+02:00",
+      "ts_to": "2025-12-31T22:00:00+02:00",
+      "bad_bars": 3868
+    },
+    {
+      "figi": "BBG00475KHX6",
+      "ticker": "TRNFP",
+      "interval": 4,
+      "ts_from": "2024-06-21T11:00:00+02:00",
+      "ts_to": "2025-12-30T18:00:00+02:00",
+      "bad_bars": 2211
+    },
+    {
+      "figi": "BBG00475KKY8",
+      "ticker": "NVTK",
+      "interval": 4,
+      "ts_from": "2024-06-20T22:00:00+02:00",
+      "ts_to": "2025-12-30T18:00:00+02:00",
+      "bad_bars": 2737
+    },
+    {
+      "figi": "BBG004S681B4",
+      "ticker": "NLMK",
+      "interval": 4,
+      "ts_from": "2024-06-24T09:00:00+02:00",
+      "ts_to": "2024-12-31T10:00:00+02:00",
+      "bad_bars": 773
+    },
+    {
+      "figi": "BBG004S681M2",
+      "ticker": "SNGSP",
+      "interval": 4,
+      "ts_from": "2024-06-24T13:00:00+02:00",
+      "ts_to": "2024-12-31T03:00:00+02:00",
+      "bad_bars": 801
+    },
+    {
+      "figi": "BBG004S682Z6",
+      "ticker": "RTKM",
+      "interval": 4,
+      "ts_from": "2024-06-21T09:00:00+02:00",
+      "ts_to": "2025-12-30T21:00:00+02:00",
+      "bad_bars": 1865
+    },
+    {
+      "figi": "BBG004S683W7",
+      "ticker": "AFLT",
+      "interval": 4,
+      "ts_from": "2024-06-22T18:00:00+02:00",
+      "ts_to": "2024-12-31T10:00:00+02:00",
+      "bad_bars": 817
+    },
+    {
+      "figi": "BBG004S68473",
+      "ticker": "IRAO",
+      "interval": 4,
+      "ts_from": "2024-06-21T09:00:00+02:00",
+      "ts_to": "2025-12-30T21:00:00+02:00",
+      "bad_bars": 2066
+    },
+    {
+      "figi": "BBG004S68507",
+      "ticker": "MAGN",
+      "interval": 4,
+      "ts_from": "2024-06-21T12:00:00+02:00",
+      "ts_to": "2025-12-31T20:00:00+02:00",
+      "bad_bars": 2514
+    },
+    {
+      "figi": "BBG004S68696",
+      "ticker": "RASP",
+      "interval": 4,
+      "ts_from": "2024-06-21T09:00:00+02:00",
+      "ts_to": "2025-12-31T19:00:00+02:00",
+      "bad_bars": 1106
+    },
+    {
+      "figi": "BBG004S68CP5",
+      "ticker": "MVID",
+      "interval": 4,
+      "ts_from": "2024-06-24T09:00:00+02:00",
+      "ts_to": "2024-12-31T11:00:00+02:00",
+      "bad_bars": 345
+    },
+    {
+      "figi": "BBG0063FKTD9",
+      "ticker": "LENT",
+      "interval": 4,
+      "ts_from": "2024-06-21T15:00:00+02:00",
+      "ts_to": "2025-12-31T22:00:00+02:00",
+      "bad_bars": 876
+    },
+    {
+      "figi": "BBG008F2T3T2",
+      "ticker": "RUAL",
+      "interval": 4,
+      "ts_from": "2024-06-24T09:00:00+02:00",
+      "ts_to": "2024-12-30T21:00:00+02:00",
+      "bad_bars": 662
+    },
+    {
+      "figi": "BBG00F6NKQX3",
+      "ticker": "SMLT",
+      "interval": 4,
+      "ts_from": "2024-06-21T09:00:00+02:00",
+      "ts_to": "2025-12-31T20:00:00+02:00",
+      "bad_bars": 1982
+    },
+    {
+      "figi": "BBG00QKJSX05",
+      "ticker": "RENI",
+      "interval": 4,
+      "ts_from": "2024-06-21T16:00:00+02:00",
+      "ts_to": "2025-12-30T19:00:00+02:00",
+      "bad_bars": 1269
+    },
+    {
+      "figi": "RU000A106T36",
+      "ticker": "ASTR",
+      "interval": 4,
+      "ts_from": "2024-06-20T22:00:00+02:00",
+      "ts_to": "2025-12-31T08:00:00+02:00",
+      "bad_bars": 1798
+    },
+    {
+      "figi": "TCS80A107UL4",
+      "ticker": "T",
+      "interval": 4,
+      "ts_from": "2024-06-21T09:00:00+02:00",
+      "ts_to": "2025-12-31T14:00:00+02:00",
+      "bad_bars": 3449
+    },
+    {
+      "figi": "BBG004730N88",
+      "ticker": "SBER",
+      "interval": 5,
+      "ts_from": "2024-01-06T02:00:00+02:00",
+      "ts_to": "2025-12-08T02:00:00+02:00",
+      "bad_bars": 55
+    },
+    {
+      "figi": "BBG003LYCMB1",
+      "ticker": "SFIN",
+      "interval": 8,
+      "ts_from": "2025-07-26T01:30:00+02:00",
+      "ts_to": "2025-12-31T22:30:00+02:00",
+      "bad_bars": 5544
+    },
+    {
+      "figi": "BBG0047315D0",
+      "ticker": "SNGS",
+      "interval": 8,
+      "ts_from": "2024-06-22T19:40:00+02:00",
+      "ts_to": "2025-12-30T22:30:00+02:00",
+      "bad_bars": 32450
+    },
+    {
+      "figi": "BBG0047315Y7",
+      "ticker": "SBERP",
+      "interval": 8,
+      "ts_from": "2024-06-22T20:10:00+02:00",
+      "ts_to": "2025-12-31T21:20:00+02:00",
+      "bad_bars": 29216
+    },
+    {
+      "figi": "BBG00475K2X9",
+      "ticker": "HYDR",
+      "interval": 8,
+      "ts_from": "2024-06-22T18:10:00+02:00",
+      "ts_to": "2025-12-31T22:40:00+02:00",
+      "bad_bars": 38361
+    },
+    {
+      "figi": "BBG00475KHX6",
+      "ticker": "TRNFP",
+      "interval": 8,
+      "ts_from": "2025-07-26T01:10:00+02:00",
+      "ts_to": "2025-12-31T19:20:00+02:00",
+      "bad_bars": 7137
+    },
+    {
+      "figi": "BBG00475KKY8",
+      "ticker": "NVTK",
+      "interval": 8,
+      "ts_from": "2025-07-26T02:10:00+02:00",
+      "ts_to": "2025-12-31T01:30:00+02:00",
+      "bad_bars": 9011
+    },
+    {
+      "figi": "BBG004S681B4",
+      "ticker": "NLMK",
+      "interval": 8,
+      "ts_from": "2024-06-22T19:00:00+02:00",
+      "ts_to": "2024-12-31T20:50:00+02:00",
+      "bad_bars": 9112
+    },
+    {
+      "figi": "BBG004S681M2",
+      "ticker": "SNGSP",
+      "interval": 8,
+      "ts_from": "2024-06-22T22:20:00+02:00",
+      "ts_to": "2024-12-31T21:20:00+02:00",
+      "bad_bars": 9355
+    },
+    {
+      "figi": "BBG004S682Z6",
+      "ticker": "RTKM",
+      "interval": 8,
+      "ts_from": "2025-07-26T01:10:00+02:00",
+      "ts_to": "2025-12-31T19:30:00+02:00",
+      "bad_bars": 6206
+    },
+    {
+      "figi": "BBG004S683W7",
+      "ticker": "AFLT",
+      "interval": 8,
+      "ts_from": "2024-06-22T18:00:00+02:00",
+      "ts_to": "2024-12-31T20:10:00+02:00",
+      "bad_bars": 8746
+    },
+    {
+      "figi": "BBG004S68473",
+      "ticker": "IRAO",
+      "interval": 8,
+      "ts_from": "2025-07-26T02:30:00+02:00",
+      "ts_to": "2025-12-31T21:50:00+02:00",
+      "bad_bars": 8025
+    },
+    {
+      "figi": "BBG004S68507",
+      "ticker": "MAGN",
+      "interval": 8,
+      "ts_from": "2025-07-26T01:00:00+02:00",
+      "ts_to": "2025-12-31T22:40:00+02:00",
+      "bad_bars": 8232
+    },
+    {
+      "figi": "BBG004S68696",
+      "ticker": "RASP",
+      "interval": 8,
+      "ts_from": "2025-07-26T09:00:00+02:00",
+      "ts_to": "2025-12-31T19:30:00+02:00",
+      "bad_bars": 2436
+    },
+    {
+      "figi": "BBG004S68CP5",
+      "ticker": "MVID",
+      "interval": 8,
+      "ts_from": "2024-06-22T17:10:00+02:00",
+      "ts_to": "2024-12-31T21:40:00+02:00",
+      "bad_bars": 5003
+    },
+    {
+      "figi": "BBG0063FKTD9",
+      "ticker": "LENT",
+      "interval": 8,
+      "ts_from": "2025-07-25T22:30:00+02:00",
+      "ts_to": "2025-12-31T22:30:00+02:00",
+      "bad_bars": 3625
+    },
+    {
+      "figi": "BBG008F2T3T2",
+      "ticker": "RUAL",
+      "interval": 8,
+      "ts_from": "2024-06-22T20:30:00+02:00",
+      "ts_to": "2024-12-31T20:40:00+02:00",
+      "bad_bars": 7968
+    },
+    {
+      "figi": "BBG00F6NKQX3",
+      "ticker": "SMLT",
+      "interval": 8,
+      "ts_from": "2025-07-26T02:40:00+02:00",
+      "ts_to": "2025-12-31T22:30:00+02:00",
+      "bad_bars": 6271
+    },
+    {
+      "figi": "BBG00QKJSX05",
+      "ticker": "RENI",
+      "interval": 8,
+      "ts_from": "2025-07-26T04:20:00+02:00",
+      "ts_to": "2025-12-31T22:40:00+02:00",
+      "bad_bars": 5218
+    },
+    {
+      "figi": "RU000A106T36",
+      "ticker": "ASTR",
+      "interval": 8,
+      "ts_from": "2025-07-25T22:30:00+02:00",
+      "ts_to": "2025-12-31T21:00:00+02:00",
+      "bad_bars": 5937
+    },
+    {
+      "figi": "TCS80A107UL4",
+      "ticker": "T",
+      "interval": 8,
+      "ts_from": "2025-07-26T01:30:00+02:00",
+      "ts_to": "2025-12-31T21:20:00+02:00",
+      "bad_bars": 10200
+    }
+  ]
+}

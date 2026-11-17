@@ -178,6 +178,60 @@ function fmtEmDateTime(ts: string): string {
 let botPollTimer: number | null = null;
 let botRunning = false;
 let botPaused = false;
+// Причины паузы входа из /bot/status и /bot/pause (ARCH399): ручная пауза и
+// автоматические блокировки — ручные/риск/сверка закрытия/восстановление журнала.
+let botPauseReasons: string[] = [];
+const ENTRY_PAUSE_LABELS: Record<string, string> = {
+  manual: "включена вручную",
+  close_reconciliation: "ждём сверки закрытия",
+  entry_reconciliation: "ждём учёта входа",
+  close_recovery_failed: "сбой восстановления журнала",
+  close_after_open: "защитный выход ждёт отмены остатка открытия и сверки позиции",
+  close_after_open_recovery_failed: "не удалось восстановить сохранённое требование выхода",
+  position_recovery_failed: "защита позиции не восстановлена по проверенным данным",
+  daily_loss_limit: "дневной лимит убытка",
+  risk_evidence_unavailable: "нет данных о риске",
+};
+
+function entryPauseReasonsText(reasons: string[]): string {
+  return reasons
+    .map((r) => ENTRY_PAUSE_LABELS[r] ?? `неизвестная причина (${r})`)
+    .join("; ");
+}
+
+function renderActionNote(text: string, warn = false, pauseNotice = false): void {
+  const el = $("bot-action-note") as HTMLElement | null;
+  if (!el) return;
+  el.dataset.pauseNotice = String(pauseNotice);
+  el.textContent = text;
+  el.title = text;
+  el.classList.toggle("hidden", !text);
+  el.classList.toggle("warn", warn);
+}
+
+// Дневной результат риска может отсутствовать: сервер отдаёт null и состояние
+// UNKNOWN, пока факты риска не прочитаны (ARCH400). Ноль здесь был бы выдумкой —
+// показываем «нет данных», чтобы лимит убытка не выглядел проверенным.
+function renderRiskNote(risk?: { state?: string; daily_pnl?: number | null; daily_loss_limit?: number | null }): void {
+  const el = $("bot-risk-note") as HTMLElement | null;
+  if (!el) return;
+  const state = String(risk?.state ?? "").toUpperCase();
+  const pnl = risk?.daily_pnl ?? null;
+  if (!risk || pnl == null || !Number.isFinite(pnl) || state === "UNKNOWN" || state === "") {
+    el.textContent = "риск: нет данных о дневном результате";
+    el.title = "Факты риска ещё не прочитаны: дневной результат неизвестен, поэтому лимит убытка не подтверждён";
+    el.classList.remove("hidden");
+    el.classList.add("warn");
+    return;
+  }
+  const sign = pnl > 0 ? "+" : pnl < 0 ? "−" : "";
+  const limit = risk?.daily_loss_limit;
+  const limitText = limit != null && Number.isFinite(limit) ? ` · лимит ${money(Math.abs(limit))}` : "";
+  el.textContent = `риск: ${sign}${money(Math.abs(pnl))}${limitText}`;
+  el.title = "Дневной результат и лимит убытка по счёту бота";
+  el.classList.remove("hidden");
+  el.classList.remove("warn");
+}
 let _botChartInit = false;
 let _botFocusFigi: string | null = null;
 let _botFocusSig = "";
@@ -200,11 +254,17 @@ async function pollBotStatus(): Promise<void> {
       mode: string;
       config?: { mode?: string };
       entries_paused?: boolean;
+      entry_pause_reasons?: string[];
       universe?: Array<{ figi: string; ticker?: string; atr_pct?: number }>;
       votes?: Array<{ figi: string; ticker?: string; buy?: number; sell?: number; votes?: number; side?: string; regime?: string | null; vol_abs?: number | null }>;
+      universe_selection?: SrUniverseSelection;
+      slots?: { occupied?: number; held?: number; pending_open?: number };
+      risk?: { state?: string; daily_pnl?: number | null; daily_loss_limit?: number | null; entries_paused?: boolean };
     }>("/api/v1/bot/status");
     _srUniverse = new Map((status.universe ?? []).map((u) => [u.figi, { atr_pct: u.atr_pct }]));
     _srVotes = new Map((status.votes ?? []).map((v) => [v.figi, { votes: v.votes ?? 0, side: v.side ?? "", regime: v.regime ?? null, buy: v.buy ?? 0, sell: v.sell ?? 0, vol_abs: v.vol_abs ?? null }]));
+    _srUniverseSelection = status.universe_selection ?? null;
+    _srSlots = status.slots ?? null;
     if (_srRows.length) renderSrTable();
     renderReplayBar(status);
     botRunning = status.running;
@@ -213,10 +273,24 @@ async function pollBotStatus(): Promise<void> {
     try {
       const ctl = new AbortController();
       const tid = setTimeout(() => ctl.abort(), 5000);
-      const sbst = await fetchJSON<{ portfolio?: { equity?: number; free_funds?: number; cash?: number; pnl?: number; tinkoff_currencies?: number | null; tinkoff_shares?: number | null; starting_margin?: number | null; own_in_positions?: number | null } }>("/api/v1/sandbox/status", { signal: ctl.signal });
+      const sbst = await fetchJSON<{ mode?: string; error?: string; portfolio?: { equity?: number; free_funds?: number; cash?: number; pnl?: number; tinkoff_currencies?: number | null; tinkoff_shares?: number | null; starting_margin?: number | null; own_in_positions?: number | null; account?: string; deposits?: { net?: number; operations?: Array<{ time?: string; amount?: number; currency?: string; type?: string }>; last_sync?: string | null } } }>("/api/v1/sandbox/status", { signal: ctl.signal });
       clearTimeout(tid);
       const pf = sbst.portfolio;
-      if (pf) {
+      const hasErr = typeof sbst.error === "string" && sbst.error.length > 0;
+      if (hasErr) {
+        // ARCH266: сбой портфеля показываем как «недоступно», а не как нули.
+        setText("bs-equity", "—");
+        setText("bs-cash", "—");
+        setText("bs-positions-value", "—");
+        setText("bs-pnl", "—");
+        const pnlErr = $("bs-pnl") as HTMLElement | null;
+        if (pnlErr) pnlErr.style.color = "";
+        setText("bs-currencies", "—");
+        const shErr = $("bs-shares");
+        if (shErr) shErr.textContent = "—";
+        const hintErr = $("botbar-hint");
+        if (hintErr) hintErr.textContent = `${String(sbst.mode ?? "sandbox").toLowerCase()} · данные недоступны`;
+      } else if (pf) {
         setText("bs-equity", money(pf.equity ?? 0));
         const ff = pf.free_funds ?? pf.cash;
         setText("bs-cash", money(ff ?? 0));
@@ -237,8 +311,48 @@ async function pollBotStatus(): Promise<void> {
             shEl.textContent = "—";
           }
         }
+        // Подпись контура: режим + счёт (маскированный) + внесённый капитал —
+        // без статичного «10k». Источник — /sandbox/status (deposits.net + account).
+        const hintEl = $("botbar-hint");
+        if (hintEl) {
+          const m = String(sbst.mode ?? "sandbox").toLowerCase();
+          const acct = pf.account ? ` · ${pf.account}` : "";
+          const net = pf.deposits?.net;
+          const cap = net != null && net !== 0 ? ` · ${money(net)}₽` : "";
+          hintEl.textContent = `${m}${acct}${cap}`;
+        }
       }
     } catch { /* sandbox/status может лежать при реплее — не роняем опрос */ }
+    // Фактический выбор юниверса брокером: сколько реально отобрано и почему
+    // остальное отброшено (ARCH213/219/221/232). Отдельный спан, не трогаем
+    // сохранённый universe и не подменяем top_n подписью.
+    {
+      const sel = _srUniverseSelection;
+      const sl = _srSlots;
+      const univEl = $("botbar-universe");
+      if (univEl) {
+        const parts: string[] = [];
+        let text = "";
+        if (sel && (sel.selected_figis?.length || sel.decisions?.length)) {
+          const n = sel.selected_figis?.length ?? 0;
+          const asOf = sel.observed_at ? new Date(sel.observed_at).toLocaleString("ru-RU") : "";
+          const excluded = (sel.decisions ?? []).filter((d) => (d.reasons?.length ?? 0) > 0 && !(sel.selected_figis ?? []).includes(d.figi ?? ""));
+          text += ` · универс ${n}`;
+          parts.push(`режим=${sel.mode || "—"}`, `as_of=${asOf || "—"}`, `отобрано=${n}`);
+          if (excluded.length) {
+            parts.push(`отброшено=${excluded.length}`);
+            parts.push(excluded.slice(0, 8).map((d) => `${d.ticker || d.figi}: ${(d.reasons ?? []).join(", ")}`).join("; "));
+          }
+        }
+        // ARCH269: занятые слоты (вкл. ожидающие открытия) отдельно от позиций.
+        if (sl && (sl.pending_open ?? 0) > 0) {
+          text += ` · ожидают ${sl.pending_open}`;
+          parts.push(`слоты: занято=${sl.occupied ?? 0} (в позиции=${sl.held ?? 0}, ожидают=${sl.pending_open ?? 0})`);
+        }
+        univEl.textContent = text;
+        univEl.title = parts.join("\n");
+      }
+    }
     setText("bs-session", status.session);
     // MOEX: одна плашка = режим рынка + направление индекса (IMOEX guard, 20м).
     const moexEl = $("bs-moex");
@@ -303,6 +417,8 @@ async function pollBotStatus(): Promise<void> {
     };
     syncBtn("btn-bot-toggle");
     botPaused = !!status.entries_paused;
+    botPauseReasons = status.entry_pause_reasons ?? [];
+    renderRiskNote(status.risk);
     const pbtn = $("btn-bot-pause");
     if (pbtn) {
       pbtn.classList.toggle("hidden", !status.running);
@@ -448,25 +564,29 @@ async function pollPositions(): Promise<void> {
       figi: string; ticker: string; side: string; qty: number; entry_price: number;
       entry_time: string; stop_loss?: number | null; take_profit?: number | null;
       trail_active?: boolean; current_price?: number | null; unrealized_pnl?: number | null;
-      roi_pct?: number | null; leverage?: number | null; notional?: number | null;
+      roi_pct?: number | null; leverage?: number | null; trade_leverage?: number | null; notional?: number | null;
       own_money?: number | null;
       regime?: string | null; regime_entry?: string; vol?: number | null;
-    }> }>("/api/v1/sandbox/positions");
+    }>; error?: string | null }>("/api/v1/sandbox/positions");
     const tbody = document.querySelector("#bot-positions-table tbody");
     if (!tbody) return;
+    if (data.error) {
+      // Ошибка сервера: не очищаем таблицу и не выдаём 0 позиций за отсутствие позиций.
+      console.warn("pollPositions: сервер вернул ошибку", data.error);
+      return;
+    }
     tbody.innerHTML = "";
     for (const p of data.positions) {
       const tr = document.createElement("tr");
       tr.dataset.figi = p.figi;
       const entryPrice = p.entry_price ?? 0;
       const qty = p.qty ?? 0;
-      const lev = p.leverage ?? 1;
+      const lev = p.trade_leverage != null && Number.isFinite(p.trade_leverage) && p.trade_leverage >= 1 ? p.trade_leverage : null;
       const notional = p.notional ?? entryPrice * qty;
-      const own = p.own_money ?? (lev > 0 ? notional / lev : notional);
       const cur = p.current_price ?? entryPrice;
       const pnl = p.unrealized_pnl ?? (p.side === "LONG" ? (cur - entryPrice) * qty : (entryPrice - cur) * qty);
       const pnlCls = pnl >= 0 ? "pos" : "neg";
-      const roi = p.roi_pct ?? 0;
+      const roi = notional > 0 ? pnl / notional * 100 : null;
       const sl = p.stop_loss ?? null;
       const tp = p.take_profit ?? null;
       const vol = typeof p.vol === "number" ? p.vol : null;
@@ -477,11 +597,11 @@ async function pollPositions(): Promise<void> {
         <td><span class="${p.side === "LONG" ? "pos" : "neg"}">${p.side}</span></td>
         <td>${qty}</td>
         <td>${money(entryPrice)}</td>
-        <td>${money(notional)}₽ <span class="dim">(${money(own)}₽ обесп.)</span></td>
+        <td>${money(notional)}₽</td>
         <td>${money(cur)}</td>
         <td class="${pnlCls}">${pnl >= 0 ? "+" : ""}${money(pnl)}</td>
-        <td class="${pnlCls}">${pct(roi)}</td>
-        <td>${lev.toFixed(1)}x</td>
+        <td class="${pnlCls}">${roi != null ? pct(roi) : "—"}</td>
+        <td title="Расчётное плечо из журнала/API, не подтверждённая сумма займа">${lev != null ? lev.toFixed(1) + "x" : "—"}</td>
         <td>${p.regime_entry || "—"} / ${p.regime || "—"}</td>
         <td>${vol != null ? vol.toFixed(1) + "%" : "—"}</td>
         <td>${sl != null ? money(sl) + (p.trail_active ? " · trail" : "") : "—"}</td>
@@ -496,8 +616,17 @@ async function pollPositions(): Promise<void> {
         const figi = btn.dataset.figi;
         if (!figi) return;
         btn.disabled = true; btn.textContent = "...";
-        try { await fetchJSON(`/api/v1/bot/positions/close?figi=${encodeURIComponent(figi)}`, { method: "POST" }); }
-        catch (err) { alert("Ошибка закрытия: " + err); }
+        try {
+          // Ответ 200 не значит «закрыто»: позиция может уйти в ожидание сверки
+          // с брокером или вовсе не закрыться (ARCH398). Показываем фактический итог.
+          const r = await fetchJSON<{ closed?: boolean; status?: string; pending?: unknown[] }>(
+            `/api/v1/bot/positions/close?figi=${encodeURIComponent(figi)}`,
+            { method: "POST" },
+          );
+          if (r.closed === true) renderActionNote(`Закрытие ${figi}: закрыто`);
+          else if (r.status === "not_closed") renderActionNote(`Закрытие ${figi}: позиция не закрыта`, true);
+          else renderActionNote(`Закрытие ${figi}: ожидаем подтверждения брокера и сверки`, true);
+        } catch (err) { alert("Ошибка закрытия: " + err); }
 finally { await pollPositions(); }
       });
     });
@@ -1917,14 +2046,25 @@ async function toggleBot(): Promise<void> {
   const btn = $("btn-bot-toggle") as HTMLButtonElement;
   if (!btn) return;
   btn.disabled = true;
+  const starting = !botRunning;
   try {
-    if (botRunning) {
-      await fetchJSON("/api/v1/bot/stop", { method: "POST" });
-    } else {
-      await fetchJSON("/api/v1/bot/start", { method: "POST" });
-    }
+    await fetchJSON(starting ? "/api/v1/bot/start" : "/api/v1/bot/stop", { method: "POST" });
     await pollBotStatus();
-  } catch (e) { alert("Ошибка: " + e); }
+    // Ответ 200 и started=True не доказывают, что бот торгует: защита позиций
+    // может не восстановиться (ARCH407), а входы остаться на паузе (ARCH399).
+    // Показываем фактическое состояние, а не факт запроса.
+    if (starting) {
+      if (!botRunning) {
+        renderActionNote("Запуск не подтверждён: бот не работает", true);
+      } else if (botPauseReasons.length) {
+        renderActionNote(`Бот работает, но входы на паузе: ${entryPauseReasonsText(botPauseReasons)}`, true, true);
+      } else {
+        renderActionNote("");
+      }
+    } else {
+      renderActionNote("");
+    }
+  } catch (e) { renderActionNote(""); alert("Ошибка: " + e); }
   finally { btn.disabled = false; }
 }
 
@@ -1945,8 +2085,8 @@ function _setActiveModeBtn(mode: string | null): void {
 async function doToggleMode(mode: "live" | "sandbox" | "test"): Promise<void> {
   if (mode === "test") { showModal("test-modal-overlay"); return; }
   const warn = mode === "live"
-    ? "Переключить на LIVE (реальные деньги)?\nБот будет ОСТАНОВЛЕН и перезапущен на боевом счёте."
-    : "Переключить на SANDBOX (тестовый счёт)?\nБот будет остановлен и перезапущен.";
+    ? "Переключить на LIVE (реальные деньги)?\nКонтур только выбирается — бот НЕ запускается автоматически."
+    : "Переключить на SANDBOX (тестовый счёт)?\nКонтур только выбирается — бот не запускается автоматически.";
   if (!confirm(warn)) return;
   const mb = document.querySelector(`#mode-switch .mode-btn[data-mode="${mode}"]`) as HTMLButtonElement | null;
   if (mb) mb.classList.add("busy");
@@ -1963,15 +2103,45 @@ function updatePauseButton(): void {
   if (!b) return;
   b.textContent = botPaused ? "▶ Снять паузу" : "⏸ Пауза входов";
   b.classList.toggle("paused", botPaused);
+  // Кнопка — намерение; фактическое состояние входа задаёт пауза с блокировками,
+  // поэтому рядом показываем, кто именно держит входы (ARCH399).
+  b.title = botPaused && botPauseReasons.length
+    ? `Входы остановлены: ${entryPauseReasonsText(botPauseReasons)}`
+    : "Остановить НОВЫЕ входы; открытые позиции продолжают жить (SL/TP работают)";
+  if (botPaused && botPauseReasons.length) {
+    renderActionNote(`Входы на паузе: ${entryPauseReasonsText(botPauseReasons)}`, true, true);
+  } else if (!botPaused && $("bot-action-note")?.dataset.pauseNotice === "true") {
+    renderActionNote("");
+  }
 }
 
 async function doPause(): Promise<void> {
+  const want = !botPaused;
   try {
-    const r = await fetchJSON<{ entries_paused: boolean }>("/api/v1/bot/pause", { method: "POST", body: JSON.stringify({ paused: !botPaused }) });
+    const r = await fetchJSON<{ entries_paused: boolean; entry_pause_reasons?: string[] }>(
+      "/api/v1/bot/pause",
+      { method: "POST", body: JSON.stringify({ paused: want }) },
+    );
     botPaused = r.entries_paused;
+    botPauseReasons = r.entry_pause_reasons ?? [];
     updatePauseButton();
+    // Запрос 200 не значит, что входы открылись: остаются автоматические
+    // блокировки (сверка закрытия, учёт входа, риск). Показываем их, а не «успех».
+    if (!want && r.entries_paused) {
+      const why = botPauseReasons.length
+        ? entryPauseReasonsText(botPauseReasons)
+        : "причина не передана сервером";
+      renderActionNote(`Пауза не снята: ${why}`, true);
+    } else if (want) {
+      renderActionNote("Входы на паузе: включена вручную", true, true);
+    } else {
+      renderActionNote("");
+    }
     void pollBotStatus();
-  } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+  } catch (e) {
+    renderActionNote("");
+    alert(e instanceof Error ? e.message : String(e));
+  }
 }
 
 function initBotTab(): void {
@@ -2096,6 +2266,7 @@ function initBotTab(): void {
         mode: "test", test_name: finalName,
         replay_start: toUTCISO(start), replay_end: end ? toUTCISO(end) : "",
         replay_log_persist: logdb,
+        start: true, // ARCH171/172: запуск теста — явный, в отличие от выбора контура
       };
       // Движок/TF одиночного прогона (пусто = ensemble_v4 / 1min). Память всех
       // настроек — в saveTestFormNow (в т.ч. при любом изменении формы).
@@ -2237,6 +2408,7 @@ function sendBotConfigPatch(extra?: Record<string, unknown>): void {
     ...(_szEq ? { pos_equity_mult: Math.max(1, Math.min(6, Number(_szEq.value))) } : {}),
     long_allowed: longOn,
     short_allowed: shortOn,
+    use_margin: ($("mg-master") as HTMLInputElement | null)?.checked ?? false,
     margin_sessions,
     margin_leverage,
     trade_regimes,
@@ -2306,7 +2478,10 @@ function initSessChips(): void {
       const dShort = $("dg-short") as HTMLInputElement | null;
       if (typeof lOn === "boolean" && dLong) applyChip(dLong, lOn);
       if (typeof sOn === "boolean" && dShort) applyChip(dShort, sOn);
-      // Маржа.
+      // Маржа: мастер-выключатель (use_margin) управляет плечом целиком.
+      const umOn = (cfg as { use_margin?: boolean }).use_margin;
+      const mgMaster = $("mg-master") as HTMLInputElement | null;
+      if (typeof umOn === "boolean" && mgMaster) applyChip(mgMaster, umOn);
       const msArr = Array.isArray(cfg.margin_sessions) ? cfg.margin_sessions as string[] : null;
       if (msArr) {
         for (const [s, id] of Object.entries({ morning: "mg-morning", day: "mg-day", evening: "mg-evening" })) {
@@ -2405,6 +2580,12 @@ function initSessChips(): void {
       sendBotConfigPatch();
     });
   }
+  // Мастер-выключатель маржи (use_margin): управляет плечом целиком.
+  ($("mg-master") as HTMLInputElement | null)?.addEventListener("change", (ev) => {
+    const cb = ev.currentTarget as HTMLInputElement;
+    cb.closest("label")?.classList.toggle("on", cb.checked);
+    sendBotConfigPatch();
+  });
   // Блок «Маржа»: сессии, где торговля идёт с плечом.
   const mgKeys = ["mg-morning", "mg-day", "mg-evening"];
   let mgSaved: string[] = [];
@@ -3095,6 +3276,7 @@ let railInit = false;
 interface SrItem { figi: string; ticker: string; name: string; price: number | null; turnover: number | null; rng_pct: number | null; in_universe: boolean; lot?: number }
 interface SrUniInfo { atr_pct?: number }
 interface SrVoteInfo { votes: number; side: string; regime: string | null; buy: number; sell: number; vol_abs: number | null }
+interface SrUniverseSelection { mode?: string; observed_at?: string | null; selected_figis?: string[]; decisions?: Array<{ figi?: string; ticker?: string; reasons?: string[] }> }
 interface SrRow extends SrItem { atr: number | null; votes: number; side: string; regime: string | null; buy: number; sell: number; vol_abs: number | null }
 interface CarouselStatus {
   bot_running?: boolean;
@@ -3107,6 +3289,8 @@ interface CarouselStatus {
 let _srRows: SrItem[] = [];
 let _srUniverse = new Map<string, SrUniInfo>();
 let _srVotes = new Map<string, SrVoteInfo>();
+let _srUniverseSelection: SrUniverseSelection | null = null;
+let _srSlots: { occupied?: number; held?: number; pending_open?: number } | null = null;
 let _srSortKey = (localStorage.getItem("deeptrading_sr_sort") as string) || "turnover";
 let _srSortAsc = localStorage.getItem("deeptrading_sr_sort_asc") === "1";
 let _srUnivOnly = localStorage.getItem("deeptrading_sr_univ") === "1";

@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from app import models  # noqa: F401
 from app.api.routes import analysis, analysis_reports, analysis_replays, bot as bot_routes, catalog, candles, candlehub, instruments, lab, ml as ml_routes, news as news_routes, orchestrator_route, quorum, research, sandbox, screener, signals, test as test_routes, warehouse, ws
 from app.config import get_settings
-from app.database import Base, engine
+from app.database import create_bootstrap_schema, engine
 from app.logging_setup import setup_logging
 
 _log = logging.getLogger("uvicorn")
@@ -21,7 +21,7 @@ setup_logging()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(create_bootstrap_schema)
         # Догоняющие ALTER'ы (idempotent). Основная схема-эволюция — в alembic/
         # (включить: RUN_MIGRATIONS_ON_START=1), см. alembic/versions/0001_*.
         from sqlalchemy import text as _text
@@ -35,6 +35,13 @@ async def lifespan(app: FastAPI):
                 "ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS test_name VARCHAR(64)"))
             await conn.execute(_text(
                 "CREATE INDEX IF NOT EXISTS ix_sandbox_trades_test_name ON sandbox_trades (test_name)"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(_text(
+                "ALTER TABLE sandbox_trades ADD COLUMN IF NOT EXISTS broker_account_id VARCHAR(40)"))
+            await conn.execute(_text(
+                "CREATE INDEX IF NOT EXISTS ix_sandbox_trades_broker_account_id ON sandbox_trades (broker_account_id)"))
         except Exception:
             pass
     try:
@@ -231,6 +238,15 @@ async def lifespan(app: FastAPI):
 
     _retention_task = asyncio.create_task(_botlogs_retention())
 
+    # Монитор лага цикла событий: при зависании API (15.11.2026 — трижды за час)
+    # нужен след того, что именно держало цикл, а не догадка по одному warning.
+    try:
+        from app.services.loop_monitor import monitor_loop as _monitor_loop
+        _loop_mon_task = asyncio.create_task(_monitor_loop())
+    except Exception as _e:  # noqa: BLE001 — монитор не должен мешать старту
+        _log.warning("loop_monitor не запущен: %s", _e)
+        _loop_mon_task = None
+
     try:
         yield
     finally:
@@ -241,6 +257,12 @@ async def lifespan(app: FastAPI):
             await _rt.stop()
         except Exception:
             pass
+        if _loop_mon_task is not None:
+            _loop_mon_task.cancel()
+            try:
+                await _loop_mon_task
+            except (asyncio.CancelledError, Exception):
+                pass
         _imoex_task.cancel()
         _daily_task.cancel()
         _retention_task.cancel()

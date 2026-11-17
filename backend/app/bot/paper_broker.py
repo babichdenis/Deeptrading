@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,7 +24,8 @@ class Fill:
 
 
 class PaperBroker:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession], cost_model: CostModel | None = None):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], cost_model: CostModel | None = None, *, clock: Callable[[], datetime] | None = None):
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.sessions = session_factory
         self.costs = cost_model or CostModel()
         # Кэш позиций: get_position зовётся на КАЖДЫЙ бар (hot-path) — без кэша это
@@ -31,6 +33,12 @@ class PaperBroker:
         self._pos_cache: dict[str, PaperPosition | None] = {}
         # Последние цены (close свечей от runtime): equity/маржа/intrabar в replay
         self._last_prices: dict[str, float] = {}
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Paper execution clock must be timezone-aware")
+        return value.astimezone(timezone.utc)
 
     async def ensure_account(self, initial_cash: float = 10_000.0) -> PaperAccount:
         async with self.sessions() as db:
@@ -127,19 +135,31 @@ class PaperBroker:
         stop_loss: float | None,
         take_profit: float | None,
         strategy_id: str,
+        plan_meta: dict | None = None,
+        price_is_filled: bool = False,
     ) -> float | None:
         # ВАЖНО: возвращаем фактическую цену входа. runtime трактует None как
         # «результат неизвестен» → PENDING_RECONCILIATION и блокирует повторные
         # попытки (так терялись входы и не писалась строка в sandbox_trades).
         if await self.get_position(figi) is not None:
             return None
-        fill = self.costs.fill_price(price, Side.BUY if side == "BUY" else Side.SELL)
+        if price_is_filled:
+            fill = float(price)
+        else:
+            fill = self.costs.fill_price(price, Side.BUY if side == "BUY" else Side.SELL)
         commission = self.costs.commission(fill * qty)
+        charged_entry_commission = Decimal(str(commission)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        meta = plan_meta or {}
+
+        def _num(key: str) -> Decimal | None:
+            value = meta.get(key)
+            return Decimal(str(value)) if value is not None else None
+
         async with self.sessions() as db:
             acc = await db.scalar(select(PaperAccount).where(PaperAccount.name == DEFAULT_ACCOUNT))
             if acc is None:
                 return
-            acc.cash -= Decimal(str(commission))
+            acc.cash -= charged_entry_commission
             db.add(
                 PaperPosition(
                     account_id=acc.id,
@@ -148,22 +168,31 @@ class PaperBroker:
                     side=side,
                     qty=qty,
                     entry_price=Decimal(str(round(fill, 6))),
-                    entry_time=datetime.now(timezone.utc),
+                    entry_commission=charged_entry_commission,
+                    entry_time=self._now(),
                     stop_loss=Decimal(str(stop_loss)) if stop_loss is not None else None,
                     take_profit=Decimal(str(take_profit)) if take_profit is not None else None,
                     strategy_id=strategy_id,
+                    initial_sl=Decimal(str(stop_loss)) if stop_loss is not None else None,
+                    atr_at_entry=_num("atr"),
+                    atr_tf=meta.get("atr_tf"),
+                    atr_period=meta.get("atr_period"),
+                    atr_as_of=meta.get("atr_as_of"),
+                    atr_multiplier=_num("atr_multiplier"),
+                    policy_source=meta.get("policy_id"),
+                    plan_entry_price=_num("plan_entry_price"),
                 )
             )
             await db.commit()
         self._pos_cache.pop(figi, None)
         return float(fill)
 
-    async def close_position(self, figi: str, price: float, reason: str) -> PaperTrade | None:
+    async def close_position(self, figi: str, price: float, reason: str, *, price_is_filled: bool = False) -> PaperTrade | None:
         pos = await self.get_position(figi)
         if pos is None:
             return None
         exit_side = Side.BUY if pos.side in ("SHORT", "SELL") else Side.SELL
-        fill = self.costs.fill_price(price, exit_side)
+        fill = float(price) if price_is_filled else self.costs.fill_price(price, exit_side)
         exit_price = float(fill)
         entry_price = float(pos.entry_price)
         direction = 1 if pos.side in ("LONG", "BUY") else -1
@@ -182,7 +211,8 @@ class PaperBroker:
                 qty=pos.qty,
                 entry_time=pos.entry_time,
                 entry_price=pos.entry_price,
-                exit_time=datetime.now(timezone.utc),
+                entry_commission=pos.entry_commission,
+                exit_time=self._now(),
                 exit_price=Decimal(str(round(exit_price, 6))),
                 gross_pnl=Decimal(str(round(gross, 6))),
                 commission=Decimal(str(round(commission, 6))),
@@ -280,7 +310,11 @@ class PaperBroker:
             for p in pos_list:
                 px = self._last_prices.get(p.figi, float(p.entry_price or 0.0))
                 long_lev, short_lev, lot = lev_map.get(p.figi, (1.0, 1.0, 1))
-                notional = px * int(p.qty) * int(lot)
+                # p.qty уже в акциях (после исправления LOTS/SHARES), поэтому лот
+                # здесь НЕ умножаем: иначе обеспечение завышается в lot раз, тогда
+                # как _unrealized_pnl и market_value считают по тому же qty без лота.
+                _ = lot
+                notional = px * int(p.qty)
                 lev = long_lev if p.side in ("LONG", "BUY") else short_lev
                 if not lev or lev < 1.0:
                     lev = 1.0

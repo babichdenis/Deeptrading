@@ -169,3 +169,42 @@ async def fetch_lot_by_figi(db: AsyncSession, figis: list[str]) -> dict[str, int
         )
     ).all()
     return {figi: _as_int(lot) for figi, lot in rows if figi}
+
+
+def exact_instrument_maps(figi_by_ticker: dict[str, str], broker_rows) -> tuple[dict[str, str], dict[str, str]]:
+    forward: dict[str, str] = {}
+    reverse: dict[str, str] = {}
+    for broker_figi, ticker in broker_rows:
+        stored_figi = figi_by_ticker.get(ticker)
+        if stored_figi and broker_figi == stored_figi:
+            forward[stored_figi] = broker_figi
+            reverse[broker_figi] = stored_figi
+    return forward, reverse
+
+
+async def discover_broker_universe(db: AsyncSession, *, broker_instruments: dict[str, dict],
+                                  observed_at: datetime, as_of: datetime,
+                                  side: str = "long"):
+    from .eligibility import broker_eligibility
+
+    rows = (await db.execute(text(
+        "SELECT figi, ticker, lot_size, avg_price, avg_daily_turnover, sector "
+        "FROM universe ORDER BY ticker, figi"
+    ))).all()
+    entries = []
+    decisions = []
+    for figi, ticker, stored_lot, price, turnover, sector in rows:
+        evidence = broker_instruments.get(figi)
+        ref = InstrumentRef(figi=figi, ticker=(evidence or {}).get("ticker") or ticker)
+        decision = broker_eligibility(ref, evidence, side=side,
+                                      observed_at=observed_at, as_of=as_of)
+        decisions.append(decision)
+        if decision.eligible:
+            entries.append(UniverseEntry(
+                ref=ref, lot=evidence["lot"], name=ref.ticker,
+                avg_price=_as_float(price), avg_turnover=_as_float(turnover),
+                sector=sector or "",
+            ))
+    entries.sort(key=lambda entry: (entry.ref.ticker, entry.ref.figi))
+    return UniverseSnapshot(as_of=as_of, source=UniverseSource.BROKER_SCREENED_TABLE,
+                            entries=tuple(entries)), tuple(decisions)

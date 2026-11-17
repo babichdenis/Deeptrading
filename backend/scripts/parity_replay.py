@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import os
 import sys
+from uuid import uuid4
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,23 +23,24 @@ _W = sys.stdout
 _MSK = "Europe/Moscow"
 
 
-async def _fetch_real(db, mode, t0, t1):
+async def _fetch_real(db, mode, broker_account_id, t0, t1):
     r = await db.execute(text(
         "SELECT ticker, side, entry_time, entry_price, exit_time, net_pnl "
-        "FROM sandbox_trades WHERE mode = :m AND entry_time >= :t0 AND entry_time < :t1 "
+        "FROM sandbox_trades WHERE mode = :m AND broker_account_id = :account "
+        "AND entry_time >= :t0 AND entry_time < :t1 "
         "ORDER BY entry_time"),
-        {"m": mode, "t0": t0, "t1": t1})
+        {"m": mode, "account": broker_account_id, "t0": t0, "t1": t1})
     return [dict(zip(("ticker", "side", "entry_ts", "entry_price", "exit_ts", "net"),
                      (row[0], row[1], row[2], float(row[3]), row[4], float(row[5] or 0))))
             for row in r.fetchall()]
 
 
-async def _fetch_paper(db, t0, t1):
+async def _fetch_paper(db, t0, t1, test_name):
     r = await db.execute(text(
         "SELECT ticker, side, entry_time, entry_price, exit_time, net_pnl "
-        "FROM sandbox_trades WHERE mode = 'paper' AND entry_time >= :t0 AND entry_time < :t1 "
+        "FROM sandbox_trades WHERE mode = 'paper' AND test_name = :test_name AND entry_time >= :t0 AND entry_time < :t1 "
         "ORDER BY entry_time"),
-        {"t0": t0, "t1": t1})
+        {"t0": t0, "t1": t1, "test_name": test_name})
     return [dict(zip(("ticker", "side", "entry_ts", "entry_price", "exit_ts", "net"),
                      (row[0], row[1], row[2], float(row[3]), row[4], float(row[5] or 0))))
             for row in r.fetchall()]
@@ -70,6 +72,8 @@ async def main():
     ap.add_argument("--t1", default="18:30")
     ap.add_argument("--top_n", type=int, default=20)
     ap.add_argument("--cash", type=float, default=10000.0)
+    ap.add_argument("--strategy", default="ensemble_v4")
+    ap.add_argument("--interval", default="1min", choices=["1min", "5min", "10min", "15min"])
     ap.add_argument("--quantize", action="store_true", help="округлять время входа до минут (бар)")
     args = ap.parse_args()
 
@@ -78,19 +82,26 @@ async def main():
     t0_utc = datetime.fromisoformat(f"{args.date}T{args.t0}:00+03:00").astimezone(timezone.utc)
     t1_utc = datetime.fromisoformat(f"{args.date}T{args.t1}:00+03:00").astimezone(timezone.utc)
 
+    from app.config import get_settings
+
+    account = get_settings().get_account(args.mode)
+    if not account:
+        ap.error(f"Не настроен брокерский счёт для режима {args.mode}")
     async with SessionLocal() as db:
-        real = await _fetch_real(db, args.mode, t0_utc, t1_utc)
+        real = await _fetch_real(db, args.mode, account, t0_utc, t1_utc)
     print(f"REAL {args.mode} {args.date}: {len(real)} сделок в окне {t0_utc.isoformat()}..{t1_utc.isoformat()}")
 
     from app.bot.runtime import BotConfig, runtime
 
+    test_name = f"parity_{args.date}_{uuid4().hex}"
     cfg = BotConfig(
-        strategy_id="ensemble_v4",
-        interval_name="1min",
+        strategy_id=args.strategy,
+        interval_name=args.interval,
         top_n=args.top_n,
-        use_ensemble=True,
+        use_ensemble=args.strategy == "ensemble_v4",
         mode="paper",
         feed="replay",
+        test_name=test_name,
         replay_start=t0_utc.isoformat(),
         replay_end=t1_utc.isoformat(),
         replay_pace="fast",
@@ -112,11 +123,13 @@ async def main():
 
     await runtime.start(cfg)
     deadline = asyncio.get_event_loop().time() + 2400
-    while runtime.running and asyncio.get_event_loop().time() < deadline:
+    while (runtime.starting or runtime.running) and asyncio.get_event_loop().time() < deadline:
         await asyncio.sleep(2)
-    if runtime.running:
-        runtime.request_stop()
-        print("!! Таймаут: бот не завершился за 40 мин, остановлен принудительно")
+    if runtime.starting or runtime.running:
+        await runtime.stop()
+        raise SystemExit("Реплей остановлен по таймауту")
+    if runtime.error:
+        raise SystemExit(f"Реплей завершился с ошибкой: {runtime.error}")
 
     from app.services.loghub import hub as _hub
     logs = [r.line for r in _hub.tail(400)]
@@ -134,7 +147,7 @@ async def main():
     print(f"runtime._replay_pos_peek={getattr(runtime, '_replay_pos_peek', None)}")
 
     async with SessionLocal() as db:
-        paper = await _fetch_paper(db, t0_utc, t1_utc)
+        paper = await _fetch_paper(db, t0_utc, t1_utc, test_name)
     print(f"REPLAY (paper): {len(paper)} сделок")
 
     tol_s = 0 if args.quantize else 180  # ±3 мин от бара входа

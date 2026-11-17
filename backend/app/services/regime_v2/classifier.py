@@ -8,7 +8,7 @@
 - structure — derived/descriptive RANGE / TREND / TRANSITION;
 - confidence — однозначность соответствия measurements классификации, НЕ вероятность.
 
-Hysteresis здесь нет. Runtime не подключён: provider по умолчанию legacy.
+Hysteresis вынесен в отдельный модуль. Подключение определяется active-провайдером.
 """
 from __future__ import annotations
 

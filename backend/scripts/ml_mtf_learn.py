@@ -1857,6 +1857,35 @@ def _maybe_post_model_ready(out, manifest, primary):
     lock = chat.parent / ".chat-write.lock"
     publish_to_chat(chat, msg)
 
+def _lock_exclusive(fd: int) -> None:
+    """Исключительная блокировка файла: flock на Unix, msvcrt на Windows.
+
+    Блокировка нужна одна и та же по смыслу (не пустить второго писателя в
+    chat.md), но примитивы платформенные: fcntl в Windows отсутствует.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        import msvcrt
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        return
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _unlock(fd: int) -> None:
+    try:
+        import fcntl
+    except ImportError:
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        return
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
 def publish_to_chat(chat: Path, msg: str) -> None:
     """Append в chat.md под exclusive flock на ПОСТОЯННОМ lock-файле.
 
@@ -1869,18 +1898,17 @@ def publish_to_chat(chat: Path, msg: str) -> None:
     Теперь ошибка записи поднимается явно, а после записи пост ПЕРЕЧИТЫВАЕТСЯ:
     отправленным считается только факт появления полного текста в chat.md.
     """
-    import fcntl
     lock = chat.parent / ".chat-write.lock"
     lfd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o666)
     try:
-        fcntl.flock(lfd, fcntl.LOCK_EX)
+        _lock_exclusive(lfd)
         try:
             with chat.open("a", encoding="utf-8") as f:
                 f.write(msg)
                 f.flush()
                 os.fsync(f.fileno())
         finally:
-            fcntl.flock(lfd, fcntl.LOCK_UN)
+            _unlock(lfd)
     except BaseException as exc:
         raise SystemExit(f"chat publish: запись не удалась: {exc!r}") from exc
     finally:

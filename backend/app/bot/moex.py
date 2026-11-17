@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, text
 
+from app.services.macro_candle_source import IMOEX, MSK, MacroInstrument, read_closed_macro_candles
+
 
 _ENGINE_CACHE = None
 
@@ -32,6 +34,13 @@ def moex_candles(ticker: str, from_date: str, till_date: str, interval: int = 1)
     ISS отдаёт максимум ~500 свечей на страницу → листаем через `start`,
     иначе за длинный диапазон теряется свежая история.
     """
+    if interval == 1:
+        start = datetime.fromisoformat(from_date).replace(tzinfo=MSK)
+        end = datetime.fromisoformat(till_date).replace(tzinfo=MSK) + timedelta(days=1)
+        end = min(end, datetime.now(timezone.utc))
+        instrument = MacroInstrument("stock", "shares", "TQBR", ticker)
+        return read_closed_macro_candles(instrument, start, end) if start < end else []
+
     base = (f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR"
             f"/securities/{ticker}/candles.json?from={from_date}&till={till_date}"
             f"&interval={int(interval)}")
@@ -74,39 +83,15 @@ def moex_candles(ticker: str, from_date: str, till_date: str, interval: int = 1)
     return out
 
 
-IMOEX_FIGI = "BBG00KDWPPW2"
-IMOEX_SECID = "IMOEX"
-_MSK = timezone(timedelta(hours=3))
+IMOEX_FIGI = IMOEX.storage_id
+IMOEX_SECID = IMOEX.secid
 
 
 def imoex_candles(from_date: str, till_date: str) -> list[dict]:
-    """1-мин свечи индекса IMOEX из MOEX ISS (index/boards/SNDX, с пагинацией).
-
-    ISS отдаёт время в МСК → конвертируем в UTC (конвенция candles.ts).
-    """
-    base = (f"https://iss.moex.com/iss/engines/stock/markets/index/boards/SNDX"
-            f"/securities/{IMOEX_SECID}/candles.json"
-            f"?from={from_date}&till={till_date}&interval=1")
-    out: list[dict] = []
-    start = 0
-    while True:
-        data = json.loads(urllib.request.urlopen(f"{base}&start={start}", timeout=20).read())
-        c = data["candles"]
-        cols = {n: i for i, n in enumerate(c["columns"])}
-        rows = c.get("data") or []
-        for r in rows:
-            ts = r[cols["begin"]]
-            if isinstance(ts, str):
-                ts = datetime.fromisoformat(ts).replace(tzinfo=_MSK).astimezone(timezone.utc)
-            out.append({
-                "open": r[cols["open"]], "high": r[cols["high"]],
-                "low": r[cols["low"]], "close": r[cols["close"]],
-                "volume": int(r[cols["volume"]] or 0), "ts": ts,
-            })
-        if len(rows) < 500:
-            break
-        start += 500
-    return out
+    start = datetime.fromisoformat(from_date).replace(tzinfo=MSK)
+    end = datetime.fromisoformat(till_date).replace(tzinfo=MSK) + timedelta(days=1)
+    end = min(end, datetime.now(timezone.utc))
+    return read_closed_macro_candles(IMOEX, start, end) if start < end else []
 
 
 def imoex_last_ts() -> datetime | None:
@@ -121,15 +106,29 @@ def imoex_last_ts() -> datetime | None:
 def _upsert_imoex(engine, candles: list[dict]) -> int:
     if not candles:
         return 0
+    import logging
+
+    # Политику входа задаёт хаб — та же, что для акций. Индексы не должны
+    # иметь собственного мнения о том, как приводить бар в согласие.
+    from app.engine.candlehub import normalize_row_for_ingest
+
+    log = logging.getLogger(__name__)
+    fixed = 0
     with engine.begin() as db:
         for c in candles:
+            row, was_fixed = normalize_row_for_ingest(c)
+            if was_fixed:
+                fixed += 1
             db.execute(text("""
                 INSERT INTO candles (figi,interval,ts,open,high,low,close,volume)
                 VALUES (:figi,1,:ts,:o,:h,:l,:c,:v)
                 ON CONFLICT (figi,interval,ts) DO UPDATE
                 SET open=:o,high=:h,low=:l,close=:c,volume=:v
-            """), {"figi": IMOEX_FIGI, "ts": c["ts"], "o": c["open"], "h": c["high"],
-                    "l": c["low"], "c": c["close"], "v": c["volume"]})
+            """), {"figi": IMOEX_FIGI, "ts": row["ts"], "o": row["open"], "h": row["high"],
+                    "l": row["low"], "c": row["close"], "v": row["volume"]})
+    if fixed:
+        log.warning("IMOEX: %d бар(ов) расширены до согласованного OHLC (ISS отдал "
+                    "закрытие/открытие вне диапазона)", fixed)
     return len(candles)
 
 

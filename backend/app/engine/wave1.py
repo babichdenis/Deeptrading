@@ -116,6 +116,7 @@ class RsiReversalStrategy:
 
     def __init__(self, params: RsiReversalParams | None = None):
         self.params = params or RsiReversalParams()
+        self._last_processed_ts = None
         self._count = 0
         self._seed_gains: list[float] = []
         self._seed_losses: list[float] = []
@@ -131,6 +132,7 @@ class RsiReversalStrategy:
 
     def reset(self) -> None:
         """ENG-007: сброс streaming-состояния RSI."""
+        self._last_processed_ts = None
         self._count = 0
         self._seed_gains.clear()
         self._seed_losses.clear()
@@ -170,7 +172,19 @@ class RsiReversalStrategy:
         return rsi
 
     def on_bar(self, candles: Sequence[Candle]) -> Signal | None:
-        bar = candles[-1]
+        if not candles:
+            return None
+        if any(left.ts >= right.ts for left, right in zip(candles, candles[1:])):
+            raise ValueError("RSI candles must be strictly chronological")
+        result = None
+        for bar in candles:
+            if self._last_processed_ts is not None and bar.ts <= self._last_processed_ts:
+                continue
+            result = self._step_bar(bar)
+            self._last_processed_ts = bar.ts
+        return result
+
+    def _step_bar(self, bar: Candle) -> Signal | None:
         rsi = self._update_rsi(bar.close)
         prev_high = self._prev_high
         prev_low = self._prev_low

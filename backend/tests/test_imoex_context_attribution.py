@@ -23,7 +23,10 @@ REPORTS = os.path.join(BACKEND, "reports")
 
 @pytest.fixture(scope="module")
 def attribution() -> dict:
-    with open(os.path.join(REPORTS, "imoex_context_attribution.json")) as f:
+    path = os.path.join(REPORTS, "imoex_context_attribution.json")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -36,7 +39,10 @@ def test_group_counts_reconcile_to_total(attribution: dict) -> None:
 
 def test_contemporaneous_features_no_lookahead(attribution: dict) -> None:
     """imoex_return_* считаются только по барам <= decision_ts (проверка на CSV)."""
-    with open(os.path.join(REPORTS, "imoex_context_attribution.csv"), newline="") as f:
+    path = os.path.join(REPORTS, "imoex_context_attribution.csv")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             # признаки imoex_ret_5m/30m/1h присутствуют; aligned/trend корректны
             assert row["imoex_ret_5m_bps"] != ""
@@ -60,7 +66,7 @@ def test_no_engine_change() -> None:
             for fn in files:
                 if not fn.endswith(".py"):
                     continue
-                with open(_os.path.join(dp, fn)) as f:
+                with open(_os.path.join(dp, fn), encoding="utf-8") as f:
                     txt = f.read()
                 if "imoex_context_attribution" in txt:
                     hits.append(_os.path.join(dp, fn))

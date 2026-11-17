@@ -28,6 +28,7 @@ class UniverseSource(str, Enum):
     """Откуда Universe берёт кандидатов. Соответствует трём legacy-функциям."""
 
     ELIGIBLE_TABLE = "eligible_table"
+    BROKER_SCREENED_TABLE = "broker_screened_table"
     INSTRUMENT_INFO = "instrument_info"
     LIQUID_TICKERS = "liquid_tickers"
 

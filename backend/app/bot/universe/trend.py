@@ -28,7 +28,7 @@ FLAT-классификация: явный порог FLAT_THRESHOLD в нор�
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Sequence
 
 from app.bot.universe.domain import InstrumentRef, TrendDirection, TrendFeatures
@@ -67,6 +67,7 @@ def compute_trend_features(
     as_of: datetime,
     window: int,
     atr_period: int = ATR_PERIOD,
+    interval: timedelta = timedelta(minutes=5),
 ) -> TrendFeatures:
     """TrendFeatures на as_of. Чистая детерминированная функция.
 
@@ -74,7 +75,7 @@ def compute_trend_features(
     нормализация — канонический ATR по тому же окну. direction — по знаку
     normalized_slope с порогом FLAT_THRESHOLD.
     """
-    visible = _visible(bars, as_of)
+    visible = _visible(bars, as_of, interval=interval)
     if not visible:
         return TrendFeatures(instrument, as_of, valid=False, reason="no_data")
 
@@ -128,6 +129,7 @@ def compute_trend_features_many(
     as_of: datetime,
     window: int,
     atr_period: int = ATR_PERIOD,
+    interval: timedelta = timedelta(minutes=5),
     key=lambda ref: ref.figi,
 ) -> tuple[TrendFeatures, ...]:
     """TrendFeatures для набора инструментов одним проходом.
@@ -141,6 +143,7 @@ def compute_trend_features_many(
             as_of=as_of,
             window=window,
             atr_period=atr_period,
+            interval=interval,
         )
         for ref in instruments
     )

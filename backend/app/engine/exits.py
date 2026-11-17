@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import math
 from typing import Sequence
 
 from app.engine.indicators import atr
@@ -13,6 +14,99 @@ logger = logging.getLogger(__name__)
 
 
 SAME_BAR_CONFLICT_RULE = "STOP_LOSS_FIRST"
+
+
+def is_fraction(value: object) -> bool:
+    """Является ли значение долей цены (0 < v < 1)?
+
+    Отдельная проверка нужна, потому что проценты, попавшие на место доли
+    (stop_pct=50.0 вместо 0.5), не падают, а дают стоп в 5000% от цены:
+    15.11.2026 в paper-контуре ASTR при 213.17 получила sl=10873.71,
+    SBER при 276.64 — sl=-13552.42. Границы (0, 1) отсекают и 50, и 0.
+    """
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return 0.0 < v < 1.0
+
+
+def pct_problem(name: str, value: object) -> str | None:
+    """Текст отказа, если значение не доля цены, иначе None.
+
+    Единая проверка у источника: и PATCH конфига, и запись в журнал причин
+    используют её, чтобы проценты не попадали в поле доли.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return f"{name} задаётся долей (0.01 = 1%), получено {value}"
+    if not math.isfinite(number) or not 0.0 < number < 1.0:
+        return f"{name} задаётся долей (0.01 = 1%), получено {value}"
+    return None
+
+
+def level_problem(value: object, kind: str, side: object, entry: object) -> str | None:
+    """Почему уровень выхода непригоден — или None, если он валиден.
+
+    Проверяются только свойства, которые обязаны выполняться всегда:
+    уровень конечный, положительный и стоит с правильной стороны от входа
+    (стоп ниже входа для LONG и выше для SHORT, тейк наоборот). Насколько
+    далеко он отстоит — вопрос стратегии, а не корректности: широкий, но
+    валидный стоп не отбрасывается.
+
+    kind: "stop" | "target"; side: Side или "BUY"/"SELL"/"LONG"/"SHORT".
+    """
+    if value is None:
+        return None
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "не число"
+    if not math.isfinite(v):
+        return "не конечное число"
+    if v <= 0.0:
+        return "не положительное"
+    try:
+        e = float(entry)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "неизвестная цена входа"
+    if not math.isfinite(e) or e <= 0.0:
+        return "неизвестная цена входа"
+    is_long = str(getattr(side, "value", side)).upper() in ("BUY", "LONG")
+    if kind == "stop":
+        if is_long and v >= e:
+            return "стоп не ниже входа для LONG"
+        if not is_long and v <= e:
+            return "стоп не выше входа для SHORT"
+    else:
+        if is_long and v <= e:
+            return "тейк не выше входа для LONG"
+        if not is_long and v >= e:
+            return "тейк не ниже входа для SHORT"
+    return None
+
+
+# Уровень дальше половины цены входа не бывает осмысленным: даже абсурдно
+# широкий стоп в 50% от цены — это уже граница. Дефект 15.11.2026 давал 50×
+# цены (ASTR 10873.71 при 213.17, SBER -13552.42 при 276.64) — сторона при
+# этом была ФОРМАЛЬНО правильной, поэтому одной проверки стороны мало.
+PLAUSIBLE_LEVEL_SPAN = 0.5
+
+
+def level_implausible(value: object, entry: object,
+                      span: float = PLAUSIBLE_LEVEL_SPAN) -> bool:
+    """Уровень подозрительно далёк от входа — почти наверняка ошибка единиц."""
+    if value is None:
+        return False
+    try:
+        v = float(value)  # type: ignore[arg-type]
+        e = float(entry)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return True
+    if not math.isfinite(v) or not math.isfinite(e) or e <= 0.0:
+        return True
+    return abs(v - e) > abs(e) * span
 
 
 class ExitPolicy(ABC):
@@ -36,9 +130,16 @@ class AtrTrailingPolicy(ExitPolicy):
         values = atr(bars, self.period)
         last = values[-1] if values else None
         distance = (last or entry_price * 0.01) * self.initial_stop_atr
+        meta = dict(
+            atr=last,
+            atr_period=self.period,
+            atr_as_of=bars[-1].ts if bars else None,
+            atr_multiplier=self.initial_stop_atr,
+            policy_id=self.policy_id,
+        )
         if side is Side.BUY:
-            return ExitPlan(stop_loss=entry_price - distance, take_profit=None)
-        return ExitPlan(stop_loss=entry_price + distance, take_profit=None)
+            return ExitPlan(stop_loss=entry_price - distance, take_profit=None, **meta)
+        return ExitPlan(stop_loss=entry_price + distance, take_profit=None, **meta)
 
     def update_stop(
         self,
@@ -86,10 +187,12 @@ class FixedSlTpPolicy(ExitPolicy):
             return ExitPlan(
                 stop_loss=entry_price * (1 - self.stop_pct),
                 take_profit=entry_price * (1 + self.target_pct),
+                policy_id=self.policy_id,
             )
         return ExitPlan(
             stop_loss=entry_price * (1 + self.stop_pct),
             take_profit=entry_price * (1 - self.target_pct),
+            policy_id=self.policy_id,
         )
 
 
@@ -110,7 +213,8 @@ class AtrStopPolicy(ExitPolicy):
     version: str = "1.2.0"
     _atr_cache: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
-    def _risk(self, entry_price: float, bars: Sequence[Candle]) -> float:
+    def _risk_detail(self, entry_price: float, bars: Sequence[Candle]) -> tuple[float, float | None]:
+        """Дистанция риска и ATR, из которого она посчитана."""
         n = len(bars)
         c = self._atr_cache
         trs = c.get("trs")
@@ -189,17 +293,28 @@ class AtrStopPolicy(ExitPolicy):
                 v = (v * (p - 1) + trs[i]) / p
             c["value"] = v
             c["value_n"] = n
-        return (v or entry_price * 0.01) * self.multiplier
+        return (v or entry_price * 0.01) * self.multiplier, v
+
+    def _risk(self, entry_price: float, bars: Sequence[Candle]) -> float:
+        return self._risk_detail(entry_price, bars)[0]
 
     def plan_entry(self, side: Side, entry_price: float, bars: Sequence[Candle]) -> ExitPlan:
-        distance = self._risk(entry_price, bars)
+        distance, atr_used = self._risk_detail(entry_price, bars)
         if side is Side.BUY:
             stop = entry_price - distance
             target = entry_price + distance * self.risk_reward if self.risk_reward else None
         else:
             stop = entry_price + distance
             target = entry_price - distance * self.risk_reward if self.risk_reward else None
-        return ExitPlan(stop_loss=stop, take_profit=target)
+        return ExitPlan(
+            stop_loss=stop,
+            take_profit=target,
+            atr=atr_used,
+            atr_period=self.period,
+            atr_as_of=bars[-1].ts if bars else None,
+            atr_multiplier=self.multiplier,
+            policy_id=self.policy_id,
+        )
 
     def trailing_activated(
         self,

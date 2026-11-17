@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from pathlib import Path
 
 from app.config import get_settings
+from app.api.routes._account_scope import _account_scope_for_routes, _active_route_mode
 
 router = APIRouter(prefix="/api/v1/sandbox", tags=["sandbox"])
 
@@ -22,16 +23,17 @@ _log = logging.getLogger("sandbox_routes")
 def _active_creds():
     """Активный контур (sandbox|live) из .env: (token, target, account_id)."""
     s = get_settings()
-    mode = s.bot_mode if s.bot_mode in ("sandbox", "live") else "sandbox"
+    mode = _active_route_mode()
     token = s.get_token(mode)
     target = s.get_target(mode)
-    acc = s.get_account(mode) or s.get_account("sandbox")
+    acc = s.get_account(mode)
+    if not acc:
+        raise RuntimeError("Selected broker account is not configured")
     return token, target, acc
 
 
 def _active_mode() -> str:
-    s = get_settings()
-    return s.bot_mode if s.bot_mode in ("sandbox", "live") else "sandbox"
+    return _active_route_mode()
 
 
 CASH_FIGI = {"RUB000UTSTOM", "RUB000UT"}
@@ -45,7 +47,7 @@ def _get_portfolio_cached():
     import time
     global _portfolio_cache
     now = time.monotonic()
-    _mode = _active_mode()
+    _mode = (_active_mode(), _account_scope_for_routes())
     if (_portfolio_cache is not None and _portfolio_cache[1] == _mode
             and now - _portfolio_cache[0] < _portfolio_cache_ttl):
         return _portfolio_cache[2]
@@ -140,7 +142,7 @@ def _get_operations(from_days=3):
     global _ops_cache
     import time as _time
     now = _time.monotonic()
-    _mode = _active_mode()
+    _mode = (_active_mode(), _account_scope_for_routes())
     if (_ops_cache is not None and _ops_cache[3] == from_days and _ops_cache[1] == _mode
             and now - _ops_cache[0] < 60.0):
         return _ops_cache[2]
@@ -152,6 +154,71 @@ def _get_operations(from_days=3):
     )
     _ops_cache = (now, _mode, ops, from_days)
     return ops
+
+
+_deposits_cache: tuple[float, str, dict] | None = None  # (ts, mode, {net, operations, last_sync})
+
+
+def _account_caption() -> str:
+    """Короткая подпись аккаунта без утечки полного id (ARCH171: не светим счёт)."""
+    acc = str(_active_creds()[2] or "").strip()
+    if not acc:
+        return "—"
+    if len(acc) <= 8:
+        return acc
+    return "…" + acc[-4:]
+
+
+def _cash_deposits() -> dict:
+    """Вводы/выводы средств владельцем (вне сделок бота) по операциям брокера.
+
+    Возвращает {net, operations:[{time,amount,currency,type,status}], last_sync}.
+    Это источник «внесённого капитала» для независимого PnL и подписи аккаунта.
+    """
+    global _deposits_cache
+    now = time.monotonic()
+    _mode = (_active_mode(), _account_scope_for_routes())
+    if (_deposits_cache is not None and _deposits_cache[1] == _mode
+            and now - _deposits_cache[0] < 60.0):
+        return _deposits_cache[2]
+    try:
+        ops = _get_operations(from_days=3650)
+    except Exception:
+        ops = None
+    net = 0.0
+    events: list[dict] = []
+    for op in getattr(ops, "operations", []):
+        ot = str(getattr(op, "type", "") or "")
+        _up = ot.upper()
+        is_in = "Пополнение" in ot or "Ввод" in ot or "INPUT" in _up
+        is_out = "Вывод" in ot or "OUTPUT" in _up
+        if not (is_in or is_out):
+            continue
+        pay = _q(getattr(op, "payment", None))
+        if pay == 0:
+            continue
+        ts = getattr(op, "date", None)
+        if is_in:
+            net += abs(pay)
+            kind = "INPUT"
+        else:
+            net -= abs(pay)
+            kind = "OUTPUT"
+        events.append({
+            "time": str(ts) if ts else "",
+            "amount": round(pay, 2),
+            "currency": str(getattr(op, "currency", "") or "RUB"),
+            "type": kind,
+            "raw_type": ot,
+            "status": "OK",
+        })
+    events.sort(key=lambda e: e["time"])
+    _deposits_cache = (now, _mode, {
+        "net": round(net, 2),
+        "operations": events,
+        "last_sync": datetime.now(timezone.utc).isoformat(),
+    })
+    return _deposits_cache[2]
 
 
 def _get_orders():
@@ -353,6 +420,13 @@ def _reconcile_due() -> bool:
     return True
 
 
+async def _portfolio_deposits_safe() -> dict:
+    try:
+        return await asyncio.to_thread(_cash_deposits)
+    except Exception:
+        return {"net": 0.0, "operations": [], "last_sync": None}
+
+
 async def _portfolio_digest() -> dict:
     """Единый проверенный блок портфеля: источник истины — T-Invest.
 
@@ -390,7 +464,8 @@ async def _portfolio_digest() -> dict:
             r = await db.execute(
                 _sel(SandboxTrade.figi, SandboxTrade.leverage)
                 .where(SandboxTrade.exit_time.is_(None),
-                       SandboxTrade.mode == _active_mode())
+                       SandboxTrade.mode == _active_mode(),
+                       SandboxTrade.broker_account_id == _account_scope_for_routes())
             )
             for f, lev in r.all():
                 if f not in lev_map:
@@ -419,7 +494,8 @@ async def _portfolio_digest() -> dict:
         async with _SL2() as db2:
             rows = (await db2.execute(
                 _sel2(_M.net_pnl).where(_M.exit_time.is_not(None),
-                                        _M.mode == _active_mode())
+                                        _M.mode == _active_mode(),
+                                        _M.broker_account_id == _account_scope_for_routes())
             )).all()
             total = len(rows)
             wins = sum(1 for r_ in rows if (r_[0] or 0) > 0)
@@ -428,9 +504,11 @@ async def _portfolio_digest() -> dict:
         lg.warning("digest trades: %s", type(e).__name__)
 
     accounting_pnl = round(closed_net + unrealized, 2)
-    # Для live «начальный депозит» из paper_accounts (10000) не относится к счёту —
-    # PnL считаем как результат сделок бота: closed_net + unrealized.
-    if _active_mode() == "live":
+    # ARCH169/170: «начальный депозит» из paper_accounts (10000) не относится к
+    # брокерским контурам. Для sandbox/live PnL считаем как результат сделок бота
+    # ТЕКУЩЕГО аккаунта (closed_net + unrealized), а внесённый капитал = equity − PnL.
+    # Статичный «10k» в подписи исчезает: initial_cash = реальный ввод средств.
+    if _active_mode() in ("sandbox", "live"):
         base = {**base, "pnl": accounting_pnl,
                 "initial_cash": round(float(base["equity"]) - accounting_pnl, 2)}
     # Ввод/вывод средств владельцем (вне сделок бота): крупное необъяснимое расхождение
@@ -496,6 +574,8 @@ async def _portfolio_digest() -> dict:
 
     return {
         **base,
+        "account": _account_caption(),
+        "deposits": await _portfolio_deposits_safe(),
         "own_in_positions": round(own, 2),
         "positions_value": round(float(base["market_value"]), 2),
         "tinkoff_currencies": round(tcur, 2),
@@ -848,6 +928,21 @@ def _test_trade_row(r) -> dict:
     }
 
 
+def _entry_sl_atr(r, entry: float) -> float | None:
+    """Дистанция стопа на входе в ATR — по записанным значениям, не по текущим."""
+    atr_value = getattr(r, "atr_at_entry", None)
+    initial = getattr(r, "initial_sl", None)
+    if atr_value is None or initial is None:
+        return None
+    base = getattr(r, "plan_entry_price", None)
+    try:
+        ref = float(base) if base is not None else float(entry)
+        atr_float = float(atr_value)
+        return round(abs(ref - float(initial)) / atr_float, 2) if atr_float else None
+    except (TypeError, ValueError):
+        return None
+
+
 async def _test_position_row(r, cur: float | None) -> dict:
     """Открытая позиция теста в формате /sandbox/positions."""
     _raw_side = str(r.side or "LONG").upper()
@@ -897,6 +992,16 @@ async def _test_position_row(r, cur: float | None) -> dict:
         "entry_time": str(r.entry_time),
         "stop_loss": round(_sl, 6) if _sl is not None else None,
         "take_profit": round(_tp, 6) if _tp is not None else None,
+        "initial_sl": round(float(r.initial_sl), 6) if getattr(r, "initial_sl", None) is not None else None,
+        "plan_entry_price": (round(float(r.plan_entry_price), 6)
+                             if getattr(r, "plan_entry_price", None) is not None else None),
+        "atr_at_entry": float(r.atr_at_entry) if getattr(r, "atr_at_entry", None) is not None else None,
+        "entry_sl_atr": _entry_sl_atr(r, entry),
+        "atr_tf": getattr(r, "atr_tf", None),
+        "atr_period": getattr(r, "atr_period", None),
+        "atr_as_of": str(r.atr_as_of) if getattr(r, "atr_as_of", None) is not None else None,
+        "atr_multiplier": float(r.atr_multiplier) if getattr(r, "atr_multiplier", None) is not None else None,
+        "policy_source": getattr(r, "policy_source", None),
         "trail_active": bool(r.trailing_active),
         "strategy_id": "v4_enhanced",
         "current_price": round(cur, 6),
@@ -928,6 +1033,35 @@ _test_price_cache: dict[tuple, tuple[float, float | None]] = {}
 # bias/replay для закрытой позиции не посчитать, берём историю.
 # Значение неизменно во времени → кэш навсегда (ключ figi+час входа).
 _regime_entry_cache: dict[tuple[str, str], str] = {}
+
+
+def normalize_position_regime(rg):
+    """Нормализовать запись режима из runtime._regimes к (state_dict, vol).
+
+    Форма непостоянна: state бывает именем режима (строка, обычный путь
+    _process_candle), timeline-записью (dict) или None; сама запись тоже может
+    оказаться не словарём. Раньше здесь стояло rg.get(...) без проверки типа —
+    строковый режим ронял весь список позиций (ARCH452).
+    """
+    if not isinstance(rg, dict):
+        return {}, None
+    raw = rg.get("state")
+    if isinstance(raw, dict):
+        state = raw
+        # Вложенный state тоже бывает dict — наружу отдаём только имя режима.
+        inner = state.get("state")
+        if not isinstance(inner, str):
+            state = dict(state)
+            state["state"] = "" if inner is None else str(inner)
+        if not isinstance(state.get("reason"), (str, type(None))):
+            state = dict(state)
+            state["reason"] = str(state.get("reason"))
+    elif isinstance(raw, str) and raw:
+        state = {"state": raw}
+    else:
+        state = {}
+    vol = rg.get("vol")
+    return state, vol if isinstance(vol, (int, float)) else None
 
 
 async def _regime_entry(figi_tcs: str, entry_ts) -> str:
@@ -1045,7 +1179,8 @@ async def sandbox_positions():
                 r = await db.execute(
                     _sel2(SandboxTrade.figi, SandboxTrade.leverage, SandboxTrade.entry_time)
                     .where(SandboxTrade.exit_time.is_(None),
-                           SandboxTrade.mode == _active_mode())
+                           SandboxTrade.mode == _active_mode(),
+                           SandboxTrade.broker_account_id == _account_scope_for_routes())
                 )
                 for f, lev, et in r.all():
                     if f not in trade_lev:
@@ -1144,9 +1279,12 @@ async def sandbox_positions():
                 lev = lev_trade
                 own = notional / lev
             pnl = (cur - avg) * abs(qty) if qty > 0 else (avg - cur) * abs(qty)
-            rg = regime_map.get(ticker) or {}
-            rg_state = (rg.get("state") or {}) or {}
-            rg_vol = rg.get("vol")
+            # Форма режима в runtime непостоянна (строка/dict/None) — нормализуем
+            # на границе, чтобы позиция отдавалась даже без обогащения (ARCH452).
+            rg_state, rg_vol = normalize_position_regime(regime_map.get(ticker))
+            _features = rg_state.get("features")
+            if not isinstance(_features, dict):
+                _features = {}
             items.append({
                 "figi": pos.figi, "ticker": ticker,
                 "side": side, "qty": abs(qty),
@@ -1171,8 +1309,8 @@ async def sandbox_positions():
                 "regime_entry": await _regime_entry(
                     pos.figi, trade_et.get(pos.figi) or etimes.get(pos.figi, "")),
                 "regime_reason": rg_state.get("reason") or "",
-                "regime_atr_pct": (rg_state.get("features") or {}).get("atr_pct"),
-                "regime_adx": (rg_state.get("features") or {}).get("adx"),
+                "regime_atr_pct": _features.get("atr_pct"),
+                "regime_adx": _features.get("adx"),
                 "vol": rg_vol if rg_vol is not None else None,
                 "atr": round(atr, 6) if atr else None,
                 "dist_sl_atr": (round(abs(cur - sl) / atr, 2) if (atr and sl) else None),
@@ -1292,7 +1430,8 @@ async def sandbox_trades(limit: int = 50):
                     res = await db.execute(
                         _sel(SandboxTrade)
                         .where(SandboxTrade.exit_time.is_(None),
-                               SandboxTrade.mode == _active_mode())
+                               SandboxTrade.mode == _active_mode(),
+                               SandboxTrade.broker_account_id == _account_scope_for_routes())
                         .order_by(SandboxTrade.entry_time.desc())
                     )
                     for r in res.scalars().all():
@@ -1350,7 +1489,8 @@ async def sandbox_trades(limit: int = 50):
                 res = await db.execute(
                     _sel(SandboxTrade)
                     .where(SandboxTrade.exit_time.is_not(None),
-                           SandboxTrade.mode == _active_mode())
+                           SandboxTrade.mode == _active_mode(),
+                           SandboxTrade.broker_account_id == _account_scope_for_routes())
                     .order_by(SandboxTrade.exit_time.desc())
                     .limit(200)
                 )
@@ -1634,12 +1774,13 @@ async def sandbox_reset(req: SandboxResetRequest) -> dict:
         wiped = {"skipped": "keep_history"}
 
     # Кэши портфеля/операций/маржа — чтобы UI сразу показал новый счёт.
-    global _portfolio_cache, _ops_cache, _init_cash_cache, _tcs_to_bbg_cache, _margin_map
+    global _portfolio_cache, _ops_cache, _init_cash_cache, _tcs_to_bbg_cache, _margin_map, _deposits_cache
     _portfolio_cache = None
     _ops_cache = None
     _init_cash_cache = None
     _tcs_to_bbg_cache = None
     _margin_map = {}
+    _deposits_cache = None
     from app.services.loghub import hub
     hub.clear()
 

@@ -16,7 +16,10 @@ RUN_DIR = os.path.join(REPORTS, "5b44f3b383df")
 
 @pytest.fixture(scope="module")
 def report() -> dict:
-    with open(os.path.join(RUN_DIR, "imoex_trend_attribution.json")) as f:
+    path = os.path.join(RUN_DIR, "imoex_trend_attribution.json")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -29,7 +32,10 @@ def test_reconciliation_groups(report: dict) -> None:
         # aligned+counter+flat может не покрыть все (часть с None regime), но не превышает n_rows
         assert aligned + counter + flat <= report["n_rows"] + 1, f"{m}: превышение n_rows"
         # audit CSV содержит n_rows строк
-        with open(os.path.join(RUN_DIR, "imoex_trend_trade_audit.csv"), newline="") as f:
+        path = os.path.join(RUN_DIR, "imoex_trend_trade_audit.csv")
+        if not os.path.exists(path):
+            pytest.skip(f"нет research-артефакта {path}")
+        with open(path, newline="", encoding="utf-8") as f:
             n_audit = sum(1 for _ in csv.DictReader(f))
         assert n_audit == report["n_rows"]
 
@@ -37,7 +43,10 @@ def test_reconciliation_groups(report: dict) -> None:
 def test_point_in_time(report: dict) -> None:
     """Методы определены: каждый трейд имеет entry/exit regime не-None (warmup отсечён)."""
     for m in ("A", "B", "C"):
-        with open(os.path.join(RUN_DIR, "imoex_trend_trade_audit.csv"), newline="") as f:
+        path = os.path.join(RUN_DIR, "imoex_trend_trade_audit.csv")
+        if not os.path.exists(path):
+            pytest.skip(f"нет research-артефакта {path}")
+        with open(path, newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         assert all(r[f"entry_regime_{m}"] in ("up_trend", "down_trend", "flat") for r in rows), f"{m}: нет regime"
 
@@ -51,7 +60,7 @@ def test_engine_not_changed() -> None:
             for fn in files:
                 if not fn.endswith(".py"):
                     continue
-                with open(_os.path.join(dp, fn)) as f:
+                with open(_os.path.join(dp, fn), encoding="utf-8") as f:
                     if "imoex_trend_attribution" in f.read():
                         hits.append(_os.path.join(dp, fn))
     assert not hits

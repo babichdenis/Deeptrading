@@ -30,10 +30,19 @@ class PaperPosition(Base):
     side: Mapped[str] = mapped_column(String(8))
     qty: Mapped[int] = mapped_column(Integer)
     entry_price: Mapped[float] = mapped_column(Numeric(20, 6))
+    entry_commission: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
     entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     stop_loss: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
     take_profit: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
     strategy_id: Mapped[str] = mapped_column(String(64), default="")
+    initial_sl: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
+    atr_at_entry: Mapped[float | None] = mapped_column(Numeric(20, 8), nullable=True)
+    atr_tf: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    atr_period: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    atr_as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    atr_multiplier: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
+    policy_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    plan_entry_price: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
 
 
 class PaperTrade(Base):
@@ -47,6 +56,7 @@ class PaperTrade(Base):
     qty: Mapped[int] = mapped_column(Integer)
     entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     entry_price: Mapped[float] = mapped_column(Numeric(20, 6))
+    entry_commission: Mapped[float | None] = mapped_column(Numeric(20, 6), nullable=True)
     exit_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     exit_price: Mapped[float] = mapped_column(Numeric(20, 6))
     gross_pnl: Mapped[float] = mapped_column(Numeric(20, 6))

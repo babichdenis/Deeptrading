@@ -35,7 +35,9 @@ FEATURE_WINDOW = 44
 SOURCE_INTERVAL_MIN = 5
 
 
-def _visible(bars: Sequence, as_of: datetime) -> list:
+def _visible(
+    bars: Sequence, as_of: datetime, *, interval: timedelta = timedelta(minutes=SOURCE_INTERVAL_MIN)
+) -> list:
     """Бары, ЗАКРЫТЫЕ на момент as_of (AUDIT P1.3, решение владельца).
 
     Метка бара = начало бакета (канон проекта), поэтому бар с меткой T описывает
@@ -46,8 +48,9 @@ def _visible(bars: Sequence, as_of: datetime) -> list:
     """
     from app.bot.universe.bars import bar_is_visible
 
-    step = timedelta(minutes=SOURCE_INTERVAL_MIN)
-    return [b for b in bars if bar_is_visible(b, as_of=as_of, interval=step)]
+    if interval <= timedelta(0):
+        raise ValueError("interval must be positive")
+    return [b for b in bars if bar_is_visible(b, as_of=as_of, interval=interval)]
 
 
 def _measure(bars: Sequence, window: int, period: int) -> tuple[float | None, float | None, bool]:

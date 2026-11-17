@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from datetime import datetime, timezone
 
 from app.bot.gates import (
     GateResult, MarketContext, TimeContext, TIME_GATES, MARKET_GATES,
@@ -83,17 +84,18 @@ def test_volatility():
 
 def test_orderbook_imbalance_and_spread():
     cfg = _cfg()
-    ob_bad = {"imbalance": -0.6, "spread_bps": 5.0}
+    fresh = {"state": "ok", "ts": datetime.now(timezone.utc).isoformat()}
+    ob_bad = {**fresh, "imbalance": -0.6, "spread_bps": 5.0}
     r = gate_orderbook(MarketContext(cfg=cfg, side="BUY", orderbook=ob_bad))
     assert not r.passed and r.key == "orderbook"
-    ob_spread = {"imbalance": 0.0, "spread_bps": 40.0}
+    ob_spread = {**fresh, "imbalance": 0.0, "spread_bps": 40.0}
     r2 = gate_orderbook(MarketContext(cfg=cfg, side="SELL", orderbook=ob_spread))
     assert not r2.passed and "спред" in r2.detail
-    ob_ok = {"imbalance": 0.1, "spread_bps": 5.0}
+    ob_ok = {**fresh, "imbalance": 0.1, "spread_bps": 5.0}
     assert gate_orderbook(MarketContext(cfg=cfg, side="BUY", orderbook=ob_ok)).passed
     # SELL при перевесе покупок > 0.3 — блок
     assert not gate_orderbook(MarketContext(cfg=cfg, side="SELL",
-                                            orderbook={"imbalance": 0.5, "spread_bps": 5.0})).passed
+                                            orderbook={**fresh, "imbalance": 0.5, "spread_bps": 5.0})).passed
 
 
 def test_orderbook_error_when_missing():

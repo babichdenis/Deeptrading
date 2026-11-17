@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import time as _time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 
 @dataclass(frozen=True)
@@ -386,7 +387,7 @@ class TimeContext:
     is_last_hour: bool = False
     risk_allowed: bool = True
     risk_state: str = "NORMAL"
-    daily_pnl: float = 0.0
+    daily_pnl: float | None = 0.0
     loss_hold: bool = False
     loss_why: str = ""
     already_held: bool = False
@@ -397,10 +398,11 @@ class MarketContext:
     """Контекст слоя signal/STAGE S: стакан/ликвидность/волатильность."""
     cfg: object
     side: str
-    turnover: float = 0.0
+    turnover: float | None = None
     atr_pct: float | None = None
     atr_pct_median: float | None = None
     orderbook: dict | None = None
+    orderbook_as_of: datetime | None = None
     orderbook_checked: bool = True  # False = стакан не запрашивали (лимиты выключены)
     news_blackout_reason: str = ""  # непусто = свежая негативная новость по тикеру
 
@@ -440,7 +442,7 @@ def gate_direction(ctx: TimeContext) -> GateResult:
 def gate_risk_day(ctx: TimeContext) -> GateResult:
     if not ctx.risk_allowed:
         return GateResult(False, f"risk_{str(ctx.risk_state).lower()}",
-                          f"риск дня {ctx.risk_state} (daily_pnl {ctx.daily_pnl:+.0f}₽)")
+                          f"риск дня {ctx.risk_state} (daily_pnl {ctx.daily_pnl})")
     return GateResult(True)
 
 
@@ -460,9 +462,11 @@ def gate_already_held(ctx: TimeContext) -> GateResult:
 
 def gate_liquidity(ctx: MarketContext) -> GateResult:
     _min_to = float(getattr(ctx.cfg, "entry_min_turnover", 0.0) or 0.0)
-    if _min_to > 0 and 0 < ctx.turnover < _min_to:
-        return GateResult(False, "liquidity_check",
-                          f"оборот {ctx.turnover:,.0f}₽ < {_min_to:,.0f}₽")
+    from app.bot.portfolio import turnover_veto
+
+    reason = turnover_veto(ctx.turnover, _min_to)
+    if reason is not None:
+        return GateResult(False, "liquidity_check", reason)
     return GateResult(True)
 
 
@@ -477,12 +481,43 @@ def gate_volatility(ctx: MarketContext) -> GateResult:
 
 
 def gate_orderbook(ctx: MarketContext) -> GateResult:
+    from math import isfinite
+
     _imb_lim = float(getattr(ctx.cfg, "entry_ob_imbalance_max", 0.3) or 0.0)
     _spr_lim = float(getattr(ctx.cfg, "entry_ob_spread_max", 25.0) or 0.0)
     if _imb_lim <= 0 and _spr_lim <= 0:
         return GateResult(True)
     if ctx.orderbook is None:
         return GateResult(False, "orderbook_error", "стакан недоступен — не торгуем вслепую")
+    state = ctx.orderbook.get("state")
+    if state != "ok":
+        return GateResult(False, "orderbook_error", f"стакан недостоверен: {state}")
+    if ctx.orderbook.get("is_consistent") is False:
+        return GateResult(False, "orderbook_error", "стакан несогласован")
+    try:
+        source_time = datetime.fromisoformat(ctx.orderbook["ts"])
+        observed_at = ctx.orderbook_as_of or datetime.now(timezone.utc)
+        if source_time.utcoffset() is None or observed_at.utcoffset() is None:
+            raise ValueError("Timezone required")
+        age_seconds = (observed_at - source_time).total_seconds()
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return GateResult(False, "orderbook_error", "время стакана неизвестно")
+    if age_seconds < 0:
+        return GateResult(False, "orderbook_error", "время стакана в будущем")
+    if age_seconds > 30:
+        return GateResult(False, "orderbook_error", "стакан старше 30 секунд")
+    for name, enabled, lower, upper in (
+        ("imbalance", _imb_lim > 0, -1.0, 1.0),
+        ("spread_bps", _spr_lim > 0, 0.0, float("inf")),
+    ):
+        if not enabled:
+            continue
+        try:
+            value = float(ctx.orderbook[name])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return GateResult(False, "orderbook_error", f"нет достоверного {name}")
+        if not isfinite(value) or value < lower or value > upper:
+            return GateResult(False, "orderbook_error", f"недопустимый {name}")
     why: list[str] = []
     _imb = ctx.orderbook.get("imbalance")
     if _imb_lim > 0 and _imb is not None:

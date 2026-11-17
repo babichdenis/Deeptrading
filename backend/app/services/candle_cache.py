@@ -27,6 +27,9 @@ _INTERVAL_STEP = {
     "month": timedelta(days=45),
 }
 
+# Дневной ряд в базе проекта хранится под кодом 24, а провайдер отдаёт код 5.
+CANONICAL_DAY_INTERVAL = 24
+
 # Шаг агрегации каждого интервала в секундах (для ресэмплинга из 1m):
 _INTERVAL_STEP_SEC = {
     "1min": 60,
@@ -93,6 +96,11 @@ async def resample_from_1m(
         return 0
     target_interval = INTERVAL_NAMES[interval_name]
     target_interval_value = int(target_interval.value)
+    # День внутри проекта живёт под кодом 24 (см. tf_freshness.TF_SPEC,
+    # move_select.SOURCE_INTERVAL): так его читают бот и сверка свежести.
+    # Код провайдера (5) остался в старых загрузках, поэтому ресэмплинг пишет в 24.
+    if interval_name == "day":
+        target_interval_value = CANONICAL_DAY_INTERVAL
 
     rows = (
         await db.execute(

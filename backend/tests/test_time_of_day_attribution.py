@@ -20,7 +20,10 @@ pytestmark = pytest.mark.artifact
 
 @pytest.fixture(scope="module")
 def attribution() -> dict:
-    with open(os.path.join(REPORTS, "time_of_day_attribution.json")) as f:
+    path = os.path.join(REPORTS, "time_of_day_attribution.json")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -48,7 +51,7 @@ def test_decision_time_in_msk() -> None:
     from zoneinfo import ZoneInfo
     msk = ZoneInfo("Europe/Moscow")
     for pack in ("5b44f3b383df", "57b6244ee3eb"):
-        with open(os.path.join(REPORTS, pack, "trades.csv"), newline="") as f:
+        with open(os.path.join(REPORTS, pack, "trades.csv"), newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 dt = datetime.fromisoformat(row["decision_time"].replace("Z", "+00:00")).astimezone(msk)
                 assert dt.hour >= 10, f"вход до 10:00 MSK: {row['decision_time']}"
@@ -74,7 +77,7 @@ def test_engine_not_modified() -> None:
             for fn in files:
                 if not fn.endswith(".py"):
                     continue
-                with open(_os.path.join(dp, fn)) as f:
+                with open(_os.path.join(dp, fn), encoding="utf-8") as f:
                     txt = f.read()
                 if "time_of_day_attribution" in txt:
                     hits.append(_os.path.join(dp, fn))

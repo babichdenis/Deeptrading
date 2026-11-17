@@ -271,3 +271,41 @@
 - [Макет торгового обзора и этапы переноса](../../frontend/public/design-preview/README.md) — 2026-10-15, демонстрационный frontend.
 
 - [Карта всего действующего фронтенда](FRONTEND.md) — 2026-10-16, source inventory, размещение и постепенное обновление.
+
+- Weekly replay and acceleration evidence: `backend/reports/week_20261109_13_r1/` — manifest, isolated run, coverage, dashboard, context benchmark; final result pending (ARCH270).
+
+- [ARCH262 — голоса роботов vs экстремумы/ML-разметка (audit r1)](../../backend/reports/vote_extrema_audit/audit_r1.md) — 2026-11-16, read-only: связка `signals`↔`ideal_trades`/`labels` в БД .8 отсутствует (временной разрыв), демо-сопоставление на фикс. участке SBER 600s; скрипт `../../backend/reports/vote_extrema_audit/audit_r1.py` + `audit_r1.json`.
+
+- [Connected weekly C1 frozen config](../../backend/reports/connected_week_20261109_13_c1/candidate_config.json) — ARCH279: Universe + MTF trend + ensemble, three predefined arms; offline research hypothesis, not a run result.
+
+- [Connected weekly C2 config](../../backend/reports/connected_week_20261109_13_c1/candidate_config_c2.json) — ARCH285: pre-outcome clarification of continuous adverse slippage, window400 and exact next-open timing; supersedes C1 for run, not a result.
+
+- [Root corrected C2 runner](../../backend/reports/connected_week_20261109_13_c1/run_connected_c2_root_r3.py) — ARCH298: minute scheduler and immutable root_r3_run001 artifacts; offline acceptance pending.
+
+- [Диагностика удержания C2](../../backend/reports/connected_week_20261109_13_c1/held_closes_diagnostic_r1.json) — ретроспективная оценка закрытий минутных свечей до выхода, ARCH302; не результат исполнимой новой стратегии.
+
+- [C3: защита прибыли по закрытию](../../backend/reports/connected_week_20261109_13_c1/candidate_config_c3.json) — правило зафиксировано до парного прогона; исследовательская гипотеза ARCH303.
+
+- [C3: происхождение оборота](../../backend/reports/connected_week_20261109_13_c1/profit_protection_c3_run001/turnover_diagnostic.json) — ретроспективная атрибуция дополнительных входов, ARCH305; не самостоятельная стратегия.
+
+- [C3: голоса при входах](../../backend/reports/connected_week_20261109_13_c1/profit_protection_c3_run001/entry_votes_diagnostic.json) — состав голосов закрытых сделок и повторных входов, ARCH306; описательная диагностика.
+
+- [Пересечение голосов до распределения капитала](../../backend/reports/connected_week_20261109_13_c1/signal_overlap_r1.json) — полный набор доступных решений и поднабор Universe+trend, ARCH308.
+
+- [C4: подтверждение намерения входа](../../backend/reports/connected_week_20261109_13_c1/candidate_config_c4.json) — зафиксированный парный эксперимент с истечением намерения на следующей пятиминутке, ARCH309.
+
+- [C4: проверка 2–6 ноября](../../backend/reports/connected_week_20261109_13_c1/candidate_c4_nov02_validation.json) — даты и неизменное правило зафиксированы до результатов, ARCH311.
+
+- [C4: непрерывные две недели](../../backend/reports/connected_week_20261109_13_c1/candidate_c4_two_weeks.json) — диагностический прогон без сброса капитала/позиций, ARCH312.
+
+- [C4: полный октябрь](../../backend/reports/connected_week_20261109_13_c1/candidate_c4_october.json) — месячный период и неизменная политика зафиксированы до результатов, ARCH314.
+
+- [C5: таймфреймы сигналов](../../backend/reports/connected_week_20261109_13_c1/candidate_config_c5.json) — сопоставление5m/15m с общим исполнением, ARCH318; [проверки префиксов](../../backend/reports/connected_week_20261109_13_c1/signal_15m_prefix_parity.json).
+
+- [Контракт сохранения метаданных покрытия](../../backend/reports/connected_week_20261109_13_c1/coverage_receipt_contract.json) —3синтетические проверки сериализации статусов Hub, ARCH321; не календарные свидетельства рынка.
+
+- [Паритет общего допуска сделки](../../backend/reports/connected_week_20261109_13_c1/shared_admission_parity_run001/shared_admission_parity.json) — полное сравнение до/после выделения модуля, ARCH324.
+
+- [Метки существующего детектора при входах](../../backend/reports/connected_week_20261109_13_c1/existing_regime_attribution_r1.json) — описательная атрибуцияC5, не новый торговый фильтр, ARCH325.
+
+- [C6: роли сигналов по режиму](../../backend/reports/connected_week_20261109_13_c1/candidate_config_c6.json) — гипотеза зафиксирована до портфельного прогона, ARCH326; развитие на просмотренных данных, отдельный сентябрьский период предусмотрен.

@@ -2,13 +2,16 @@
 
 Контракты (активны на July 2026): BRU6 (BR-9.26), GDU6 (GOLD-9.26), SiU6 (Si-9.26).
 Пагинация 500 свечей/запрос; timestamps begin в MSK -> конвертация в UTC.
-Сохранение: backend/data/{brent,gold,usdrub}_1m.csv  (ts_utc;open;high;low;close;volume)
+Сохранение: backend/data/raw_iss/{brent,gold,usdrub}_1m.csv  (ts_utc;open;high;low;close;volume;)
+Границы суток в MSK, поэтому метки в UTC могут переезжать через полночь:
+окно не фильтруем, а дедуплицируем по метке и сортируем. Запись атомарная,
+в свой каталог, чтобы не смешиваться с выгрузкой T-Invest.
 Запуск: локально.
 """
 import os, time, urllib.request, urllib.parse
 from datetime import datetime, timedelta, timezone
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "raw_iss")
 MSK = timezone(timedelta(hours=3))
 CONTRACTS = {"BRU6": "brent_1m.csv", "GDU6": "gold_1m.csv", "SiU6": "usdrub_1m.csv"}
 
@@ -49,23 +52,34 @@ def main():
     d1 = datetime(2026, 8, 29)
     for secid, outfile in CONTRACTS.items():
         path = os.path.join(DATA_DIR, outfile)
-        total = 0
-        with open(path, "w") as f:
-            day = d0
-            while day < d1:
-                try:
-                    candles = fetch_day(secid, day)
-                except Exception as e:  # noqa: BLE001
-                    print(f"{secid} {day.date()}: ERR {str(e)[:60]}", flush=True)
-                    day += timedelta(days=1); time.sleep(1); continue
-                for c in candles:
-                    f.write(f"{c[0]};{c[1]};{c[2]};{c[3]};{c[4]};{c[5]};\n")
-                total += len(candles)
-                day += timedelta(days=1)
-                if day.day % 5 == 1:
-                    print(f"{secid} ... {day.date()} баров {total}", flush=True)
-                time.sleep(0.15)
-        print(f"{secid}: {total} баров -> {path}", flush=True)
+        rows: dict[str, str] = {}
+        conflicts = 0
+        day = d0
+        while day < d1:
+            try:
+                candles = fetch_day(secid, day)
+            except Exception as e:  # noqa: BLE001
+                print(f"{secid} {day.date()}: ERR {str(e)[:60]}", flush=True)
+                day += timedelta(days=1); time.sleep(1); continue
+            for c in candles:
+                line = f"{c[0]};{c[1]};{c[2]};{c[3]};{c[4]};{c[5]};"
+                known = rows.get(c[0])
+                if known is not None and known != line:
+                    conflicts += 1
+                if known is None:
+                    rows[c[0]] = line
+            day += timedelta(days=1)
+            if day.day % 5 == 1:
+                print(f"{secid} ... {day.date()} баров {len(rows)}", flush=True)
+            time.sleep(0.15)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            for stamp in sorted(rows):
+                handle.write(rows[stamp] + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        print(f"{secid}: {len(rows)} баров (расхождений по метке {conflicts}) -> {path}", flush=True)
 
 
 if __name__ == "__main__":

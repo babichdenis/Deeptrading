@@ -15,9 +15,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from sqlalchemy import text  # noqa: E402
 
@@ -25,7 +29,8 @@ from app.database import SessionLocal  # noqa: E402
 from app.services.candle_cache import resample_from_1m  # noqa: E402
 
 VALUE2NAME = {2: "5min", 3: "15min", 4: "hour", 5: "day", 8: "10min",
-              9: "30min", 10: "2h", 11: "4h", 12: "week", 13: "month"}
+              9: "30min", 10: "2h", 11: "4h", 12: "week", 13: "month",
+              24: "day"}
 
 
 def parse_args():
@@ -33,12 +38,16 @@ def parse_args():
     p.add_argument("--dry", action="store_true", help="только план, без изменений")
     p.add_argument("--intervals", default="", help="имена ТФ через запятую (пусто = все известные)")
     p.add_argument("--figi", default="", help="один figi (для отладки)")
+    p.add_argument("--from", dest="dfrom", default="", help="начало окна YYYY-MM-DD")
+    p.add_argument("--to", dest="dto", default="", help="конец окна YYYY-MM-DD (не включая следующий день)")
     return p.parse_args()
 
 
 async def main() -> int:
     a = parse_args()
     only = {x.strip() for x in a.intervals.split(",") if x.strip()}
+    win_from = datetime.fromisoformat(a.dfrom).replace(tzinfo=timezone.utc) if a.dfrom else None
+    win_to = (datetime.fromisoformat(a.dto).replace(tzinfo=timezone.utc) + timedelta(days=1)) if a.dto else None
     async with SessionLocal() as db:
         rows = (await db.execute(text(
             "SELECT figi, interval, count(*), min(ts), max(ts) FROM candles "
@@ -54,13 +63,22 @@ async def main() -> int:
                 continue
             if a.figi and figi != a.figi:
                 continue
+            span_from = max(mn, win_from) if win_from else mn
+            span_to = min(mx, win_to) if win_to else mx
+            if span_from > span_to:
+                continue
             groups += 1
-            print(f"{figi} {name}[{ival}]: {cnt} строк {mn:%Y-%m-%d}..{mx:%Y-%m-%d}")
+            print(f"{figi} {name}[{ival}]: {cnt} строк {mn:%Y-%m-%d}..{mx:%Y-%m-%d} "
+                  f"→ окно {span_from:%Y-%m-%d}..{span_to:%Y-%m-%d}")
             if a.dry:
                 continue
-            await db.execute(text("DELETE FROM candles WHERE figi=:f AND interval=:i"),
-                             {"f": figi, "i": int(ival)})
-            n = await resample_from_1m(db, figi, name, mn, mx)
+            q = "DELETE FROM candles WHERE figi=:f AND interval=:i"
+            params = {"f": figi, "i": int(ival)}
+            if win_from is not None and win_to is not None:
+                q += " AND ts >= :a AND ts < :b"
+                params |= {"a": win_from, "b": win_to}
+            await db.execute(text(q), params)
+            n = await resample_from_1m(db, figi, name, span_from, span_to)
             await db.commit()
             done += 1
             print(f"   → пересобрано {n}")

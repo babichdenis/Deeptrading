@@ -7,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 import app.models  # noqa: F401 — регистрирует модели для create_all
-from app.database import Base
+from app.database import create_bootstrap_schema
 from app.models.signal_lab import LabExperimentRun, LabSignalEvent
 
 
@@ -16,7 +16,7 @@ def _now() -> str:
 
 
 def ensure_schema(eng) -> None:
-    Base.metadata.create_all(eng)
+    create_bootstrap_schema(eng)
 
 
 def upsert_run(eng, cfg, c_hash: str, code_version: str = "") -> str:

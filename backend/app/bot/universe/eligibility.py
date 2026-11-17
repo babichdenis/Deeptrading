@@ -69,3 +69,39 @@ def eligible_instruments(
     return tuple(
         r.instrument for r in eligibility_screen(items, profile) if r.eligible
     )
+
+def broker_eligibility(instrument: InstrumentRef, evidence: dict | None, *,
+                       side: str, observed_at=None, as_of=None, max_age=None,
+                       allowed_classes: tuple[str, ...] = ("TQBR",)) -> EligibilityResult:
+    from datetime import datetime, timedelta
+
+    reasons: list[str] = []
+    if max_age is None:
+        max_age = timedelta(hours=1)
+    if not isinstance(max_age, timedelta) or max_age <= timedelta(0):
+        raise ValueError("max_age must be a positive timedelta")
+    if not all(isinstance(value, datetime) and value.utcoffset() is not None
+               for value in (observed_at, as_of)):
+        reasons.append("broker_evidence_time_unknown")
+    elif observed_at > as_of:
+        reasons.append("broker_evidence_from_future")
+    elif as_of - observed_at > max_age:
+        reasons.append("broker_evidence_stale")
+    if side not in ("long", "short"):
+        raise ValueError("side must be long or short")
+    if evidence is None:
+        return EligibilityResult(instrument, False, tuple(reasons + ["broker_identity_unknown"]))
+    if not instrument.figi or evidence.get("figi") != instrument.figi or not evidence.get("uid"):
+        reasons.append("broker_identity_mismatch")
+    if evidence.get("class_code") not in allowed_classes:
+        reasons.append("trading_class_not_allowed")
+    lot = evidence.get("lot")
+    if type(lot) is not int or lot <= 0:
+        reasons.append("lot_unknown")
+    if evidence.get("api_trade_available_flag") is not True:
+        reasons.append("api_trade_unavailable")
+    required = ("buy_available_flag",) if side == "long" else ("sell_available_flag", "short_enabled_flag")
+    for flag in required:
+        if evidence.get(flag) is not True:
+            reasons.append(flag.removesuffix("_flag") + "_not_confirmed")
+    return EligibilityResult(instrument, not reasons, tuple(reasons))

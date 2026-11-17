@@ -10,6 +10,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from math import isfinite
+
+from app.engine.margin_budget import check_margin_budget, margin_number
 
 
 @dataclass
@@ -68,8 +71,9 @@ def snapshot(equity: float, positions: list[dict], meta_by_ticker: dict | None =
             stress[f"imoex_{shock:+.0%}"] += n * beta * shock * dir_
     net = longs - shorts
     margin = margin or {}
-    start = float(margin.get("starting_margin") or 0.0)
-    liquid = float(margin.get("liquid") or equity)
+    start = margin_number(margin.get("starting_margin"))
+    liquid = margin_number(margin.get("liquid"))
+    committed = margin_number(margin.get("corrected_margin", margin.get("starting_margin")))
     out = {
         "equity": round(equity, 2),
         "long_notional": round(longs, 2),
@@ -80,9 +84,11 @@ def snapshot(equity: float, positions: list[dict], meta_by_ticker: dict | None =
         "short_exposure_pct": round(shorts / equity, 4) if equity else 0.0,
         "long_exposure_pct": round(longs / equity, 4) if equity else 0.0,
         "gross_leverage": round(gross / equity, 2) if equity else 0.0,
-        "margin_used": round(start, 2),
-        "margin_use_pct": round(start / equity, 4) if equity else 0.0,
-        "margin_free": round(max(0.0, liquid - start), 2),
+        "margin_used": round(start, 2) if start is not None else None,
+        "margin_liquid": liquid,
+        "margin_committed": committed,
+        "margin_use_pct": round(start / liquid, 4) if start is not None and liquid is not None and liquid > 0 else None,
+        "margin_free": round(max(0.0, liquid - committed), 2) if liquid is not None and committed is not None else None,
         "sector_pct": {k: round(v / equity, 4) if equity else 0.0 for k, v in sectors.items()},
         "stress_pct": {k: round(v / equity, 4) if equity else 0.0 for k, v in stress.items()},
     }
@@ -95,10 +101,22 @@ def check_order(snap: dict, side: str, notional: float, ticker: str,
                 limits: PortfolioLimits | None = None) -> tuple[bool, str]:
     """Проверка заявки по лимитам портфеля. Возвращает (ok, reason)."""
     lim = limits or PortfolioLimits()
-    eq = float(snap.get("equity") or 0.0)
-    if eq <= 0 or notional <= 0:
-        return True, "no_equity_check"
-    is_long = str(side).upper() in ("BUY", "LONG")
+    try:
+        eq = float(snap.get("equity"))
+    except (TypeError, ValueError, OverflowError):
+        return False, "invalid_equity"
+    if not isfinite(eq) or eq <= 0:
+        return False, "invalid_equity"
+    try:
+        notional = float(notional)
+    except (TypeError, ValueError, OverflowError):
+        return False, "invalid_notional"
+    if not isfinite(notional) or notional <= 0:
+        return False, "invalid_notional"
+    normalized_side = str(side).upper()
+    if normalized_side not in ("BUY", "LONG", "SELL", "SHORT"):
+        return False, "invalid_side"
+    is_long = normalized_side in ("BUY", "LONG")
     dir_ = 1.0 if is_long else -1.0
     # 1) чистая экспозиция
     if lim.max_net_exposure_pct > 0:
@@ -116,19 +134,15 @@ def check_order(snap: dict, side: str, notional: float, ticker: str,
                            f"{lim.max_sector_pct:.0%} (equity)")
     # 3) маржа (буфер)
     if lim.max_margin_use_pct > 0:
-        used = float(snap.get("margin_used") or 0.0)
-        # Маржа новой позиции = номинал × риск-ставка брокера (dlong/dshort) —
-        # это то, что реально заморозит брокер. Fallback — оценка через gross_leverage.
-        _m3 = meta_for(meta_by_ticker, ticker)
-        _risk3 = float(_m3.get("dshort" if not is_long else "dlong") or 0.0)
-        if 0 < _risk3 < 1:
-            new_margin = notional * _risk3
-        else:
-            lev = max(1.0, float(snap.get("gross_leverage") or 1.0))
-            new_margin = notional / lev
-        if (used + new_margin) > eq * lim.max_margin_use_pct:
-            return False, (f"маржа {(used+new_margin)/eq:.0%} > "
-                           f"{lim.max_margin_use_pct:.0%} (equity)")
+        instrument = meta_for(meta_by_ticker, ticker)
+        decision = check_margin_budget(
+            liquid_value=snap.get("margin_liquid"),
+            committed_margin=snap.get("margin_committed"),
+            additional_notional=notional,
+            initial_risk_rate=instrument.get("dlong" if is_long else "dshort"),
+            max_use_fraction=lim.max_margin_use_pct)
+        if not decision.allowed:
+            return False, f"маржа: {decision.reason}"
     # 4) стресс при ±5% IMOEX
     if lim.max_stress_loss_pct > 0:
         m = meta_for(meta_by_ticker, ticker)
@@ -226,6 +240,22 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
 
 
+def turnover_veto(turnover: float | None, minimum: float) -> str | None:
+    if not isfinite(minimum) or minimum < 0:
+        return "liquidity_threshold_invalid"
+    if minimum == 0:
+        return None
+    if turnover is None:
+        return "liquidity_unknown"
+    try:
+        value = float(turnover)
+    except (TypeError, ValueError, OverflowError):
+        return "liquidity_unknown"
+    if not isfinite(value) or value < 0:
+        return "liquidity_unknown"
+    return "illiquid" if value < minimum else None
+
+
 def candidate_score(*, ret_ticker: float, ret_index: float, beta: float = 1.0,
                     side: str = "SELL", hist: dict | None = None, turnover: float = 0.0,
                     votes: int = 0, total_members: int = 0, vol_ratio: float = 1.0,
@@ -257,7 +287,8 @@ def candidate_score(*, ret_ticker: float, ret_index: float, beta: float = 1.0,
            if total_members else 0.5)
     f_vol = _clamp01(float(vol_ratio or 1.0) / 2.0)
     f_conf = 0.6 * f_q + 0.4 * f_vol
-    t = float(turnover or 0.0)
+    liquidity_reason = turnover_veto(turnover, float(min_turnover or 0.0))
+    t = float(turnover or 0.0) if liquidity_reason != "liquidity_unknown" else 0.0
     f_liq = (1.0 if t > 50e6 else 0.75 if t > 10e6 else 0.5 if t > 1e6
              else 0.2 if t > 0 else 0.5)
     f_fit = _clamp01(fit if fit is not None else 1.0)
@@ -271,8 +302,8 @@ def candidate_score(*, ret_ticker: float, ret_index: float, beta: float = 1.0,
     total = (0.30 * f_rs + 0.25 * f_hist + 0.20 * f_conf
              + 0.15 * f_liq + 0.10 * f_fit + adj)
     veto: list[str] = []
-    if 0 < t < float(min_turnover or 0.0):
-        veto.append("illiquid")
+    if liquidity_reason is not None:
+        veto.append(liquidity_reason)
     if (history_veto and n >= 20 and float(h.get("net") or 0.0) < -50.0
             and float(h.get("wr") or 0.0) < 0.25):
         veto.append("bad_history")

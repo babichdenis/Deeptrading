@@ -143,11 +143,11 @@ def test_detect_kind(tmp_path):
     junk = tmp_path / "notes.json"
     junk.write_text(json.dumps({"hello": "world"}), encoding="utf-8")
 
-    assert imp.detect_kind(real, json.loads(real.read_text())) == "real"
-    assert imp.detect_kind(matrix, json.loads(matrix.read_text())) == "matrix"
-    assert imp.detect_kind(wf, json.loads(wf.read_text())) == "wf"
-    assert imp.detect_kind(exp, json.loads(exp.read_text())) == "exp"
-    assert imp.detect_kind(junk, json.loads(junk.read_text())) is None
+    assert imp.detect_kind(real, json.loads(real.read_text(encoding="utf-8"))) == "real"
+    assert imp.detect_kind(matrix, json.loads(matrix.read_text(encoding="utf-8"))) == "matrix"
+    assert imp.detect_kind(wf, json.loads(wf.read_text(encoding="utf-8"))) == "wf"
+    assert imp.detect_kind(exp, json.loads(exp.read_text(encoding="utf-8"))) == "exp"
+    assert imp.detect_kind(junk, json.loads(junk.read_text(encoding="utf-8"))) is None
 
 
 def _real_payload() -> dict:

@@ -62,7 +62,8 @@ def _candles(closes, base, interval=24):
     s.interval = interval
     for i, close in enumerate(closes):
         ts = base - __import__("datetime").timedelta(days=len(closes) - 1 - i)
-        s.append((ts, close, close * 1.001, close * 0.998, close))
+        opening = closes[i - 1] if i else close
+        s.append((ts, opening, max(opening, close) * 1.001, min(opening, close) * 0.998, close))
     return s
 
 
@@ -70,7 +71,9 @@ AS_OF = datetime(2026, 6, 30, 20, 0, tzinfo=timezone.utc)
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Свой цикл на каждый вызов: общий неявный цикл сбрасывают другие тесты."""
+    with asyncio.Runner() as runner:
+        return runner.run(coro)
 
 
 def test_config_defaults_disabled():
@@ -195,14 +198,14 @@ def test_lookback_window_limits_history(tmp_path):
                                            {}), {"A": "f1", "B": "f2"}, cfg, AS_OF))
     by = {u["ticker"]: u for u in got}
     assert by["A"]["move_cum_ret"] == pytest.approx(-0.5)
-    assert by["B"]["move_cum_ret"] == pytest.approx(-0.75)
+    assert by["B"]["move_cum_ret"] == pytest.approx(-0.5)
 
 
 def test_rsi_metric_uses_canonical_hub(tmp_path):
     base = datetime(2026, 6, 29, tzinfo=timezone.utc)
     down = _candles([100 - i for i in range(20)], base)
     up = _candles([80 + i for i in range(20)], base)
-    cfg = MoveSelectConfig(enabled=True, direction="any", n=5, lookback_days=25,
+    cfg = MoveSelectConfig(enabled=True, direction="any", n=5, lookback_days=20,
                            metric="rsi", tf="day", rsi_period=14, shortable_only=False,
                            log_dir=str(tmp_path))
     got = _run(select_move_universe(FakeDB({"f1": down, "f2": up}, {}), {"A": "f1", "B": "f2"},
@@ -251,7 +254,7 @@ def test_logger_writes_jsonl(tmp_path):
     log.record("picked", "AAA", rank=1, score=-0.1)
     log.note("hello")
     log.close()
-    rows = [json.loads(line) for line in (tmp_path / "run1.jsonl").read_text().splitlines()]
+    rows = [json.loads(line) for line in (tmp_path / "run1.jsonl").read_text(encoding="utf-8").splitlines()]
     assert rows[0]["action"] == "picked"
     assert rows[0]["ticker"] == "AAA"
     assert rows[1]["action"] == "note"
@@ -262,3 +265,20 @@ def test_try_never_raises_on_bad_config(tmp_path):
     path.write_text("{not json", encoding="utf-8")
     assert _run(try_select_move_universe(FakeDB({}, {}), {"A": "f1"}, feed="replay",
                                          as_of=AS_OF, config_path=path)) == []
+
+
+@pytest.fixture(autouse=True)
+def selection_hub_fixture(monkeypatch):
+    from types import SimpleNamespace
+    from datetime import timedelta
+    from app.engine.models import Candle
+    from app.engine.candlehub import tf_to_seconds
+
+    async def tail(db, figi, tf, limit, *, as_of):
+        seconds = tf_to_seconds(tf)
+        rows = db.candles.get(figi, [])
+        return [Candle(ts=ts, open=o, high=h, low=l, close=c, volume=0)
+                for ts, o, h, l, c in rows
+                if ts + timedelta(seconds=seconds) <= as_of][-limit:]
+
+    monkeypatch.setattr('app.bot.universe.bars._reader', lambda: SimpleNamespace(tail_bars=tail))

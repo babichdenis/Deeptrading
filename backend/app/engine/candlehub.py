@@ -63,12 +63,16 @@ build_tf() — чистая функция сборки ТФ из списка 1
 """
 from __future__ import annotations
 
+import logging
 import math
 from collections import deque
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable
 
 from app.engine.models import Candle
+
+logger = logging.getLogger("candlehub")
 
 TF_SECONDS: dict[str, int] = {
     "1min": 60,
@@ -126,6 +130,59 @@ def validate_candle(c: Candle, *, rel_eps: float = 1e-9) -> str | None:
     if c.high + eps < c.low:
         return "bad_range"
     return None
+
+
+def normalize_candle_for_ingest(c: Candle, *,
+                                rel_eps: float = 1e-9) -> tuple[Candle, bool]:
+    """Привести бар в согласие — ЕДИНСТВЕННАЯ политика входа, и для акций, и для индексов.
+
+    Источник может отдать бар, у которого тело выходит за high/low. У нас так
+    пришло 4 505 376 исторических строк (2024–2025): high == low, а open/close
+    вне этого диапазона. validate_candle() отвергает такой бар как "bad_range" —
+    и в ряду появляется дыра вместо данных.
+
+    Поэтому вход расширяет огибающую до всех четырёх цен и только потом отдаёт
+    бар проверке. Решение принимается ЗДЕСЬ, а не в вызывающих модулях: иначе
+    у акций и у индексов (MOEX ISS) появляются разные политики, и расхождение
+    всплывает уже в агрегатах старших ТФ.
+
+    Возвращает (бар, был_ли_исправлен). Неизменяемая Candle: правится копией.
+    Нулевой объём и честно плоский бар (o==h==l==c) остаются как есть.
+    """
+    try:
+        o, h, lo, cl = (float(x) for x in (c.open, c.high, c.low, c.close))
+    except (TypeError, ValueError):
+        return c, False
+    if not all(math.isfinite(v) for v in (o, h, lo, cl)):
+        return c, False
+    eps = rel_eps * max(1.0, abs(h), abs(lo))
+    if h + eps >= max(o, cl) and lo - eps <= min(o, cl) and h + eps >= lo:
+        return c, False
+    # Огибающая всех четырёх цен: держит и порядок (max >= min), и вложенность
+    # open/close. При max < min границы противоречат друг другу — честнее
+    # расширить обе, чем молча выбрать одну.
+    new_high = max(h, o, cl, lo)
+    new_low = min(lo, o, cl, h)
+    if new_high == h and new_low == lo:
+        return c, False
+    return replace(c, high=new_high, low=new_low), True
+
+
+def normalize_row_for_ingest(row: dict, *,
+                             rel_eps: float = 1e-9) -> tuple[dict, bool]:
+    """То же для словаря строки БД (persist-путь). Политика — одна, из хаба."""
+    try:
+        c = Candle(ts=row["ts"], open=float(row["open"]), high=float(row["high"]),
+                   low=float(row["low"]), close=float(row["close"]),
+                   volume=float(row.get("volume") or 0.0))
+    except (KeyError, TypeError, ValueError):
+        return row, False
+    fixed, changed = normalize_candle_for_ingest(c, rel_eps=rel_eps)
+    if not changed:
+        return row, False
+    out = dict(row)
+    out["high"], out["low"] = fixed.high, fixed.low
+    return out, True
 
 
 def tf_to_seconds(tf: str | int) -> int:
@@ -197,6 +254,7 @@ class CandleSeries:
         self._n_skipped = 0                   # дубликаты + опоздавшие + дропы
         self._n_rejected = 0                  # отброшено валидатором
         self._n_rebuilds = 0                  # сколько раз ряд перестраивался
+        self._n_evicted = 0                   # вытеснено головой deque по maxlen
         self.on_closed: list[EventListener] = []
         self.on_updated: list[EventListener] = []
         self.on_rejected: list[RejectListener] = []
@@ -230,6 +288,16 @@ class CandleSeries:
     def rebuilds(self) -> int:
         """Сколько раз ряд целиком перестраивался (коррекция истории)."""
         return self._n_rebuilds
+
+    @property
+    def evicted(self) -> int:
+        """Сколько ЗАКРЫТЫХ баров вытеснено из памяти по maxlen.
+
+        Только про память: данные остаются в БД. Ненулевое значение означает,
+        что ряд в памяти короче загруженной истории — за глубиной диапазона
+        надо идти в read_range, а не в snapshot.
+        """
+        return self._n_evicted
 
     def snapshot(self, n: int | None = None) -> list[Candle]:
         """Копия последних n закрытых баров (хронологический порядок)."""
@@ -378,7 +446,18 @@ class CandleSeries:
 
         items = sorted(merged.items(), key=lambda kv: kv[0])
         if len(items) > self.maxlen:
+            # Обрезка головы: история остаётся в БД, но из памяти уходит часть
+            # загруженного диапазона. Раньше это было молча — теперь считается
+            # и логируется, чтобы глубина ряда в памяти не выдавалась за
+            # загруженную. maxlen НЕ увеличиваем: за диапазоном — read_range.
+            dropped = len(items) - self.maxlen
             items = items[-self.maxlen:]
+            self._n_evicted += dropped
+            logger.warning(
+                "[CandleHub] %s tf=%ss merge_1m: evicted %d oldest bars (maxlen=%d, "
+                "requested %d); DB keeps full history",
+                self.figi, self.tf_seconds, dropped, self.maxlen, len(items) + dropped,
+            )
         self._closed = deque(c for _ts, (c, _s) in items)
         self._start = 0
         self._pos = {ts: j for j, (ts, _kv) in enumerate(items)}
@@ -438,6 +517,7 @@ class CandleSeries:
         self._pos.pop(ev.ts, None)
         self._src.pop(ev.ts, None)
         self._start += 1
+        self._n_evicted += 1
 
     def _append_closed(self, candle: Candle, *, source: str, fire: bool) -> None:
         if len(self._closed) >= self.maxlen:

@@ -4,10 +4,10 @@ from __future__ import annotations
 from app.bot.portfolio import PortfolioLimits, check_order, snapshot
 
 META = {
-    "SBER": {"sector": "financial", "beta": 0.8},
-    "GAZP": {"sector": "energy", "beta": 1.0},
+    "SBER": {"sector": "financial", "beta": 0.8, "dlong": 1.0, "dshort": 1.0},
+    "GAZP": {"sector": "energy", "beta": 1.0, "dlong": 1.0, "dshort": 1.0},
     "LKOH": {"sector": "energy", "beta": 1.1},
-    "NLMK": {"sector": "materials", "beta": 1.0},
+    "NLMK": {"sector": "materials", "beta": 1.0, "dlong": 1.0, "dshort": 1.0},
 }
 
 
@@ -140,7 +140,7 @@ def test_candidate_score_vetoes_illiquid():
     assert r2["veto"] == []
     # нулевой оборот = нет данных, не хороним
     r3 = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL", turnover=0.0)
-    assert "illiquid" not in r3["veto"]
+    assert "illiquid" in r3["veto"]
     # порог настраивается
     r4 = candidate_score(ret_ticker=-0.01, ret_index=0.0, side="SELL",
                          turnover=5e6, min_turnover=10e6)

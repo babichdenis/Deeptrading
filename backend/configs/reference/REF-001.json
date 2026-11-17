@@ -23,12 +23,36 @@
     "slippage_bps": 2.0
   },
   "expected": {
-    "data_hash": "4b76c10cb0373247",
-    "bars": 1192,
+    "data_hash": "3a0d5cb2dece3dd7",
+    "bars": 1228,
     "pre_window_trades": 1,
-    "trades": 4,
-    "net": -2.8709,
-    "fingerprint": "d0451b32dde4f94450366000c7e2905a6c5460c0b95ae83752db4fb460ecdb55"
+    "trades": 3,
+    "net": -1.3912,
+    "fingerprint": "998b62f69729dfb228a0c3efee19a8522505cae8e37cfbacb82396af3261bb1f"
   },
-  "warmup_days": 3
+  "warmup_days": 3,
+  "lineage": {
+    "created_at": "2026-11-15T13:14:09Z",
+    "host": "DESKTOP-56NPC9C",
+    "git_commit": "e8f74d7",
+    "reason": "ARCH-20261115-09: зафиксировано происхождение эталона (хеши входов, границы окна UTC, прогрев) и объяснено расхождение 1228 баров против 872 бакетов окна",
+    "previous": "archive\\REF-001-20261115T131409Z.json",
+    "inputs": {
+      "ticker": "SBER",
+      "figi": "BBG004730N88",
+      "interval": "10min",
+      "window_utc": [
+        "2026-09-01T00:00:00+00:00",
+        "2026-09-09T00:00:00+00:00"
+      ],
+      "warmup_days": 3,
+      "load_from": "2026-08-29",
+      "bars": 1228,
+      "bars_window": 872,
+      "first_ts": "2026-08-29T00:00:00+00:00",
+      "last_ts": "2026-09-08T20:40:00+00:00",
+      "data_hash": "3a0d5cb2dece3dd7",
+      "strategy_hash": "42b577432de1dc99"
+    }
+  }
 }

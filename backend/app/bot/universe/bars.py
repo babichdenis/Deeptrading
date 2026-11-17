@@ -17,10 +17,10 @@ Bounded-семантика (AUDIT P1.1/P1.3): меры (volatility/trend/feature
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
-from sqlalchemy import DateTime, Integer, SmallInteger, String, bindparam, select, text
+from sqlalchemy import DateTime, Integer, SmallInteger, String, bindparam, func, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,33 +94,58 @@ def resample_1m_to_5m(bars_1m: list, figi: str) -> list[EngineCandle]:
     return out
 
 
+_READER_ORCH = None
+
+
+def _reader():
+    """Оркестратор хаба только для чтения (hub-серии при этом не создаются)."""
+    global _READER_ORCH
+    if _READER_ORCH is None:
+        from app.services.candle_hub_orchestrator import CandleHubOrchestrator
+
+        _READER_ORCH = CandleHubOrchestrator()
+    return _READER_ORCH
+
+
 async def load_bars(
     db: AsyncSession, figi: str, interval: int, limit: int
 ) -> list[EngineCandle]:
-    """Последние limit свечей figi, по возрастанию ts (как в legacy)."""
-    rows = (
-        await db.execute(
-            select(Candle)
-            .where(Candle.figi == figi, Candle.interval == interval)
-            .order_by(Candle.ts.desc())
-            .limit(limit)
-        )
-    ).scalars().all()
-    return [to_engine_candle(r) for r in reversed(rows)]
+    """Последние limit ЗАКРЫТЫХ свечей figi, по возрастанию ts.
+
+    Чтение идёт через зону хаба, а не своим SQL: толкование кода interval и
+    политика входа (нормализация -> validate_candle) живут в одном месте, а
+    незакрытый бакет в ряд не попадает. Код interval толкует хаб: 1 -> 1min,
+    2 -> 5min, 4 -> hour, 24 -> day, 5 -> legacy day (см. interval_to_tf).
+    """
+    from app.services.candle_hub_orchestrator import interval_to_tf
+
+    return await _reader().tail_bars(db, figi, interval_to_tf(interval), limit)
 
 
 async def load_all_bars(
     db: AsyncSession, figi: str, interval: int
 ) -> list[EngineCandle]:
-    """Все свечи figi за интервал, по возрастанию ts, без ограничения выборки."""
-    rows = (
+    """Все свечи figi за интервал, по возрастанию ts, без ограничения выборки.
+
+    Читается через read_range хаба: диапазон от первой строки в БД до as_of,
+    со строгим режимом (неполные бакеты не выдаются как полные).
+    """
+    from app.services.candle_hub_orchestrator import interval_to_tf
+
+    tf = interval_to_tf(interval)
+    first_ts = (
         await db.execute(
-            select(Candle)
-            .where(Candle.figi == figi, Candle.interval == interval)
-            .order_by(Candle.ts)
+            select(func.min(Candle.ts)).where(
+                Candle.figi == figi, Candle.interval == interval)
         )
-    ).scalars().all()
-    return [to_engine_candle(r) for r in rows]
+    ).scalar()
+    if first_ts is None:
+        return []
+    if first_ts.tzinfo is None:
+        first_ts = first_ts.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    res = await _reader().read_range(db, figi, tf, first_ts, now, as_of=now)
+    return list(res.candles)
 
 
 BULK_TAIL_SQL = text(
@@ -209,6 +234,15 @@ async def load_bars_bulk_bounded(
     unique = sorted({f.strip() for f in figis if f and f.strip()})
     if not unique:
         return {}
+    # Шаг бара в минутах — ДЛИТЕЛЬНОСТЬ интервала, а не его код в БД.
+    # Раньше сюда передавался сам код: для interval=2 (5-минутные) граница
+    # закрытия считалась как ts+2 мин вместо ts+5 мин, а для interval=5
+    # (дневные) — как ts+5 мин вместо суток, то есть в фичи попадал ещё не
+    # закрывшийся дневной бар. Длительность толкует хаб.
+    from app.engine.candlehub import tf_to_seconds
+    from app.services.candle_hub_orchestrator import interval_to_tf
+
+    step_min = tf_to_seconds(interval_to_tf(interval)) // 60
     result = await db.execute(
         BULK_TAIL_SQL,
         {
@@ -216,7 +250,7 @@ async def load_bars_bulk_bounded(
             "interval": interval,
             "as_of": as_of,
             "window": window,
-            "step_min": interval,
+            "step_min": step_min,
         },
     )
     return group_tail_rows(_as_tail_rows(result))

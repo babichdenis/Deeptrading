@@ -178,3 +178,67 @@ async def select_screened_universe(
             "screen_score": candidate.score,
         })
     return out
+
+
+async def select_broker_candidates(db: AsyncSession, *, catalog: dict[str, dict],
+                                   observed_at: datetime, as_of: datetime,
+                                   top_n: int, ensemble: bool = False) -> tuple[list[dict], list[dict]]:
+    from .bars import _reader, resample_1m_to_5m
+    from datetime import timedelta
+    from .discovery import discover_broker_universe
+    from .features import ATR_PERIOD, atr_pct
+    from .eligibility import broker_eligibility
+    from .selection import top_n as select_top_n
+
+    snapshot, broker_decisions = await discover_broker_universe(
+        db, broker_instruments=catalog, observed_at=observed_at, as_of=as_of)
+    decisions = [{"figi": d.instrument.figi, "ticker": d.instrument.ticker,
+                  "reasons": list(d.reasons)} for d in broker_decisions]
+    by_figi = {d["figi"]: d for d in decisions}
+    scored = []
+    for entry in snapshot.entries:
+        window = FEATURE_WINDOW if ensemble else 20 + ATR_PERIOD
+        if ensemble:
+            minute_bars = await _reader().tail_bars(db, entry.ref.figi, "1min", 1000, as_of=as_of)
+            bars = [bar for bar in resample_1m_to_5m(minute_bars, entry.ref.figi)
+                    if bar.ts + timedelta(minutes=5) <= as_of]
+        else:
+            bars = await _reader().tail_bars(db, entry.ref.figi, "day", window, as_of=as_of)
+        pct, valid = atr_pct(bars, window)
+        if len(bars) < (15 if ensemble else 20) or not valid:
+            by_figi[entry.ref.figi]["reasons"].append("insufficient_valid_history")
+            continue
+        short = broker_eligibility(entry.ref, catalog.get(entry.ref.figi), side="short",
+                                   observed_at=observed_at, as_of=as_of)
+        scored.append(dict(figi=entry.ref.figi, ticker=entry.ref.ticker, lot=entry.lot,
+                           lot_size=entry.lot, name=entry.name, atr_pct=pct,
+                           short_allowed=short.eligible, short_reasons=list(short.reasons),
+                           broker_observed_at=observed_at.isoformat()))
+    return select_top_n(scored, key=lambda row: row["atr_pct"], limit=top_n), decisions
+
+
+def constrain_manual_candidates(candidates: list[dict], decisions: list[dict],
+                                requested: list[dict]) -> tuple[list[dict], list[dict]]:
+    available = {row["figi"]: row for row in candidates}
+    requested_figis = {row["figi"] for row in requested}
+    audited = {row["figi"]: {**row, "reasons": list(row["reasons"])} for row in decisions}
+    selected = []
+    seen = set()
+    for request in requested:
+        figi = request["figi"]
+        if figi in seen:
+            continue
+        seen.add(figi)
+        candidate = available.get(figi)
+        if candidate is None:
+            audited.setdefault(figi, dict(figi=figi, ticker=request.get("ticker", figi),
+                                          reasons=["manual_candidate_unavailable"]))
+            continue
+        if request.get("side") == "short" and not candidate.get("short_allowed", False):
+            audited[figi]["reasons"].append("short_enabled_not_confirmed")
+            continue
+        selected.append({**request, **candidate})
+    for figi, verdict in audited.items():
+        if figi not in requested_figis and not verdict["reasons"]:
+            verdict["reasons"].append("outside_manual_selection")
+    return selected, list(audited.values())

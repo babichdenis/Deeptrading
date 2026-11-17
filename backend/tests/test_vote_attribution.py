@@ -24,22 +24,34 @@ PRIOR_N = 20
 
 
 def _load_scores() -> list[dict]:
-    with open(os.path.join(RUN_DIR, "vote_shadow_scores.csv"), newline="") as f:
+    path = os.path.join(RUN_DIR, "vote_shadow_scores.csv")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
 def _load_attribution() -> dict:
-    with open(os.path.join(RUN_DIR, "vote_attribution.json")) as f:
+    path = os.path.join(RUN_DIR, "vote_attribution.json")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
 def _load_intents() -> dict[str, dict]:
-    with open(os.path.join(RUN_DIR, "entry_intents.csv"), newline="") as f:
+    path = os.path.join(RUN_DIR, "entry_intents.csv")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, newline="", encoding="utf-8") as f:
         return {r["intent_id"]: r for r in csv.DictReader(f)}
 
 
 def _load_trades() -> dict[str, dict]:
-    with open(os.path.join(RUN_DIR, "trades.csv"), newline="") as f:
+    path = os.path.join(RUN_DIR, "trades.csv")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, newline="", encoding="utf-8") as f:
         return {r["trade_id"]: r for r in csv.DictReader(f)}
 
 
@@ -99,7 +111,10 @@ def test_functions_mask_reconciles(scores: list[dict], intents: dict[str, dict])
 
 def test_all_score_rows_link_to_candidate(scores: list[dict], intents: dict[str, dict]) -> None:
     """Каждая score-строка линкуется на candidate и trade."""
-    with open(os.path.join(RUN_DIR, "trades.csv"), newline="") as f:
+    path = os.path.join(RUN_DIR, "trades.csv")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, newline="", encoding="utf-8") as f:
         trade_keys = {(r["figi"], r["decision_time"].replace("Z", "+00:00"), r["side"])
                       for r in csv.DictReader(f)}
     for row in scores:
@@ -127,7 +142,7 @@ def test_shadow_score_cannot_affect_engine(scores: list[dict]) -> None:
             for fn in files:
                 if not fn.endswith(".py"):
                     continue
-                with open(os.path.join(dirpath, fn)) as f:
+                with open(os.path.join(dirpath, fn), encoding="utf-8") as f:
                     if "vote_shadow" in f.read() or "shadow_score" in f.read():
                         hits.append(os.path.join(dirpath, fn))
         assert not hits, f"движок ссылается на shadow score: {hits}"
@@ -137,20 +152,29 @@ DS_DIR = os.path.join(RUN_DIR, "vote_attribution_dataset_v1")
 
 
 def test_canonical_shrinkage_k_200() -> None:
-    with open(os.path.join(DS_DIR, "manifest.json")) as f:
+    path = os.path.join(DS_DIR, "manifest.json")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, encoding="utf-8") as f:
         m = json.load(f)
     assert m["shrinkage_k"] == 200, f"k={m['shrinkage_k']} != 200"
     assert m["formula_version"] == "v1_median_shrink"
     assert m["config_hash"] == "1c7f75dc44c2aa67"
     assert "training_cutoff_rule" in m
-    with open(os.path.join(DS_DIR, "shadow_weights.json")) as f:
+    path = os.path.join(DS_DIR, "shadow_weights.json")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, encoding="utf-8") as f:
         sw = json.load(f)
     assert sw["shrinkage_k"] == 200
 
 
 def test_weights_are_median_shrunk_and_walk_forward() -> None:
     scores = _load_scores()
-    with open(os.path.join(DS_DIR, "shadow_weights.json")) as f:
+    path = os.path.join(DS_DIR, "shadow_weights.json")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, encoding="utf-8") as f:
         sw = json.load(f)
     # любой ненулевой вес w = (n/(n+200))*median для соответствующего дня
     for day, wmap in sw["weights_by_day"].items():
@@ -198,7 +222,10 @@ def test_all_21_unordered_pairs_exist() -> None:
 
 
 def test_artifacts_have_manifest_runid_cutoff() -> None:
-    with open(os.path.join(DS_DIR, "manifest.json")) as f:
+    path = os.path.join(DS_DIR, "manifest.json")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, encoding="utf-8") as f:
         m = json.load(f)
     assert m["run_id"] == RUN_ID
     assert m["config_hash"].startswith("1c7f75dc44c2aa67")

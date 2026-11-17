@@ -15,7 +15,7 @@ from app.engine.models import Candle
 from app.services.ensemble import compute_ensemble
 
 
-T0 = datetime(2026, 8, 1, 6, 50, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 3, 6, 50, tzinfo=timezone.utc)
 
 
 def _make_candles(n=500, base_price=100.0, seed=42):
@@ -32,7 +32,7 @@ def _make_candles(n=500, base_price=100.0, seed=42):
         l = price * (1 - abs(rng.gauss(0, 0.0005)))
         c = price + rng.gauss(0, 0.0003) * price
         v = int(rng.uniform(500, 2000))
-        candles.append(Candle(ts=ts, open=o, high=h, low=l, close=c, volume=v))
+        candles.append(Candle(ts=ts, open=o, high=max(h, o, c), low=min(l, o, c), close=c, volume=v))
     return candles
 
 
@@ -49,7 +49,8 @@ def _default_req():
             {"strategy_id": "donchian_breakout", "tf": "5min",
              "params": {"period": 45}},
         ],
-        "quorum": 2,
+        "quorum": 1,
+        "bias_mode": "info",
         "entry": {"tf": "1min", "lookback": 1},
         "exit_policy": {"id": "atr_stop", "params": {
             "period": 14, "multiplier": 4.0, "risk_reward": 4.0}},
@@ -59,25 +60,17 @@ def _default_req():
     }
 
 
+def _trades(result):
+    assert "error" not in result, result.get("error")
+    trades = result["static"]["trades"]
+    assert trades, "parity fixture must exercise actual trades"
+    return trades
+
+
 def _fingerprint(result):
-    trades_summary = []
-    for t in result.get("trades", []):
-        trades_summary.append({
-            "figi": t.get("figi"),
-            "side": t.get("side"),
-            "qty": t.get("qty"),
-            "entry_price": round(float(t.get("entry_price", 0)), 6),
-            "exit_price": round(float(t.get("exit_price", 0)), 6),
-            "exit_reason": t.get("exit_reason"),
-            "net_pnl": round(float(t.get("net_pnl", 0)), 6),
-        })
-    data = {
-        "trades_count": len(result.get("trades", [])),
-        "trades": trades_summary,
-        "error": result.get("error"),
-    }
-    raw = json.dumps(data, sort_keys=True, default=str)
-    return hashlib.sha256(raw.encode()).hexdigest()
+    data = {"trades": _trades(result), "economic": result["static"]["economic"],
+            "funnel": result["static"]["funnel"]}
+    return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
 
 
 class TestDeterministicReplay:
@@ -95,16 +88,16 @@ class TestDeterministicReplay:
         req = _default_req()
         r1 = compute_ensemble(candles, req)
         r2 = compute_ensemble(candles, req)
-        assert len(r1.get("trades", [])) == len(r2.get("trades", []))
+        assert len(_trades(r1)) == len(_trades(r2))
 
     def test_same_trade_details(self):
         candles = _make_candles(n=500, seed=42)
         req = _default_req()
         r1 = compute_ensemble(candles, req)
         r2 = compute_ensemble(candles, req)
-        t1 = r1.get("trades", [])
-        t2 = r2.get("trades", [])
-        assert len(t1) == len(t2)
+        t1 = _trades(r1)
+        t2 = _trades(r2)
+        assert t1 == t2
         for i, (a, b) in enumerate(zip(t1, t2)):
             assert a.get("entry_price") == b.get("entry_price"), f"Trade {i} entry differs"
             assert a.get("exit_price") == b.get("exit_price"), f"Trade {i} exit differs"

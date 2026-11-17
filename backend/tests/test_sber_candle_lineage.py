@@ -268,8 +268,8 @@ def test_offline_transfer_from_facts_src(tmp_path):
         capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
     outdir = Path(proc.stdout.strip().split("saved: ")[1])
-    man = json.loads((outdir / "manifest.json").read_text())
-    fac = json.loads((outdir / "facts.json").read_text())
+    man = json.loads((outdir / "manifest.json").read_text(encoding="utf-8"))
+    fac = json.loads((outdir / "facts.json").read_text(encoding="utf-8"))
 
     assert man["mode"] == "offline_transfer"
     assert man["sha256_script"] == hashlib.sha256(Path(ascl.__file__).read_bytes()).hexdigest()

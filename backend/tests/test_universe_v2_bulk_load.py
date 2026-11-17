@@ -314,8 +314,9 @@ def test_bulk_matches_per_figi_on_live_db():
     from sqlalchemy.ext.asyncio import create_async_engine
 
     from app.bot.universe.features import compute_feature_set
+    from app.config import get_settings
 
-    url = "postgresql+asyncpg://deeptrading:deeptrading@192.168.1.7:5432/deeptrading"
+    url = get_settings().database_url
 
     async def run():
         engine = create_async_engine(url, poolclass=None)

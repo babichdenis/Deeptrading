@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -72,6 +73,40 @@ def _trade_dict(t) -> dict:
     }
 
 
+def _strategy_hash(ref: dict) -> str:
+    payload = json.dumps({"engine": ref["strategy"]["engine"],
+                          "params": ref["strategy"].get("params") or {},
+                          "exit": ref.get("exit") or {},
+                          "execution": ref.get("execution") or {}},
+                         sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _git_commit() -> str:
+    try:
+        import subprocess
+        out = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _archive(path: Path, *, stamp: str) -> str | None:
+    """Сохранить прежнюю версию эталона рядом, в archive/, прежде чем перезаписать.
+
+    Эталон — точка отсчёта регрессий, поэтому его нельзя молча заменить: прежняя
+    версия остаётся на диске со своим временем, а новая ссылается на неё в lineage.
+    """
+    if not path.exists():
+        return None
+    arc = path.parent / "archive"
+    arc.mkdir(parents=True, exist_ok=True)
+    target = arc / f"{path.stem}-{stamp}.json"
+    target.write_bytes(path.read_bytes())
+    return str(target.relative_to(path.parent))
+
+
 def run_reference(ref: dict) -> dict:
     """Детерминированный эталонный прогон: DB (фикс. данные) → EngineRunner → ledger.
 
@@ -97,9 +132,15 @@ def run_reference(ref: dict) -> dict:
     led = EngineRunner(strategy=strat, exit_policy=oem.NoExitPolicy(), config=cfg).run(bars)
     trades = led.trades
     win = [t for t in trades if t.entry_time >= start_ts]
+    window_bars = [b for b in bars if b.ts >= start_ts]
     return {
         "data_hash": _data_hash(bars),
+        "strategy_hash": _strategy_hash(ref),
         "bars": len(bars),
+        "bars_window": len(window_bars),
+        "first_ts": bars[0].ts.isoformat() if bars else "",
+        "last_ts": bars[-1].ts.isoformat() if bars else "",
+        "load_from": load_from,
         "pre_window_trades": len(trades) - len(win),
         "trades": len(win),
         "net": round(sum(t.net_pnl for t in win), 4),
@@ -172,6 +213,7 @@ def main() -> int:
     ap.add_argument("--compare-runtime", default="", help="имя проектного теста (sandbox_trades)")
     ap.add_argument("--runtime-ticker", default="", help="тикер runtime-фильтра (пусто = тикер датасета)")
     ap.add_argument("--file", default=str(REF_PATH))
+    ap.add_argument("--reason", default="", help="причина новой версии эталона (в lineage)")
     a = ap.parse_args()
     path = Path(a.file)
     ref = json.loads(path.read_text(encoding="utf-8")) if path.exists() else dict(DEFAULT_REF)
@@ -213,10 +255,36 @@ def main() -> int:
     if a.write or not exp:
         exp_got = {k: got[k] for k in ("data_hash", "bars", "pre_window_trades",
                                        "trades", "net", "fingerprint")}
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        prev = _archive(path, stamp=stamp)
+        ds = ref["dataset"]
         ref["expected"] = exp_got
+        ref["lineage"] = {
+            "created_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "host": os.environ.get("COMPUTERNAME", ""),
+            "git_commit": _git_commit(),
+            "reason": a.reason or "первичная фиксация",
+            "previous": prev,
+            "inputs": {
+                "ticker": ds["ticker"],
+                "figi": _figi(ds["ticker"]),
+                "interval": ds["interval"],
+                "window_utc": [ds["period"][0] + "T00:00:00+00:00",
+                               (datetime.fromisoformat(ds["period"][1])
+                                + timedelta(days=1)).date().isoformat() + "T00:00:00+00:00"],
+                "warmup_days": int(ref.get("warmup_days", 0) or 0),
+                "load_from": got["load_from"],
+                "bars": got["bars"],
+                "bars_window": got["bars_window"],
+                "first_ts": got["first_ts"],
+                "last_ts": got["last_ts"],
+                "data_hash": got["data_hash"],
+                "strategy_hash": got["strategy_hash"],
+            },
+        }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(ref, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"saved: {path}")
+        print(f"saved: {path}" + (f" (архив прежней версии: {prev})" if prev else ""))
     return 0
 
 

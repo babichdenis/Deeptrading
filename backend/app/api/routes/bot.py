@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -9,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.runtime import (BotConfig, BOT_PERSIST_FIELDS, load_bot_settings, runtime,
                              save_bot_settings, load_ensemble_config, save_ensemble_config,
-                             default_ensemble_config)
+                             default_ensemble_config, _account_scope_of)
+from app.engine.exits import is_fraction, pct_problem
+from app.api.routes._account_scope import _account_scope_for_routes
 
 logger = logging.getLogger("bot_api")
 
@@ -64,6 +67,7 @@ def _config_payload(cfg: BotConfig) -> dict:
         "sessions": list(cfg.sessions),
         "long_allowed": cfg.long_allowed,
         "short_allowed": cfg.short_allowed,
+        "use_margin": cfg.use_margin,
         "leverage": cfg.leverage,
         "margin_sessions": list(cfg.margin_sessions),
         "margin_leverage": float(cfg.margin_leverage or 0.0),
@@ -220,6 +224,10 @@ class StartRequest(BaseModel):
 async def bot_start(req: StartRequest) -> dict:
     if req.interval_name not in ("1min", "5min", "10min", "15min"):
         raise HTTPException(400, "бот работает на интрадей-таймфреймах 1min/5min/10min/15min")
+    # Доли, а не проценты: 50.0 вместо 0.5 давало стоп в 5000% от цены (15.11.2026).
+    for _name, _val in (("stop_pct", req.stop_pct), ("target_pct", req.target_pct)):
+        if not (0.0 < float(_val) < 1.0):
+            raise HTTPException(400, f"{_name} задаётся долей (0.01 = 1%), получено {_val}")
     if not req.use_ensemble:
         try:
             build_strategy(req.strategy_id, req.params)
@@ -238,6 +246,7 @@ async def bot_start(req: StartRequest) -> dict:
         atr_multiplier=req.atr_multiplier,
         atr_risk_reward=req.atr_risk_reward,
         allow_short=req.allow_short,
+        use_margin=req.use_margin,
         long_allowed=req.long_allowed,
         short_allowed=req.short_allowed,
         initial_cash=req.initial_cash,
@@ -276,6 +285,7 @@ class BotConfigPatch(BaseModel):
     sessions: list[str] | None = None
     long_allowed: bool | None = None
     short_allowed: bool | None = None
+    use_margin: bool | None = None
     leverage: float | None = None
     margin_sessions: list[str] | None = None
     margin_leverage: float | None = None
@@ -382,6 +392,9 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.short_allowed is not None and req.short_allowed != cfg.short_allowed:
         changes.append(f"short: {'вкл' if cfg.short_allowed else 'выкл'} → {'вкл' if req.short_allowed else 'выкл'}")
         cfg.short_allowed = req.short_allowed
+    if req.use_margin is not None:
+        cfg.use_margin = req.use_margin
+        changes.append(f"use_margin: {cfg.use_margin}")
     if req.leverage is not None and req.leverage != cfg.leverage:
         changes.append(f"плечо: ×{cfg.leverage} → ×{req.leverage}")
         cfg.leverage = req.leverage
@@ -414,13 +427,27 @@ async def bot_config_patch(req: BotConfigPatch) -> dict:
     if req.trend_alignment is not None and req.trend_alignment != cfg.trend_alignment:
         changes.append(f"trend-alignment: {'вкл' if cfg.trend_alignment else 'выкл'} → {'вкл' if req.trend_alignment else 'выкл'}")
         cfg.trend_alignment = req.trend_alignment
-    if req.stop_pct is not None:
-        new_sl = max(0.001, req.stop_pct)
+    _pct_updates: dict[str, float] = {}
+    for _name, _val in (("stop_pct", req.stop_pct), ("target_pct", req.target_pct)):
+        if _val is None:
+            continue
+        _err = pct_problem(_name, _val)
+        if _err:
+            raise HTTPException(400, _err)
+        _pct_updates[_name] = float(_val)
+    for _name, _cur in (("stop_pct", cfg.stop_pct), ("target_pct", cfg.target_pct)):
+        _eff = _pct_updates.get(_name, _cur)
+        if not is_fraction(_eff):
+            raise HTTPException(
+                400, f"{_name}: в конфиге недопустимое значение {_cur}; "
+                     f"задайте долю (0.01 = 1%) явно")
+    if "stop_pct" in _pct_updates:
+        new_sl = _pct_updates["stop_pct"]
         if new_sl != cfg.stop_pct:
             changes.append(f"SL: {cfg.stop_pct*100:.1f}% → {new_sl*100:.1f}%")
         cfg.stop_pct = new_sl
-    if req.target_pct is not None:
-        new_tp = max(0.001, req.target_pct)
+    if "target_pct" in _pct_updates:
+        new_tp = _pct_updates["target_pct"]
         if new_tp != cfg.target_pct:
             changes.append(f"TP: {cfg.target_pct*100:.1f}% → {new_tp*100:.1f}%")
         cfg.target_pct = new_tp
@@ -940,6 +967,10 @@ class ModeRequest(BaseModel):
     # Чем закончился выбор в UI: "user" (нажал кнопку) | "timeout" (15 с истекли).
     # Пишется в логи прогона — по результату видно, чей это был выбор.
     preset_choice: str = ""
+    # ARCH171/172: True = после выбора контура запустить стратегию (явный перезапуск
+    # теста). False (по умолчанию) = только выбрать контур, НЕ запускать и НЕ останавливать
+    # стратегию. Выбор режима сам по себе не должен трогать runtime.
+    start: bool = False
 
 
 class PresetPreviewRequest(BaseModel):
@@ -1110,33 +1141,57 @@ def _save_test_sidecar(name: str, req: ModeRequest, pace: str, eff_cfg=None) -> 
 
 @router.post("/mode")
 async def bot_set_mode(req: ModeRequest) -> dict:
-    """Переключить контур sandbox/live/test: обновить .env, перезапустить бота."""
+    """Выбрать контур sandbox/live/test; при start=True — запустить стратегию.
+
+    ARCH171/172: выбор контура сам по себе НЕ запускает и НЕ останавливает
+    стратегию (start=False). Явный запуск — start=True (перезапуск теста) или
+    отдельный /start. Переключение атомарно: BOT_MODE(.env) + run_state.json +
+    cache_clear за один вызов.
+    """
     import asyncio
     mode = req.mode if req.mode in ("sandbox", "live", "test") else None
     if not mode:
         raise HTTPException(400, "mode must be 'sandbox', 'live' or 'test'")
+    start = bool(getattr(req, "start", False))
+    # ARCH171/172: смену контура нельзя проводить «на живом» — иначе позиции и
+    # незавершённые ордера старого контура останутся без владельца (исход неизвестен).
+    # Проверяем ДО любой записи: run_state/env не трогаем, стратегию не запускаем.
+    _cur_mode = str(getattr(getattr(runtime, "config", None), "mode", "") or "")
+    if mode != _cur_mode:
+        _pending = dict(getattr(runtime, "pending_orders", None) or {})
+        _unresolved = [f for f, o in _pending.items()
+                       if str(getattr(o, "status", "") or "").upper()
+                       in ("PENDING_RECONCILIATION", "PARTIAL_FILLED")]
+        if bool(getattr(runtime, "running", False)) or bool(getattr(runtime, "starting", False)):
+            raise HTTPException(
+                409, "смена контура запрещена: рантайм работает — сначала останови стратегию")
+        if _unresolved:
+            raise HTTPException(
+                409, "смена контура запрещена: незавершённые ордера "
+                     f"{', '.join(_unresolved[:3])} — дождись сверки с брокером")
     if mode == "test":
-        name = req.test_name.strip()
-        if not name:
-            raise HTTPException(400, "test_name обязателен для mode=test")
-        if not req.replay_start:
-            raise HTTPException(400, "replay_start обязателен для mode=test")
-        # Тишины не бывает: без пресета движок/ТФ должны быть заданы явно.
-        # Раньше пустые поля молча падали в ensemble_v4/1min — и никто не знал, что гоняем.
-        if not (getattr(req, "preset", None) or {}):
-            _miss = [f for f in ("test_engine", "test_interval")
-                     if not str(getattr(req, f, "") or "").strip()]
-            if _miss:
-                raise HTTPException(400,
-                    "без пресета обязательны " + ", ".join(_miss) +
-                    " (иначе прогон молча уходит в ensemble_v4/1min)")
-        # Имена тестов — ключ для идентификации прогона в БД (единый sanitize = preset_tags).
-        from app.services.preset_tags import sanitize
-        name = sanitize(name)
-        if not name:
-            raise HTTPException(400, "test_name пуст после нормализации")
+        name = (req.test_name or "").strip()
+        if start:
+            if not name:
+                raise HTTPException(400, "test_name обязателен для запуска test")
+            if not req.replay_start:
+                raise HTTPException(400, "replay_start обязателен для запуска test")
+            # Тишины не бывает: без пресета движок/ТФ должны быть заданы явно.
+            # Раньше пустые поля молча падали в ensemble_v4/1min — и никто не знал, что гоняем.
+            if not (getattr(req, "preset", None) or {}):
+                _miss = [f for f in ("test_engine", "test_interval")
+                         if not str(getattr(req, f, "") or "").strip()]
+                if _miss:
+                    raise HTTPException(400,
+                        "без пресета обязательны " + ", ".join(_miss) +
+                        " (иначе прогон молча уходит в ensemble_v4/1min)")
+            # Имена тестов — ключ для идентификации прогона в БД (единый sanitize = preset_tags).
+            from app.services.preset_tags import sanitize
+            name = sanitize(name)
+            if not name:
+                raise HTTPException(400, "test_name пуст после нормализации")
     else:
-        name = req.test_name
+        name = req.test_name or ""
     pace = req.replay_pace if req.replay_pace in ("fast", "wall") else "fast"
     # Движок/TF/параметры/пресет теста — состояние прогона, его хранит
     # data/run_state.json, а os.environ здесь только кэш для apply_test_overrides
@@ -1156,7 +1211,7 @@ async def bot_set_mode(req: ModeRequest) -> dict:
     # уйдёт пустой режим, и прогон будет неотличим от «пресета не было»).
     req.preset_mode = _pmode
     req.preset_choice = _pchoice
-    if mode == "test":
+    if mode == "test" and start:
         try:
             _eff_cfg = await _cfg_from_saved(
                 mode, test_name=name,
@@ -1183,20 +1238,53 @@ async def bot_set_mode(req: ModeRequest) -> dict:
         "preset": getattr(req, "preset", None) or {},
         "preset_mode": _pmode,
     }
+    if not start:
+        # ARCH172: выбор контура (без запуска) не должен стирать сохранённый
+        # тест-конфиг пустыми дефолтами запроса. Если req не задал поле явно —
+        # берём прежнее из run_state. При start=True — полная перезапись прогона.
+        try:
+            from app.services.run_state import load_run_state
+            _prev = dict(load_run_state() or {})
+        except Exception:
+            _prev = {}
+        if not name:
+            _run_state["test_name"] = _prev.get("test_name", "") or ""
+        if not _run_state["replay_start"]:
+            _run_state["replay_start"] = _prev.get("replay_start", "") or ""
+        if not _run_state["replay_end"]:
+            _run_state["replay_end"] = _prev.get("replay_end", "") or ""
+        if not _run_state["test_engine"]:
+            _run_state["test_engine"] = _prev.get("test_engine", "") or ""
+        if not _run_state["test_interval"]:
+            _run_state["test_interval"] = _prev.get("test_interval", "") or ""
+        if not _run_state["test_params"]:
+            _run_state["test_params"] = _prev.get("test_params") or {}
+        if not _run_state["preset"]:
+            _run_state["preset"] = _prev.get("preset") or {}
     try:
         from app.services.run_state import save_run_state, sync_env
         _saved_ok = save_run_state(_run_state)
-        sync_env(_run_state)
-        if not _saved_ok:
-            logger.warning("run_state.json не записан — рестарт восстановит прошлый прогон")
     except Exception as _rs_e:
-        logger.warning("run_state save failed: %s", str(_rs_e)[:120])
+        # Сбой персистентности выбора (включая raise) — не рапортуем успех и не
+        # пишем env, иначе рестарт восстановит прошлый контур, а UI переключится.
+        raise HTTPException(500, f"не удалось сохранить выбор режима: {type(_rs_e).__name__}")
+    if not _saved_ok:
+        raise HTTPException(500, "не удалось сохранить выбор режима (run_state.json)")
+    try:
+        sync_env(_run_state)
+    except Exception:
+        pass
     _write_env_mode(mode)
     try:
         from app.config import get_settings
         get_settings.cache_clear()
     except Exception:
         pass
+    if not start:
+        # ARCH171/172: только выбор контура — стратегию не запускаем и не останавливаем.
+        return {"mode": mode, "test_name": name or None, "restarted": False,
+                "replay_pace": pace, "replay_log_persist": bool(req.replay_log_persist),
+                "preset_conflicts": [], "preset_mode": _pmode, "preset_choice": _pchoice}
     was_running = runtime.running or runtime.starting
     if was_running:
         await runtime.stop()
@@ -1567,46 +1655,14 @@ async def bot_close_all() -> dict:
 
 @router.post("/positions/close")
 async def bot_close_position(figi: str) -> dict:
-    import asyncio as _aio
-    positions = await runtime.broker.positions()
-    pos = next((p for p in positions if p.figi == figi), None)
-    if not pos:
-        from app.api.routes.sandbox import _get_portfolio, _q
-        p = await _aio.to_thread(_get_portfolio)
-        bbg = figi
-        from app.api.routes.sandbox import _resolve_bbg
-        sip = next((x for x in p.positions if x.figi == figi), None)
-        if sip is None:
-            tcs = runtime.tcs_to_bbg.get(figi)
-            if tcs:
-                sip = next((x for x in p.positions if x.figi == tcs), None)
-        if sip is None:
-            for x in p.positions:
-                resolved = await _resolve_bbg(x.figi)
-                if resolved == figi:
-                    sip = x
-                    break
-        if sip is None:
-            raise HTTPException(404, f"позиция {figi} не найдена")
-        cur = _q(sip.current_price)
-        lb = _get_sandbox_broker()
-        try:
-            await lb.close_position(figi, cur, "manual_close")
-        except Exception as e:
-            raise HTTPException(502, f"ошибка закрытия: {e}")
-        runtime._held.discard(figi)
-        runtime._held.discard(runtime.tcs_to_bbg.get(figi, figi))
-        return {"closed": True, "figi": figi, "ticker": figi[:12], "price": float(cur)}
-    bbg = runtime.tcs_to_bbg.get(figi, figi)
-    buf = runtime.buffers.get(bbg) or runtime.buffers.get(figi)
-    price = float(buf[-1].close) if buf else float(pos.entry_price)
-    try:
-        await runtime.broker.close_position(figi, price, "manual_close")
-    except Exception as e:
-        raise HTTPException(502, f"ошибка закрытия: {e}")
-    runtime._held.discard(figi)
-    runtime._held.discard(bbg)
-    return {"closed": True, "figi": figi, "ticker": pos.ticker, "price": price}
+    result = await runtime.close_all(only_figi=figi, reason="manual_close")
+    closed = result.get("positions", [])
+    pending = result.get("pending", [])
+    if closed:
+        return {**closed[0], "closed": True, "figi": figi}
+    if pending:
+        return {"closed": False, "figi": figi, "pending": pending}
+    return {"closed": False, "figi": figi, "status": "not_closed"}
 
 
 @router.post("/positions/levels")
@@ -1778,7 +1834,10 @@ async def bot_logs_history(
         params["ticker"] = r"\m" + re.escape(ticker.strip()) + r"\M"
     if date.strip():
         where.append("(ts AT TIME ZONE 'Europe/Moscow')::date = :date")
-        params["date"] = date.strip()
+        try:
+            params["date"] = _dt.strptime(date.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD") from None
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
     sql = _text(
@@ -1866,10 +1925,64 @@ async def bot_status() -> dict:
         _breadth = market_breadth()
     except Exception:
         _breadth = {}
+    # Часовой контекст: показываем честно, включая «неизвестно», без подмены нейтралью.
+    _hourly = {"state": "UNKNOWN", "reason": "часовой слой не подключён"}
+    try:
+        getter = getattr(runtime, "hourly_context_status", None)
+        if callable(getter):
+            _hourly = getter()
+    except Exception:
+        logger.exception("status: не смогли получить часовой контекст")
+    # Фактический выбор юниверса брокером (ARCH213/219/221/232): показываем, что
+    # реально выбрано и почему остальное отброшено, а не только сохранённый
+    # self.universe. Данные читаем из runtime-атрибутов, без правки runtime.py.
+    _selection = {"mode": "", "observed_at": None, "selected_figis": [], "decisions": []}
+    try:
+        _cf = getattr(runtime, "_candidate_figis", None)
+        _cd = getattr(runtime, "_candidate_decisions", None)
+        _co = getattr(runtime, "_candidate_observed_at", None)
+        _cm = getattr(runtime, "_candidate_mode", None)
+        if _cf is not None or _cd is not None:
+            _decisions = []
+            _ticker_by_figi = {}
+            for _d in (_cd or []):
+                try:
+                    _f = _d.get("figi")
+                    _ticker_by_figi[_f] = _d.get("ticker") or _f[:6] if _f else ""
+                    _decisions.append({"figi": _f, "ticker": _d.get("ticker"),
+                                       "reasons": list(_d.get("reasons") or [])})
+                except Exception:
+                    continue
+            _selection = {
+                "mode": str(_cm or ""),
+                "observed_at": _co.isoformat() if _co is not None else None,
+                "selected_figis": sorted(list(_cf or [])),
+                "decisions": _decisions,
+            }
+    except Exception:
+        logger.exception("status: не смогли собрать выбор кандидатов")
+    # ARCH269: занятые слоты = позиции ∪ ожидающие открытия. Отличаем от реальных
+    # брокерских позиций, чтобы MAX_POSITIONS не выглядел «забитым» только сделками.
+    _slots = {"occupied": 0, "held": 0, "pending_open": 0}
+    try:
+        _occ = getattr(runtime, "_occupied_entry_slots", None)
+        if callable(_occ):
+            _occ_set = set(_occ())
+            _held_set = set(getattr(runtime, "_held", None) or [])
+            _slots = {
+                "occupied": len(_occ_set),
+                "held": len(_held_set),
+                "pending_open": len(_occ_set - _held_set),
+            }
+    except Exception:
+        logger.exception("status: не смогли посчитать слоты")
     return {
         **status,
         "ai_mode": str(runtime.get_ai_control().get("mode") or ""),
         "breadth": _breadth,
+        "hourly_context": _hourly,
+        "slots": _slots,
+        "universe_selection": _selection,
         "portfolio": {
             "cash": portfolio.get("cash", 0),
             "initial_cash": portfolio.get("initial_cash", 10000),
@@ -1936,7 +2049,8 @@ async def bot_trades(limit: int = 50) -> dict:
             rows = (await db.execute(
                 _sel(SandboxTrade)
                 .where(SandboxTrade.mode == _mode, SandboxTrade.exit_time.is_not(None),
-                       _fn.coalesce(SandboxTrade.exit_reason, "") != "reopened")
+                       _fn.coalesce(SandboxTrade.exit_reason, "") != "reopened",
+                       SandboxTrade.broker_account_id == _account_scope_of(runtime))
                 .order_by(SandboxTrade.exit_time.desc())
                 .limit(_lim)
             )).scalars().all()
@@ -2394,6 +2508,7 @@ async def bot_test_restart(name: str) -> TestRestartResponse:
         test_params=payload.get("test_params") or {},
         preset=payload.get("preset") or {},
         replay_log_persist=bool(payload.get("replay_log_persist", False)),
+        start=True,
     )
     out = await bot_set_mode(req)
     return TestRestartResponse(old_name=name, test_name=str(out.get("test_name") or cand),
@@ -2473,6 +2588,8 @@ async def bot_test_stats(test_name: str = "", date_from: str = "", date_to: str 
             q = q.where(SandboxTrade.test_name == name)
         else:
             q = q.where(SandboxTrade.mode == mode)
+            if mode in ("sandbox", "live"):
+                q = q.where(SandboxTrade.broker_account_id == _account_scope_for_routes())
         _df = _parse(date_from)
         _dtto = _parse(date_to, end=True)
         if _df is not None:

@@ -12,7 +12,7 @@ from app.engine.models import Candle
 from app.services.ensemble import compute_ensemble
 from app.services.ensemble_ctx import EnsembleContext
 
-T0 = datetime(2026, 8, 1, 6, 50, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 3, 6, 50, tzinfo=timezone.utc)
 
 
 def _make_candles(n=600, base_price=100.0, seed=42):
@@ -29,7 +29,7 @@ def _make_candles(n=600, base_price=100.0, seed=42):
         l = price * (1 - abs(rng.gauss(0, 0.0005)))
         c = price + rng.gauss(0, 0.0003) * price
         v = int(rng.uniform(500, 2000))
-        candles.append(Candle(ts=ts, open=o, high=h, low=l, close=c, volume=v))
+        candles.append(Candle(ts=ts, open=o, high=max(h, o, c), low=min(l, o, c), close=c, volume=v))
     return candles
 
 
@@ -46,7 +46,8 @@ def _req():
             {"strategy_id": "donchian_breakout", "tf": "5min",
              "params": {"period": 45}},
         ],
-        "quorum": 2,
+        "quorum": 1,
+        "bias_mode": "info",
         "entry": {"tf": "1min", "lookback": 1},
         "exit_policy": {"id": "atr_stop", "params": {
             "period": 14, "multiplier": 4.0, "risk_reward": 4.0}},
@@ -56,12 +57,10 @@ def _req():
 
 
 def _trades_key(res):
-    out = []
-    for t in res.get("trades", []):
-        out.append((t.get("side"), round(float(t.get("entry_price", 0)), 6),
-                    round(float(t.get("exit_price", 0)), 6),
-                    t.get("exit_reason"), round(float(t.get("net_pnl", 0)), 6)))
-    return out
+    assert "error" not in res, res.get("error")
+    trades = res["static"]["trades"]
+    assert trades, "parity fixture must exercise actual trades"
+    return trades
 
 
 def test_ctx_matches_batch_trades():
@@ -101,3 +100,26 @@ def test_ctx_rebuild_on_reset():
     compute_ensemble(candles[:100], dict(req), ctx)
     last = compute_ensemble(list(candles), dict(req), ctx)
     assert _trades_key(last) == _trades_key(batch)
+
+
+def test_decision_only_matches_full_pipeline_without_running_trade_engine(monkeypatch):
+    import app.services.ensemble as module
+
+    candles = _make_candles()
+    request = _req()
+    full = module.compute_ensemble(candles, dict(request))
+    assert full['static']['entries']
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('decision computation must not simulate trades')
+
+    monkeypatch.setattr(module.EngineRunner, 'run', forbidden)
+    decisions = module.compute_ensemble(candles, dict(request), include_execution=False)
+    assert decisions['comparison'] is None
+    assert decisions['static']['execution_status'] == 'NOT_COMPUTED'
+    assert 'economic' not in decisions['static']
+    assert 'trades' not in decisions['static']
+    for key in ['entries', 'rejected', 'quorum_list', 'votes_last', 'setups', 'funnel_tf', 'why_no_entry']:
+        assert decisions['static'][key] == full['static'][key], key
+    for key, value in decisions['static']['funnel'].items():
+        assert value == full['static']['funnel'][key], key

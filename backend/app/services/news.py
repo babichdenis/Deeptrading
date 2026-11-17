@@ -91,17 +91,14 @@ def _parse_ts(ts: str) -> datetime | None:
             return d.astimezone(timezone.utc) if d.tzinfo else d.replace(tzinfo=timezone.utc)
     except Exception:
         pass
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.strptime(t[:19], fmt).replace(
-                tzinfo=timezone(timedelta(hours=3))).astimezone(timezone.utc)
-        except Exception:
-            continue
     try:
         d = datetime.fromisoformat(t.replace("Z", "+00:00"))
-        return d.astimezone(timezone.utc) if d.tzinfo else d.replace(tzinfo=timezone.utc)
-    except Exception:
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone(timedelta(hours=3)))
+        return d.astimezone(timezone.utc)
+    except ValueError:
         return None
+
 
 
 def _get(url: str, timeout: float = _TIMEOUT) -> bytes:
@@ -208,20 +205,30 @@ NEGATIVE_COMBOS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-def blackout_reason(items: list[NewsItem], ticker: str, window_min: int = 60) -> str | None:
+def blackout_reason(
+    items: list[NewsItem], ticker: str, window_min: int = 60, *, as_of: datetime | None = None
+) -> str | None:
     """Причина стоп-блока тикера по свежей негативной новости (или None).
 
     Смотрит только новости с явным упоминанием тикера и возрастом <= window_min.
     """
+    decision_time = as_of if as_of is not None else datetime.now(timezone.utc)
+    if decision_time.utcoffset() is None:
+        raise ValueError("as_of must be timezone aware")
+    if window_min < 0:
+        raise ValueError("window_min must be nonnegative")
     tk = str(ticker or "").upper()
     if not tk:
         return None
     for x in items:
         if tk not in (x.tickers or []):
             continue
-        age = x.age_min
-        if age is None or age > int(window_min):
+        if x.dt is None or x.dt.utcoffset() is None:
             continue
+        age_seconds = (decision_time - x.dt).total_seconds()
+        if age_seconds < 0 or age_seconds > window_min * 60:
+            continue
+        age = int(age_seconds // 60)
         t = x.title.lower()
         for kw in NEGATIVE_KEYWORDS:
             if kw in t:

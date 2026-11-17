@@ -14,7 +14,10 @@ pytestmark = pytest.mark.artifact
 
 @pytest.fixture(scope="module")
 def report() -> dict:
-    with open(os.path.join(RUN_DIR, "entry_exit_vote_behavior.json")) as f:
+    path = os.path.join(RUN_DIR, "entry_exit_vote_behavior.json")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -28,7 +31,10 @@ def test_direction_not_degenerated(report: dict) -> None:
 
 def test_strength_continuous(report: dict) -> None:
     """strength непрерывна: среди значений есть дробные > 1 (не только 0/1)."""
-    with open(os.path.join(RUN_DIR, "entry_exit_vote_audit.csv"), newline="") as f:
+    path = os.path.join(RUN_DIR, "entry_exit_vote_audit.csv")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     vals = [float(r["vote_strength"]) for r in rows if r["vote_strength"]]
     assert max(vals) > 1.0, "strength не continuous (все <= 1)"
@@ -44,7 +50,10 @@ def test_forward_dynamics_no_nulls(report: dict) -> None:
 
 def test_point_in_time(report: dict) -> None:
     """rel_bar в audit только в допустимых окнах (+0..+5, -0..-5)."""
-    with open(os.path.join(RUN_DIR, "entry_exit_vote_audit.csv"), newline="") as f:
+    path = os.path.join(RUN_DIR, "entry_exit_vote_audit.csv")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     allowed = {"+0", "+1", "+2", "+3", "+5", "-0", "-1", "-3", "-5"}
     for r in rows:
@@ -68,7 +77,7 @@ def test_engine_not_changed() -> None:
             for fn in files:
                 if not fn.endswith(".py"):
                     continue
-                with open(_os.path.join(dp, fn)) as f:
+                with open(_os.path.join(dp, fn), encoding="utf-8") as f:
                     if "entry_exit_vote_behavior" in f.read():
                         hits.append(_os.path.join(dp, fn))
     assert not hits

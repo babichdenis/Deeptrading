@@ -475,7 +475,8 @@ def main(argv: list[str] | None = None) -> None:
         if out.exists():
             out = d / f"{unique}-r{int(datetime.now(timezone.utc).microsecond)}"
         out.mkdir(parents=True, exist_ok=False)
-        (out / "facts.json").write_text(json.dumps(blob, indent=1, ensure_ascii=False, default=str))
+        (out / "facts.json").write_text(json.dumps(blob, indent=1, ensure_ascii=False, default=str),
+                                        encoding="utf-8")
         facts_b = (out / "facts.json").read_bytes()
         manifest = {
             "generator": "audit_sber_candle_lineage.py",
@@ -488,7 +489,8 @@ def main(argv: list[str] | None = None) -> None:
         }
         if mode == "offline_transfer" and args.facts_src:
             manifest["supersedes"] = Path(args.facts_src).resolve().parent.name
-        (out / "manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False))
+        (out / "manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False),
+                                           encoding="utf-8")
         print(f"saved: {out}")
     else:
         print(json.dumps(blob, indent=1, ensure_ascii=False, default=str))

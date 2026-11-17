@@ -181,7 +181,7 @@ def test_matrix_filled_and_primary_chosen(tmp_path):
     df, _ = _make_synthetic()
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t)          # полная матрица 12 fits + ablation
-    metrics = json.loads((out / "metrics.json").read_text())
+    metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
     keys = list(metrics["results"].keys())
     assert len(keys) == 12, keys
     assert metrics["manifest"]["primary_winner"] in keys
@@ -194,7 +194,7 @@ def test_matrix_filled_and_primary_chosen(tmp_path):
     assert m["n_fits_matrix"] == 12
     assert 1 <= m["n_fits_ablation"] <= 5
     assert m["n_fits_total"] == m["n_fits_matrix"] + m["n_fits_ablation"]
-    abl = json.loads((out / "ablation.json").read_text())
+    abl = json.loads((out / "ablation.json").read_text(encoding="utf-8"))
     if "full" in abl:
         assert abl["full"]["reused_from_matrix"] is True
         assert abl["full"]["log_loss"] == pytest.approx(
@@ -213,7 +213,7 @@ def test_no_selection_means_no_entries(tmp_path):
     df["label"] = rng.choice([-1, 0, 1], len(df))
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t, LIGHT)
-    r = json.loads((out / "metrics.json").read_text())["results"][
+    r = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["results"][
         "dtree__individual_votes"]
     assert r["selection_status"] == "NO_SELECTION"
     assert r["threshold_selection"]["reason"]
@@ -233,7 +233,7 @@ def test_metrics_have_proper_calibration_and_baselines(tmp_path):
     df, _ = _make_synthetic()
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t, LIGHT)
-    r = json.loads((out / "metrics.json").read_text())["results"][
+    r = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["results"][
         "dtree__individual_votes"]
 
     for split in ("train", "val", "eval"):
@@ -264,7 +264,7 @@ def test_tree_conditions_have_raw_scale(tmp_path):
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t,
                   ["--models", "dtree", "--sets", "continuous_all_tf"])
-    leaves = json.loads((out / "tree_leaves.json").read_text())
+    leaves = json.loads((out / "tree_leaves.json").read_text(encoding="utf-8"))
     assert leaves["leaves"]
     kept = set(leaves["kept_features"])
     for lf in leaves["leaves"]:
@@ -333,7 +333,7 @@ def test_censored_kept_for_inference_out_of_scoring(tmp_path):
     df.loc[df.index[::2], "label_status"] = "CENSORED"
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t, LIGHT)
-    m = json.loads((out / "metrics.json").read_text())["manifest"]
+    m = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["manifest"]
     n_mature = int((df["label_status"] == "MATURE").sum())
 
     # universe не отфильтрован по будущей метке
@@ -360,7 +360,7 @@ def test_censored_kept_for_inference_out_of_scoring(tmp_path):
     censored_ids = set(df.loc[df["label_status"] == "CENSORED", "row_id"])
     assert censored_ids & set(ev["row_id"]), "CENSORED обязаны попадать в predict"
 
-    r = json.loads((out / "metrics.json").read_text())["results"][
+    r = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["results"][
         "dtree__individual_votes"]
     assert r["eval"]["n_scored"] == m["n_rows_split"]["eval"]
     assert r["eval"]["n_scored"] < m["n_rows_split_infer"]["eval"]
@@ -447,8 +447,8 @@ def test_determinism(tmp_path):
     p1 = (out1 / "predictions.parquet").read_bytes()
     p2 = (out2 / "predictions.parquet").read_bytes()
     assert p1 == p2
-    m1 = (out1 / "model_manifest.json").read_text()
-    m2 = (out2 / "model_manifest.json").read_text()
+    m1 = (out1 / "model_manifest.json").read_text(encoding="utf-8")
+    m2 = (out2 / "model_manifest.json").read_text(encoding="utf-8")
     assert m1 == m2
 
 
@@ -457,13 +457,13 @@ def test_no_future_leakage_in_train(tmp_path):
     df, _ = _make_synthetic()
     f, t = _write_parquet(df, tmp_path / "base")
     out1 = _run_in(tmp_path / "base", f, t, LIGHT)
-    m1 = json.loads((out1 / "metrics.json").read_text())
+    m1 = json.loads((out1 / "metrics.json").read_text(encoding="utf-8"))
     tr1 = m1["results"]["dtree__individual_votes"]["train"]["balanced_accuracy"]
 
     df2, _ = _make_synthetic(extra_future=500)
     f2, t2 = _write_parquet(df2, tmp_path / "fut")
     out2 = _run_in(tmp_path / "fut", f2, t2, LIGHT)
-    m2 = json.loads((out2 / "metrics.json").read_text())
+    m2 = json.loads((out2 / "metrics.json").read_text(encoding="utf-8"))
     tr2 = m2["results"]["dtree__individual_votes"]["train"]["balanced_accuracy"]
     assert tr1 == pytest.approx(tr2, rel=0, abs=1e-12)
 
@@ -473,13 +473,13 @@ def test_tree_leaves_and_ablation(tmp_path):
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t,
                   ["--models", "dtree", "--sets", "continuous_all_tf"])
-    leaves = json.loads((out / "tree_leaves.json").read_text())
+    leaves = json.loads((out / "tree_leaves.json").read_text(encoding="utf-8"))
     assert len(leaves["leaves"]) > 0
     for lf in leaves["leaves"]:
         assert "support" in lf and "p_label" in lf and "lift" in lf
         assert sum(lf["p_label"].values()) == pytest.approx(1.0, abs=1e-9)
     assert isinstance(leaves["val_attr"], dict) and len(leaves["val_attr"]) > 0
-    abl = json.loads((out / "ablation.json").read_text())
+    abl = json.loads((out / "ablation.json").read_text(encoding="utf-8"))
     assert "full" in abl
     for k in abl:
         if k.startswith("drop_tf"):
@@ -490,7 +490,7 @@ def test_threshold_selection_or_no_selection(tmp_path):
     df, _ = _make_synthetic()
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t, LIGHT)
-    metrics = json.loads((out / "metrics.json").read_text())
+    metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
     for r in metrics["results"].values():
         sel = r["threshold_selection"]
         assert sel["selection"] in ("selected", "NO_SELECTION")
@@ -504,7 +504,7 @@ def test_all_nan_feature_dropped_without_name_shift(tmp_path):
     df["age_kama_trend"] = np.nan
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t, LIGHT)
-    leaves = json.loads((out / "tree_leaves.json").read_text())
+    leaves = json.loads((out / "tree_leaves.json").read_text(encoding="utf-8"))
     assert "age_kama_trend" in leaves["dropped_all_nan"]
     assert "age_kama_trend" not in leaves["kept_features"]
 
@@ -513,7 +513,7 @@ def test_all_nan_feature_dropped_without_name_shift(tmp_path):
     assert used, "ожидаемые условия листьев"
     assert used <= set(leaves["kept_features"]), used - set(leaves["kept_features"])
 
-    r = json.loads((out / "metrics.json").read_text())["results"][
+    r = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["results"][
         "dtree__individual_votes"]
     assert r["n_features"] == len(leaves["kept_features"])
     assert r["dropped_all_nan"] == leaves["dropped_all_nan"]
@@ -532,14 +532,14 @@ def test_predictions_schema_and_split_coverage(tmp_path):
     pdf = tbl.to_pandas()
     n_models = pdf["model_id"].nunique()
     assert n_models == 1 and set(pdf["split"]) == {"train", "val", "eval"}
-    manifest = json.loads((out / "model_manifest.json").read_text())
+    manifest = json.loads((out / "model_manifest.json").read_text(encoding="utf-8"))
     # predictions = inference universe, а не supervised-подмножество
     n_infer = sum(manifest["n_rows_split_infer"].values())
     assert len(pdf) == n_models * n_infer, (len(pdf), n_infer)
     assert n_infer > sum(manifest["n_rows_split"].values())
 
     # NO_SELECTION -> selected_long ВСЕГДА False; selected -> p_up >= порог
-    r = json.loads((out / "metrics.json").read_text())["results"][
+    r = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["results"][
         "dtree__individual_votes"]
     sel = r["threshold_selection"]
     assert set(pdf["selection_status"]) == {r["selection_status"]}
@@ -588,7 +588,7 @@ def test_freeze_manifest_and_bundle_reload(tmp_path):
     df, _ = _make_synthetic()
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t, LIGHT)
-    manifest = json.loads((out / "model_manifest.json").read_text())
+    manifest = json.loads((out / "model_manifest.json").read_text(encoding="utf-8"))
     assert manifest["freeze"]["stage"] == "after_train_val_selection_before_eval"
     assert manifest["freeze"]["eval_evaluated_after_manifest_write"] is True
     assert manifest["input_targets_identity"]["identity_sha256"]
@@ -620,19 +620,19 @@ def test_breakdown_ticker_month_matches_metrics(tmp_path):
     df, _ = _make_synthetic()
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t, LIGHT)
-    bd = json.loads((out / "breakdown.json").read_text())
+    bd = json.loads((out / "breakdown.json").read_text(encoding="utf-8"))
     assert bd["n_matched"] == bd["n_predictions"] > 0
     m = "dtree__individual_votes"
     assert m in bd["by_ticker"] and m in bd["by_month"]
 
-    manifest = json.loads((out / "model_manifest.json").read_text())
+    manifest = json.loads((out / "model_manifest.json").read_text(encoding="utf-8"))
     n_eval = manifest["n_rows_split"]["eval"]
     tk = bd["by_ticker"][m]["eval"]
     assert set(tk) == {"TEST"}
     assert tk["TEST"]["n"] == n_eval
     assert abs(sum(tk["TEST"]["class_share"].values()) - 1.0) < 1e-9
     # сверка с metrics.json: balanced_accuracy должен сходиться построением
-    ev = json.loads((out / "metrics.json").read_text())["results"][m]["eval"]
+    ev = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["results"][m]["eval"]
     assert tk["TEST"]["balanced_accuracy"] == pytest.approx(
         ev["balanced_accuracy"], abs=1e-9)
     assert tk["TEST"]["log_loss"] == pytest.approx(ev["log_loss"], abs=1e-9)
@@ -810,7 +810,7 @@ def test_policy_gate_applied_in_run(tmp_path):
 
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t, LIGHT)
-    m = json.loads((out / "metrics.json").read_text())["manifest"]
+    m = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["manifest"]
 
     assert m["policy_eligibility"]["policy"] == M.POLICY_NAME
     assert m["policy_eligibility"]["gate_source"] == \
@@ -842,7 +842,7 @@ def test_manifest_declares_fixed_feature_contract(tmp_path):
     df, _ = _make_synthetic()
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t, LIGHT)
-    m = json.loads((out / "metrics.json").read_text())["manifest"]
+    m = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["manifest"]
 
     assert m["feature_set_sizes"] == {
         "individual_votes": len(M.VOTE_STRATEGIES) * 2 + len(M.VOICE_COLS),
@@ -861,7 +861,7 @@ def test_manifest_declares_fixed_feature_contract(tmp_path):
                for c in m["excluded_quality_columns"])
 
     # support известных исходов и полный inference-допуск разделены
-    rc = json.loads((out / "metrics.json").read_text())["row_counts"]
+    rc = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["row_counts"]
     assert rc["support_known_targets"] == m["n_rows_split"]
     assert rc["eligible_infer_all_labels"] == m["n_rows_split_infer"]
     assert sum(rc["support_known_targets"].values()) < \
@@ -875,7 +875,7 @@ def test_policy_sufficiency_declared_when_precision_below_base(tmp_path):
     df["label"] = rng.choice([-1, 0, 1], len(df))
     f, t = _write_parquet(df, tmp_path)
     out = _run_in(tmp_path, f, t, LIGHT)
-    m = json.loads((out / "metrics.json").read_text())["manifest"]
+    m = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["manifest"]
     ps = m["primary_policy_sufficiency"]
     assert ps["base_up_val"] is not None
     if ps["selected_threshold"] is None:
@@ -939,7 +939,7 @@ def test_b1_manifest_is_source_of_truth(tmp_path):
     mp.write_text(json.dumps(good), encoding="utf-8")
 
     out = _run_in(tmp_path, f, t, LIGHT)
-    m = json.loads((out / "metrics.json").read_text())["manifest"]
+    m = json.loads((out / "metrics.json").read_text(encoding="utf-8"))["manifest"]
     bp = m["b1_provenance"]
     assert bp["whitelist_matches_b1_predictors"] is True
     assert bp["eligibility_policy_hash"] == "b8f7f9cd0498d4b9"

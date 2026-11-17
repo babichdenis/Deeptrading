@@ -35,3 +35,15 @@ Manifest input/config/code hashes, границы train/val/eval, полный �
 Нефть, золото, валюты и новости — кандидаты контекста, а не готовые сигналы. Для истории важны publication/availability time, версии текста и отсутствие будущих правок; современная LLM-оценка старой новости не является эталонной доходностью. Эталон реакции определяется будущим окном и расходами в отдельном причинном эксперименте. Упоминание DeepSeek в MVP не доказывает историческую валидность интеграции и не разрешает внешний запрос.
 
 Старые идеи собраны в каталоге как backlog. Перенос в execution path требует отдельного обоснованного этапа, не статуса «идея интересна».
+
+
+### ARCH414 — C7 timing and input acceptance
+A pure exact-label lookup does not prove late-arrival expiry: a cancelled signal must retain its terminal decision and the event scheduler must gate confirmation toT+5. Root probe found revival on same-label late arrival despite23 green goldens (the purported late-arrival test reused empty input). Manifest month/day grouping must explicitly use MSK boundaries, not session TimeZone; observed22:00UTC month boundaries conflict with frozen21:00UTC. Ten tickers with initial warmup does not justify dropping the remaining28 from the whole interval: eligibility must evolve causally with available history. Ordered candle-value fingerprints are required in addition to source/config hashes. Review receipt ROOT/C7_root_review_r1.json; evaluation not accepted yet.
+
+
+### ARCH418 — C7 timing accepted narrowly
+Independent synthetic review verifies WAIT before confirmation close and persistent cancellation after missed expiry, with invalid prices rejected. Coverage code now declares repeatable read/MSK/fingerprint, but output remains to review. Depth-ready time can fall off a15m boundary; actual eligibility must select a present closed15m bar with fresh higher-timeframe evidence. Retained CONFIRM is a decision record, not permission for repeated portfolio entries: caller must consume once. Review ROOT/C7_root_review_r2.json; evaluation not yet accepted.
+
+
+### ARCH420 — database timezone versus returned timestamp representation
+C7r2 groups on correct Moscow midnight but returned UTC-aware timestamps must explicitly astimezone(MSK) before month labels/ MSK serialization. Merely SET LOCAL TIME ZONE does not establish Python object display zone. Root audit maps eight blocks toJan-Aug2026 and sums6402486 evaluation rows. This certifies artifact arithmetic/time conversion only, not source completeness or independently reproduced input hash.

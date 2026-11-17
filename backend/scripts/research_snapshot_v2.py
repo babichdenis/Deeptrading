@@ -278,8 +278,11 @@ async def run(args) -> int:
         "adjustments": "none — raw values без округления/исправлений",
         "per_ticker": per_ticker,
     }
+    # Кодировка задаётся явно: манифест содержит кириллицу (ensure_ascii=False),
+    # а системная кодировка Windows (cp1251) делает его нечитаемым как UTF-8.
     (out / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=1, default=str) + "\n")
+        json.dumps(manifest, ensure_ascii=False, indent=1, default=str) + "\n",
+        encoding="utf-8")
     n_rows = sum(t["m1"]["written_rows"] for t in per_ticker.values())
     print(f"snapshot: tickers={len(per_ticker)} m1_rows={n_rows} out={out}")
     return 0

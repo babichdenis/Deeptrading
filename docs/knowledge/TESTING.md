@@ -34,3 +34,11 @@
 Последний ограниченный refactor-run: 33 passed, затем 12 passed, после последней правки 7 passed; группы пересекаются. TypeScript/Vite и проверки новых модулей прошли по [сохранённому отчёту](../Audit/LARGE_CODE_REFACTOR_2026-10-15.md). Полный suite и реальная задержка БД не проверялись этим этапом.
 
 Новый код engine требует golden-покрытия. Не добавлять и не запускать дополнительные тесты вне запроса/назначения; текущая уборка документации не меняет тестовый scope.
+
+
+### Isolated PostgreSQL broker journal (ARCH369)
+`tests/test_broker_order_journal_postgres.py` launches its own temporary PostgreSQL cluster when `DEEPTRADING_TEST_PG_BIN` explicitly points to PostgreSQL binaries; absent setting skips. No application DB URL accepted. On .8: `set DEEPTRADING_TEST_PG_BIN=C:\pgsql\bin` then `.venv\Scripts\python.exe -m pytest tests/test_broker_order_journal_postgres.py -q --tb=short`. Five tests cover real0006 guard/application, concurrent scoped reservation, cleanserverrestart, cumulative observation monotonicity. Not crash-recovery/atomicfill-accounting/runtime integration acceptance. Temporary instance stopped in fixture cleanup. Windows server output must go to a file, not inherited capture pipes.
+
+
+### Close adapter with real isolated PostgreSQL (ARCH383)
+`tests/test_live_close_postgres_acceptance.py` uses the same explicit DEEPTRADING_TEST_PG_BIN fixture as journal tests. Runs actualcloseadapter/journal against actual0006 tables, withfake SDKresponse only. Independentconnection verifies committedintentbeforepost;7cases coverfull/partial/NEW/wrongrequest,timeoutrecreation,atomicwritefailure andunknownentrytime. No productionDB URL accepted. Not realbroker/currentportfolio or fullruntime acceptance.

@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 import statistics
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
@@ -138,7 +139,6 @@ def resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]
     return out
 
 
-_resample_cache: dict[int, list[EngineCandle]] = {}
 
 
 def _bar_stats_1m(candles: list[EngineCandle], tf_sec: int) -> dict:
@@ -215,26 +215,18 @@ def _bstats(ctx, candles, tf_sec):
     return ctx.bar_stats(tf_sec) if ctx is not None else _bar_stats_1m(candles, tf_sec)
 
 
-def cached_resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]:
-    """Resample with per-call cache. Within one compute_ensemble call,
-    same tf_seconds returns cached result (avoids redundant O(N) passes).
+@lru_cache(maxsize=8)
+def _cached_resample_content(candles: tuple[EngineCandle, ...], tf_seconds: int) -> tuple[EngineCandle, ...]:
+    return tuple(resample(candles, tf_seconds))
 
-    ВАЖНО: ключ обязан включать контентный отпечаток. Ключ только по id(candles)
-    ломается: id() переиспользуется после сборки мусора, и в долгоживущем процессе
-    (матрицы, live) кэш протекает между разными наборами свечей.
-    """
-    try:
-        key = (id(candles), tf_seconds, len(candles),
-               candles[0].ts if candles else None, candles[-1].ts if candles else None)
-    except Exception:
-        key = (id(candles), tf_seconds)
-    if key not in _resample_cache:
-        _resample_cache[key] = resample(candles, tf_seconds)
-    return _resample_cache[key]
+
+def cached_resample(candles: list[EngineCandle], tf_seconds: int) -> list[EngineCandle]:
+    """Bound retention and key by immutable OHLCV content, including revised bars."""
+    return list(_cached_resample_content(tuple(candles), tf_seconds))
 
 
 def clear_resample_cache():
-    _resample_cache.clear()
+    _cached_resample_content.cache_clear()
 
 
 def _ema(values: list[float], span: int) -> list[float]:
@@ -546,7 +538,8 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
                   bias_by_state: dict[str, dict] | None = None,
                   ml_filter_obj=None, ml_vote_obj=None,
                   regime_tf_sec: int = 1800,
-                  ctx: EnsembleContext | None = None) -> dict:
+                  ctx: EnsembleContext | None = None,
+                  include_execution: bool = True) -> dict:
     """Один прогон (static или adaptive) через единый конвейер."""
     from app.services.replay_pipeline import ReplayState as _ReplayState
     # Режим берём только по ЗАКРЫТЫМ барам детектора: бар с ts0 закрыт в ts0+tf.
@@ -1162,6 +1155,64 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             _acc_entry["score_components"] = _score_raw.get("components", {})
         accepted.append(_acc_entry)
 
+    decision_result = {
+        "label": label,
+        "setups": setup_out,
+        "funnel": {
+            "raw_signals": sum(v["signals"] for v in setup_out.values()),
+            "unique_raw_ts": unique_raw_ts,
+            "quorum_unique": len(quorum_sigs),
+            "quorum_BUY": sum(1 for q in quorum_sigs if q["side"] == "BUY"),
+            "quorum_SELL": sum(1 for q in quorum_sigs if q["side"] == "SELL"),
+            "entries_raw": len(entries_raw),
+            "entry_confirm_rejected": _ecb_rej,
+            "skip_side_rejected": _skip_rej,
+            "accepted_decisions": len(accepted),
+            "unique_entry_episodes": len(entry_episodes),
+            "entries_rejected": len(rejected),
+        },
+        "funnel_tf": {
+            "bias_states": {
+                "LONG_ALLOWED": sum(1 for v in bias.values() if v >= 0),
+                "SHORT_ALLOWED": sum(1 for v in bias.values() if v <= 0),
+                "NEUTRAL": sum(1 for v in bias.values() if v == 0),
+            },
+            "setups": {
+                "candidates": sum(v["signals"] for v in setup_out.values()),
+                "quorum_passed": len(quorum_sigs),
+                "BUY": sum(1 for q in quorum_sigs if q["side"] == "BUY"),
+                "SELL": sum(1 for q in quorum_sigs if q["side"] == "SELL"),
+            },
+            "entries": {
+                "candidates": len(entries_raw),
+                "accepted": len(accepted),
+                "rejected": len(rejected),
+            },
+            "rejected_by_reason": dict(__import__("collections").Counter(r["reason"].split(":")[0] for r in rejected)),
+        },
+        "why_no_entry": [{
+            "ts": r["ts"], "side": r["side"],
+            "code": r["reason"].split(":")[0],
+            "detail": r["reason"],
+        } for r in rejected[-500:]],
+        "quorum_list": [{"ts": q["ts"].isoformat(), "side": q["side"],
+                         "votes": q["features"].get("votes"),
+                         "buy_votes": q["features"].get("buy_votes", 0),
+                         "sell_votes": q["features"].get("sell_votes", 0),
+                         "members_for": q["features"].get("members_for", []),
+                         "opposition": q["features"].get("opposition", []),
+                         "total_members": len(setup_runs),
+                         "quorum_k": quorum_k,
+                         "event_id": q["event_id"]}
+                        for q in quorum_sigs],
+        "entries": accepted,
+        "rejected": rejected,
+        "votes_last": _votes_last(setup_runs),
+    }
+    if not include_execution:
+        decision_result["execution_status"] = "NOT_COMPUTED"
+        return decision_result
+
     if adaptive is not None:
         exit_obj = RegimeExitPolicy(exit_obj, adaptive["_exit_policies"], regime_bars)
 
@@ -1396,48 +1447,14 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
     hit_2r = sum(1 for t in trades_out if t["mfe_r"] >= 2.0 and t["mae_r"] < 1.0)
 
     return {
-        "label": label,
-        "setups": setup_out,
+        **decision_result,
+        "execution_status": "COMPUTED",
         "funnel": {
-            "raw_signals": sum(v["signals"] for v in setup_out.values()),
-            "unique_raw_ts": unique_raw_ts,
-            "quorum_unique": len(quorum_sigs),
-            "quorum_BUY": sum(1 for q in quorum_sigs if q["side"] == "BUY"),
-            "quorum_SELL": sum(1 for q in quorum_sigs if q["side"] == "SELL"),
-            "entries_raw": len(entries_raw),
-            "entry_confirm_rejected": _ecb_rej,
-            "skip_side_rejected": _skip_rej,
-            "accepted_decisions": len(accepted),
-            "unique_entry_episodes": len(entry_episodes),
-            "entries_rejected": len(rejected),
+            **decision_result["funnel"],
             "reentry_rejected": len(reentry_rejected),
             "reentry_rejected_list": reentry_rejected,
             "preview_trades": len(trades_out),
         },
-        "funnel_tf": {
-            "bias_states": {
-                "LONG_ALLOWED": sum(1 for v in bias.values() if v >= 0),
-                "SHORT_ALLOWED": sum(1 for v in bias.values() if v <= 0),
-                "NEUTRAL": sum(1 for v in bias.values() if v == 0),
-            },
-            "setups": {
-                "candidates": sum(v["signals"] for v in setup_out.values()),
-                "quorum_passed": len(quorum_sigs),
-                "BUY": sum(1 for q in quorum_sigs if q["side"] == "BUY"),
-                "SELL": sum(1 for q in quorum_sigs if q["side"] == "SELL"),
-            },
-            "entries": {
-                "candidates": len(entries_raw),
-                "accepted": len(accepted),
-                "rejected": len(rejected),
-            },
-            "rejected_by_reason": dict(__import__("collections").Counter(r["reason"].split(":")[0] for r in rejected)),
-        },
-        "why_no_entry": [{
-            "ts": r["ts"], "side": r["side"],
-            "code": r["reason"].split(":")[0],
-            "detail": r["reason"],
-        } for r in rejected[-500:]],
         "counterfactual_reentries": (_counterfactual_reentries(candles, reentry_rejected,
                                                                exit_obj, qty_shares)
                                      if _analytics else None),
@@ -1456,19 +1473,6 @@ def _run_pipeline(candles: list[EngineCandle], req: dict, bias: dict[int, int],
             "unresolved": len(episodes) - completed,
             "list": episodes,
         },
-        "quorum_list": [{"ts": q["ts"].isoformat(), "side": q["side"],
-                         "votes": q["features"].get("votes"),
-                         "buy_votes": q["features"].get("buy_votes", 0),
-                         "sell_votes": q["features"].get("sell_votes", 0),
-                         "members_for": q["features"].get("members_for", []),
-                         "opposition": q["features"].get("opposition", []),
-                         "total_members": len(setup_runs),
-                         "quorum_k": quorum_k,
-                         "event_id": q["event_id"]}
-                        for q in quorum_sigs],
-        "entries": accepted,
-        "rejected": rejected,
-        "votes_last": _votes_last(setup_runs),
         "trades": trades_out,
         "economic": {
             "trades": len(trades_out), "gross": round(gross, 2),
@@ -1557,7 +1561,8 @@ _drop_useless_last: dict[str, str] = {}
 
 
 def compute_ensemble(candles_1m: list[EngineCandle], req: dict,
-                     ctx: EnsembleContext | None = None) -> dict:
+                     ctx: EnsembleContext | None = None, *,
+                     include_execution: bool = True) -> dict:
     lot = int(req.get("lot", 10))
     capital = float(req.get("capital", 100_000))
     days = int(req.get("days", 3))
@@ -1835,7 +1840,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict,
                            ml_filter_obj=ml_filter_obj,
                             ml_vote_obj=ml_vote_obj if not adaptive_map else None,
                             regime_tf_sec=regime_tf_sec,
-                            ctx=ctx)
+                            ctx=ctx, include_execution=include_execution)
 
     if adaptive_map is not None:
         adaptive = _run_pipeline(candles, req, bias, setups_cfg, quorum_k, entry_window_min,
@@ -1845,7 +1850,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict,
                                  bias_by_state=bias_by_state,
                                  ml_filter_obj=ml_filter_obj,
                                  regime_tf_sec=regime_tf_sec,
-                                 ctx=ctx)
+                                 ctx=ctx, include_execution=include_execution)
     else:
         adaptive = None
 
@@ -1884,7 +1889,7 @@ def compute_ensemble(candles_1m: list[EngineCandle], req: dict,
             "adaptive_costs": adaptive["economic"]["costs"] if adaptive else None,
             "static_capture": static["capture_ratio"],
             "adaptive_capture": adaptive["capture_ratio"] if adaptive else None,
-        },
+        } if include_execution else None,
         "config": {
             "strategy_id": "ensemble_main_v1",
             "config_hash": request_hash(req),

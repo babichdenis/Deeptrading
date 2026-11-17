@@ -70,6 +70,11 @@ class Signal:
 class ExitPlan:
     stop_loss: float | None = None
     take_profit: float | None = None
+    atr: float | None = None
+    atr_period: int | None = None
+    atr_as_of: datetime | None = None
+    atr_multiplier: float | None = None
+    policy_id: str | None = None
 
 
 @dataclass

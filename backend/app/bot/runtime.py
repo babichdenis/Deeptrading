@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import os
 import time as _time
 import uuid
 from collections import deque
@@ -23,7 +24,7 @@ from app.bot.events import EventLog
 from app.bot.feed import STEP_SEC, CandleFeed
 from app.bot.replay_feed import ReplayFeed
 from app.bot.paper_broker import PaperBroker
-from app.bot.live_broker import LiveBroker
+from app.bot.live_broker import EntrySubmissionUnknown, LiveBroker
 from app.bot.risk import RiskSnapshot
 from app.bot.stream_manager import StreamManager
 
@@ -124,12 +125,13 @@ from app.bot.session import session_state
 from app.config import get_settings
 from app.database import SessionLocal
 from app.engine.costs import CostModel
-from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy
-from app.engine.models import Candle as EngineCandle, PositionState, Side
+from app.engine.exits import (AtrStopPolicy, FixedSlTpPolicy, PLAUSIBLE_LEVEL_SPAN,
+                             is_fraction, level_implausible, level_problem)
+from app.engine.models import Candle as EngineCandle, ExitPlan, PositionState, Side
 from app.engine.policies import SignalPolicy
 from app.engine.strategies import build_strategy
 from app.models.instrument import Instrument
-from app.models.paper import PaperTrade
+from app.models.paper import PaperAccount, PaperTrade
 from app.services.signals import _load_candles as _lc
 from app.services.tinvest import INTERVAL_NAMES
 
@@ -157,7 +159,7 @@ AI_MODES: dict[str, dict] = {
 # Поля BotConfig, которые сохраняются в БД и восстанавливаются при старте бота.
 BOT_PERSIST_FIELDS = (
     "initial_cash", "qty_per_trade",
-    "sessions", "long_allowed", "short_allowed", "leverage",
+    "sessions", "long_allowed", "short_allowed", "use_margin", "leverage",
     "margin_sessions", "margin_leverage", "margin_sizing",
     "trade_regimes", "trend_alignment",
     "trail_distance_atr", "trail_compress_r", "trail_min_factor", "trail_min_atr", "trail_vol_boost",
@@ -433,6 +435,7 @@ async def _move_select_universe(figi_by_ticker: dict[str, str], cfg, as_of, log)
     try:
         from app.config import get_settings as _gs
         from app.bot.universe.move_select import try_select_move_universe as _try
+        from app.bot.universe.move_select import LiquidityEvidenceUnavailable
     except Exception:
         return []
     settings = _gs()
@@ -456,6 +459,8 @@ async def _move_select_universe(figi_by_ticker: dict[str, str], cfg, as_of, log)
                 config_path=cfg_path,
                 enabled=True,
             )
+    except LiquidityEvidenceUnavailable:
+        raise
     except Exception as exc:
         log(f"move_select: сбой ({exc}), берём прежний юниверс", "warn")
         return []
@@ -667,7 +672,12 @@ async def save_bot_flags(flags: dict) -> None:
 
 
 def _new_order_id() -> str:
-    return f"paper-{uuid.uuid4().hex[:12]}"
+    return str(uuid.uuid4())
+
+
+def _as_position_side(value) -> str:
+    """Order direction (BUY/SELL) as a position side (LONG/SHORT); positions pass through."""
+    return {"BUY": "LONG", "SELL": "SHORT"}.get(value, value)
 
 
 def _loss_hold_left(now: datetime, count: int, last_ts: datetime | None,
@@ -686,7 +696,113 @@ def _loss_hold_left(now: datetime, count: int, last_ts: datetime | None,
 from app.engine.sessions import is_session_active as _sessions_allowed, should_force_close as _should_force_close, weekend_close_due as _weekend_close_due
 
 
+# --- Ручные переопределения юниверса -------------------------------------
+# Раньше путь к файлу был зашит в двух местах, и воспроизводимый прогон на
+# замороженном наборе данных молча подхватывал состояние рабочей машины.
+# Теперь путь задаётся переменной окружения, по умолчанию — прежний.
+# Файл читается на каждом баре, поэтому содержимое кэшируется по (путь, mtime,
+# размер): иначе это лишний ввод-вывод в горячем пути расчёта.
+_UNIVERSE_OVERRIDES_ENV = "DEEPTRADING_UNIVERSE_OVERRIDES"
+_UNIVERSE_OVERRIDES_DEFAULT = Path(r"X:\run\custom_universe.json")
+_universe_overrides_cache: dict = {"key": None, "items": None}
+
+
+def universe_overrides_path() -> Path:
+    """Путь к файлу ручных переопределений юниверса (env перекрывает умолчание)."""
+    raw = (os.environ.get(_UNIVERSE_OVERRIDES_ENV) or "").strip()
+    return Path(raw) if raw else _UNIVERSE_OVERRIDES_DEFAULT
+
+
+def load_universe_overrides() -> list | None:
+    """Переопределения юниверса или None, если файла нет, он пуст или битый.
+
+    Отсутствие файла — штатное состояние, ошибки не пробрасываются.
+    """
+    if not (os.environ.get(_UNIVERSE_OVERRIDES_ENV) or "").strip():
+        _universe_overrides_cache["key"] = None
+        _universe_overrides_cache["items"] = None
+        return None
+    path = universe_overrides_path()
+    try:
+        st = path.stat()
+    except OSError:
+        _universe_overrides_cache["key"] = None
+        _universe_overrides_cache["items"] = None
+        return None
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if _universe_overrides_cache["key"] == key:
+        return _universe_overrides_cache["items"]
+    items = None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            items = [d for d in data if isinstance(d, dict) and d.get("figi")]
+    except (OSError, ValueError):
+        items = None
+    _universe_overrides_cache["key"] = key
+    _universe_overrides_cache["items"] = items
+    return items
+
+
+_MISSING_ACCOUNT = "__missing_account__"
+
+
+def _account_scope_of(rt) -> str | None:
+    """Идентификатор брокерского счёта для sandbox_trades (live/sandbox) — для ЧТЕНИЯ.
+
+    ARCH155: строки live/sandbox должны различаться по счёту, а не только по
+    mode. Для paper/replay идентичность задаёт test_name, счёт здесь не нужен
+    и остаётся NULL (возвращаем None).
+
+    Если контур live/sandbox, а счёт неизвестен — возвращаем sentinel
+    `_MISSING_ACCOUNT`, а не None: равенство с ним не матчит ни реальные счета,
+    ни legacy NULL-строки, поэтому выборка возвращает пусто, а не чужую историю.
+    """
+    mode = getattr(rt, "broker_mode", None)
+    if mode not in ("live", "sandbox"):
+        return None
+    acct = getattr(getattr(rt, "broker", None), "_account", None)
+    if acct in (None, ""):
+        return _MISSING_ACCOUNT
+    return str(acct)
+
+
+def _account_scope_or_raise(rt) -> str | None:
+    """Идентификатор счёта для ЗАПИСИ live/sandbox-сделок.
+
+    Неизвестный счёт у live/sandbox — ошибка конфигурации: писать в NULL (legacy)
+    или в чужой счёт нельзя, поэтому поднимаем ValueError; вызывающий метод
+    прерывает запись. Для paper/replay возвращает None (там identity = test_name).
+    """
+    mode = getattr(rt, "broker_mode", None)
+    if mode not in ("live", "sandbox"):
+        return None
+    acct = getattr(getattr(rt, "broker", None), "_account", None)
+    if acct in (None, ""):
+        raise ValueError("live/sandbox mutation without broker account identity")
+    return str(acct)
+
+
 class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
+    def _entry_pause(self):
+        from app.bot.entry_pause import EntryPause
+        state = getattr(self, '_entry_pause_control', None)
+        if state is None:
+            state = EntryPause()
+            self._entry_pause_control = state
+        return state
+
+    @property
+    def entries_paused(self):
+        return self._entry_pause().paused
+
+    @entries_paused.setter
+    def entries_paused(self, value):
+        self._entry_pause().manual = bool(value)
+
+    def _pause_close(self, scope, request_id, active=True):
+        self._entry_pause().set_blocker('close_reconciliation', active, *scope, request_id)
+
     def _database_session(self):
         return SessionLocal()
 
@@ -1037,7 +1153,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             qe = ((meta or {}).get("quorum_event") or {}) if isinstance(meta, dict) else {}
             return _cs(ret_ticker=ret_tk, ret_index=ret_idx, beta=beta, side=side,
                        hist=(self._hist_cache or {}).get(tk) or {},
-                       turnover=float((self._turnover_cache or {}).get(tk) or 0.0),
+                       turnover=(None if str(getattr(self.config, "feed", "")) == "replay"
+                                 else (self._turnover_cache or {}).get(tk)),
                        votes=int(qe.get("votes") or 0),
                        total_members=int(qe.get("total_members") or 0),
                        vol_ratio=vol_ratio,
@@ -1046,8 +1163,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                        min_turnover=self._min_turnover(snap),
                        history_veto=bool(getattr(self.config, "queue_history_veto", True)))
         except Exception as _sw_e:
-            _audit_swallow('_strength_for@L1134', _sw_e)  # audit silent-except
-            return {"score": 50.0, "factors": {}, "veto": []}
+            _audit_swallow('_strength_for@L1134', _sw_e)
+            return {"score": 0.0, "factors": {}, "veto": ["candidate_inputs_unknown"]}
 
     async def _enqueue_candidate(self, figi: str, ticker: str, side: str, why: str,
                                  meta: dict | None = None, snap: dict | None = None) -> None:
@@ -1146,19 +1263,35 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         items.sort(key=lambda x: x[0])
         n = max(1, int(round(len(items) * float(close_pct)))) if items else 0
         closed = []
+        unresolved = []
         for pnl, p, bb, last in items[:n]:
             try:
-                trade = await self.broker.close_position(p.figi, last, reason)
+                outcome = await self._submit_close_reconciled(
+                    p.figi, getattr(p, "ticker", ""), p.qty, last, reason, paper_filled=False)
+                if outcome["status"] == "reconciled_closed":
+                    self._held.discard(bb)
+                    if bb != p.figi:
+                        self._clear_exit_state(bb)
+                    closed.append({"figi": p.figi, "ticker": getattr(p, "ticker", ""),
+                                   "price": None, "net_pnl": None, "order_id": outcome["order"].id})
+                    continue
+                if outcome["status"] == "pending_partial":
+                    self._exit_qty[bb] = outcome["residual"]
+                if outcome["status"] != "closed":
+                    unresolved.append({"figi": p.figi, "status": outcome["status"]})
+                    continue
+                trade = outcome["trade"]
             except Exception as e:
                 self._log(f"ОШИБКА ЗАКРЫТИЯ {getattr(p, 'ticker', '')}: {type(e).__name__}")
+                unresolved.append({"figi": p.figi, "status": "unresolved_error"})
                 continue
             self._held.discard(p.figi)
             self._held.discard(bb)
             self._clear_exit_state(bb)
             _net = float(trade.net_pnl) if trade else None
-            _px = float(trade.price) if (trade and getattr(trade, "price", None)) else last
+            _px = float(getattr(trade, "exit_price", None) or getattr(trade, "price", None)) if (trade and (getattr(trade, "exit_price", None) or getattr(trade, "price", None))) else last
             try:
-                await self._st_close(p.figi, _px, reason=reason, net=_net,
+                await self._st_close(p.figi, _px, execution=trade, reason=reason, net=_net,
                                      meta={"source": "reduce_positions", "close_pct": close_pct})
             except Exception as _e:
                 self._log(f"ST_CLOSE FAIL {getattr(p, 'ticker', '')}: {type(_e).__name__}")
@@ -1167,7 +1300,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                            "net_pnl": _net})
             self.events.log("POSITION_CLOSED", figi=p.figi, ticker=getattr(p, "ticker", ""),
                             reason=reason, net_pnl=_net)
-        return {"closed": len(closed), "positions": closed, "reason": reason}
+        return {"closed": len(closed), "positions": closed, "reason": reason,
+                "unresolved": unresolved}
 
     async def _overnight_positions(self) -> list[str]:
         """figis открытых позиций, вошедших ДО сегодняшнего дня (пережили ночь)."""
@@ -1473,15 +1607,13 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         _rr_key = "rr_override" if _src == "optuna" else "rr"
         _skip_side = ""
         try:
-            _cu_path = Path(r"X:\run\custom_universe.json")
-            if _cu_path.exists():
-                for _c in json.loads(_cu_path.read_text(encoding="utf-8")):
-                    if _c.get("figi") == figi:
-                        if _c.get("side") == "short":
-                            _skip_side = "BUY"
-                        elif _c.get("side") == "long":
-                            _skip_side = "SELL"
-                        break
+            for _c in load_universe_overrides() or []:
+                if _c.get("figi") == figi:
+                    if _c.get("side") == "short":
+                        _skip_side = "BUY"
+                    elif _c.get("side") == "long":
+                        _skip_side = "SELL"
+                    break
         except Exception:
             _skip_side = ""
         return EnsembleParams(
@@ -1545,12 +1677,14 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             self._log(f"⚙ КОНФИГ КВОРУМА: ошибка применения: {e}")
         return n
 
-    async def _daily_turnover(self, ticker: str) -> float:
+    async def _daily_turnover(self, ticker: str) -> float | None:
         """Дневной оборот тикера (VALTODAY из TQBR quotes, кэш 5 мин).
 
         В universe.avg_daily_turnover лежит не дневной оборот (мелкие значения),
         поэтому ликвидность считаем по живым котировкам биржи.
         """
+        if str(getattr(self.config, "feed", "")) == "replay":
+            return None
         import time as _t
         tk = str(ticker or "").upper()
         now = _t.monotonic()
@@ -1753,7 +1887,24 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             out["regime"] = reg
         return out
 
-    async def _st_open(self, figi, ticker, side, qty, price, sl, tp, meta: dict | None = None, leverage: float = 1.0) -> None:
+    async def _entry_lot_size(self, figi, meta):
+        lot = (meta or {}).get("lot_size")
+        if type(lot) is int and lot > 0:
+            return lot
+        if isinstance(self.broker, LiveBroker):
+            raise ValueError("confirmed_entry_lot_missing")
+        from app.models.instrument import Instrument
+        async with SessionLocal() as db:
+            lot = (await db.execute(
+                select(Instrument.lot).where(Instrument.figi == figi)
+            )).scalar_one_or_none()
+        if type(lot) is not int or lot <= 0:
+            raise ValueError("entry_lot_unknown")
+        return lot
+
+    async def _st_open(self, figi, ticker, side, qty, price, sl, tp, meta: dict | None = None, leverage: float = 1.0, entry_evidence=None) -> None:
+        ledger_mode = self.broker_mode
+        ledger_account = _account_scope_or_raise(self)
         try:
             if str((meta or {}).get("hold") or "").lower() == "swing":
                 self._swing.add(str(figi))
@@ -1763,14 +1914,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             pass
         from app.models.sandbox_trade import SandboxTrade
         import json as _json
-        _lot = 1
-        try:
-            from app.models.instrument import Instrument
-            async with SessionLocal() as db2:
-                _lot = int((await db2.execute(select(Instrument.lot).where(Instrument.figi == figi))).scalar_one_or_none() or 1)
-        except Exception as _sw_e:
-            _audit_swallow('_st_open@L1554', _sw_e)  # audit silent-except
-            pass
+        from decimal import Decimal
+        _lot = await self._entry_lot_size(figi, meta)
         qty_shares = int(qty) * _lot
         _er = (self._regimes.get(figi) or {}).get("state")
         # _regimes[figi]["state"] может быть dict (timeline-запись от стратегии):
@@ -1780,9 +1925,22 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         self._entry_regime[figi] = _er_norm
         # Карточка входа (reason/голоса/режим) — для ЛЮБОГО движка, см. _entry_card.
         _meta_row = self._entry_card(figi, meta, _er_norm)
+        client_order_id = str((meta or {}).get("client_order_id") or "")
+        if client_order_id:
+            _meta_row["client_order_id"] = client_order_id
+            _meta_row["lot_size"] = _lot
+        entry_time = None
+        if ledger_mode in ('live', 'sandbox'):
+            from app.services.broker_fill_evidence import entry_evidence_metadata
+            evidence_meta = entry_evidence_metadata(entry_evidence, mode=ledger_mode,
+                broker_account_id=ledger_account, client_order_id=client_order_id, figi=figi,
+                side=side, units=qty_shares, lot_size=_lot, price=price)
+            _meta_row.update(evidence_meta)
+            if evidence_meta['entry_time_confirmed']:
+                entry_time = datetime.fromisoformat(evidence_meta['entry_time_confirmed'])
         import logging as _lg
         _lg.getLogger("app.bot.runtime").info(
-            "ST_OPEN enter figi=%s mode=%s test=%s", figi, self.broker_mode,
+            "ST_OPEN enter figi=%s mode=%s test=%s", figi, ledger_mode,
             getattr(self.config, "test_name", "") or "")
         try:
             async with SessionLocal() as db:
@@ -1792,18 +1950,59 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 _now = self._bot_now()
                 prev = (await db.execute(
                     select(SandboxTrade)
-                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None))
+                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
+                           SandboxTrade.mode == ledger_mode,
+                           SandboxTrade.test_name == (getattr(self.config, "test_name", "") or None),
+                           SandboxTrade.broker_account_id == ledger_account)
                     .order_by(SandboxTrade.entry_time.desc())
                 )).scalars().all()
+                if client_order_id:
+                    history = (await db.execute(select(SandboxTrade).where(
+                        SandboxTrade.figi == figi,
+                        SandboxTrade.mode == ledger_mode,
+                        SandboxTrade.broker_account_id == ledger_account,
+                    ))).scalars().all()
+                    matching = []
+                    for row in history:
+                        row_meta = _json.loads(row.meta or "{}")
+                        if row_meta.get("client_order_id") == client_order_id:
+                            matching.append((row, row_meta))
+                    if len(matching) > 1:
+                        raise ValueError("duplicate_entry_identity")
+                    if matching:
+                        row, row_meta = matching[0]
+                        if (row.exit_time is not None or row.side != side
+                                or row_meta.get("lot_size") != _lot
+                                or qty_shares < row.qty):
+                            raise ValueError("entry_execution_conflict")
+                        same_execution = (row.qty == qty_shares
+                            and Decimal(str(row.entry_price)).quantize(Decimal('0.000001'))
+                            == Decimal(str(price)).quantize(Decimal('0.000001')))
+                        row.qty = qty_shares
+                        row.entry_price = float(price)
+                        row_meta["entry_price0"] = float(price)
+                        if ledger_mode in ('live', 'sandbox'):
+                            if (entry_evidence is not None or not same_execution
+                                    or row_meta.get('entry_time_source') != 'broker_history'):
+                                row_meta.update(evidence_meta)
+                            row_meta['entry_observed_at'] = _now.isoformat()
+                            if entry_time is not None:
+                                row.entry_time = entry_time
+                                row_meta['entry_time'] = entry_time.isoformat()
+                        row.meta = _json.dumps(row_meta, ensure_ascii=False, default=str)
+                        await db.commit()
+                        return
+                    if prev:
+                        raise ValueError("another_open_entry_exists")
                 for _old in prev:
                     _old.exit_time = _now
-                    _old.exit_price = float(_old.entry_price or 0.0)
+                    _old.exit_price = None
                     _old.exit_reason = "reopened"
-                    _old.net_pnl = 0.0
+                    _old.net_pnl = None
                     await db.flush()
                 db.add(SandboxTrade(
                     figi=figi, ticker=ticker, side=side, qty=qty_shares,
-                    entry_time=_now,
+                    entry_time=entry_time or _now,
                     entry_price=float(price),
                     stop_loss=float(sl) if sl else None,
                     take_profit=float(tp) if tp else None,
@@ -1811,15 +2010,17 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     meta=_json.dumps({**_meta_row, "sl_initial": float(sl) if sl else None,
                                       "entry_price0": float(price),
                                       "entry_regime": _er_norm,
-                                      "entry_time": _now.isoformat()}, ensure_ascii=False, default=str),
+                                      "entry_time": (entry_time or _now).isoformat(),
+                                      "entry_observed_at": _now.isoformat()}, ensure_ascii=False, default=str),
                     leverage=float(leverage),
-                    mode=self.broker_mode,
+                    mode=ledger_mode,
                     test_name=getattr(self.config, "test_name", "") or None,
+                    broker_account_id=ledger_account,
                 ))
                 await db.commit()
                 _lg.getLogger("app.bot.runtime").info(
                     "ST_OPEN persist ok figi=%s mode=%s test=%s", figi,
-                    self.broker_mode, getattr(self.config, "test_name", "") or "")
+                    ledger_mode, getattr(self.config, "test_name", "") or "")
                 # Funnel: фактический вход (executed_entries) — инкремент стратегии figi
                 try:
                     _st_f = self.strategies.get(figi)
@@ -1830,12 +2031,11 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         except Exception as _sw_e:
             _lg.getLogger("app.bot.runtime").error(
                 "ST_OPEN persist FAILED figi=%s mode=%s test=%s: %r",
-                figi, self.broker_mode,
+                figi, ledger_mode,
                 getattr(self.config, "test_name", "") or "", _sw_e, exc_info=True)
-            _audit_swallow('_st_open@L1588', _sw_e)  # audit silent-except
-            pass
+            raise
 
-    async def _st_close(self, figi, exit_price, reason="", net=None, meta: dict | None = None) -> None:
+    async def _st_close(self, figi, exit_price, reason="", net=None, meta: dict | None = None, execution=None) -> None:
         from app.models.sandbox_trade import SandboxTrade
         from app.engine.costs import CostModel
         import json as _json
@@ -1844,7 +2044,9 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 res = await db.execute(
                     select(SandboxTrade)
                     .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
-                           SandboxTrade.mode == self.broker_mode)
+                           SandboxTrade.mode == self.broker_mode,
+                           SandboxTrade.test_name == (getattr(self.config, "test_name", "") or None),
+                           SandboxTrade.broker_account_id == _account_scope_of(self))
                     .order_by(SandboxTrade.entry_time.desc())
                     .limit(1)
                 )
@@ -1855,6 +2057,17 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                         "ST_CLOSE: нет открытой строки figi=%s mode=%s test=%s (открытие не записалось?)",
                         figi, self.broker_mode, getattr(self.config, "test_name", "") or "")
                 if row is not None:
+                    paper_settlement = None
+                    if isinstance(self.broker, PaperBroker):
+                        from app.bot.paper_cashflow import settle_paper_exit
+                        net = None
+                        if execution is not None and int(execution.qty) == int(row.qty):
+                            exit_price = float(execution.exit_price)
+                            paper_settlement = settle_paper_exit(
+                                float(execution.gross_pnl), float(execution.commission),
+                                float(execution.entry_commission) if execution.entry_commission is not None else None,
+                            )
+                            net = paper_settlement.total_net
                     row.exit_time = self._bot_now()
                     row.exit_price = float(exit_price)
                     row.exit_reason = reason or ""
@@ -1951,12 +2164,14 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                             _audit_swallow('_st_close@peak_mae', _sw_e)  # audit silent-except
                             pass
                     row.exit_meta = _json.dumps(meta, ensure_ascii=False, default=str)
-                    if net is not None:
-                        row.net_pnl = float(net)
+                    if net is not None or isinstance(self.broker, PaperBroker):
+                        row.net_pnl = float(net) if net is not None else None
                     costs = CostModel(commission_rate=self.config.commission_rate, slippage_bps=self.config.slippage_bps)
                     entry_comm = costs.commission(float(row.entry_price) * int(row.qty))
                     exit_comm = costs.commission(float(exit_price) * int(row.qty))
                     row.commission = round(entry_comm + exit_comm, 4)
+                    if isinstance(self.broker, PaperBroker):
+                        row.commission = paper_settlement.total_commission if paper_settlement else None
                     await db.commit()
                     # --- HOLD после серии убытков: обновляем счётчик ---
                     try:
@@ -1976,28 +2191,49 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             pass
 
     async def _st_update_sl(self, figi: str, sl: float, trail_active: bool | None = None) -> None:
+        from decimal import Decimal
         from app.models.sandbox_trade import SandboxTrade
+
+        broker = self.broker
+        mode = self.broker_mode
+        account = _account_scope_of(self)
+        test_name = getattr(self.config, "test_name", "") or None
+        sessions = broker.sessions if isinstance(broker, LiveBroker) else SessionLocal
+        def same_scope():
+            return (self.broker is broker and self.broker_mode == mode and _account_scope_of(self) == account
+                    and (broker.mode == mode if isinstance(broker, LiveBroker)
+                         else (getattr(self.config, "test_name", "") or None) == test_name))
         try:
-            async with SessionLocal() as db:
-                res = await db.execute(
-                    select(SandboxTrade)
-                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
-                           SandboxTrade.mode == self.broker_mode)
-                    .order_by(SandboxTrade.entry_time.desc())
-                    .limit(1)
-                )
-                row = res.scalar_one_or_none()
-                if row is not None:
-                    if sl is not None:
-                        row.stop_loss = float(sl)
+            if not same_scope():
+                raise ValueError('Protection update scope mismatch')
+            stop = Decimal(str(sl)) if sl is not None and not isinstance(sl, bool) else None
+            if (sl is not None and (stop is None or not stop.is_finite() or stop <= 0)
+                    or trail_active is not None and type(trail_active) is not bool):
+                raise ValueError('Invalid protection update')
+            async with sessions() as db:
+                async with db.begin():
+                    rows = (await db.scalars(select(SandboxTrade).where(
+                        SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
+                        SandboxTrade.mode == mode, SandboxTrade.broker_account_id == account,
+                        *([] if isinstance(broker, LiveBroker) else [SandboxTrade.test_name == test_name])
+                    ).with_for_update())).all()
+                    if not same_scope():
+                        raise ValueError('Protection update scope changed')
+                    if len(rows) != 1:
+                        raise ValueError('Unique open position required for protection update')
+                    row = rows[0]
+                    if stop is not None:
+                        row.stop_loss = stop
                     if trail_active is not None:
-                        row.trailing_active = bool(trail_active)
+                        row.trailing_active = trail_active
                         if trail_active:
-                            row.take_profit = None  # TP выключается при активации трейлинга
-                    await db.commit()
-        except Exception as _sw_e:
-            _audit_swallow('_st_update_sl@L1653', _sw_e)  # audit silent-except
-            pass
+                            row.take_profit = None
+            if not same_scope():
+                raise ValueError('Protection scope changed after commit')
+            self._entry_pause().set_blocker('protection_persistence_failed', False, mode, account, figi)
+        except Exception as error:
+            self._entry_pause().set_blocker('protection_persistence_failed', True, mode, account, figi)
+            self.events.log('PROTECTION_PERSISTENCE_FAILED', figi=figi, error_type=type(error).__name__)
 
     async def set_position_levels(self, figi: str, sl: float | None = None, tp: float | None = None) -> dict:
         """Ручная правка SL/TP позиции: in-memory учёт выхода + запись в БД.
@@ -2084,7 +2320,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 row = (await db.execute(
                     _sel(SandboxTrade).where(
                         SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
-                        SandboxTrade.mode == self.broker_mode)
+                        SandboxTrade.mode == self.broker_mode,
+                        SandboxTrade.broker_account_id == _account_scope_of(self))
                     .order_by(SandboxTrade.entry_time.desc()).limit(1)
                 )).scalar_one_or_none()
                 if row is not None:
@@ -2142,13 +2379,33 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             _atr = self.atr_now(bb)
             _dsa = (abs(last - sl) / _atr) if (last and sl and _atr) else None
             _dta = (abs(tp - last) / _atr) if (last and tp and _atr) else None
+            _init_sl = getattr(p, "initial_sl", None)
+            _plan_px = getattr(p, "plan_entry_price", None)
+            _atr_entry = getattr(p, "atr_at_entry", None)
+            _mult = getattr(p, "atr_multiplier", None)
+            _esl_atr = None
+            if _init_sl is not None and _atr_entry:
+                _base = float(_plan_px) if _plan_px is not None else float(entry or 0)
+                _esl_atr = abs(_base - float(_init_sl)) / float(_atr_entry) if _base else None
             out["positions"].append({
                 "figi": bb, "ticker": self.tickers.get(bb, getattr(p, "ticker", "") or bb[-6:]),
+                "protection_reference": (getattr(self, '_intrabar_reference_status', {}).get(bb)
+                    if getattr(self, '_intrabar_reference_scope', None) ==
+                    (getattr(self.broker, 'mode', None), getattr(self.broker, '_account', None)) else None),
                 "side": "LONG" if long_ else "SHORT", "qty": qty,
                 "entry": entry, "last": last, "pnl": pnl,
                 "sl": sl, "tp": tp,
                 "dist_sl_pct": d_sl, "dist_tp_pct": d_tp,
                 "atr": _atr, "dist_sl_atr": _dsa, "dist_tp_atr": _dta,
+                "initial_sl": float(_init_sl) if _init_sl is not None else None,
+                "plan_entry_price": float(_plan_px) if _plan_px is not None else None,
+                "atr_at_entry": float(_atr_entry) if _atr_entry is not None else None,
+                "entry_sl_atr": _esl_atr,
+                "atr_tf": getattr(p, "atr_tf", None),
+                "atr_period": getattr(p, "atr_period", None),
+                "atr_as_of": str(getattr(p, "atr_as_of", None) or "") or None,
+                "atr_multiplier": float(_mult) if _mult is not None else None,
+                "policy_source": getattr(p, "policy_source", None),
                 "regime": self._entry_regime.get(bb), "trail_active": bool(self._trail_active.get(bb)),
                 "hold": "swing" if bb in self._swing else "intraday",
                 "notional": (abs(qty) * last) if last else None,
@@ -2162,6 +2419,61 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             if _dsa is not None and _dsa <= 1.5:
                 out["alerts"].append(f"{pos['ticker']}: {_dsa:.2f} ATR до SL (близко)")
         return out
+
+    async def _intrabar_handle(self, figi: str, px: float) -> str:
+        """One intrabar protection check for a single FIGI.
+
+        Returns the classified outcome. Position, protection and entry bookkeeping are
+        cleared only on a confirmed full close, so an unacknowledged submission can never
+        look like a completed exit.
+        """
+        sl = self._trail_stop.get(figi)
+        tp = self._exit_target.get(figi)
+        if sl is None and tp is None:
+            return "no_plan"
+        side = self._exit_side.get(figi) or "LONG"
+        long_ = str(side).upper() in ("LONG", "BUY")
+        hit_sl = bool(sl) and ((long_ and px <= sl) or (not long_ and px >= sl))
+        hit_tp = bool(tp) and ((long_ and px >= tp) or (not long_ and px <= tp))
+        if not (hit_sl or hit_tp):
+            return "no_hit"
+        pos = await self.broker.get_position(figi)
+        if pos is None:
+            return "no_position"
+        # Вне сессии биржа/sandbox не принимает заявки (30079) —
+        # не дёргаем брокера, выход дожидается открытия сессии.
+        if not self._in_trading_session():
+            self._session_gate_log("intrabar-выход")
+            return "session_closed"
+        reason = "intrabar_sl" if hit_sl else "intrabar_tp"
+        qty = int(self._exit_qty.get(figi) or getattr(pos, "qty", 0) or 0)
+        ticker = getattr(pos, "ticker", "") or self.tickers.get(figi, "")
+        outcome = await self._submit_close_reconciled(figi, ticker, qty, float(px), reason)
+        status = outcome["status"]
+        if status == "reconciled_closed":
+            return "closed"
+        if status == "pending_partial":
+            self._exit_qty[figi] = int(outcome["residual"])
+        if status != "closed":
+            self._log(f"intrabar {figi[-6:]} {status} — позиция и защита сохранены",
+                      level="warn")
+            return status
+        trade = outcome["trade"]
+        exit_px = float(getattr(trade, "exit_price", None) or px)
+        self._held.discard(figi)
+        self._opposite_count.pop(figi, None)
+        self._last_exit_bar[figi] = self._bar_counter
+        self._peak_pnl.pop(figi, None)
+        self._clear_exit_state(figi)
+        bars_held = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
+        await self._st_close(figi, exit_px, execution=trade, reason=reason,
+                             net=float(trade.net_pnl),
+                             meta={"bars_held": bars_held, "intrabar": True})
+        self._log(f"INTRABAR ВЫХОД {figi[-6:]} {reason} @ {exit_px:.2f} "
+                  f"pnl={float(trade.net_pnl):+.2f}")
+        self.events.log("ORDER_FILLED", figi=figi, reason=reason,
+                        price=exit_px, net_pnl=float(trade.net_pnl), intrabar=True)
+        return "closed"
 
     async def _intrabar_exit_loop(self) -> None:
         """Быстрая (intrabar) проверка SL/TP между барами по последней цене брокера.
@@ -2179,6 +2491,10 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 await asyncio.sleep(max(2.0, _sec))
                 if not self.running or not self._exit_plans:
                     continue
+                if isinstance(self.broker, LiveBroker):
+                    from app.bot.intrabar_reference import check_intrabar_references
+                    await check_intrabar_references(self)
+                    continue
                 _lp = getattr(self.broker, "last_prices", None)
                 if _lp is None:
                     continue
@@ -2189,40 +2505,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     try:
                         if not px or px <= 0:
                             continue
-                        sl = self._trail_stop.get(figi)
-                        tp = self._exit_target.get(figi)
-                        if sl is None and tp is None:
-                            continue
-                        side = self._exit_side.get(figi) or "LONG"
-                        long_ = str(side).upper() in ("LONG", "BUY")
-                        hit_sl = bool(sl) and ((long_ and px <= sl) or (not long_ and px >= sl))
-                        hit_tp = bool(tp) and ((long_ and px >= tp) or (not long_ and px <= tp))
-                        if not (hit_sl or hit_tp):
-                            continue
-                        pos = await self.broker.get_position(figi)
-                        if pos is None:
-                            continue
-                        # Вне сессии биржа/sandbox не принимает заявки (30079) —
-                        # не дёргаем брокера, выход дожидается открытия сессии.
-                        if not self._in_trading_session():
-                            self._session_gate_log("intrabar-выход")
-                            continue
-                        reason = "intrabar_sl" if hit_sl else "intrabar_tp"
-                        trade = await self.broker.close_position(figi, float(px), reason)
-                        self._held.discard(figi)
-                        self._opposite_count.pop(figi, None)
-                        self._last_exit_bar[figi] = self._bar_counter
-                        self._clear_exit_state(figi)
-                        _bh = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
-                        if trade is not None:
-                            await self._st_close(figi, float(px), reason=reason,
-                                                 net=float(trade.net_pnl),
-                                                 meta={"bars_held": _bh, "intrabar": True})
-                            self._log(f"INTRABAR ВЫХОД {figi[-6:]} {reason} @ {px:.2f} "
-                                      f"pnl={float(trade.net_pnl):+.2f}")
-                            self.events.log("ORDER_FILLED", figi=figi, reason=reason,
-                                            price=float(px), net_pnl=float(trade.net_pnl),
-                                            intrabar=True)
+                        await self._intrabar_handle(figi, float(px))
                     except Exception as _ie:
                         self._log(f"intrabar {figi[-6:]}: {type(_ie).__name__}: {str(_ie)[:70]}")
             except asyncio.CancelledError:
@@ -2565,6 +2848,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             "signals_seen": self.signals_seen,
             "pending_orders": len(self.pending_orders),
             "entries_paused": self.entries_paused,
+            "entry_pause_reasons": self._entry_pause().reasons,
             "session": session_state(),
             "data": {
                 "health": health,
@@ -2576,7 +2860,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             "preset_conflicts": list(getattr(self, "_preset_conflicts", []) or []),
             "risk": {
                 "state": risk.state,
-                "daily_pnl": round(risk.daily_pnl, 2),
+                "daily_pnl": round(risk.daily_pnl, 2) if risk.daily_pnl is not None else None,
                 "daily_loss_limit": risk.daily_loss_limit,
                 "entries_paused": risk.entries_paused,
             },
@@ -2627,33 +2911,79 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             return self._replay_from
         return datetime.now(timezone.utc)
 
-    def daily_pnl_cached(self) -> float:
+    def _daily_pnl_scope(self) -> tuple | None:
+        mode = getattr(self, 'broker_mode', None)
+        broker = getattr(self, 'broker', None)
+        if mode in ('live', 'sandbox'):
+            account = getattr(broker, '_account', None)
+            if getattr(broker, 'mode', None) == mode and isinstance(account, str) and account.strip():
+                return mode, id(broker), account
+        elif mode == 'paper' and broker is not None:
+            return mode, id(broker), getattr(self.config, 'test_name', None)
+        return None
+
+    def daily_pnl_cached(self) -> float | None:
+        from math import isfinite
+        cache = getattr(self, '_daily_pnl_cache', None)
+        scope = self._daily_pnl_scope()
+        if not cache or scope is None or scope != getattr(self, '_daily_pnl_cache_scope', None):
+            return None
         now = self._bot_now()
-        if self._daily_pnl_cache and now - self._daily_pnl_cache[0] < DAILY_PNL_TTL:
-            return self._daily_pnl_cache[1]
-        self._daily_pnl_cache = (now, 0.0)
-        self._turnover_cache: dict[str, float] = {}
-        self._turnover_ts = 0.0
-        return self._daily_pnl_cache[1]
+        saved, value = cache
+        msk = timezone(timedelta(hours=3))
+        if now.utcoffset() is None or saved.utcoffset() is None:
+            return None
+        if not timedelta(0) <= now - saved < DAILY_PNL_TTL or now.astimezone(msk).date() != saved.astimezone(msk).date():
+            return None
+        return float(value) if value is not None and isfinite(float(value)) else None
+
+    async def _ensure_risk_fresh(self) -> bool:
+        if not hasattr(self, '_risk_refresh_lock'):
+            self._risk_refresh_lock = asyncio.Lock()
+        async with self._risk_refresh_lock:
+            if self.daily_pnl_cached() is not None and 'risk_evidence_unavailable' not in self._entry_pause().reasons:
+                return True
+            try:
+                await self._check_circuit_breaker()
+            except Exception:
+                return False
+            return self.daily_pnl_cached() is not None
 
     async def refresh_daily_pnl(self) -> float:
-        msk_now = self._bot_now().astimezone(timezone(timedelta(hours=3)))
+        from math import isfinite
+        from sqlalchemy import or_
+        as_of = self._bot_now()
+        msk_now = as_of.astimezone(timezone(timedelta(hours=3)))
         day_start = msk_now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
-        _mode = str(getattr(self, "broker_mode", "") or "")
-        async with SessionLocal() as db:
-            if _mode in ("sandbox", "live"):
-                # Дневной P&L — только по активному контуру, иначе после переключения
-                # sandbox↔live в лимит дня попадали бы сделки чужого счёта.
-                from app.models.sandbox_trade import SandboxTrade as _ST
-                res = await db.execute(
-                    select(_ST.net_pnl).where(_ST.exit_time >= day_start, _ST.mode == _mode)
-                )
+        mode = str(getattr(self, 'broker_mode', '') or '')
+        broker = self.broker
+        scope = self._daily_pnl_scope()
+        if scope is None:
+            raise ValueError("daily_pnl_scope_unavailable")
+        account = _account_scope_or_raise(self) if mode in ('sandbox', 'live') else None
+        sessions = broker.sessions
+        async with sessions() as db:
+            if mode in ('sandbox', 'live'):
+                from app.models.sandbox_trade import SandboxTrade
+                query = select(SandboxTrade.net_pnl).where(
+                    SandboxTrade.exit_time >= day_start, SandboxTrade.exit_time <= as_of,
+                    SandboxTrade.mode == mode, SandboxTrade.broker_account_id == account,
+                    or_(SandboxTrade.exit_reason.is_(None), SandboxTrade.exit_reason != 'duplicate_cleanup'))
             else:
-                res = await db.execute(
-                    select(PaperTrade.net_pnl).where(PaperTrade.exit_time >= day_start)
-                )
-            total = sum(float(v) for v in res.scalars() if v is not None)
-        self._daily_pnl_cache = (datetime.now(timezone.utc), total)
+                from app.bot.paper_broker import DEFAULT_ACCOUNT
+                account_id = await db.scalar(select(PaperAccount.id).where(PaperAccount.name == DEFAULT_ACCOUNT))
+                if account_id is None:
+                    raise ValueError('paper_risk_account_missing')
+                query = select(PaperTrade.net_pnl).where(PaperTrade.account_id == account_id,
+                    PaperTrade.exit_time >= day_start, PaperTrade.exit_time <= as_of)
+            values = (await db.execute(query)).scalars().all()
+        if self._daily_pnl_scope() != scope:
+            raise ValueError('broker_scope_changed_during_daily_pnl')
+        if any(value is None or not isfinite(float(value)) for value in values):
+            raise ValueError('daily_pnl_contains_unknown_outcomes')
+        total = sum(float(value) for value in values)
+        self._daily_pnl_cache = (as_of, total)
+        self._daily_pnl_cache_scope = scope
         return total
 
     async def _restore_swing(self) -> None:
@@ -2700,6 +3030,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         self._replay_summary = None
         self._signal_busy = set()
         self._skip_logged = {}
+        self._entry_runtime_requests = {}
         self._held = set()
         self._swing = set()
         self._peak_pnl = {}
@@ -2946,7 +3277,6 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         self.buffers = {}
         self.pending_orders = {}
         self.tickers = {}
-        self.entries_paused = False
         self._imoex_state = None  # счётчики guard'а — с чистого листа на каждый запуск
         self.carousel_diag = {
             "eligible_count": 0, "active_count": 0, "hot_adds": 0,
@@ -2962,9 +3292,12 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             # CostModel из конфига: комиссия/проскальзывание теста = настройки бота
             from app.engine.costs import CostModel as _CostModel
             self.broker = PaperBroker(SessionLocal, cost_model=_CostModel(
-                commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps))
+                commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps), clock=self._bot_now)
         else:
             self.broker = LiveBroker(SessionLocal, config=cfg)
+            await self._restore_close_intents()
+            await self._restore_open_intents()
+            await self._restore_close_after_open_requests()
             # --- StreamManager: subscribe to server streams ---
             from app.config import get_settings
             _s = get_settings()
@@ -3045,7 +3378,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             except Exception as e:
                 self._log(f"REPLAY RESET FAIL: {type(e).__name__}: {str(e)[:80]}")
         await self.broker.ensure_account(cfg.initial_cash)
-        await self.refresh_daily_pnl()
+        await self._check_circuit_breaker()
         self.starting = True
         self.startup_task = asyncio.create_task(self._startup(cfg))
         return {"started": True, "async": True}
@@ -3174,6 +3507,34 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         except Exception as e:
             self._log(f"⚠ CANDLE-PREFLIGHT: {type(e).__name__}: {str(e)[:120]}")
 
+    async def _refresh_broker_candidates(self):
+        from app.services.tinvest import fetch_share_catalog
+        from app.bot.universe.runtime_select import select_broker_candidates, constrain_manual_candidates
+
+        manual = load_universe_overrides()
+        mode = str(self.config.mode)
+        now = datetime.now(timezone.utc)
+        observed = getattr(self, "_candidate_observed_at", None)
+        cached_mode = getattr(self, "_candidate_mode", None)
+        if observed is None or cached_mode != mode or not timedelta(0) <= now - observed < timedelta(hours=1):
+            catalog, observed = await asyncio.to_thread(fetch_share_catalog, mode)
+        else:
+            catalog = self._candidate_catalog
+        async with SessionLocal() as db:
+            candidates, decisions = await select_broker_candidates(
+                db, catalog=catalog, observed_at=observed,
+                as_of=datetime.now(timezone.utc),
+                top_n=9999 if manual or self.config.use_ensemble else self.config.top_n,
+                ensemble=bool(self.config.use_ensemble))
+        if manual:
+            candidates, decisions = constrain_manual_candidates(candidates, decisions, manual)
+        self._candidate_catalog = catalog
+        self._candidate_observed_at = observed
+        self._candidate_mode = mode
+        self._candidate_figis = {row["figi"] for row in candidates}
+        self._candidate_decisions = decisions
+        return candidates
+
     async def _startup(self, cfg: BotConfig) -> None:
         await self._init_signal_trace(cfg)
         try:
@@ -3188,11 +3549,9 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     "SELECT figi, ticker FROM instrument_info"))
                 self.bbg_to_tcs = {}
                 self.tcs_to_bbg = {}
-            for ii_figi, ii_ticker in ii_rows.all():
-                bb = figi_by_ticker.get(ii_ticker)
-                if bb and ii_figi:
-                    self.bbg_to_tcs[bb] = ii_figi
-                    self.tcs_to_bbg[ii_figi] = bb
+            from app.bot.universe.discovery import exact_instrument_maps
+            self.bbg_to_tcs, self.tcs_to_bbg = exact_instrument_maps(
+                figi_by_ticker, ii_rows.all())
 
             from app.bot.universe import select_eligible_universe, select_volatile_universe
 
@@ -3202,24 +3561,23 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 figi_by_ticker, cfg, self._replay_from or self._bot_now(),
                 lambda msg, level="info": self._log(msg, level=level, source="universe"),
             )
-            _custom_uni = None
-            try:
-                _cu_path = Path(r"X:\run\custom_universe.json")
-                if _cu_path.exists():
-                    _custom_uni = json.loads(_cu_path.read_text(encoding="utf-8"))
-            except Exception:
-                _custom_uni = None
+            _custom_uni = load_universe_overrides()
             if _custom_uni:
-                self.universe = [dict(_c) for _c in _custom_uni]
+                if str(cfg.mode) in ("live", "sandbox") and str(cfg.feed) != "replay":
+                    self.universe = await self._refresh_broker_candidates()
+                else:
+                    self.universe = [dict(_c) for _c in _custom_uni]
                 self._custom_locks = {
                     str(_c["figi"]): ("BUY" if _c.get("side") == "short" else "SELL")
-                    for _c in _custom_uni if _c.get("side") in ("short", "long")}
+                    for _c in self.universe if _c.get("side") in ("short", "long")}
                 self._log(
                     "UNIVERSE-CUSTOM: %d бумаг · %s" % (
                         len(self.universe),
                         ", ".join("%s(%s)" % (str(_c.get("ticker", "?")), _c.get("side", ""))
                                  for _c in self.universe)),
                     level="info", source="universe")
+            elif str(cfg.mode) in ("live", "sandbox") and str(cfg.feed) != "replay":
+                self.universe = await self._refresh_broker_candidates()
             elif _move_universe:
                 self.universe = _move_universe
                 self._move_selected = {str(u["figi"]) for u in self.universe}
@@ -3266,6 +3624,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             # Loaded all eligible for streaming
             if _umode == "v2_move" or (_umode.startswith("v2_") and str(cfg.mode) == "test"):
                 # v2-режим теста: подписка/стрим только на отобранный скринером набор
+                self.stream_universe = [u["figi"] for u in self.universe]
+            elif str(cfg.mode) in ("live", "sandbox") and str(cfg.feed) != "replay":
                 self.stream_universe = [u["figi"] for u in self.universe]
             else:
                 async with SessionLocal() as db2:
@@ -3394,84 +3754,87 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 raise RuntimeError("no strategies loaded (all tickers failed)")
             self.universe = [u for u in self.universe if u["figi"] in self.strategies]
 
-            try:
-                held_now = await self.broker.positions()
-                self._held = {p.figi for p in held_now}
-                import time as _t0
-                for _hf in self._held:
-                    self._held_since[_hf] = _t0.monotonic()
-                if self._held:
-                    self._log(f"ОТКРЫТО при старте: {len(self._held)} поз.")
-                    # Реставрация exit-состояния после перезагрузки из sandbox_trades:
-                    # SL/TP/трейлинг/цена входа переживают рестарт (источник — БД, не брокер).
-                    from app.models.sandbox_trade import SandboxTrade as _STM
-                    _open_rows: dict[str, _STM] = {}
-                    try:
-                        async with SessionLocal() as _db_r:
-                            _rows_r = (await _db_r.execute(
-                                select(_STM)
-                                .where(_STM.exit_time.is_(None))
-                                .order_by(_STM.entry_time.desc())
-                            )).scalars().all()
-                        for _r in _rows_r:
-                            _open_rows.setdefault(_r.figi, _r)
-                    except Exception as _re_err:
-                        self._log(f"restore rows error: {_re_err}")
-                    from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy
-                    for _p in held_now:
-                        _f = _p.figi
+            if isinstance(self.broker, LiveBroker):
+                await self._restore_live_position_exits()
+            else:
+                try:
+                    held_now = await self.broker.positions()
+                    self._held = {p.figi for p in held_now}
+                    import time as _t0
+                    for _hf in self._held:
+                        self._held_since[_hf] = _t0.monotonic()
+                    if self._held:
+                        self._log(f"ОТКРЫТО при старте: {len(self._held)} поз.")
+                        # Реставрация exit-состояния после перезагрузки из sandbox_trades:
+                        # SL/TP/трейлинг/цена входа переживают рестарт (источник — БД, не брокер).
+                        from app.models.sandbox_trade import SandboxTrade as _STM
+                        _open_rows: dict[str, _STM] = {}
                         try:
-                            if _p.side in ("LONG", "BUY"):
-                                _st = Side.BUY
-                                _side_str = "LONG"
-                            elif _p.side in ("SHORT", "SELL"):
-                                _st = Side.SELL
-                                _side_str = "SHORT"
-                            else:
-                                continue
-                            _row = _open_rows.get(_f)
-                            _entry_px = float(_row.entry_price) if (_row is not None and _row.entry_price) else float(_p.entry_price or 0)
-                            _strat_r = self.strategies.get(_f)
-                            _rr_r = getattr(_strat_r.p, "rr", None) if _strat_r is not None else None
-                            if cfg.sl_mode == "fixed":
-                                _pol = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
-                                _pl = _pol.plan_entry(_st, _entry_px, [])
-                            else:
-                                _pol = AtrStopPolicy(period=cfg.atr_period,
-                                                     multiplier=cfg.initial_sl_atr,
-                                                     risk_reward=float(_rr_r) if _rr_r else cfg.atr_risk_reward,
-                                                     trail_activation_comm_mult=cfg.trail_activation_comm_mult,
-                                                     trail_distance_r=cfg.trail_distance_atr,
-                                                     trail_compress_r=cfg.trail_compress_r,
-                                                     trail_min_factor=cfg.trail_min_factor,
-                                                     trail_min_atr=cfg.trail_min_atr,
-                                                     trail_vol_boost=cfg.trail_vol_boost)
-                                _buf_raw = list(self.buffers.get(_f, [])) or None
-                                _pl = _pol.plan_entry(_st, _entry_px, _buf_raw or [])
-                            # Сохранённые уровни важнее пересчитанного плана:
-                            # трейлинг мог уже подтянуть стоп / отключить TP.
-                            _sl = float(_row.stop_loss) if (_row is not None and _row.stop_loss) else (
-                                float(_pl.stop_loss) if _pl.stop_loss is not None else None)
-                            _trail_was = bool(_row.trailing_active) if _row is not None else False
-                            _tp = (float(_row.take_profit) if (_row is not None and _row.take_profit) else
-                                   (float(_pl.take_profit) if _pl.take_profit is not None else None))
-                            if _trail_was:
-                                _tp = None  # TP выключен после активации трейлинга
-                            self._exit_plans[_f] = _pol
-                            self._exit_side[_f] = _side_str
-                            self._exit_entry_px[_f] = _entry_px
-                            self._exit_qty[_f] = int(abs(getattr(_p, "qty", 0) or 0))
-                            self._trail_active[_f] = _trail_was
-                            self._trail_stop[_f] = float(_sl) if _sl is not None else 0.0
-                            if _tp is not None:
-                                self._exit_target[_f] = _tp
-                            self._entry_bar_index[_f] = 0
-                            self._log(f"ВЫХОД ВОССТАНОВЛЕН {_f[-6:]} {_p.side} entry={_entry_px:.2f} sl={self._trail_stop[_f]:.2f} trail={_trail_was}")
-                        except Exception as _restore_e:
-                            self._log(f"restore trailing {_f[-6:]} error: {_restore_e}")
-            except Exception as _sw_e:
-                _audit_swallow('_load_bounded@L2633', _sw_e)  # audit silent-except
-                self._held = set()
+                            async with SessionLocal() as _db_r:
+                                _rows_r = (await _db_r.execute(
+                                    select(_STM)
+                                    .where(_STM.exit_time.is_(None))
+                                    .order_by(_STM.entry_time.desc())
+                                )).scalars().all()
+                            for _r in _rows_r:
+                                _open_rows.setdefault(_r.figi, _r)
+                        except Exception as _re_err:
+                            self._log(f"restore rows error: {_re_err}")
+                        from app.engine.exits import AtrStopPolicy, FixedSlTpPolicy
+                        for _p in held_now:
+                            _f = _p.figi
+                            try:
+                                if _p.side in ("LONG", "BUY"):
+                                    _st = Side.BUY
+                                    _side_str = "LONG"
+                                elif _p.side in ("SHORT", "SELL"):
+                                    _st = Side.SELL
+                                    _side_str = "SHORT"
+                                else:
+                                    continue
+                                _row = _open_rows.get(_f)
+                                _entry_px = float(_row.entry_price) if (_row is not None and _row.entry_price) else float(_p.entry_price or 0)
+                                _strat_r = self.strategies.get(_f)
+                                _rr_r = getattr(_strat_r.p, "rr", None) if _strat_r is not None else None
+                                if cfg.sl_mode == "fixed":
+                                    _pol = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
+                                    _pl = _pol.plan_entry(_st, _entry_px, [])
+                                else:
+                                    _pol = AtrStopPolicy(period=cfg.atr_period,
+                                                         multiplier=cfg.initial_sl_atr,
+                                                         risk_reward=float(_rr_r) if _rr_r else cfg.atr_risk_reward,
+                                                         trail_activation_comm_mult=cfg.trail_activation_comm_mult,
+                                                         trail_distance_r=cfg.trail_distance_atr,
+                                                         trail_compress_r=cfg.trail_compress_r,
+                                                         trail_min_factor=cfg.trail_min_factor,
+                                                         trail_min_atr=cfg.trail_min_atr,
+                                                         trail_vol_boost=cfg.trail_vol_boost)
+                                    _buf_raw = list(self.buffers.get(_f, [])) or None
+                                    _pl = _pol.plan_entry(_st, _entry_px, _buf_raw or [])
+                                # Сохранённые уровни важнее пересчитанного плана:
+                                # трейлинг мог уже подтянуть стоп / отключить TP.
+                                _sl = float(_row.stop_loss) if (_row is not None and _row.stop_loss) else (
+                                    float(_pl.stop_loss) if _pl.stop_loss is not None else None)
+                                _trail_was = bool(_row.trailing_active) if _row is not None else False
+                                _tp = (float(_row.take_profit) if (_row is not None and _row.take_profit) else
+                                       (float(_pl.take_profit) if _pl.take_profit is not None else None))
+                                if _trail_was:
+                                    _tp = None  # TP выключен после активации трейлинга
+                                self._exit_plans[_f] = _pol
+                                self._exit_side[_f] = _side_str
+                                self._exit_entry_px[_f] = _entry_px
+                                self._exit_qty[_f] = int(abs(getattr(_p, "qty", 0) or 0))
+                                self._trail_active[_f] = _trail_was
+                                self._trail_stop[_f] = float(_sl) if _sl is not None else 0.0
+                                if _tp is not None:
+                                    self._exit_target[_f] = _tp
+                                self._entry_bar_index[_f] = 0
+                                self._log(f"ВЫХОД ВОССТАНОВЛЕН {_f[-6:]} {_p.side} entry={_entry_px:.2f} sl={self._trail_stop[_f]:.2f} trail={_trail_was}")
+                            except Exception as _restore_e:
+                                self._log(f"restore trailing {_f[-6:]} error: {_restore_e}")
+                except Exception as _sw_e:
+                    _audit_swallow('_load_bounded@L2633', _sw_e)  # audit silent-except
+                    self._held = set()
             self.running = True
             self._log("БОТ ЗАПУЩЕН")
             self.started_at = datetime.now(timezone.utc)
@@ -3519,7 +3882,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     pass
         # Хвостовые циклы (persist/imoex/queue/…): если _run уже завершился сам,
         # они остаются висеть и блокируют graceful shutdown uvicorn — гасим явно.
-        for _attr in ('_persist_task', '_held_sync_task', '_hot_add_task', '_vol_carousel_task',
+        for _attr in ('_dispatch_task', '_persist_task', '_held_sync_task', '_hot_add_task', '_vol_carousel_task',
                    '_reconcile_task',
                        '_session_task', '_metrics_task', '_intrabar_task', '_imoex_task',
                        '_queue_task', '_momentum_task', '_guard_task'):
@@ -3530,6 +3893,11 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     await _t
                 except (asyncio.CancelledError, Exception):
                     pass
+        if isinstance(self.feed, CandleFeed) and getattr(self.config, "feed", "") != "replay":
+            try:
+                await asyncio.wait_for(self.feed._flush_persist(), timeout=5.0)
+            except TimeoutError as exc:
+                _audit_swallow("stop.feed_persist_timeout", exc)
         try:
             await asyncio.wait_for(self._flush_persist_once(), timeout=5.0)
         except Exception:
@@ -3542,24 +3910,38 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         return {"stopped": True, "was_running": was_running}
 
     async def set_entries_paused(self, paused: bool) -> dict:
-        prev = self.entries_paused
+        previous_effective = self.entries_paused
         self.entries_paused = paused
+        if not paused:
+            try:
+                await self._check_circuit_breaker()
+            except Exception:
+                self.events.log('ENTRY_RESUME_BLOCKED', reason='risk_evidence_unavailable')
         await save_bot_flags({"entries_paused": paused})
-        if paused != prev:
-            self.events.log("PAUSE_NEW_ENTRIES" if paused else "RESUME_NEW_ENTRIES",
-                            reason="manual")
-        return {"entries_paused": self.entries_paused}
+        event = ('PAUSE_NEW_ENTRIES' if self.entries_paused else 'RESUME_NEW_ENTRIES')
+        if self.entries_paused == previous_effective:
+            event = 'ENTRY_PAUSE_UPDATED'
+        self.events.log(event, reason='manual', entry_pause_reasons=self._entry_pause().reasons)
+        return {"entries_paused": self.entries_paused, "entry_pause_reasons": self._entry_pause().reasons}
 
     async def cancel_pending(self) -> dict:
         cancelled = []
+        unresolved = []
         for figi, order in list(self.pending_orders.items()):
+            if order.status in ("PENDING_RECONCILIATION", "PARTIAL_FILLED"):
+                unresolved.append(order.to_dict())
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                ticker=order.ticker, order_id=order.id,
+                                reason="local_cancel_cannot_confirm_broker_cancellation")
+                continue
             order.status = "CANCELLED"
             cancelled.append(order.to_dict())
             del self.pending_orders[figi]
             self._approvals_since.pop(order.id, None)
             self.events.log("ORDER_CANCELLED", figi=figi, ticker=order.ticker,
                             reason="manual", order_id=order.id)
-        return {"cancelled": len(cancelled), "orders": cancelled}
+        return {"cancelled": len(cancelled), "orders": cancelled,
+                "pending_reconciliation": len(unresolved), "unresolved_orders": unresolved}
 
     # --- AI-гейт: ожидающие входы и решения (approve/reject) ---
 
@@ -3903,34 +4285,64 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                         "cooldown_min": _cd}
         return {"ok": False, "error": "order not found or not pending approval"}
 
-    async def close_all(self) -> dict:
+    async def close_all(self, only_figi=None, reason="kill_switch_close_all") -> dict:
         if not self._in_trading_session():
             self._session_gate_log("закрытие всех позиций (kill-switch)")
             return {"closed": 0, "positions": []}
-        positions = await self.broker.positions()
+        broker = self.broker
+        scope = (getattr(broker, 'mode', None), getattr(broker, '_account', None))
+        positions = await broker.positions()
+        if (self.broker is not broker
+                or (getattr(broker, 'mode', None), getattr(broker, '_account', None)) != scope):
+            return {"closed": 0, "positions": [], "pending": [{"figi": only_figi, "status": "broker_scope_changed"}]}
+        if only_figi is not None:
+            positions = [position for position in positions if position.figi == only_figi]
         closed = []
+        pending = []
         for p in positions:
+            if (self.broker is not broker
+                    or (getattr(broker, 'mode', None), getattr(broker, '_account', None)) != scope):
+                pending.append({"figi": p.figi, "status": "broker_scope_changed"})
+                continue
             buf = self.buffers.get(p.figi)
             price = float(buf[-1].close) if buf else float(p.entry_price)
-            trade = await self.broker.close_position(p.figi, price, "kill_switch_close_all")
+            qty = int(self._exit_qty.get(p.figi) or getattr(p, "qty", 0) or 0)
+            outcome = await self._submit_close_reconciled(
+                p.figi, p.ticker, qty, price, reason)
+            status = outcome["status"]
+            if status == "reconciled_closed":
+                closed.append({"figi": p.figi, "ticker": p.ticker, "price": None,
+                               "net_pnl": None, "order_id": outcome["order"].id})
+                continue
+            if status == "pending_partial":
+                self._exit_qty[p.figi] = int(outcome["residual"])
+            if status != "closed":
+                pending.append({"figi": p.figi, "ticker": p.ticker, "status": status,
+                                "residual": int(outcome.get("residual") or qty)})
+                self._log(f"KILL-SWITCH: {p.ticker or p.figi[-6:]} не закрыт ({status}), "
+                          "позиция и защита сохранены", level="warn")
+                continue
+            trade = outcome["trade"]
+            _exit_px = float(getattr(trade, "exit_price", None)
+                             or getattr(trade, "price", None) or price)
             self._held.discard(p.figi)
+            self._peak_pnl.pop(p.figi, None)
             self._clear_exit_state(p.figi)
             self._entry_bar_index.pop(p.figi, None)
             try:
-                await self._st_close(p.figi,
-                                     float(trade.price) if (trade and getattr(trade, "price", None)) else price,
-                                     reason="kill_switch_close_all",
+                await self._st_close(p.figi, _exit_px, execution=trade,
+                                     reason=reason,
                                      net=float(trade.net_pnl) if trade else None)
             except Exception as _sw_e:
                 _audit_swallow('close_all@L3054', _sw_e)  # audit silent-except
                 pass
             closed.append({"figi": p.figi, "ticker": p.ticker,
-                           "price": round(price, 6),
+                           "price": round(_exit_px, 6),
                            "net_pnl": float(trade.net_pnl) if trade else None})
             self.events.log("POSITION_CLOSED", figi=p.figi, ticker=p.ticker,
-                            reason="kill_switch_close_all", net_pnl=closed[-1]["net_pnl"])
-        self.events.log("CLOSE_ALL", reason=f"closed={len(closed)}")
-        return {"closed": len(closed), "positions": closed}
+                            reason=reason, net_pnl=closed[-1]["net_pnl"])
+        self.events.log("CLOSE_ALL", reason=f"closed={len(closed)} pending={len(pending)}")
+        return {"closed": len(closed), "positions": closed, "pending": pending}
 
     async def _move_reselect_day(self, as_of) -> None:
         """Ежедневная пересборка корзины move_select на границе дня (реплей).
@@ -3999,6 +4411,9 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         """
         ticker = self.tickers.get(figi, figi[-6:])
         closed = []
+        if self._close_pending_block(figi) is not None or figi in self._close_inflight():
+            return {"ok": False, "ticker": ticker, "figi": figi,
+                    "closed": 0, "pending_position": True}
         # 1) Закрываем открытую позицию (если есть) — как close_all, но для одной figi.
         if self.broker is not None:
             try:
@@ -4010,7 +4425,14 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     else:
                         price = float(price)
                     try:
-                        trade = await self.broker.close_position(figi, price, "carousel_remove")
+                        outcome = await self._submit_close_reconciled(
+                            figi, ticker, pos.qty, price, "carousel_remove", paper_filled=False)
+                        if outcome["status"] == "pending_partial":
+                            self._exit_qty[figi] = outcome["residual"]
+                        if outcome["status"] not in ("closed", "reconciled_closed"):
+                            return {"ok": False, "ticker": ticker, "figi": figi,
+                                    "closed": 0, "pending_position": True}
+                        trade = outcome["trade"]
                     except Exception as _cl_e:
                         # Вне торговой сессии sandbox не принимает заявки (30079) — тикер
                         # со снятой меткой останется в карусели до закрытия позиции, каждый
@@ -4019,22 +4441,28 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                                   f"{type(_cl_e).__name__}: {str(_cl_e)[:120]}. Тикер остаётся до закрытия.")
                         return {"ok": False, "ticker": ticker, "figi": figi,
                                 "closed": 0, "pending_position": True}
-                    self._held.discard(figi)
-                    self._clear_exit_state(figi)
-                    self._entry_bar_index.pop(figi, None)
-                    try:
-                        await self._st_close(figi,
-                                             float(trade.price) if (trade and getattr(trade, "price", None)) else price,
-                                             reason="carousel_remove",
-                                             net=float(trade.net_pnl) if trade else None)
-                    except Exception as _sw_e:
-                        _audit_swallow('deactivate_figi@st_close', _sw_e)
-                    closed.append({"figi": figi, "ticker": ticker, "price": round(price, 6),
-                                   "net_pnl": float(trade.net_pnl) if trade else None})
-                    self.events.log("POSITION_CLOSED", figi=figi, ticker=ticker,
-                                    reason="carousel_remove", net_pnl=closed[-1]["net_pnl"])
+                    if outcome["status"] == "reconciled_closed":
+                        closed.append({"figi": figi, "ticker": ticker, "price": None,
+                                       "net_pnl": None, "order_id": outcome["order"].id})
+                    else:
+                        self._held.discard(figi)
+                        self._clear_exit_state(figi)
+                        self._entry_bar_index.pop(figi, None)
+                        try:
+                            await self._st_close(figi,
+                                                 float(getattr(trade, "exit_price", None) or getattr(trade, "price", None)) if (trade and (getattr(trade, "exit_price", None) or getattr(trade, "price", None))) else price,
+                                                 execution=trade, reason="carousel_remove",
+                                                 net=float(trade.net_pnl) if trade else None)
+                        except Exception as _sw_e:
+                            _audit_swallow('deactivate_figi@st_close', _sw_e)
+                        closed.append({"figi": figi, "ticker": ticker, "price": round(price, 6),
+                                       "net_pnl": float(trade.net_pnl) if trade else None})
+                        self.events.log("POSITION_CLOSED", figi=figi, ticker=ticker,
+                                        reason="carousel_remove", net_pnl=closed[-1]["net_pnl"])
             except Exception as _pos_e:
                 self._log(f"⚠ deactivate {ticker}: позиция — {type(_pos_e).__name__}: {str(_pos_e)[:120]}")
+                return {"ok": False, "ticker": ticker, "figi": figi,
+                        "closed": 0, "pending_position": True}
 
         # 2) Отписываем стрим данных (stream-unsubscribe / polling берёт из self.figis).
         try:
@@ -4110,20 +4538,25 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 # добавление/удаление тикеров должно работать как часы (ночью/в выходные
                 # свечи всё равно пишутся в БД потоком, а подписку подтянем к сессии).
                 async with SessionLocal() as db:
-                    # Ищем eligible тикеры которые ещё НЕ в universe
                     current_figi = {u["figi"] for u in self.universe}
-                    _skip = list(current_figi) if current_figi else ["__none__"]
-                    rows = (await db.execute(
-                        _text("SELECT figi, ticker, lot_size FROM universe "
-                              "WHERE eligible_tier = 'eligible' AND NOT (figi = ANY(:skip))"),
-                        {"skip": _skip}
-                    )).all()
+                    broker_selection = str(self.config.mode) in ("live", "sandbox")
+                    if broker_selection:
+                        selected = await self._refresh_broker_candidates()
+                        all_eligible = [(row["figi"], row["ticker"], row["lot"]) for row in selected]
+                        rows = [row for row in all_eligible if row[0] not in current_figi]
+                    else:
+                        _skip = list(current_figi) if current_figi else ["__none__"]
+                        rows = (await db.execute(
+                            _text("SELECT figi, ticker, lot_size FROM universe "
+                                  "WHERE eligible_tier = 'eligible' AND NOT (figi = ANY(:skip))"),
+                            {"skip": _skip}
+                        )).all()
 
-                    # Диагностика: считаем все eligible + их свечи
-                    all_eligible = (await db.execute(
-                        _text("SELECT figi, ticker, lot_size FROM universe "
-                              "WHERE eligible_tier = 'eligible'")
-                    )).all()
+                        # Диагностика: считаем все eligible + их свечи
+                        all_eligible = (await db.execute(
+                            _text("SELECT figi, ticker, lot_size FROM universe "
+                                  "WHERE eligible_tier = 'eligible'")
+                        )).all()
                     diag_instruments = []
                     hot_adds_this_cycle = 0
                     hot_skips_this_cycle = 0
@@ -4214,6 +4647,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     for _cur in list(self.universe):
                         _f = _cur.get("figi")
                         if _f in eligible_set:
+                            continue
+                        if broker_selection:
                             continue
                         try:
                             self._log(f"➖ КАРУСЕЛЬ (цикл): {_cur.get('ticker', _f[-6:])} — метка снята, убираю")
@@ -4407,6 +4842,634 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             except Exception as e:
                 self._log(f"METRICS_LOOP_ERR {type(e).__name__}: {str(e)[:120]}")
 
+    async def _restore_live_position_exits(self):
+        from app.models.sandbox_trade import SandboxTrade
+        from app.services.position_exit_recovery import recover_position_exit
+
+        broker = self.broker
+        scope = (getattr(broker, 'mode', None), getattr(broker, '_account', None))
+
+        def same_scope():
+            return self.broker is broker and (broker.mode, broker._account) == scope and self.broker_mode == scope[0]
+
+        try:
+            if scope[0] not in ('live', 'sandbox') or not isinstance(scope[1], str) or not scope[1].strip():
+                raise ValueError('Explicit position recovery scope required')
+            inventory = await broker.positions()
+            if not same_scope():
+                raise ValueError('Position recovery scope changed')
+            async with broker.sessions() as db:
+                rows = (await db.scalars(select(SandboxTrade).where(
+                    SandboxTrade.mode == scope[0], SandboxTrade.broker_account_id == scope[1],
+                    SandboxTrade.exit_time.is_(None)))).all()
+            if not same_scope():
+                raise ValueError('Position recovery scope changed')
+            grouped = {}
+            for row in rows:
+                grouped.setdefault(row.figi, []).append(row)
+            held = {position.figi for position in inventory}
+            if len(held) != len(inventory):
+                raise ValueError('Duplicate broker inventory')
+            self._held = held
+            failed = []
+            restored = []
+            for position in inventory:
+                figi = position.figi
+                pending = self.pending_orders.get(figi)
+                if pending is not None:
+                    if tuple((pending.meta or {}).get('broker_scope', ())) != scope:
+                        raise ValueError('Pending position belongs to another scope')
+                    continue
+                try:
+                    candidates = grouped.get(figi, [])
+                    if len(candidates) != 1:
+                        raise ValueError('Unique scoped local position required')
+                    recovered = recover_position_exit(candidates[0], position, mode=scope[0], account=scope[1])
+                    self._exit_plans[figi] = recovered.policy
+                    self._exit_side[figi] = recovered.side
+                    self._exit_qty[figi] = recovered.units
+                    self._exit_entry_px[figi] = recovered.entry_price
+                    self._trail_active[figi] = recovered.trailing_active
+                    self._trail_stop[figi] = recovered.stop_loss if recovered.stop_loss is not None else 0.0
+                    if recovered.take_profit is None:
+                        self._exit_target.pop(figi, None)
+                    else:
+                        self._exit_target[figi] = recovered.take_profit
+                    self._pos_leverage[figi] = recovered.leverage
+                    self._entry_bar_index[figi] = self._bar_counter
+                    self._held_since.setdefault(figi, __import__('time').monotonic())
+                    self._entry_pause().set_blocker('position_recovery_failed', False, *scope, figi)
+                    restored.append(figi)
+                except Exception as error:
+                    self._entry_pause().set_blocker('position_recovery_failed', True, *scope, figi)
+                    self.events.log('POSITION_RECOVERY_PENDING', figi=figi, reason=type(error).__name__)
+                    failed.append(figi)
+            for figi in grouped.keys() - held:
+                if figi not in self.pending_orders:
+                    self._entry_pause().set_blocker('position_recovery_failed', True, *scope, figi)
+                    failed.append(figi)
+            for blocker in tuple(self._entry_pause().blockers):
+                if (len(blocker) == 4 and blocker[:3] == ('position_recovery_failed', *scope)
+                        and blocker[3] not in held and blocker[3] not in grouped
+                        and blocker[3] not in self.pending_orders):
+                    self._entry_pause().set_blocker('position_recovery_failed', False, *scope, blocker[3])
+            self._entry_pause().set_blocker('position_recovery_failed', False, *scope)
+            return dict(restored=restored, pending=failed)
+        except Exception as error:
+            self._entry_pause().set_blocker('position_recovery_failed', True, *scope)
+            self.events.log('POSITION_RECOVERY_PENDING', reason=type(error).__name__)
+            return dict(restored=[], pending=None)
+
+    async def _finish_open_runtime(self, broker, scope, order, intent):
+        from app.services.broker_order_journal import BrokerOrderJournal
+        from app.services.open_fill_accounting import acknowledge_open
+        from app.services.open_order_intent import OpenIntent
+        from app.services.close_position_projection import price_equal
+        from app.models.sandbox_trade import SandboxTrade
+
+        figi = intent.figi
+        self._entry_pause().set_blocker('entry_reconciliation', True, *scope, order.id)
+
+        def same_scope():
+            return (self.broker is broker and (broker.mode, broker._account) == scope
+                    and self.broker_mode == scope[0] and self.pending_orders.get(figi) is order)
+
+        try:
+            row = await BrokerOrderJournal(broker.sessions).load(intent)
+            if (row is None or row.accounted_units <= 0 or row.accounted_units != row.observed_units
+                    or not row.entry_accounting or row.runtime_accounted_units is None):
+                raise ValueError('opening_runtime_checkpoint_missing')
+            saved = OpenIntent.from_record(row)
+            if saved.exit_policy is None:
+                raise ValueError('original_exit_policy_unknown')
+            policy = saved.exit_policy.restore()
+            local_id = row.entry_accounting['local_position_id']
+            async with broker.sessions() as db:
+                local = await db.get(SandboxTrade, local_id)
+            if (local is None or local.exit_time is not None or local.qty != row.accounted_units
+                    or (local.mode, local.broker_account_id, local.figi, local.side)
+                    != (scope[0], scope[1], figi, saved.side)):
+                raise ValueError('opening_local_position_mismatch')
+            if not same_scope():
+                return False
+            await broker.flush_portfolio()
+            if not same_scope():
+                return False
+            inventory = await broker.get_position(figi)
+            if not same_scope():
+                return False
+            side = 'LONG' if saved.side == 'BUY' else 'SHORT'
+            if (inventory is None or inventory.figi != figi or inventory.side != side
+                    or type(inventory.qty) is not int or inventory.qty != row.accounted_units
+                    or not price_equal(inventory.entry_price, local.entry_price)):
+                raise ValueError('opening_broker_inventory_mismatch')
+            installed = getattr(self, '_entry_runtime_requests', {}).get(figi) == (id(broker), scope, order.id)
+            if not installed:
+                self._exit_plans[figi] = policy
+                self._trail_active[figi] = bool(local.trailing_active)
+                self._trail_stop[figi] = float(local.stop_loss) if local.stop_loss is not None else 0.0
+                if local.take_profit is not None and not local.trailing_active:
+                    self._exit_target[figi] = float(local.take_profit)
+                else:
+                    self._exit_target.pop(figi, None)
+                self._entry_bar_index[figi] = self._bar_counter
+                self._pos_leverage[figi] = float(local.leverage)
+                self._peak_pnl[figi] = dict(pnl=0.0, ts=self._bot_now(), price=float(local.entry_price),
+                                           atr_abs=None, atr_pct=None, mae=0.0)
+                self._gb_peak[figi] = 0.0
+                self._trail_info.pop(figi, None)
+            self._exit_side[figi] = side
+            self._exit_qty[figi] = row.accounted_units
+            self._exit_entry_px[figi] = float(local.entry_price)
+            self._held.add(figi)
+            self._held_since.setdefault(figi, __import__('time').monotonic())
+            if not hasattr(self, '_entry_runtime_requests'):
+                self._entry_runtime_requests = {}
+            self._entry_runtime_requests[figi] = (id(broker), scope, order.id)
+            order.meta = {**(order.meta or {}), 'protection_installed': True}
+            await self._check_circuit_breaker()
+            if not same_scope():
+                return False
+            result = await acknowledge_open(broker.sessions, saved, units=row.accounted_units, local_position_id=local_id)
+            if not same_scope():
+                return False
+            order.meta = {**order.meta, 'runtime_accounted_units': result.accounted_units,
+                          'runtime_accounting_pending': False}
+            order.qty = saved.requested_units // saved.lot_size
+            order.meta['remaining_lots'] = (saved.requested_units - result.accounted_units) // saved.lot_size
+            order.price = float(local.entry_price)
+            order.status = ('FILLED' if result.accounted_units == saved.requested_units else 'CANCELLED') if result.released else 'PARTIAL_FILLED'
+            if result.released:
+                self.pending_orders.pop(figi, None)
+                self._entry_pause().set_blocker('entry_reconciliation', False, *scope, order.id)
+            self.events.log('ORDER_RECONCILED_ACCOUNTED', figi=figi, order_id=order.id,
+                            executed_units=result.accounted_units, terminal=result.released)
+            return True
+        except Exception as error:
+            self.events.log('ORDER_RECONCILIATION_REQUIRED', figi=figi, order_id=order.id,
+                            reason='opening_runtime_completion_pending', error_type=type(error).__name__)
+            return False
+
+    async def _resume_close_after_open_requests(self):
+        from decimal import Decimal
+        from app.services.open_close_request import prepare_close_after_open
+
+        broker = self.broker
+        if not isinstance(broker, LiveBroker):
+            return
+        scope = (broker.mode, broker._account)
+        requests = await self._restore_close_after_open_requests()
+        for pending in requests:
+            intent = pending.intent
+            if intent.figi in self._close_inflight():
+                continue
+            existing = self.pending_orders.get(intent.figi)
+            if existing is not None:
+                if existing.action == 'open' and existing.id == intent.client_order_id:
+                    await self._submit_close_reconciled(intent.figi, intent.ticker,
+                        int((existing.meta or {}).get('durable_accounted_units', 0)), 0.0, pending.request.reason)
+                continue
+            try:
+                proof = await prepare_close_after_open(broker.sessions, pending)
+                if proof is None:
+                    continue
+                await broker.flush_portfolio()
+                position = await broker.get_position(intent.figi)
+                if (self.broker is not broker or (broker.mode, broker._account) != scope
+                        or self.broker_mode != scope[0]):
+                    raise ValueError('close_after_open_handoff_scope_changed')
+                if (position is None or position.figi != intent.figi or position.qty != proof.units
+                        or position.side != ('LONG' if intent.side == 'BUY' else 'SHORT')
+                        or Decimal(str(position.entry_price)).quantize(Decimal('0.000001')) != proof.entry_price):
+                    raise ValueError('close_after_open_handoff_inventory_changed')
+                order = BotOrder(id=proof.close_client_order_id, figi=intent.figi, ticker=intent.ticker,
+                    action='close', side='SELL' if intent.side == 'BUY' else 'BUY', qty=proof.units,
+                    created_at=self._bot_now(), status='PENDING_RECONCILIATION', meta={})
+                await self._submit_close_reconciled(intent.figi, intent.ticker, proof.units,
+                    float(proof.entry_price), pending.request.reason, close_order=order, entry_proof=proof)
+            except Exception as error:
+                self.events.log('ORDER_RECONCILIATION_REQUIRED', figi=intent.figi, action='close',
+                                reason='close_after_open_handoff_pending', error_type=type(error).__name__)
+        if self.broker is broker and (broker.mode, broker._account) == scope and self.broker_mode == scope[0]:
+            await self._restore_close_after_open_requests()
+
+    async def _restore_close_after_open_requests(self):
+        from app.services.open_close_request import load_close_after_open
+
+        broker = self.broker
+        if not isinstance(broker, LiveBroker):
+            return []
+        scope = (broker.mode, broker._account)
+        try:
+            if self.broker_mode != scope[0]:
+                raise ValueError('close_after_open_recovery_scope_mismatch')
+            requests = await load_close_after_open(broker.sessions, mode=scope[0], broker_account_id=scope[1])
+            if (self.broker is not broker or (broker.mode, broker._account) != scope
+                    or self.broker_mode != scope[0]):
+                raise ValueError('close_after_open_recovery_scope_changed')
+            active_requests = {item.intent.client_order_id for item in requests}
+            pause = self._entry_pause()
+            for key in tuple(pause.blockers):
+                if (len(key) == 4 and key[:3] == ('close_after_open', *scope)
+                        and key[3] not in active_requests):
+                    pause.set_blocker('close_after_open', False, *scope, key[3])
+            for item in requests:
+                pause.set_blocker('close_after_open', True, *scope, item.intent.client_order_id)
+            self._entry_pause().set_blocker('close_after_open_recovery_failed', False, *scope)
+            return requests
+        except Exception as error:
+            self._entry_pause().set_blocker('close_after_open_recovery_failed', True, *scope)
+            raise RuntimeError('close_after_open_recovery_failed') from error
+
+    async def _restore_open_intents(self):
+        from app.services.broker_order_journal import BrokerOrderJournal
+        from app.services.open_order_intent import OpenIntent
+
+        broker = self.broker
+        if not isinstance(broker, LiveBroker):
+            return 0
+        scope = (getattr(broker, 'mode', None), getattr(broker, '_account', None))
+        try:
+            if scope[0] != self.broker_mode:
+                raise ValueError('opening_recovery_scope_mismatch')
+            rows = await BrokerOrderJournal(broker.sessions).unresolved(
+                mode=scope[0], broker_account_id=scope[1], action='open')
+            restored = {}
+            for row in rows:
+                intent = OpenIntent.from_record(row)
+                if ((intent.mode, intent.broker_account_id) != scope or row.unresolved_figi != intent.figi
+                        or intent.figi in restored or type(row.accounted_units) is not int
+                        or type(row.observed_units) is not int
+                        or not 0 <= row.accounted_units <= row.observed_units <= intent.requested_units
+                        or row.accounted_units % intent.lot_size or row.observed_units % intent.lot_size):
+                    raise ValueError('opening_recovery_checkpoint_invalid')
+                restored[intent.figi] = BotOrder(
+                    id=intent.client_order_id, figi=intent.figi, ticker=intent.ticker,
+                    action='open', side=intent.side, qty=intent.requested_units // intent.lot_size,
+                    status='PENDING_RECONCILIATION', created_at=intent.created_at,
+                    meta=dict(broker_scope=scope, quantity_unit='lots', durable_open=True,
+                              requested_lots=intent.requested_units // intent.lot_size,
+                              requested_units=intent.requested_units, lot_size=intent.lot_size,
+                              confirmed_executed_lots=row.accounted_units // intent.lot_size,
+                              broker_observed_executed_lots=row.observed_units // intent.lot_size,
+                              entry_plan=intent.entry_payload(), durable_recovery=True))
+            if (self.broker is not broker or (broker.mode, broker._account) != scope
+                    or self.broker_mode != scope[0]):
+                raise ValueError('opening_recovery_scope_changed')
+            for figi, order in restored.items():
+                previous = self.pending_orders.get(figi)
+                if previous is not None and (previous.id != order.id or previous.action != 'open'
+                        or tuple((previous.meta or {}).get('broker_scope', ())) != scope):
+                    raise ValueError('opening_recovery_pending_conflict')
+            for figi, order in restored.items():
+                self.pending_orders.setdefault(figi, order)
+                self._entry_pause().set_blocker('entry_reconciliation', True, *scope, order.id)
+            self._entry_pause().set_blocker('entry_recovery_failed', False, *scope)
+            return len(restored)
+        except Exception as error:
+            self._entry_pause().set_blocker('entry_recovery_failed', True, *scope)
+            raise RuntimeError('opening_journal_recovery_failed') from error
+
+    async def _reconcile_durable_open(self, broker, scope, order, state):
+        from app.services.broker_order_journal import BrokerOrderJournal
+        from app.services.open_order_intent import OpenIntent
+        from app.services.broker_fill_evidence import parse_order_state_fills
+        from app.services.open_fill_accounting import settle_open
+
+        self._entry_pause().set_blocker('entry_reconciliation', True, *scope, order.id)
+
+        def same_scope():
+            return (self.broker is broker and (broker.mode, broker._account) == scope
+                    and self.broker_mode == scope[0] and self.pending_orders.get(order.figi) is order)
+
+        try:
+            journal = BrokerOrderJournal(broker.sessions)
+            async with broker.sessions() as db:
+                from app.models.broker_order_intent import BrokerOrderIntent
+                row = await db.get(BrokerOrderIntent, (*scope, order.id))
+            if row is None:
+                raise ValueError('opening_reservation_missing')
+            intent = OpenIntent.from_record(row)
+            if (intent.figi != order.figi or intent.side != order.side
+                    or (intent.mode, intent.broker_account_id) != scope or not same_scope()):
+                raise ValueError('opening_runtime_identity_changed')
+            units = state.lots_executed * intent.lot_size
+            status = broker._close_evidence_status(state, units, intent.requested_units)
+            if not await journal.observe(intent, broker_order_id=state.order_id,
+                                         broker_status=status, executed_units=units):
+                recorded = await journal.load(intent)
+                if (recorded is not None and recorded.status == 'SETTLED'
+                        and recorded.accounted_units == recorded.runtime_accounted_units == units and units > 0):
+                    return await self._finish_open_runtime(broker, scope, order, intent)
+                raise ValueError('opening_observation_not_accepted')
+            if not same_scope():
+                return False
+            if units == 0:
+                if status in ('CANCELLED', 'REJECTED'):
+                    order.status = status
+                    self.pending_orders.pop(order.figi)
+                    self._entry_pause().set_blocker('entry_reconciliation', False, *scope, order.id)
+                    return True
+                return False
+            evidence = parse_order_state_fills(state, mode=scope[0], broker_account_id=scope[1],
+                client_order_id=intent.client_order_id, figi=intent.figi, side=intent.side,
+                requested_lots=intent.requested_units // intent.lot_size, lot_size=intent.lot_size,
+                as_of=self._bot_now())
+            result = await settle_open(broker.sessions, intent, evidence, as_of=self._bot_now())
+            if not same_scope():
+                return False
+            order.meta = {**(order.meta or {}), 'confirmed_executed_lots': result.accounted_units // intent.lot_size,
+                          'durable_accounted_units': result.accounted_units,
+                          'local_position_id': result.local_position_id, 'runtime_accounting_pending': True}
+            return await self._finish_open_runtime(broker, scope, order, intent)
+        except Exception as error:
+            self.events.log('ORDER_RECONCILIATION_REQUIRED', figi=order.figi, order_id=order.id,
+                            reason='opening_stage_accounting_pending', error_type=type(error).__name__)
+            return False
+
+    async def _restore_close_intents(self):
+        from app.services.broker_order_journal import BrokerOrderJournal, CloseIntent
+
+        broker = self.broker
+        if not isinstance(broker, LiveBroker):
+            return 0
+        scope = (getattr(broker, 'mode', None), getattr(broker, '_account', None))
+        try:
+            if (scope[0] not in ('live', 'sandbox') or not isinstance(scope[1], str)
+                    or not scope[1].strip() or self.broker_mode != scope[0]):
+                raise ValueError('explicit_close_recovery_scope_required')
+            rows = await BrokerOrderJournal(broker.sessions).unresolved(mode=scope[0], broker_account_id=scope[1])
+            restored = {}
+            for row in rows:
+                intent = CloseIntent.from_record(row)
+                if (intent.mode, intent.broker_account_id) != scope or row.unresolved_figi != intent.figi:
+                    raise ValueError('stored_close_recovery_scope_mismatch')
+                if (type(row.accounted_units) is not int or type(row.observed_units) is not int
+                        or not 0 <= row.accounted_units <= row.observed_units <= intent.requested_units
+                        or row.accounted_units % intent.lot_size or row.observed_units % intent.lot_size
+                        or row.runtime_accounted_units is not None and (
+                            type(row.runtime_accounted_units) is not int
+                            or not 0 <= row.runtime_accounted_units <= row.accounted_units
+                            or row.runtime_accounted_units % intent.lot_size)
+                        or intent.figi in restored):
+                    raise ValueError('stored_close_recovery_quantity_conflict')
+                snapshot = intent.position_snapshot
+                restored[intent.figi] = BotOrder(
+                    id=intent.client_order_id, figi=intent.figi,
+                    ticker=snapshot.ticker if snapshot else getattr(self, 'tickers', {}).get(intent.figi, intent.figi),
+                    action='close', side=intent.side,
+                    qty=intent.requested_units - row.accounted_units,
+                    status='PARTIAL_FILLED' if row.accounted_units else 'PENDING_RECONCILIATION',
+                    created_at=intent.created_at,
+                    meta=dict(broker_scope=scope, quantity_unit='shares',
+                              requested_units=intent.requested_units, lot_size=intent.lot_size,
+                              requested_lots=intent.requested_units // intent.lot_size,
+                              executed_units=row.accounted_units, observed_executed_units=row.observed_units,
+                              durable_accounted_units=row.accounted_units,
+                              runtime_accounted_units=row.runtime_accounted_units,
+                              runtime_accounting_pending=row.runtime_accounted_units is not None
+                                  and row.runtime_accounted_units < row.accounted_units,
+                              broker_order_id=row.broker_order_id, broker_report_status_name=row.broker_status,
+                              exit_reason=snapshot.exit_reason if snapshot else 'UNKNOWN',
+                              durable_recovery=True, recovery_snapshot_available=snapshot is not None),
+                )
+            if (self.broker is not broker or (broker.mode, broker._account) != scope
+                    or self.broker_mode != scope[0]):
+                raise ValueError('broker_scope_changed_during_close_recovery')
+            pending = getattr(self, 'pending_orders', {}) or {}
+            for figi, order in restored.items():
+                existing = pending.get(figi)
+                if existing is not None and (existing.id != order.id or existing.action != 'close'
+                        or tuple((existing.meta or {}).get('broker_scope', ())) != scope):
+                    raise ValueError('existing_intent_conflicts_with_close_recovery')
+            for figi, order in restored.items():
+                pending.setdefault(figi, order)
+            self.pending_orders = pending
+            for order in restored.values():
+                self._pause_close(scope, order.id)
+            self._entry_pause().set_blocker('close_recovery_failed', False, *scope)
+            return len(restored)
+        except Exception as error:
+            self._entry_pause().set_blocker('close_recovery_failed', True, *scope)
+            raise RuntimeError('close_journal_recovery_failed') from error
+
+    async def _finish_close_runtime(self, broker, scope, order, intent):
+        from app.services.broker_order_journal import BrokerOrderJournal, CloseIntent
+        from app.services.close_position_projection import project_close_fills, price_equal
+
+        figi = intent.figi
+        self._pause_close(scope, order.id)
+
+        def same_scope():
+            return (self.broker is broker and (broker.mode, broker._account) == scope
+                    and self.broker_mode == scope[0] and self.pending_orders.get(figi) is order)
+
+        try:
+            journal = BrokerOrderJournal(broker.sessions)
+            row = await journal.load(intent)
+            if (row is None or row.runtime_accounted_units is None or row.accounted_units <= 0
+                    or row.observed_units != row.accounted_units):
+                raise ValueError('close_runtime_checkpoint_not_ready')
+            saved = CloseIntent.from_record(row)
+            remaining = saved.requested_units - row.accounted_units
+            if not same_scope():
+                return False
+            await broker.flush_portfolio()
+            if not same_scope():
+                return False
+            position = await broker.get_position(figi)
+            if not same_scope():
+                return False
+            if remaining == 0:
+                if position is not None:
+                    raise ValueError('broker_position_still_present_after_full_close')
+            elif (position is None or getattr(position, 'figi', None) != figi
+                    or type(getattr(position, 'qty', None)) is not int or position.qty != remaining
+                    or saved.position_snapshot is None
+                    or getattr(position, 'side', None) != saved.position_snapshot.position_side
+                    or not price_equal(getattr(position, 'entry_price', None), saved.position_snapshot.entry_price)):
+                raise ValueError('broker_residual_differs_from_close_accounting')
+            applied = await journal.apply_runtime(saved, cumulative_units=row.accounted_units,
+                                                   apply=project_close_fills)
+            if not same_scope():
+                return False
+            await self._check_circuit_breaker()
+            if not same_scope():
+                return False
+            meta = dict(order.meta or {})
+            meta.update(runtime_accounted_units=applied.accounted_units,
+                        runtime_accounting_pending=False, executed_units=applied.accounted_units,
+                        remaining_units=remaining)
+            meta.pop('durable_observation_pending', None)
+            order.meta = meta
+            order.qty = remaining
+            if remaining:
+                self._exit_qty[figi] = remaining
+                self._held.add(figi)
+                order.status = 'CANCELLED' if applied.released else 'PARTIAL_FILLED'
+            else:
+                self._clear_exit_state(figi)
+                self._held.discard(figi)
+                self._opposite_count.pop(figi, None)
+                self._entry_bar_index.pop(figi, None)
+                self._last_exit_bar[figi] = self._bar_counter
+                order.status = 'FILLED'
+            if applied.released:
+                self.pending_orders.pop(figi, None)
+                self._pause_close(scope, order.id, active=False)
+            self.events.log('ORDER_RECONCILED_ACCOUNTED', figi=figi, order_id=order.id,
+                            executed_units=applied.accounted_units, remaining_units=remaining,
+                            terminal=applied.released)
+            return True
+        except Exception as error:
+            self.events.log('ORDER_RECONCILIATION_REQUIRED', figi=figi, order_id=order.id,
+                            reason='close_local_projection_pending', error_type=type(error).__name__)
+            return False
+
+    async def _reconcile_pending_orders(self, only_figi=None):
+        from t_tech.invest.schemas import OrderExecutionReportStatus
+
+        broker = self.broker
+        if not isinstance(broker, LiveBroker):
+            return
+        scope = (broker.mode, broker._account)
+        terminal_empty = {
+            OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_CANCELLED: "CANCELLED",
+            OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED: "REJECTED",
+        }
+        for figi, order in list(self.pending_orders.items()):
+            if only_figi is not None and figi != only_figi:
+                continue
+            if order.status not in ("PENDING_RECONCILIATION", "PARTIAL_FILLED"):
+                continue
+            meta = dict(order.meta or {})
+            if order.action not in ("open", "close"):
+                continue
+            if ("broker_scope" in meta and tuple(meta["broker_scope"]) != scope):
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                order_id=order.id, reason="broker_scope_changed")
+                continue
+            requested = meta.get("requested_lots")
+            if type(requested) is not int or requested <= 0:
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                order_id=order.id, reason="original_requested_lots_missing")
+                continue
+            if order.action == "close":
+                lot_size = meta.get("lot_size")
+                requested_units = meta.get("requested_units")
+                if (type(lot_size) is not int or lot_size <= 0
+                        or type(requested_units) is not int
+                        or requested_units != requested * lot_size):
+                    self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                    order_id=order.id, reason="original_close_quantity_inconsistent")
+                    continue
+            try:
+                state = await broker.order_state(order.id, figi, order.side, requested)
+            except Exception as error:
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                order_id=order.id, reason="broker_state_unavailable",
+                                error_type=type(error).__name__)
+                continue
+            if (self.broker is not broker or (broker.mode, broker._account) != scope
+                    or self.pending_orders.get(figi) is not order):
+                continue
+            if order.action == 'open' and meta.get('durable_open'):
+                await self._reconcile_durable_open(broker, scope, order, state)
+                continue
+            report_status = state.execution_report_status
+            observed_executed = state.lots_executed
+            previous_executed = max(
+                int(meta.get("broker_observed_executed_lots") or 0),
+                int(meta.get("confirmed_executed_lots") or 0),
+            )
+            if order.action == "close":
+                prior_units = max(int(meta.get("executed_units") or 0),
+                                  int(meta.get("observed_executed_units") or 0))
+                if observed_executed * lot_size < prior_units:
+                    self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                    order_id=order.id, reason="broker_execution_regressed")
+                    continue
+            if observed_executed < previous_executed or (
+                    order.status == "PARTIAL_FILLED" and observed_executed == 0):
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                order_id=order.id, reason="broker_execution_regressed")
+                continue
+            if order.action == 'close':
+                from app.services.broker_order_journal import BrokerOrderJournal, CloseIntent
+                meta['observed_executed_units'] = observed_executed * lot_size
+                order.meta = meta
+                try:
+                    intent = CloseIntent(scope[0], scope[1], order.id, figi, order.side,
+                                         requested_units, lot_size, order.created_at)
+                    durable_status = broker._close_evidence_status(state, observed_executed * lot_size, requested_units)
+                    stored = await BrokerOrderJournal(broker.sessions).observe(intent,
+                        broker_order_id=state.order_id, broker_status=durable_status,
+                        executed_units=observed_executed * lot_size)
+                    if not stored:
+                        recorded = await BrokerOrderJournal(broker.sessions).load(intent)
+                        if (recorded is not None and recorded.status == 'SETTLED'
+                                and recorded.runtime_accounted_units == recorded.accounted_units
+                                and recorded.accounted_units == recorded.observed_units
+                                and recorded.accounted_units > 0):
+                            await self._finish_close_runtime(broker, scope, order, intent)
+                            continue
+                        raise ValueError('close_observation_not_accepted_by_journal')
+                except Exception as error:
+                    meta['durable_observation_pending'] = True
+                    self._pause_close(scope, order.id)
+                    self.events.log('ORDER_RECONCILIATION_REQUIRED', figi=figi, order_id=order.id,
+                                    reason='close_observation_persistence_failed', error_type=type(error).__name__)
+                    continue
+                if (self.broker is not broker or (broker.mode, broker._account) != scope
+                        or self.pending_orders.get(figi) is not order):
+                    continue
+                meta.pop('durable_observation_pending', None)
+            meta.update(broker_order_id=state.order_id,
+                        broker_observed_executed_lots=observed_executed,
+                        broker_report_status=int(report_status),
+                        broker_state_observed_at=datetime.now(timezone.utc).isoformat())
+            order.meta = meta
+            if order.action == 'close' and observed_executed > 0:
+                from app.services.broker_fill_evidence import parse_order_state_fills
+                accounting_stage = 'parse_evidence'
+                try:
+                    evidence = parse_order_state_fills(state, mode=scope[0], broker_account_id=scope[1],
+                        client_order_id=order.id, figi=figi, side=order.side,
+                        requested_lots=requested, lot_size=lot_size, as_of=datetime.now(timezone.utc))
+                    accounting_stage = 'settle_execution'
+                    settlement = await BrokerOrderJournal(broker.sessions).settle(intent,
+                        broker_order_id=state.order_id, cumulative_units=observed_executed * lot_size,
+                        evidence=evidence, defer_runtime=True)
+                    if (self.broker is not broker or (broker.mode, broker._account) != scope
+                            or self.pending_orders.get(figi) is not order):
+                        continue
+                    meta.update(durable_accounted_units=settlement.accounted_units,
+                                runtime_accounting_pending=True)
+                    order.meta = meta
+                    self._pause_close(scope, order.id)
+                    accounting_stage = 'finish_close_runtime'
+                    await self._finish_close_runtime(broker, scope, order, intent)
+                    continue
+                except Exception as error:
+                    from traceback import extract_tb
+                    origin = extract_tb(error.__traceback__)[-1]
+                    self._pause_close(scope, order.id)
+                    self.events.log('ORDER_RECONCILIATION_REQUIRED', figi=figi, order_id=order.id,
+                                    reason='close_stage_accounting_pending', error_type=type(error).__name__,
+                                    accounting_stage=accounting_stage, error_function=origin.name,
+                                    error_line=origin.lineno)
+                    continue
+            if report_status in terminal_empty and observed_executed == 0:
+                order.status = terminal_empty[report_status]
+                self.pending_orders.pop(figi)
+                self._pause_close(scope, order.id, active=False)
+                self.events.log("ORDER_RECONCILED_EMPTY", figi=figi,
+                                order_id=order.id, status=order.status)
+            else:
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                order_id=order.id, reason="execution_accounting_pending",
+                                executed_lots=observed_executed)
+
     async def _reconcile_loop(self) -> None:
         """Фоновая задача: каждые 60с.
 
@@ -4428,6 +5491,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 # сессии конфига) — вне сессии позиции и так заморожены, опрос только шумит.
                 if not getattr(self.config, "reconcile_enabled", True):
                     continue
+                await self._reconcile_pending_orders()
+                await self._resume_close_after_open_requests()
                 if not _sessions_allowed(self._bot_now(), self.config.sessions):
                     continue
                 await self._reconcile_positions(force=False)
@@ -4440,6 +5505,14 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         """Привести локальный учёт открытых позиций к факту брокера."""
         from app.models.sandbox_trade import SandboxTrade
         from sqlalchemy import select as _sel_r
+
+        def pending_execution_figis():
+            orders = getattr(self, 'pending_orders', {}) or {}
+            return set(getattr(self, '_closing_inflight', set()) or ()) | {
+                figi for figi, order in orders.items()
+                if getattr(order, 'action', None) in ('open', 'close')
+                and getattr(order, 'status', None) not in ('CANCELLED', 'REJECTED', 'FILLED')
+            }
         # Форс-сброс кэша портфеля, чтобы reconcile не видел устаревший снапшот
         # после только что отправленного ордера (иначе свежая строка съедается как orphan).
         try:
@@ -4451,19 +5524,23 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         async with SessionLocal() as db:
             rows = (await db.execute(_sel_r(SandboxTrade)
                                      .where(SandboxTrade.exit_time.is_(None),
-                                            SandboxTrade.mode == self.broker_mode))).scalars().all()
+                                            SandboxTrade.mode == self.broker_mode,
+                                            SandboxTrade.broker_account_id == _account_scope_of(self)))).scalars().all()
             local_by_figi: dict[str, list] = {}
             for r in rows:
                 local_by_figi.setdefault(r.figi, []).append(r)
 
+            blocked_figis = pending_execution_figis()
             created = closed = 0
+            unresolved = len(blocked_figis & (set(broker_pos) | set(local_by_figi)))
+            changed_figis = set()
             now = datetime.now(timezone.utc)
             # Grace-период: строки, открытые/закрытые в последние 2 минуты, НЕ трогаем —
             # брокер (sandbox/биржа) может отражать позицию с лагом после ордера.
             _grace = 120.0
             # 1) Позиции брокера без локальной строки -> создать.
             for figi, bp in broker_pos.items():
-                if figi in local_by_figi:
+                if figi in blocked_figis or figi in local_by_figi:
                     continue
                 # Grace-период против «двойняшек orphan»: если по figi НЕДАВНО
                 # была локально закрыта строка (напр. только что сработал
@@ -4478,6 +5555,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     _sel_r(SandboxTrade)
                     .where(SandboxTrade.figi == figi,
                            SandboxTrade.mode == self.broker_mode,
+                           SandboxTrade.broker_account_id == _account_scope_of(self),
                            SandboxTrade.exit_time.is_not(None),
                            SandboxTrade.exit_time >= now - timedelta(seconds=_grace))
                     .order_by(SandboxTrade.exit_time.desc())
@@ -4488,7 +5566,11 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     self._log(f"RECONCILE: position {_tk} ({figi[-6:]}) не пересоздаю — "
                               f"локально закрыта {(_grace - (now - _recently_closed.exit_time).total_seconds()):.0f}с назад, жду отражения брокера")
                     continue
+                if figi in pending_execution_figis():
+                    unresolved += 1
+                    continue
                 ticker = self.tickers.get(figi, figi[:8])
+                changed_figis.add(figi)
                 db.add(SandboxTrade(
                     figi=figi, ticker=ticker,
                     side="SELL" if bp.side in ("SHORT", "SELL") else "BUY",
@@ -4500,13 +5582,14 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     leverage=1.0,
                     mode=self.broker_mode,
                     test_name=getattr(self.config, "test_name", "") or None,
+                    broker_account_id=_account_scope_or_raise(self),
                 ))
                 created += 1
                 self._log(f"RECONCILE: создана строка {ticker} ({figi[-6:]}) {bp.side} {bp.qty} @{getattr(bp, 'entry_price', 0.0):.2f}")
 
             # 2) Локальные строки без позиции брокера -> закрыть (orphan).
             for figi, lst in local_by_figi.items():
-                if figi in broker_pos:
+                if figi in blocked_figis or figi in broker_pos:
                     continue
                 pending = [r for r in lst if (now - (r.entry_time or now)).total_seconds() < _grace]
                 if pending and len(pending) == len(lst):
@@ -4521,8 +5604,9 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     try:
                         _real = await self.broker.get_position(figi)
                     except Exception as _sw_e:
-                        _audit_swallow('_reconcile_positions@L3434', _sw_e)  # audit silent-except
-                        _real = None
+                        unresolved += 1
+                        self._log(f"RECONCILE UNKNOWN {figi[-6:]}: {type(_sw_e).__name__}; local position retained")
+                        continue
                     if _real is not None:
                         self._log(f"RECONCILE: orphan {figi[-6:]} — у брокера позиция есть, не трогаю")
                         continue
@@ -4530,20 +5614,15 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     # у брокера — тогда net=0 недопустим. Берём из операций брокера,
                     # fallback — последняя известная цена.
                     _exit_px = None
-                    _net = None
-                    _entry_px_broker = None
                     try:
-                        import asyncio as _aio
-                        from app.api.routes.sandbox import _get_operations
-                        _ops = await _aio.to_thread(_get_operations, 3)
+                        _ops = await self.broker.operations(now - timedelta(days=3), now)
                         _lng0 = str(r.side).upper() in ("BUY", "LONG")
                         _close_kind = "Покупка" if not _lng0 else "Продажа"   # закрывающая сторона
-                        _open_kind = "Продажа" if not _lng0 else "Покупка"    # сторона входа
                         _et = r.entry_time
                         if _et is not None and getattr(_et, "tzinfo", None) is None:
                             _et = _et.replace(tzinfo=timezone.utc)
                         _best_close = None   # (t, price) — ближайшая закрывающая после входа
-                        _best_open = None
+                        _close_matches = 0
                         for _op in (getattr(_ops, "operations", None) or []):
                             try:
                                 if str(getattr(_op, "figi", "")) != figi:
@@ -4551,7 +5630,15 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                                 _t = getattr(_op, "date", None)
                                 if _t is not None and getattr(_t, "tzinfo", None) is None:
                                     _t = _t.replace(tzinfo=timezone.utc)
-                                if _et is not None and _t is not None and _t < _et - timedelta(minutes=3):
+                                if _et is None or _t is None or not (_et <= _t <= now):
+                                    continue
+                                from t_tech.invest import OperationState
+                                if getattr(_op, "state", None) != OperationState.OPERATION_STATE_EXECUTED:
+                                    continue
+                                _operation_qty = getattr(_op, "quantity", None)
+                                _operation_remaining = getattr(_op, "quantity_rest", None)
+                                if (type(_operation_qty) is not int or _operation_qty != r.qty
+                                        or type(_operation_remaining) is not int or _operation_remaining != 0):
                                     continue
                                 _otype = str(getattr(_op, "type", "") or "")
                                 if "комисси" in _otype.lower():
@@ -4564,45 +5651,34 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                                 if _p <= 0:
                                     continue
                                 if _close_kind in _otype:
+                                    _close_matches += 1
                                     if _best_close is None or (_t is not None and _t < _best_close[0]):
                                         _best_close = (_t or _et or _t, _p)
-                                elif _open_kind in _otype:
-                                    if _best_open is None or (_t is not None and _t > _best_open[0]):
-                                        _best_open = (_t or _et or _t, _p)
                             except Exception as _sw_e:
                                 _audit_swallow('_reconcile_positions@L3482', _sw_e)  # audit silent-except
                                 continue
-                        if _best_close is not None:
+                        if _best_close is not None and _close_matches == 1:
                             _exit_px = round(_best_close[1], 6)
-                        if _best_open is not None:
-                            _entry_px_broker = round(_best_open[1], 6)
                     except Exception as _sw_e:
                         _audit_swallow('_reconcile_positions@L3488', _sw_e)  # audit silent-except
                         pass
-                    # P&L считаем по ценам: (выход − вход) × qty × направление − комиссии.
+                    # ARCH193: закрываем orphan ТОЛЬКО по реальной цене закрытия из
+                    # операций брокера. Без неё исход неизвестен — не подставляем свечу
+                    # и не фабрикуем сделку: оставляем строку, помечаем unresolved.
                     _px_out = float(_exit_px or 0.0)
                     if _px_out <= 0:
-                        try:
-                            _buf = self.buffers.get(figi)
-                            _px_out = float(_buf[-1].close) if _buf else 0.0
-                        except Exception as _sw_e:
-                            _audit_swallow('_reconcile_positions@L3496', _sw_e)  # audit silent-except
-                            _px_out = 0.0
-                    if _px_out > 0:
-                        _q = abs(float(r.qty or 0))
-                        _lng = str(r.side).upper() in ("BUY", "LONG")
-                        # Цена входа: если брокер дал операцию входа — берём её (точнее стрима)
-                        _epx = float(_entry_px_broker or r.entry_price or 0.0)
-                        _pnl = (_px_out - _epx) * _q * (1 if _lng else -1)
-                        _cr = float(getattr(self.config, "commission_rate", 0.0005) or 0.0005)
-                        _net = round(_pnl - _cr * (_epx + _px_out) * _q, 4)
-                        _exit_px = _px_out
-                    r.exit_time = now
-                    r.exit_price = float(_exit_px or r.entry_price or 0.0)
+                        unresolved += 1
+                        self._log(f"RECONCILE UNKNOWN {figi[-6:]}: нет операции закрытия у брокера; строка оставлена (без фабрикации)")
+                        continue
+                    if figi in pending_execution_figis():
+                        unresolved += 1
+                        continue
+                    changed_figis.add(figi)
+                    r.exit_time = _best_close[0]
+                    r.exit_price = _px_out
                     r.exit_reason = "closed_at_broker"
-                    r.net_pnl = _net
-                    if _px_out > 0:
-                        r.commission = round(_cr * (_epx + _px_out) * _q, 4)
+                    r.net_pnl = None
+                    r.commission = None
                     closed_here += 1
                 closed += closed_here
                 if closed_here:
@@ -4610,7 +5686,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
 
             # 3) Дубликаты на один figi -> оставить только лучшую по цене.
             for figi, lst in local_by_figi.items():
-                if figi not in broker_pos or len(lst) <= 1:
+                if figi in pending_execution_figis() or figi not in broker_pos or len(lst) <= 1:
                     continue
                 bp = broker_pos[figi]
                 ref = float(getattr(bp, "entry_price", 0.0) or 0.0)
@@ -4618,18 +5694,25 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 for r in lst:
                     if r is best:
                         continue
+                    changed_figis.add(figi)
                     r.exit_time = now
                     r.exit_price = float(r.entry_price or 0.0)
                     r.exit_reason = "duplicate_cleanup"
-                    r.net_pnl = 0.0
+                    r.net_pnl = None  # не экономическая сделка: не 0₽, а «нет P&L»
                     closed += 1
                     _tk = self.tickers.get(figi, figi[:8])
                     self._log(f"RECONCILE: закрыт дубликат {_tk} {figi[-6:]} @{r.entry_price:.2f} (best @{ref:.2f})")
             if created or closed:
+                if changed_figis & pending_execution_figis():
+                    await db.rollback()
+                    self._log('RECONCILE UNKNOWN: execution started during position repair; changes rolled back')
+                    return
                 await db.commit()
             # Лог состояния сверки КАЖДЫЙ цикл (не только при изменениях).
             if not force:
-                if created or closed:
+                if unresolved:
+                    self._log(f"Сверка с брокером: не завершена, неизвестных результатов {unresolved}")
+                elif created or closed:
                     self._log(f"Сверка с брокером: были расхождения → создано {created}, закрыто {closed} (брокер: {len(broker_pos)} поз., локально: {len(local_by_figi)})")
                 else:
                     self._log(f"Сверка с брокером: ✓ сходится (позиций: брокер {len(broker_pos)}, локально {len(local_by_figi)})")
@@ -4707,16 +5790,31 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         _close_errors: list[str] = []
         for _p in _pos_list:
             try:
-                _px = float(_prices.get(_p.figi) or float(_p.entry_price or 0.0))
-                _trade = await self.broker.close_position(_p.figi, _px, "replay_end_close")
-                if _trade is None:
-                    _close_errors.append(f"{_p.figi}: close_position() -> None")
+                from math import isfinite
+                _observed = _prices.get(_p.figi)
+                if _observed is None or isinstance(_observed, bool):
+                    _close_errors.append(f"{_p.figi}: final_price_unknown")
                     continue
+                _px = float(_observed)
+                if not isfinite(_px) or _px <= 0:
+                    _close_errors.append(f"{_p.figi}: final_price_invalid")
+                    continue
+                _outcome = await self._submit_close_reconciled(
+                    _p.figi, _p.ticker, _p.qty, _px, "replay_end_close", paper_filled=False)
+                if _outcome["status"] == "reconciled_closed":
+                    _closed += 1
+                    continue
+                if _outcome["status"] == "pending_partial":
+                    self._exit_qty[_p.figi] = _outcome["residual"]
+                if _outcome["status"] != "closed":
+                    _close_errors.append(f"{_p.figi}: {_outcome['status']}")
+                    continue
+                _trade = _outcome["trade"]
                 # Успешно закрытое уходит из held-state; незакрытое остаётся (P1.2).
                 self._held.discard(_p.figi)
                 self._exit_plans.pop(_p.figi, None)
                 _closed += 1
-                await self._st_close(_p.figi, float(_trade.exit_price), reason="replay_end_close",
+                await self._st_close(_p.figi, float(_trade.exit_price), execution=_trade, reason="replay_end_close",
                                      net=float(_trade.net_pnl))
                 self._log(f"ВЫХОД {_p.figi[-6:]} (replay_end) pnl={float(_trade.net_pnl):+.2f}")
                 if self._trace is not None:
@@ -4846,6 +5944,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         self._persist_task = self._spawn_task("persist", self._flush_persist())
         self._hot_add_task = self._spawn_task("hot_add", self._hot_add_universe())
         self._reconcile_task = self._spawn_task("reconcile", self._reconcile_loop())
+        self._dispatch_task = (self._spawn_task("dispatch", self._dispatch_loop())
+                               if isinstance(self.broker, LiveBroker) else None)
         self._session_task = self._spawn_task("session", self._session_monitor())
         self._metrics_task = self._spawn_task("metrics", self._metrics_loop())
         self._imoex_task = self._spawn_task("imoex", self._imoex_loop())
@@ -4883,7 +5983,9 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                         self._move_leaving.discard(candle.figi)
                         continue
                 _t1 = _time.perf_counter()
-                await self._process_candle(candle)
+                from app.bot.pending_dispatch import execution_lock
+                async with execution_lock(self):
+                    await self._process_candle(candle)
                 _dt = (_time.perf_counter() - _t1) * 1000
                 self.metrics["bar_ms_total"] += _dt
                 self.metrics["bar_ms_n"] += 1
@@ -4912,7 +6014,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     await self._persist_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            for t in ('_held_sync_task', '_hot_add_task', '_vol_carousel_task', '_reconcile_task',
+            for t in ('_dispatch_task', '_held_sync_task', '_hot_add_task', '_vol_carousel_task', '_reconcile_task',
                       '_metrics_task',
                       '_intrabar_task', '_imoex_task', '_session_task', '_queue_task',
                       '_momentum_task', '_guard_task'):
@@ -4925,6 +6027,18 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                         pass
             self.running = False
             self.events.log("BOT_LOOP_EXITED", reason=exited)
+
+    async def _dispatch_loop(self):
+        from app.bot.pending_dispatch import dispatch_pending
+
+        while self.running:
+            try:
+                await dispatch_pending(self)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.events.log("DISPATCH_ERROR", reason=type(error).__name__)
+            await asyncio.sleep(1.0)
 
     async def _process_candle(self, c) -> None:
         _t0 = _time.perf_counter()
@@ -4976,7 +6090,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         try:
             # В replay свечи УЖЕ в БД (оттуда и читаем) — обратная запись избыточна
             # и тормозит тест (persist ~540ms/флаш через сеть). Пишем только в live/sandbox.
-            if self.mode != "replay" and not str(self.mode).startswith("test"):
+            if self.config.interval_name == "1min" and self.mode != "replay" and not str(self.mode).startswith("test"):
                 self._persist_queue.append(
                     (figi, c.ts, float(c.open), float(c.high), float(c.low), float(c.close), int(c.volume or 0))
                 )
@@ -5021,25 +6135,19 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         if strategy is None or buffer is None:
             return
 
-        _did_execute = await self._execute_pending(figi, c)
+        _did_execute = False if isinstance(self.broker, LiveBroker) else await self._execute_pending(figi, c)
 
         _new_c = EngineCandle(ts=c.ts, open=c.open, high=c.high,
                               low=c.low, close=c.close, volume=c.volume)
-        if buffer and buffer[-1].ts == c.ts:
-            # ENG-015 (audit 2026-09-29): стык preload (date_to=_bot_now) с
-            # первой живой/реплейной свечой даёт тот же ts. По семантике
-            # CandleHub это REPLACE, а не дубль — иначе движок отклоняет
-            # немонотонный ряд и ансамбль молчит весь день.
-            buffer[-1] = _new_c
-        else:
-            buffer.append(_new_c)
+        from app.bot.strategy_history import update_strategy_history
+        update_strategy_history(buffer, _new_c)
         # --- Ресемпл 1m → 5m: когда закрыт 5m бар (последняя минута интервала),
         # строим 5m из буфера и пишем в очередь (interval=5 в БД).
         try:
             _min = c.ts.minute
-            if _min % 5 == 4 and len(buffer) >= 5 and self.mode != "replay" and not str(self.mode).startswith("test"):
+            if self.config.interval_name == "1min" and _min % 5 == 4 and len(buffer) >= 5 and self.mode != "replay" and not str(self.mode).startswith("test"):
                 _tail = list(buffer)[-5:]
-                if _tail and _tail[0].ts.minute % 5 == 0:
+                if all(bar.ts == c.ts - timedelta(minutes=4 - offset) for offset, bar in enumerate(_tail)):
                     _o = _tail[0].open
                     _h = max(x.high for x in _tail)
                     _l = min(x.low for x in _tail)
@@ -5119,17 +6227,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 # по последней СЕССИОННОЙ свече (пятница).
                 _px = float(c.close) if _in_ses else self._last_session_close(figi, float(c.close))
                 _reason = "weekend_force_close" if _wk_due else "overnight_force_close"
-                _fb_px = float(c.close) if _in_ses else _px
-                trade = await self.broker.close_position(figi, _px, _reason)
-                self._held.discard(figi)
-                self._opposite_count.pop(figi, None)
-                self._last_exit_bar[figi] = self._bar_counter
-                self._clear_exit_state(figi)
-                _bh_overnight = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
-                if trade:
-                    await self._st_close(figi, _fb_px, reason=_reason,
-                                          net=float(trade.net_pnl), meta={"bars_held": _bh_overnight})
-                    self._log(f"ВЫХОД {figi[-6:]} ({'weekend' if _wk_due else 'overnight'}) pnl={float(trade.net_pnl):+.2f}")
+                _closed = await self._close_session_position(figi, _px, _reason)
             else:
                 self._session_gate_log("overnight закрытие")
 
@@ -5393,6 +6491,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
 
         from app.engine.models import DecisionAction
         if action is DecisionAction.ACCEPT_ENTRY:
+            await self._ensure_risk_fresh()
             if figi in self._held:
                 self._reject_entry("state", "already_held", "позиция уже открыта", figi, ticker)
                 return
@@ -5445,7 +6544,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             risk = self.risk_snapshot()
             if not risk.entries_allowed():
                 self._reject_entry("risk", f"risk_{risk.state.lower()}",
-                                   f"стоп-лимит {risk.state} (daily_pnl={risk.daily_pnl:+.2f})",
+                                   f"стоп-лимит {risk.state} (daily_pnl={risk.daily_pnl})",
                                    figi, ticker)
                 return
             if bool(getattr(self.config, "momentum_only", False)):
@@ -5563,6 +6662,14 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             _audit_swallow('_bias_exit_check', _e)  # audit silent-except
             return False
 
+    def _occupied_entry_slots(self) -> set[str]:
+        occupied = set(self._held)
+        for figi, order in self.pending_orders.items():
+            if (getattr(order, "action", None) == "open"
+                    and getattr(order, "status", "") not in ("CANCELLED", "REJECTED")):
+                occupied.add(figi)
+        return occupied
+
     async def _submit_order(self, figi: str, ticker: str, action: str, side: str, meta: dict | None = None) -> None:
         if self._trace is not None:
             try:
@@ -5577,12 +6684,18 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         # pending_orders[figi], guard в _execute_pending перестанет видеть
         # PENDING_RECONCILIATION и возможна дубль-экспозиция.
         _cur = self.pending_orders.get(figi)
-        if _cur is not None and getattr(_cur, "status", "") == "PENDING_RECONCILIATION":
+        if _cur is not None and getattr(_cur, "status", "") in ("PENDING_RECONCILIATION", "PARTIAL_FILLED"):
             self._log(f"ЗАЩИТА СВЕРКИ: {ticker} unresolved-ордер не разрешён — {action} {side} отклонён")
             self.events.log("ORDER_BLOCKED_RECONCILIATION", figi=figi, ticker=ticker,
                             action=action, side=side, pending_id=str(getattr(_cur, "id", "")))
             return
         cfg = self.config
+        confirmed_broker_lot = None
+        if action == "open" and str(getattr(cfg, "mode", "")) in ("live", "sandbox") and str(getattr(cfg, "feed", "")) != "replay":
+            confirmed_broker_lot, reason = self._broker_candidate_admission(figi, ticker, side)
+            if reason:
+                self._trace_order_reject(figi, ticker, action, side, "universe_admission", reason)
+                return
         # Инверсия уже применена на уровне сигнала (см. _process_candle) — здесь НЕ дублируем.
         qty = cfg.qty_per_trade
         _used_lev = 1.0
@@ -5612,6 +6725,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             from app.bot.gates import TimeContext, TIME_GATES, run_gate_chain
             from app.bot.session import session_last_hour as _slh
             _hold_a, _hold_why_a = self._loss_streak_block(figi)
+            await self._ensure_risk_fresh()
             _risk_a = self.risk_snapshot()
             _tc = TimeContext(
                 cfg=cfg, side=side,
@@ -5619,7 +6733,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 sessions_allowed=bool(_sessions_allowed(self._bot_now(), cfg.sessions)),
                 is_last_hour=bool(_slh(self._bot_now(), list(cfg.sessions or []))),
                 risk_allowed=bool(_risk_a.entries_allowed()),
-                risk_state=str(_risk_a.state), daily_pnl=float(_risk_a.daily_pnl),
+                risk_state=str(_risk_a.state), daily_pnl=_risk_a.daily_pnl,
                 loss_hold=bool(_hold_a), loss_why=str(_hold_why_a),
                 already_held=bool(figi in self._held),
             )
@@ -5637,9 +6751,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         # до тренда/портфеля/маржи. Данные — app/services/orderbook.py (кэш 5с).
         if action == "open":
             from app.bot.gates import MarketContext, MARKET_GATES, run_gate_chain
-            # В реплее живые котировки не относятся к датам прогона — гейт ликвидности
-            # пропускаем (иначе ложные блоки на устаревшем/нулевом обороте).
-            _to_s = (0.0 if str(getattr(cfg, "feed", "")) == "replay"
+            _to_s = (None if str(getattr(cfg, "feed", "")) == "replay"
                      else await self._daily_turnover(ticker))
             _atr_s = None
             for _u in self.universe:
@@ -5669,7 +6781,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 except Exception:
                     _ob_s = None  # gate_orderbook вернёт orderbook_error
             _nb_reason = ""
-            if bool(getattr(cfg, "entry_news_blackout", True)):
+            if str(getattr(cfg, "feed", "")) != "replay" and bool(getattr(cfg, "entry_news_blackout", True)):
                 try:
                     import asyncio as _aio_n
                     from app.services.news import blackout_reason as _nbr, fetch_news as _nf
@@ -5721,21 +6833,30 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     self._log(f"ДНЕВНОЙ BIAS {ticker}: {side} против {_bias} "
                               f"(hist {_db.get('hist'):+}, info-режим) — пропускаю дальше")
             _rwhy = ""
-            try:
-                await self.trade_history()
-                _rok, _rwhy = self._rank_ok(ticker)
-                _rwhy = "" if _rok else str(_rwhy)
-            except Exception:
-                _rwhy = ""
+            if bool(getattr(cfg, "rank_enabled", True)):
+                try:
+                    await self.trade_history()
+                    _rok, _rwhy = self._rank_ok(ticker)
+                    _rwhy = "" if _rok else str(_rwhy)
+                except Exception as error:
+                    self._reject_entry("trend", "rank_data_error", type(error).__name__, figi, ticker)
+                    self._trace_order_reject(figi, ticker, action, side,
+                                             "rank_data_error", type(error).__name__)
+                    return
             _hmp = None
             _hmd = 0
-            try:
-                _hmw = max(1, int(getattr(cfg, "hm_veto_window_h", 24) or 24))
-                _hm = (await self.hm_map(_hmw)).get(str(ticker).upper())
-                if _hm:
-                    _hmp, _hmd = float(_hm[0]), int(_hm[1])
-            except Exception:
-                pass
+            if bool(getattr(cfg, "entry_hm_veto", False)):
+                try:
+                    _hmw = max(1, int(getattr(cfg, "hm_veto_window_h", 24) or 24))
+                    _hm = (await self.hm_map(_hmw)).get(str(ticker).upper())
+                    if _hm:
+                        _hmp, _hmd = float(_hm[0]), int(_hm[1])
+                except Exception as error:
+                    if str(getattr(cfg, "hm_veto_mode", "veto")).lower() == "veto":
+                        self._reject_entry("trend", "hm_data_error", type(error).__name__, figi, ticker)
+                        self._trace_order_reject(figi, ticker, action, side,
+                                                 "hm_data_error", type(error).__name__)
+                        return
             _tctx = TrendContext(
                 cfg=cfg, side=side,
                 daily_bias=_bias, daily_hist=_db.get("hist"),
@@ -5774,11 +6895,15 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                                    or _meta_s.get(_f) or {}).get("sector") or "")
                         if _s2 == _sector:
                             _sector_count += 1
-            except Exception:
-                pass
+            except Exception as error:
+                if int(getattr(cfg, "max_sector_positions", 0) or 0) > 0:
+                    self._reject_entry("portfolio", "sector_data_error", type(error).__name__, figi, ticker)
+                    self._trace_order_reject(figi, ticker, action, side,
+                                             "sector_data_error", type(error).__name__)
+                    return
             _shorts_c = sum(1 for _f in self._held
                             if str(self._exit_side.get(_f, "")).upper() == "SHORT")
-            _pctx = PortfolioContext(cfg=cfg, side=side, held_count=len(self._held),
+            _pctx = PortfolioContext(cfg=cfg, side=side, held_count=len(self._occupied_entry_slots()),
                                      sector=_sector, sector_count=_sector_count,
                                      short_count=_shorts_c, ticker=ticker,
                                      held_tickers=tuple(self.tickers.get(_f, "").upper()
@@ -5826,25 +6951,34 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         if action == "open":
             buf = self.buffers.get(figi)
             price = float(buf[-1].close) if buf else 0.0
-            lot = 10
-            for u in self.universe:
-                if u.get("figi") == figi and u.get("lot"):
-                    lot = int(u["lot"])
-                    break
+            if confirmed_broker_lot is not None:
+                lot = confirmed_broker_lot
             else:
-                # Не в eligible-универсе (AI-трейдер может брать лидеров движения) —
-                # лот берём из БД, иначе дефолт 10 даёт ошибку размера в 10 раз.
-                try:
-                    from app.models.instrument import Instrument as _Inst
-                    async with SessionLocal() as _db:
-                        _l = (await _db.execute(
-                            select(_Inst.lot).where(_Inst.figi == figi)
-                        )).scalar_one_or_none()
-                    if _l:
-                        lot = int(_l)
-                except Exception as _sw_e:
-                    _audit_swallow('_submit_order@L4173', _sw_e)  # audit silent-except
-                    pass
+                lot = 0
+                for instrument in self.universe:
+                    if instrument.get("figi") == figi:
+                        raw_lot = instrument.get("lot_size") or instrument.get("lot")
+                        try:
+                            lot = int(raw_lot)
+                        except (TypeError, ValueError, OverflowError):
+                            lot = 0
+                        break
+                if lot <= 0:
+                    try:
+                        from app.models.instrument import Instrument as _Inst
+                        async with SessionLocal() as _db:
+                            raw_lot = (await _db.execute(
+                                select(_Inst.lot).where(_Inst.figi == figi)
+                            )).scalar_one_or_none()
+                        lot = int(raw_lot) if raw_lot is not None else 0
+                    except Exception as error:
+                        self._log(f"LOT UNKNOWN {ticker}: {type(error).__name__}")
+                        lot = 0
+            import math
+            if not math.isfinite(price) or price <= 0 or lot <= 0:
+                self._trace_order_reject(figi, ticker, action, side,
+                                         "sizing_price_lot", "unknown or invalid price/lot")
+                return
             budget = cfg.ensemble_capital
             if isinstance(self.broker, LiveBroker):
                 try:
@@ -5855,14 +6989,10 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     _free = await self.broker.free_funds()
                     _slot_pct = self._pos_pct() * _boost
                     budget = _eq * _slot_pct
-                except Exception as _sw_e:
-                    _audit_swallow('_submit_order@L4185', _sw_e)  # audit silent-except
-                    try:
-                        live_cash = await self.broker.cash()
-                        budget = live_cash * self._pos_pct() * _boost
-                    except Exception as _sw_e:
-                        _audit_swallow('_submit_order@L4189', _sw_e)  # audit silent-except
-                        pass
+                except Exception as error:
+                    self._trace_order_reject(figi, ticker, action, side,
+                                             "sizing_budget_unknown", type(error).__name__)
+                    return
             elif isinstance(self.broker, PaperBroker):
                 # Тест-режим: эмулируем Live — бюджет = доля от начального капитала теста
                 # (PaperBroker не спрашивает equity у брокера). Плечо ниже берётся из БД.
@@ -5881,16 +7011,20 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                         _short = str(getattr(_p, "side", "")).upper() in ("SELL", "SHORT")
                         _pnl_open += ((_ep - _ppx) if _short else (_ppx - _ep)) * _q
                     _eq = float(_acc.cash or 0.0) + _pnl_open
-                    if _eq <= 0:
-                        _eq = float(cfg.initial_cash)
                     budget = _eq * self._pos_pct() * _boost
                     self._log(
                         f"TEST BUDGET {ticker}: equity≈{_eq:.0f}₽ → слот {budget:.0f}₽ "
                         f"(слот {self._pos_pct()*_boost*100:.0f}% от EQ) · initial={cfg.initial_cash:.0f}₽"
                     )
                 except Exception as e:
-                    self._log(f"TEST BUDGET FAIL {ticker}: {type(e).__name__}: {str(e)[:80]} — слот {budget:.0f}₽")
-            lev = max(1.0, float(cfg.leverage or 1.0))
+                    self._trace_order_reject(figi, ticker, action, side,
+                                             "sizing_budget_unknown", type(e).__name__)
+                    return
+            if not math.isfinite(float(budget)) or budget <= 0:
+                self._trace_order_reject(figi, ticker, action, side,
+                                         "sizing_budget_invalid", "budget must be finite and positive")
+                return
+            lev = 1.0
             lot_cost = price * lot
             if price <= 0 or lot <= 0 or lot_cost <= 0:
                 self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] price_lot — цена={price} лот={lot}")
@@ -5911,10 +7045,15 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             if isinstance(self.broker, (LiveBroker, PaperBroker)):
                 try:
                     ml = await self.broker.get_max_lots(figi)
+                    entry_limits = ml
                     from app.bot.session import session_state, trading_session
                     _ss = session_state(now=self._bot_now())
                     _tss = trading_session(now=self._bot_now())
-                    use_margin = bool(cfg.margin_sessions) and _tss in cfg.margin_sessions
+                    # Маржа допустима только при явно включённом use_margin И сессии
+                    # из margin_sessions. Раньше проверялся только список сессий,
+                    # поэтому use_margin=false всё равно давало плечо.
+                    use_margin = (bool(cfg.use_margin) and bool(cfg.margin_sessions)
+                                  and _tss in cfg.margin_sessions)
                     _cash_lots = ml.buy_cash if side == "BUY" else ml.sell_cash
                     _mrgn_lots = ml.buy_margin if side == "BUY" else ml.sell_margin
                     self._log(
@@ -5959,38 +7098,36 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                                   f"режим={_sizing}{' [топ-1]' if (_is_priority and not _is_ai) else ''} "
                                   f"(позиция {_pos:.0f}₽ = свои {_own:.0f}₽ + заём {_pos-_own:.0f}₽)")
                 except Exception as e:
-                    self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed at cfg.leverage={lev:.1f}")
+                    self._trace_order_reject(figi, ticker, action, side,
+                                             "sizing_margin_unknown", type(e).__name__)
+                    return
+            if not bool(cfg.use_margin):
+                # Явный отказ от маржи: размер считается только по своим деньгам.
+                # Ни cfg.leverage, ни брокерский максимум не увеличивают позицию,
+                # поэтому плечо принудительно 1.0 даже после fallback блока MARGIN.
+                lev = 1.0
+                own_per_lot = lot_cost
             if budget < own_per_lot:
                 self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] budget — бюджет {budget:.0f} < стоимость лота {own_per_lot:.0f}")
                 self._trace_order_reject(figi, ticker, action, side, "sizing_budget", "бюджет < своих на лот")
                 return
             qty = max(1, int(budget / own_per_lot))
             _used_lev = lev
-        # --- Margin cap: не превышать max lots брокера (ответ уже в логе MARGIN) ---
-        # Развилка: если в этой сессии плечо запрещено (вечер/утро), но инструмент
-        # в принципе торгуется (есть маржинальный лимит в нужную сторону), НЕ блокируем —
-        # qty уже посчитан по собственному бюджету без плеча (own_per_lot при lev=1).
-        # Свои деньги = 0 бывает у шортов в sandbox (шорт требует маржи), при этом
-        # cash-бюджет на qty есть — значит ордер без плеча допустим.
-        if action == "open" and isinstance(self.broker, (LiveBroker, PaperBroker)) and cfg.use_margin:
+        if action == "open" and isinstance(self.broker, (LiveBroker, PaperBroker)):
             try:
                 from app.bot.session import trading_session
                 _tss = trading_session(now=self._bot_now())
-                use_margin = bool(cfg.margin_sessions) and _tss in cfg.margin_sessions
-                ml = await self.broker.get_max_lots(figi)
+                use_margin = (bool(cfg.use_margin) and bool(cfg.margin_sessions)
+                              and _tss in cfg.margin_sessions)
+                ml = entry_limits
                 cash_max = ml.buy_cash if side == "BUY" else ml.sell_cash
                 margin_max = ml.buy_margin if side == "BUY" else ml.sell_margin
                 if use_margin:
                     max_lots = margin_max
                     _lim_kind = "маржа"
-                elif cash_max > 0:
+                else:
                     max_lots = cash_max
                     _lim_kind = "свои деньги"
-                else:
-                    # Без плеча, но инструмент торгуется вообще (шорт через марж. лимит):
-                    # потолок — маржинальный лимит, реальный размер уже ограничен бюджетом.
-                    max_lots = margin_max
-                    _lim_kind = "свои деньги (без плеча, потолок марж. лимита)"
                 if max_lots <= 0:
                     self._log(f"ПРОПУСК СДЕЛКИ {ticker}: [sizing] margin_limit — лимит ({_lim_kind}) = 0")
                     self._trace_order_reject(figi, ticker, action, side, "sizing_margin_limit",
@@ -6000,49 +7137,66 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     self._log(f"QTY CAP {ticker}: {qty} → {max_lots} ({_lim_kind}, {_tss or '—'})")
                     qty = max_lots
             except Exception as e:
-                self._log(f"MARGIN CHECK FAIL {ticker}: {e} — proceed without cap")
+                self._trace_order_reject(figi, ticker, action, side,
+                                         "sizing_margin_unknown", type(e).__name__)
+                return
         # --- Кап совокупной экспозиции: свои деньги в позициях <= max_exposure_pct от equity ---
         if action == "open":
             try:
                 _cap = float(getattr(cfg, "max_exposure_pct", 0.0) or 0.0)
+                if not math.isfinite(_cap) or _cap < 0:
+                    raise ValueError("invalid exposure limit")
                 if _cap > 0:
                     _eq_cap = float(await self.broker.equity() or 0.0)
+                    if not math.isfinite(_eq_cap) or _eq_cap <= 0:
+                        raise ValueError("unknown exposure equity")
                     if _eq_cap > 0:
-                        # Свои деньги/маржа — «правда» брокера (starting_margin), а не наша
-                        # оценка entry×qty/lev (она завышала в разы). Если брокер недоступен —
-                        # fallback на оценку.
                         _own_now = None
-                        _eff_lev = None
                         _ma_fn = getattr(self.broker, "margin_attributes", None)
                         if _ma_fn is not None:
                             try:
                                 _ma = await _ma_fn()
-                                if _ma and _ma.get("liquid"):
-                                    _own_now = float(_ma.get("starting_margin") or 0.0)
-                                    _mv_cap = float(await self.broker.market_value() or 0.0)
-                                    _eff_lev = max(1.0, _mv_cap / max(_own_now, 1.0))
-                                    _eq_cap = float(_ma.get("liquid") or _eq_cap)
-                            except Exception as _sw_e:
-                                _audit_swallow('_submit_order@L4345', _sw_e)  # audit silent-except
+                                if (_ma and _ma.get("liquid") is not None
+                                        and _ma.get("starting_margin") is not None):
+                                    _own_now = float(_ma["starting_margin"])
+                                    _eq_cap = float(_ma["liquid"])
+                            except Exception:
+                                if isinstance(self.broker, LiveBroker):
+                                    raise
                                 _own_now = None
+                        if _own_now is None and isinstance(self.broker, LiveBroker):
+                            raise ValueError("broker account exposure unavailable")
                         if _own_now is None:
                             _own_now = 0.0
                             for _f in list(self._held):
                                 _ep = float(self._exit_entry_px.get(_f) or 0.0)
                                 _q = float(self._exit_qty.get(_f) or 0.0)
                                 _lev = max(1.0, float(self._pos_leverage.get(_f, 1.0) or 1.0))
+                                if (not all(math.isfinite(v) for v in (_ep, _q, _lev))
+                                        or _ep <= 0 or _q <= 0):
+                                    raise ValueError("unknown held-position exposure")
                                 _own_now += (_ep * _q) / _lev
-                            _eff_lev = 1.0
-                        _lot_cap = next((u.get("lot") for u in self.universe
-                                         if u.get("figi") == figi), 1) or 1
                         # Свои деньги НОВОЙ позиции = номинал / плечо именно этой позиции
                         # (_used_lev). Точно в обоих режимах: divide — own=бюджет/lev,
                         # multiply — own=бюджет=номинал/lev. Портфельный _eff_lev не годится:
                         # при пустом портфеле он =1 и own_new раздувался до полного номинала
                         # (лог: «свои 10000+9892 > equity 10000» при выбранном ×5).
-                        _own_new = ((float(price) * int(qty) * int(_lot_cap))
+                        _own_new = ((float(price) * int(qty) * lot)
                                     / max(1.0, float(_used_lev or 1.0)))
-                        if _own_now + _own_new > _eq_cap * _cap:
+                        if (not all(math.isfinite(v) for v in (_own_now, _own_new, _eq_cap))
+                                or _own_now < 0 or _own_new <= 0 or _eq_cap <= 0):
+                            raise ValueError("invalid exposure inputs")
+                        from app.engine.margin_budget import check_margin_budget
+                        margin_decision = check_margin_budget(
+                            liquid_value=_eq_cap,
+                            committed_margin=_own_now,
+                            additional_notional=float(price) * int(qty) * lot,
+                            initial_risk_rate=1.0 / max(1.0, float(_used_lev or 1.0)),
+                            max_use_fraction=_cap,
+                        )
+                        if margin_decision.reason in ("MARGIN_INPUT_UNKNOWN", "MARGIN_INPUT_INVALID"):
+                            raise ValueError(margin_decision.reason)
+                        if not margin_decision.allowed:
                             self._log(f"ПРОПУСК ВХОДА {ticker}: [portfolio] max_exposure — кап экспозиции "
                                       f"{_cap*100:.0f}% (свои {_own_now:.0f}+{_own_new:.0f} > equity {_eq_cap:.0f}₽)")
                             self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
@@ -6051,9 +7205,11 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                             self._trace_order_reject(figi, ticker, action, side, "max_exposure")
                             return
             except Exception as _sw_e:
-                _audit_swallow('_submit_order@L4366', _sw_e)  # audit silent-except
-                pass
+                self._trace_order_reject(figi, ticker, action, side,
+                                         "exposure_unknown", type(_sw_e).__name__)
+                return
         order = BotOrder(
+            created_at=self._bot_now(),
             id=_new_order_id(),
             figi=figi,
             ticker=ticker,
@@ -6063,12 +7219,14 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             meta={**dict(meta or {}), "leverage": float(_used_lev),
                   "gate_path": list(_gate_path)},
         )
+        if action == "open":
+            order.meta.update(lot_size=int(lot), requested_lots=int(qty))
         # --- Портфельные лимиты (net exposure / сектор / маржа / стресс) ---
         if action == "open":
             try:
                 from app.bot.portfolio import (PortfolioLimits as _PL, check_order as _pcheck,
                                                regime_limits as _rlim)
-                _snap = await self.portfolio_snapshot()
+                _snap = await self.portfolio_snapshot(ttl=0.0)
                 _regime = await self.market_regime()
                 _base = _PL(
                     max_net_exposure_pct=float(getattr(cfg, "max_net_exposure_pct", 0.5) or 0.0),
@@ -6084,8 +7242,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                         _lim.max_net_exposure_pct = max(_lim.max_net_exposure_pct, 1.0)
                     _lim.max_sector_pct = 0.0
                 # лот: из universe
-                _lot_pf = next((u.get("lot") for u in self.universe if u.get("figi") == figi), 1) or 1
-                _notional = float(price) * int(qty) * int(_lot_pf)
+                _notional = float(price) * int(qty) * lot
                 # Разворот рынка против книги: не добавляем в убыточную сторону.
                 _net = float(_snap.get("net_notional") or 0.0)
                 if str(_regime.get("state")) == "reversal" and (
@@ -6111,7 +7268,13 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                                                       meta=meta, snap=_snap)
                     return
             except Exception as _e:
-                self._log(f"ПОРТФЕЛЬ-ЛИМИТ {ticker}: проверка не удалась ({type(_e).__name__}) — пропускаю")
+                self._log(f"ПОРТФЕЛЬ-ЛИМИТ {ticker}: проверка не удалась ({type(_e).__name__}) — вход отклонён")
+                self.events.log("SIGNAL_REJECTED", figi=figi, ticker=ticker,
+                                reason="PORTFOLIO_CHECK_ERROR", detail=type(_e).__name__)
+                self._log_no_trade(figi, "portfolio_check_error")
+                self._trace_order_reject(figi, ticker, action, side,
+                                         "portfolio_check_error", type(_e).__name__)
+                return
         # --- AI-гейт: дедуп и пауза после отклонения ---
         if action == "open" and not _is_ai and bool(getattr(cfg, "ai_approval", False)):
             _pend = self.pending_orders.get(figi)
@@ -6153,15 +7316,92 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         self.events.log("ORDER_SUBMITTED", figi=figi, ticker=ticker,
                         order_id=order.id, action=action, side=side)
 
+    def _broker_candidate_admission(self, figi, ticker, side):
+        from app.bot.universe.domain import InstrumentRef
+        from app.bot.universe.eligibility import broker_eligibility
+
+        if getattr(self, "_candidate_mode", None) != str(getattr(self.config, "mode", "")):
+            return None, "broker_evidence_mode_mismatch"
+        evidence = getattr(self, "_candidate_catalog", {}).get(figi)
+        decision = broker_eligibility(
+            InstrumentRef(ticker=ticker, figi=figi), evidence,
+            side="long" if side == "BUY" else "short",
+            observed_at=getattr(self, "_candidate_observed_at", None),
+            as_of=datetime.now(timezone.utc),
+        )
+        if not decision.eligible or figi not in getattr(self, "_candidate_figis", set()):
+            return None, "; ".join(decision.reasons) or "outside_selected_universe"
+        return evidence["lot"], None
+
+    async def _persist_entry_fill(self, figi, order, executed_lots, price, plan):
+        order.meta = dict(order.meta or {})
+        order.meta["client_order_id"] = order.id
+        broker = self.broker
+        scope = (getattr(broker, 'mode', None), getattr(broker, '_account', None))
+        evidence = None
+        try:
+            if isinstance(broker, LiveBroker):
+                from app.services.broker_fill_evidence import read_order_fill_evidence, entry_evidence_metadata
+                try:
+                    evidence = await read_order_fill_evidence(broker, mode=scope[0], broker_account_id=scope[1],
+                        client_order_id=order.id, figi=figi, side=order.side,
+                        requested_lots=order.meta.get('requested_lots'), lot_size=order.meta.get('lot_size'),
+                        as_of=self._bot_now())
+                    entry_evidence_metadata(evidence, mode=scope[0], broker_account_id=scope[1],
+                        client_order_id=order.id, figi=figi, side=order.side,
+                        units=executed_lots * order.meta['lot_size'], lot_size=order.meta['lot_size'], price=price)
+                    order.meta.pop('entry_evidence_error', None)
+                except Exception as error:
+                    evidence = None
+                    order.meta['entry_evidence_error'] = type(error).__name__
+                if (self.broker is not broker or (broker.mode, broker._account) != scope
+                        or getattr(self, 'broker_mode', scope[0]) != scope[0]):
+                    raise ValueError('broker_scope_changed_during_entry_evidence')
+            await self._st_open(
+                figi, order.ticker, order.side, executed_lots, price,
+                plan.stop_loss, plan.take_profit, meta=order.meta, entry_evidence=evidence,
+                leverage=max(1.0, float((order.meta or {}).get("leverage")
+                                       or self.config.leverage or 1.0)),
+            )
+            if isinstance(broker, LiveBroker) and (self.broker is not broker
+                    or (broker.mode, broker._account) != scope
+                    or getattr(self, 'broker_mode', scope[0]) != scope[0]):
+                raise ValueError('broker_scope_changed_during_entry_persistence')
+            return True
+        except Exception:
+            self._entry_pause().set_blocker('entry_reconciliation', True, *scope, order.id)
+            order.status = "PENDING_RECONCILIATION"
+            order.meta = dict(order.meta or {})
+            order.meta.update(ledger_write_failed=True,
+                              confirmed_executed_lots=executed_lots,
+                              confirmed_fill_price=price)
+            self.pending_orders[figi] = order
+            self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                            ticker=order.ticker, order_id=order.id,
+                            action="open", reason="entry_ledger_write_failed")
+            return False
+
     async def _execute_pending(self, figi: str, c) -> bool:
         """Process pending order."""
+        from app.bot.execution_reference import ExecutionReference
+        is_reference = isinstance(c, ExecutionReference)
         order = self.pending_orders.pop(figi, None)
         if order is None or order.status == "CANCELLED":
             return False
-        if order.status == "PENDING_RECONCILIATION":
+        if order.status in ("PENDING_RECONCILIATION", "PARTIAL_FILLED"):
             self._log(f"RECONCILIATION: {order.ticker} ждёт сверки, повторная отправка заблокирована")
             self.pending_orders[figi] = order
             return False
+        execution_price = c.price if is_reference else c.open
+        execution_at = c.market_at if is_reference else c.ts
+        if order.action == "open" and isinstance(self.broker, LiveBroker):
+            try:
+                await self._entry_lot_size(figi, order.meta)
+            except ValueError:
+                order.status = "REJECTED"
+                self.events.log("ORDER_REJECTED", figi=figi, ticker=order.ticker,
+                                order_id=order.id, reason="confirmed_entry_lot_missing")
+                return False
         cfg = self.config
         # --- Подтверждение входа (крос-ТФ фильтр, research-bundle): перед открытием
         # проверяем, был ли сигнал ENTRY_CONFIRM_ENGINE@TF в окне ±N минут.
@@ -6183,7 +7423,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                         _bars = _buf
                     from app.engine.strategies import build_strategy as _bs
                     _sigs = _bs(_conf, {}).on_bar(_bars) or []
-                    _now = c.ts
+                    _now = execution_at
                     _ok = any(abs((getattr(_s, "ts", _now) - _now).total_seconds()) <= _w * 60
                               for _s in _sigs)
                     if not _ok:
@@ -6208,8 +7448,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                                                          buy_verdict, h1_ret3, previous_day_features)
                     from app.services.ensemble import resample as _frs
                     _fstep = STEP_SEC.get(getattr(cfg, "interval_name", ""), 300)
-                    _fref = c.ts if getattr(c.ts, "tzinfo", None) else c.ts.replace(tzinfo=timezone.utc)
-                    _fref = _fref + timedelta(seconds=_fstep)
+                    _fref = execution_at if getattr(execution_at, "tzinfo", None) else execution_at.replace(tzinfo=timezone.utc)
+                    _fref = _fref if is_reference else _fref + timedelta(seconds=_fstep)
                     _fatr = float(_fos.environ.get("ENTRY_FILTER_D1_ATR_MIN") or BUY_ATR_MIN)
                     _frsi = float(_fos.environ.get("ENTRY_FILTER_D1_RSI_MAX") or 45.0)
                     async with SessionLocal() as _fdb:
@@ -6245,8 +7485,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                                                          m5_ret12, sell_verdict)
                     from app.services.ensemble import resample as _frs2
                     _fstep2 = STEP_SEC.get(getattr(cfg, "interval_name", ""), 300)
-                    _fref2 = c.ts if getattr(c.ts, "tzinfo", None) else c.ts.replace(tzinfo=timezone.utc)
-                    _fref2 = _fref2 + timedelta(seconds=_fstep2)
+                    _fref2 = execution_at if getattr(execution_at, "tzinfo", None) else execution_at.replace(tzinfo=timezone.utc)
+                    _fref2 = _fref2 if is_reference else _fref2 + timedelta(seconds=_fstep2)
                     _fh3 = float(_fos2.environ.get("ENTRY_FILTER_D1_SELL_H3") or -0.001)
                     _fm5 = float(_fos2.environ.get("ENTRY_FILTER_D1_SELL_M5") or -0.0006)
                     _sbuf = list(self.buffers.get(figi) or [])
@@ -6269,6 +7509,13 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     self._log(f"ФИЛЬТР D1 SELL: ошибка проверки {type(_fe2).__name__}: "
                               f"{str(_fe2)[:90]} (fail-open)")
         # Пауза новых входов: НЕ открываем новые позиции из очереди (закрытия/выходы — можно).
+        if order.action == "open":
+            refreshed = await self._ensure_risk_fresh()
+            if not refreshed or not self.risk_snapshot().entries_allowed():
+                order.status = "CANCELLED"
+                self.events.log("ORDER_CANCELLED", figi=figi, ticker=order.ticker,
+                                order_id=order.id, action="open", reason="risk_not_allowed")
+                return False
         if order.action == "open" and self.entries_paused:
             order.status = "CANCELLED"
             self._log(f"ПАУЗА: отменён вход {order.ticker} ({order.side}) — entries_paused")
@@ -6320,31 +7567,30 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             self._approvals_since.pop(order.id, None)
         if order.action == "close":
             try:
-                trade = await self.broker.close_position(figi, c.open, "signal_exit")
-            except Exception as _e:
-                order.status = "REJECTED"
-                self._log(f"⛔ ЗАКРЫТИЕ ОТКЛОНЕНО БРОКЕРОМ {order.ticker}: "
-                          f"{type(_e).__name__}: {str(_e)[:140]}")
-                self.events.log("ORDER_REJECTED", figi=figi, ticker=order.ticker,
-                                order_id=order.id, action="close", error=str(_e)[:200])
-                if self._trace is not None:
-                    try:
-                        from app.engine.trace import Stage, Status, TraceEvent
-                        self._trace.emit(TraceEvent(stage=Stage.FILL, status=Status.REJECTED, ts_bar=c.ts,
-                                                    figi=figi, ticker=order.ticker, order_id=order.id,
-                                                    action="close", side=str(order.side),
-                                                    error={"type": type(_e).__name__, "message": str(_e)[:200]}))
-                    except Exception:
-                        pass
+                position = await self.broker.get_position(figi)
+            except Exception as error:
+                self.pending_orders.setdefault(figi, order)
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                order_id=order.id, reason="signal_close_position_unavailable",
+                                error_type=type(error).__name__)
                 return False
-            if trade is None:
-                order.status = "PENDING_RECONCILIATION"
-                self.pending_orders[figi] = order
-                self._log(f"⛔ ЗАКРЫТИЕ НЕ ПОДТВЕРЖДЕНО {order.ticker}: ждём reconciliation")
-                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi, ticker=order.ticker,
-                                order_id=order.id, action="close", reason="unknown_broker_result")
+            if position is None:
+                self.pending_orders.setdefault(figi, order)
                 return False
-            actual_exit = price_from_trade(trade) if trade else c.open
+            order.qty = position.qty
+            outcome = await self._submit_close_reconciled(
+                figi, order.ticker, order.qty, execution_price, "signal_exit",
+                paper_filled=False, close_order=order)
+            if outcome["status"] == "reconciled_closed":
+                return True
+            if outcome["status"] == "pending_partial":
+                self._exit_qty[figi] = outcome["residual"]
+            if outcome["status"] != "closed":
+                if outcome["order"] is None and figi not in self.pending_orders:
+                    self.pending_orders[figi] = order
+                return False
+            trade = outcome["trade"]
+            actual_exit = price_from_trade(trade) if trade else execution_price
             order.status = "FILLED"
             order.filled_at = datetime.now(timezone.utc)
             order.price = actual_exit
@@ -6353,18 +7599,18 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             _bars_held = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
             _exit_meta_sig = {"bars_held": _bars_held, "signal_note": "signal_exit",
                               "gate_path_in": list((order.meta or {}).get("gate_path") or [])}
-            await self._st_close(figi, actual_exit, reason="signal_exit",
+            await self._st_close(figi, actual_exit, execution=trade, reason="signal_exit",
                                   net=float(trade.net_pnl) if trade else None,
                                   meta=_exit_meta_sig)
             pnl = float(trade.net_pnl) if trade else 0
-            self._log(f"СДЕЛКА ЗАКРЫТИЕ {order.ticker} @ {actual_exit:.2f} pnl={pnl:+.2f} (candle={c.open:.2f})")
+            self._log(f"СДЕЛКА ЗАКРЫТИЕ {order.ticker} @ {actual_exit:.2f} pnl={pnl:+.2f} (candle={execution_price:.2f})")
             self.events.log("ORDER_FILLED", figi=figi, ticker=order.ticker,
                             order_id=order.id, price=actual_exit, action="close",
                             net_pnl=float(trade.net_pnl) if trade else None)
             if self._trace is not None:
                 try:
                     from app.engine.trace import Stage, Status, TraceEvent
-                    self._trace.emit(TraceEvent(stage=Stage.FILL, status=Status.EXECUTED, ts_bar=c.ts,
+                    self._trace.emit(TraceEvent(stage=Stage.FILL, status=Status.EXECUTED, ts_bar=execution_at,
                                                 figi=figi, ticker=order.ticker, order_id=order.id,
                                                 action="close", side=str(order.side),
                                                 price=float(actual_exit), qty=getattr(order, "qty", None),
@@ -6385,12 +7631,12 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             # TP: из optuna-параметров rr стратегии figi (EnsembleParams).
             strat = self.strategies.get(figi)
             _sl_mult = cfg.initial_sl_atr
-            _rr = getattr(strat.p, "rr", None) if strat is not None else None
+            _rr = getattr(getattr(strat, "p", None), "rr", None)
             if _rr is None:
                 _rr = cfg.atr_risk_reward
             # Проскальзывание на входе (adverse) — parity с бэктестом (fill_price).
             _cm = CostModel(commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps)
-            _fill = _cm.fill_price(float(c.open), side)
+            _fill = _cm.fill_price(float(execution_price), side)
             if (order.meta or {}).get("ai_trader") and (
                     order.meta.get("sl_pct") or order.meta.get("tp_pct")):
                 _slp = float(order.meta.get("sl_pct") or 0.03)
@@ -6439,7 +7685,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             import os as _os
             _sl1r = (_os.environ.get("SL1R") or "").strip().lower()
             _cm = CostModel(commission_rate=cfg.commission_rate, slippage_bps=cfg.slippage_bps)
-            _fill = _cm.fill_price(float(c.open), side)
+            _fill = _cm.fill_price(float(execution_price), side)
             if _sl1r and _sl1r not in ("0", "false", "off", "no"):
                 exit_policy = FixedSlTpPolicy(stop_pct=0.022, target_pct=50.0)
                 plan = exit_policy.plan_entry(side, _fill, [])
@@ -6448,7 +7694,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 _rtr3_kw = _rtr3()
                 if _rtr3_kw:
                     _s3 = self.strategies.get(figi)
-                    _rr3 = getattr(_s3.p, "rr", None) if _s3 is not None else None
+                    _rr3 = getattr(getattr(_s3, "p", None), "rr", None)
                     exit_policy = AtrStopPolicy(period=cfg.atr_period,
                                                  multiplier=cfg.initial_sl_atr,
                                                  risk_reward=float(_rr3) if _rr3 else cfg.atr_risk_reward,
@@ -6456,21 +7702,133 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     _b3 = list(self.buffers.get(figi, []))
                     buf_raw3 = self._get_5m_bars(figi, _b3) or _b3
                     plan = exit_policy.plan_entry(side, _fill, buf_raw3)
+                elif cfg.sl_mode == "atr":
+                    exit_policy = AtrStopPolicy(
+                        period=cfg.atr_period,
+                        multiplier=cfg.initial_sl_atr,
+                        risk_reward=cfg.atr_risk_reward,
+                        trail_activation_comm_mult=cfg.trail_activation_comm_mult,
+                        trail_distance_r=cfg.trail_distance_atr,
+                        trail_compress_r=cfg.trail_compress_r,
+                        trail_min_factor=cfg.trail_min_factor,
+                        trail_min_atr=cfg.trail_min_atr,
+                        trail_vol_boost=cfg.trail_vol_boost)
+                    entry_bars = list(self.buffers.get(figi, []))
+                    plan = exit_policy.plan_entry(side, _fill, entry_bars)
                 else:
                     exit_policy = FixedSlTpPolicy(stop_pct=cfg.stop_pct, target_pct=cfg.target_pct)
                     plan = exit_policy.plan_entry(side, _fill, [])
+        # Уровень, не прошедший проверку, означает ошибку единиц или стратегии.
+        # Писать его нельзя, но и открывать позицию без стопа тоже: 15.11.2026
+        # в paper-контуре ASTR при 213.17 получила sl=10873.71, SBER при 276.64
+        # — sl=-13552.42. Дистанция ровно 50x цены, причём сторона формально
+        # правильная, поэтому проверяется ещё и масштаб. Такой вход отклоняем
+        # целиком и громко сообщаем причину: молчаливая подмена уровня скрывала
+        # бы дефект, а позиция без защиты недопустима.
+        _bad_levels: list[str] = []
+        for _lv, _kind, _name in ((plan.stop_loss, "stop", "SL"),
+                                  (plan.take_profit, "target", "TP")):
+            if _lv is None:
+                continue
+            _why = level_problem(_lv, _kind, order.side, _fill)
+            if _why is None and level_implausible(_lv, _fill):
+                _why = f"дальше {int(PLAUSIBLE_LEVEL_SPAN * 100)}% от входа — ошибка единиц"
+            if _why is not None:
+                _bad_levels.append(f"{_name} {float(_lv):.2f} ({_why})")
+        if _bad_levels:
+            order.status = "REJECTED"
+            self._log(f"⛔ ВХОД ОТКЛОНЁН {order.ticker} @ {float(_fill):.2f} "
+                      f"{order.side}: {', '.join(_bad_levels)} — проверь stop_pct/"
+                      f"target_pct (доля, не проценты) и sl_mode")
+            self.events.log("SLTP_INVALID_LEVEL", figi=figi, ticker=order.ticker,
+                            side=str(getattr(order.side, "value", order.side)),
+                            entry=float(_fill), dropped=", ".join(_bad_levels))
+            self._trace_order_reject(figi, order.ticker, "open", str(order.side),
+                                     "invalid_level", ", ".join(_bad_levels),
+                                     ts_bar=getattr(c, "ts", None))
+            return False
+        entry_scope = None
         try:
-            actual_entry = await self.broker.open_position(
+            broker_qty = int(order.qty)
+            if isinstance(self.broker, PaperBroker):
+                from app.models.instrument import Instrument
+                async with SessionLocal() as quantity_db:
+                    instrument_lot = (await quantity_db.execute(
+                        select(Instrument.lot).where(Instrument.figi == figi)
+                    )).scalar_one_or_none()
+                if instrument_lot is None or int(instrument_lot) <= 0:
+                    raise ValueError("Paper execution requires a known positive instrument lot")
+                broker_qty *= int(instrument_lot)
+            # ARCH160: client_order_id — только живому брокеру (PaperBroker его не принимает).
+            _open_kwargs = {}
+            if not isinstance(self.broker, PaperBroker):
+                _open_kwargs["client_order_id"] = str(getattr(order, "id", "") or "") or None
+            if isinstance(self.broker, LiveBroker):
+                current_lot, admission_error = self._broker_candidate_admission(
+                    figi, order.ticker, order.side)
+                if not admission_error and current_lot != (order.meta or {}).get("lot_size"):
+                    admission_error = "broker_lot_changed_since_sizing"
+                if admission_error:
+                    order.status = "REJECTED"
+                    self.events.log("ORDER_REJECTED", figi=figi, ticker=order.ticker,
+                                    order_id=order.id, reason=admission_error)
+                    return False
+            from app.services.exit_policy_snapshot import ExitPolicySnapshot
+            order.meta = {**(order.meta or {}), 'entry_exit_policy': ExitPolicySnapshot.capture(exit_policy).to_payload()}
+            entry_broker = self.broker
+            entry_scope = None
+            if isinstance(entry_broker, LiveBroker):
+                entry_scope = (entry_broker.mode, entry_broker._account)
+                order.meta = {**(order.meta or {}), "broker_scope": entry_scope,
+                              "requested_lots": broker_qty, "durable_open": True}
+                order.status = 'PENDING_RECONCILIATION'
+                self.pending_orders[figi] = order
+                self._entry_pause().set_blocker('entry_reconciliation', True, *entry_scope, order.id)
+            actual_entry = await entry_broker.open_position(
                 figi=figi,
                 ticker=order.ticker,
                 side=order.side,
-                qty=order.qty,
+                qty=broker_qty,
                 price=_fill,
                 stop_loss=round(plan.stop_loss, 6) if plan.stop_loss is not None else None,
                 take_profit=round(plan.take_profit, 6) if plan.take_profit is not None else None,
                 strategy_id=cfg.strategy_id,
+                price_is_filled=True,
+                **_open_kwargs,
+                plan_meta={
+                    "exit_policy": order.meta["entry_exit_policy"],
+                    "lot_size": (order.meta or {}).get("lot_size"),
+                    "leverage": (order.meta or {}).get("leverage") or getattr(cfg, "leverage", 1) or 1,
+                    "atr": plan.atr,
+                    "atr_period": plan.atr_period,
+                    "atr_as_of": plan.atr_as_of,
+                    "atr_multiplier": plan.atr_multiplier,
+                    "policy_id": plan.policy_id,
+                    "atr_tf": str(getattr(cfg, "interval_name", "") or "") or None,
+                    "plan_entry_price": float(_fill),
+                },
             )
+            if entry_scope is not None and (self.broker is not entry_broker
+                    or (entry_broker.mode, entry_broker._account) != entry_scope
+                    or getattr(self, 'broker_mode', entry_scope[0]) != entry_scope[0]):
+                raise EntrySubmissionUnknown('entry_runtime_scope_changed_after_submission')
+        except (TimeoutError, EntrySubmissionUnknown) as _te:
+            if isinstance(_te, EntrySubmissionUnknown) and entry_scope is not None:
+                order.meta = {**(order.meta or {}), 'durable_open': True}
+                self._entry_pause().set_blocker('entry_reconciliation', True, *entry_scope, order.id)
+            # ARCH160: таймаут = исход НЕИЗВЕСТЕН (ордер мог исполниться после разрыва),
+            # а не отказ. Нельзя помечать REJECTED и нельзя пере-отправлять новый ордер:
+            # удерживаем pending до сверки; повторная отправка блокируется статусом.
+            order.status = "PENDING_RECONCILIATION"
+            self.pending_orders[figi] = order
+            self._log(f"⏳ ИСХОД НЕИЗВЕСТЕН {order.ticker} {order.side} qty={order.qty}: "
+                      f"ответ не подтверждён — ждём сверки, повторная отправка заблокирована")
+            self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi, ticker=order.ticker,
+                            order_id=order.id, action="open", reason="submission_unknown_outcome")
+            return False
         except Exception as _e:
+            if entry_scope is not None:
+                self._entry_pause().set_blocker("entry_reconciliation", False, *entry_scope, order.id)
             # Ошибка брокера (нехватка средств, отказ биржи) НЕ должна ронять рантайм:
             # помечаем ордер REJECTED, логируем — бот продолжает работать.
             order.status = "REJECTED"
@@ -6483,6 +7841,22 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                                      error={"type": type(_e).__name__, "message": str(_e)[:200]},
                                      ts_bar=getattr(c, "ts", None))
             return False
+        if isinstance(entry_broker, LiveBroker):
+            from app.bot.open_submission import OpenSubmission
+            order.status = 'PENDING_RECONCILIATION'
+            self.pending_orders[figi] = order
+            order.meta = {**(order.meta or {}), 'durable_open': True}
+            self._entry_pause().set_blocker('entry_reconciliation', True, *entry_scope, order.id)
+            if (not isinstance(actual_entry, OpenSubmission)
+                    or (actual_entry.mode, actual_entry.broker_account_id) != entry_scope
+                    or actual_entry.client_order_id != order.id or actual_entry.figi != figi
+                    or actual_entry.side != order.side or actual_entry.lot_size != order.meta.get('lot_size')
+                    or actual_entry.requested_units != broker_qty * actual_entry.lot_size):
+                self.events.log('ORDER_RECONCILIATION_REQUIRED', figi=figi, order_id=order.id,
+                                reason='opening_submission_receipt_mismatch')
+                return False
+            await self._reconcile_pending_orders(only_figi=figi)
+            return order.status == 'FILLED' and figi not in self.pending_orders
         if actual_entry is None:
             order.status = "PENDING_RECONCILIATION"
             self.pending_orders[figi] = order
@@ -6490,7 +7864,42 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi, ticker=order.ticker,
                             order_id=order.id, action="open", reason="unknown_broker_result")
             return False
-        entry_px = actual_entry if actual_entry and actual_entry > 0 else c.open
+        _exec = getattr(self.broker, "last_execution", None)
+        _ex_lots = int(getattr(_exec, "executed_lots", 0) or 0)
+        _req_lots = int(getattr(_exec, "requested_lots", 0) or 0)
+        if _exec is not None and _ex_lots > 0 and _ex_lots < _req_lots:
+            # ARCH160: частичное исполнение входа. Фиксируем только исполненную часть,
+            # остаток НЕ считаем исполненным и не отправляем повторно без сверки.
+            entry_px = actual_entry if actual_entry and actual_entry > 0 else execution_price
+            order.status = "PARTIAL_FILLED"
+            self.pending_orders[figi] = order
+            order.filled_at = datetime.now(timezone.utc)
+            order.price = entry_px
+            order.qty = _req_lots - _ex_lots
+            self._held.add(figi)
+            self._held_since.setdefault(figi, __import__("time").monotonic())
+            await self._persist_entry_fill(figi, order, _ex_lots, entry_px, plan)
+            _lot_partial = await self._entry_lot_size(figi, order.meta)
+            self._exit_qty[figi] = int(_ex_lots) * int(_lot_partial)
+            self._exit_plans[figi] = exit_policy
+            self._exit_side[figi] = "LONG" if order.side == "BUY" else "SHORT"
+            self._exit_entry_px[figi] = float(entry_px)
+            self._pos_leverage[figi] = max(1.0, float((order.meta or {}).get("leverage") or 1.0))
+            self._trail_active[figi] = False
+            self._trail_stop[figi] = float(plan.stop_loss) if plan.stop_loss is not None else 0.0
+            self._peak_pnl[figi] = {"pnl": 0.0, "ts": execution_at, "price": float(entry_px),
+                                    "atr_abs": None, "atr_pct": None, "mae": 0.0}
+            self._gb_peak[figi] = 0.0
+            self._trail_info.pop(figi, None)
+            if plan.take_profit is not None:
+                self._exit_target[figi] = float(plan.take_profit)
+            self._entry_bar_index[figi] = self._bar_counter
+            self._log(f"ЧАСТИЧНЫЙ ВХОД {order.ticker} {order.side}: исполнено={_ex_lots} лотов, остаток={order.qty} лотов — ждём сверки")
+            self.events.log("ORDER_PARTIAL_FILLED", figi=figi, ticker=order.ticker,
+                            order_id=order.id, price=entry_px, action="open",
+                            executed_lots=_ex_lots, remaining_lots=order.qty)
+            return False
+        entry_px = actual_entry if actual_entry and actual_entry > 0 else execution_price
         order.status = "FILLED"
         order.filled_at = datetime.now(timezone.utc)
         order.price = entry_px
@@ -6521,30 +7930,17 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             pass
         self._held.add(figi)
         self._held_since.setdefault(figi, __import__("time").monotonic())
-        await self._st_open(figi, order.ticker, order.side, order.qty, entry_px,
-                            plan.stop_loss, plan.take_profit, meta=order.meta,
-                            leverage=max(1.0, float((order.meta or {}).get("leverage") or self.config.leverage or 1.0)))
+        ledger_saved = await self._persist_entry_fill(figi, order, order.qty, entry_px, plan)
         self._exit_plans[figi] = exit_policy
         self._exit_side[figi] = "LONG" if order.side == "BUY" else "SHORT"
         self._exit_entry_px[figi] = float(entry_px)
-        # Лот — из БД (Instrument.lot), как в _st_open: order.qty приходит в ЛОТАХ,
-        # а _exit_qty должен быть в ШТУКАХ. Раньше искали ключ "lot" в словарях
-        # универса, где ключ "lot_size" → лот=1 → qty занижен в разы (max_pnl/MAE
-        # в карточке меньше реальных, найдено 02.10 на MTSS: 2.70₽ вместо 27.0₽).
-        _lot_entry = 1
-        try:
-            from app.models.instrument import Instrument as _Instr
-            async with SessionLocal() as _db_lot:
-                _lot_entry = int((await _db_lot.execute(
-                    select(_Instr.lot).where(_Instr.figi == figi))).scalar_one_or_none() or 1)
-        except Exception:
-            _lot_entry = 1
+        _lot_entry = await self._entry_lot_size(figi, order.meta)
         self._exit_qty[figi] = int(order.qty) * int(_lot_entry)
         self._pos_leverage[figi] = max(1.0, float((order.meta or {}).get("leverage") or 1.0))
         self._trail_active[figi] = False
         self._trail_stop[figi] = float(plan.stop_loss) if plan.stop_loss is not None else 0.0
         # Старт пика P&L: от входа, лучший ход = 0.
-        self._peak_pnl[figi] = {"pnl": 0.0, "ts": c.ts, "price": float(entry_px),
+        self._peak_pnl[figi] = {"pnl": 0.0, "ts": execution_at, "price": float(entry_px),
                                 "atr_abs": None, "atr_pct": None, "mae": 0.0}
         self._gb_peak[figi] = 0.0
         # Виртуальный трейл — строго с нуля на каждой позиции. Раньше _trail_info
@@ -6555,11 +7951,13 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
         if plan.take_profit is not None:
             self._exit_target[figi] = float(plan.take_profit)
         self._entry_bar_index[figi] = self._bar_counter
-        self._log(f"СДЕЛКА ВХОД {order.ticker} {order.side} qty={order.qty} @ {entry_px:.2f} (candle={c.open:.2f})")
+        if not ledger_saved:
+            return False
+        self._log(f"СДЕЛКА ВХОД {order.ticker} {order.side} qty={order.qty} @ {entry_px:.2f} (candle={execution_price:.2f})")
         if self._trace is not None:
             try:
                 from app.engine.trace import Stage, Status, TraceEvent
-                self._trace.emit(TraceEvent(stage=Stage.FILL, status=Status.EXECUTED, ts_bar=c.ts,
+                self._trace.emit(TraceEvent(stage=Stage.FILL, status=Status.EXECUTED, ts_bar=execution_at,
                                             figi=figi, ticker=order.ticker, order_id=order.id,
                                             action="open", side=str(order.side),
                                             price=float(entry_px), qty=getattr(order, "qty", None)))
@@ -6590,6 +7988,13 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
 
         Уровни считаем от текущего ATR (5m), entry — из фактической позиции.
         """
+        if isinstance(self.broker, LiveBroker):
+            scope = (self.broker.mode, self.broker._account)
+            blockers = self._entry_pause().blockers
+            if (figi in self.pending_orders
+                    or ('position_recovery_failed', *scope) in blockers
+                    or ('position_recovery_failed', *scope, figi) in blockers):
+                return
         if figi in self._exit_plans:
             return
         if pos is None:
@@ -6603,7 +8008,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             _rtr2_kw = _rtr2()
             if _rtr2_kw:
                 _strat = self.strategies.get(figi)
-                _rrc = getattr(_strat.p, "rr", None) if _strat is not None else None
+                _rrc = getattr(getattr(_strat, "p", None), "rr", None)
                 _pol = AtrStopPolicy(period=cfg.atr_period,
                                      multiplier=cfg.initial_sl_atr,
                                      risk_reward=float(_rrc) if _rrc else cfg.atr_risk_reward,
@@ -6616,7 +8021,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 _pl = _pol.plan_entry(_side_enum, _entry_px, [])
             else:
                 _strat = self.strategies.get(figi)
-                _rrc = getattr(_strat.p, "rr", None) if _strat is not None else None
+                _rrc = getattr(getattr(_strat, "p", None), "rr", None)
                 _pol = AtrStopPolicy(period=cfg.atr_period,
                                      multiplier=cfg.initial_sl_atr,
                                      risk_reward=float(_rrc) if _rrc else cfg.atr_risk_reward,
@@ -6649,7 +8054,8 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                     _row = (await _db.execute(
                         _sel(SandboxTrade).where(
                             SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
-                            SandboxTrade.mode == self.broker_mode)
+                            SandboxTrade.mode == self.broker_mode,
+                            SandboxTrade.broker_account_id == _account_scope_of(self))
                         .order_by(SandboxTrade.entry_time.desc()).limit(1)
                     )).scalar_one_or_none()
                     if _row is not None:
@@ -6691,145 +8097,490 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             return float(c.close), "trail_exit"
         return None, ""
 
-    async def _step_exit(self, figi: str, c, pos) -> bool:
-        """Единый шаг управления выходом позиции на одном баре.
+    async def _close_session_position(self, figi: str, price: float, reason: str) -> bool:
+        try:
+            position = await self.broker.get_position(figi)
+        except Exception as error:
+            self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                            reason="session_close_position_unavailable", error_type=type(error).__name__)
+            return False
+        if position is None:
+            return False
+        outcome = await self._submit_close_reconciled(
+            figi, position.ticker, position.qty, price, reason, paper_filled=False)
+        if outcome["status"] == "reconciled_closed":
+            return True
+        if outcome["status"] == "pending_partial":
+            self._exit_qty[figi] = outcome["residual"]
+        if outcome["status"] != "closed":
+            return False
+        trade = outcome["trade"]
+        self._held.discard(figi)
+        self._opposite_count.pop(figi, None)
+        self._last_exit_bar[figi] = self._bar_counter
+        self._clear_exit_state(figi)
+        bars_held = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
+        await self._st_close(figi, float(trade.exit_price), execution=trade, reason=reason,
+                             net=float(trade.net_pnl), meta={"bars_held": bars_held})
+        self.events.log("POSITION_CLOSED", figi=figi, reason=reason,
+                        price=float(trade.exit_price), net_pnl=float(trade.net_pnl))
+        return True
 
-        Зеркалит движок EngineRunner.run():
-          1) пока трейлинг НЕ активирован — действует СТАНДАРТНЫЙ SL/TP
-             (защита от разворота; уровни из нашего учёта, не из брокера);
-          2) при pnl >= комиссия_входа × 4 трейлинг АКТИВИРУЕТСЯ:
-             TP и сигнальные выходы отключаются;
-          3) после активации стоп идёт за ценой (update_stop, ratchet),
-             выход — только по трейлинговому стопу.
-        Возвращает True, если позиция закрыта на этом баре.
+    def _close_inflight(self) -> set:
+        inflight = getattr(self, "_closing_inflight", None)
+        if inflight is None:
+            inflight = set()
+            self._closing_inflight = inflight
+        return inflight
+
+    def _close_pending_block(self, figi: str):
+        pending = (getattr(self, "pending_orders", None) or {}).get(figi)
+        if pending is not None and getattr(pending, "status", "") not in ("FILLED", "CANCELLED", "REJECTED"):
+            return pending
+        return None
+
+    async def _entry_provenance(self, figi: str, scope, *, side, units, entry_price, lot) -> tuple:
+        """Confirmed entry time of this position cycle, read from the durable entry record.
+
+        The broker position itself only carries snapshot time, so a close may use this time
+        only when the entry side persisted an explicit provenance for it AND the record proves
+        it belongs to this cycle (side, full quantity, entry price, lot, request, stages).
         """
-        # Вне сессии позицию не закрываем: sandbox/биржа не принимает заявки (30079),
-        # а бэклог ночных свечей не должен генерировать исполнения.
+        mode, account = scope if isinstance(scope, (tuple, list)) and len(scope) == 2 else (None, None)
+        if mode not in ("live", "sandbox") or not account:
+            return None, "unknown", None, None
+        from app.models.sandbox_trade import SandboxTrade
+        test_name = (getattr(self.config, "test_name", "") or None)
+        try:
+            async with SessionLocal() as db:
+                rows = (await db.execute(
+                    select(SandboxTrade)
+                    .where(SandboxTrade.figi == figi, SandboxTrade.exit_time.is_(None),
+                           SandboxTrade.mode == mode,
+                           SandboxTrade.broker_account_id == account,
+                           SandboxTrade.test_name == test_name)
+                    .order_by(SandboxTrade.entry_time.desc())
+                )).scalars().all()
+        except Exception as error:
+            self._log(f"ENTRY_PROVENANCE_ERR {figi[-6:]}: {type(error).__name__}: {str(error)[:120]}")
+            return None, "unknown", None, None
+        for row in rows:
+            try:
+                meta = json.loads(row.meta or "{}")
+            except Exception:
+                continue
+            proven = self._entry_record_matches(row, meta, figi=figi, side=side, units=units,
+                                                entry_price=entry_price, lot=lot)
+            if proven is None:
+                continue
+            first_execution, source, request_id, original_units = proven
+            if units == original_units:
+                return first_execution, source, row.id, request_id
+            # A residual after a partial close is provable only from durable linked allocations
+            # of this exact entry record; otherwise the remaining quantity is not this cycle.
+            covered = await self._entry_closed_units(
+                row_id=row.id, request_id=request_id, original_units=original_units,
+                mode=mode, account=account, figi=figi)
+            if covered is not None and covered == original_units - units:
+                return first_execution, source, row.id, request_id
+            return None, "unknown", None, None
+        return None, "unknown", None, None
+
+    def _entry_record_matches(self, row, meta, *, figi, side, units, entry_price, lot):
+        """Accept an entry record only when its whole identity matches this position cycle.
+
+        A recent scoped row with a time source is not identity evidence: it can belong to an
+        earlier cycle of the same instrument. Side, full original quantity, entry price, lot,
+        the original entry request and the stage payload must all agree.
+        """
+        from decimal import Decimal
+        if type(lot) is not int or lot <= 0 or type(units) is not int or units <= 0:
+            return None
+        original_units = row.qty
+        if type(original_units) is not int or original_units <= 0:
+            return None
+        if units > original_units or original_units % lot or units % lot:
+            return None
+        if side not in ("LONG", "SHORT") or _as_position_side(row.side) != side:
+            return None
+        try:
+            if Decimal(str(row.entry_price)).quantize(Decimal("0.000001")) != \
+                    Decimal(str(entry_price)).quantize(Decimal("0.000001")):
+                return None
+        except Exception:
+            return None
+        if meta.get("lot_size") != lot:
+            return None
+        if meta.get("entry_time_source") == "sandbox_order_timestamp":
+            from app.services.sandbox_order_evidence import accounting_totals
+            evidence = meta.get("entry_fill_evidence") or {}
+            request_id = meta.get("client_order_id")
+            if (row.mode != "sandbox" or evidence.get("source") != "sandbox_order_aggregate"
+                    or not isinstance(request_id, str) or not request_id.strip()
+                    or evidence.get("client_order_id") != request_id or evidence.get("figi") != figi
+                    or _as_position_side(evidence.get("side")) != side or evidence.get("lot_size") != lot
+                    or type(row.id) is not int or row.id <= 0):
+                return None
+            try:
+                recorded_units, recorded_price, order_at = accounting_totals(evidence)
+                if (recorded_units != original_units or order_at != row.entry_time
+                        or order_at.utcoffset() is None
+                        or recorded_price.quantize(Decimal("0.000001")) != Decimal(str(row.entry_price)).quantize(Decimal("0.000001"))):
+                    return None
+            except Exception:
+                return None
+            return order_at, "sandbox_order_timestamp", request_id, original_units
+        source = meta.get("entry_time_source")
+        confirmed = meta.get("entry_time_confirmed")
+        if source not in ("broker_history", "execution_ledger") or not confirmed:
+            return None
+        request_id = meta.get("client_order_id")
+        evidence = meta.get("entry_fill_evidence")
+        if not isinstance(request_id, str) or not request_id.strip():
+            return None
+        if not isinstance(evidence, dict) or evidence.get("version") != 1:
+            return None
+        if (evidence.get("client_order_id") != request_id or evidence.get("figi") != figi
+                or _as_position_side(evidence.get("side")) != side
+                or evidence.get("lot_size") != lot):
+            return None
+        executed_lots = evidence.get("executed_lots")
+        requested_lots = evidence.get("requested_lots")
+        if type(executed_lots) is not int or type(requested_lots) is not int or executed_lots <= 0:
+            return None
+        if executed_lots * lot != original_units or requested_lots < executed_lots:
+            return None
+        fills = evidence.get("fills")
+        if not isinstance(fills, list) or not fills:
+            return None
+        traded_units = 0
+        times = []
+        seen_ids = set()
+        for fill in fills:
+            if not isinstance(fill, dict):
+                return None
+            trade_id = fill.get("trade_id")
+            fill_units = fill.get("units")
+            if not isinstance(trade_id, str) or not trade_id.strip() or trade_id in seen_ids:
+                return None
+            seen_ids.add(trade_id)
+            if type(fill_units) is not int or fill_units <= 0 or fill_units % lot:
+                return None
+            try:
+                if Decimal(str(fill.get("price"))).quantize(Decimal("0.000001")) <= 0:
+                    return None
+                executed_at = datetime.fromisoformat(fill.get("executed_at"))
+            except Exception:
+                return None
+            if executed_at.utcoffset() is None:
+                return None
+            traded_units += fill_units
+            times.append(executed_at)
+        if traded_units != original_units:
+            return None
+        try:
+            first_execution = min(times)
+            if datetime.fromisoformat(confirmed) != first_execution:
+                return None
+        except Exception:
+            return None
+        if type(row.id) is not int or row.id <= 0:
+            return None
+        return first_execution, source, request_id.strip(), original_units
+
+    async def _entry_closed_units(self, *, row_id, request_id, original_units, mode, account, figi):
+        """Already closed units of one entry cycle, proven from durable linked close allocations.
+
+        Returns the covered quantity, or None when the residual cannot be proven: a close of
+        this instrument that is unlinked, linked to another entry, not fully accounted, or
+        counted twice makes the remainder unattributable.
+        """
+        from app.models.broker_order_intent import BrokerOrderIntent
+        try:
+            async with SessionLocal() as db:
+                rows = (await db.execute(
+                    select(BrokerOrderIntent).where(
+                        BrokerOrderIntent.mode == mode,
+                        BrokerOrderIntent.broker_account_id == account,
+                        BrokerOrderIntent.figi == figi)
+                )).scalars().all()
+        except Exception as error:
+            self._log(f"ENTRY_ALLOCATION_ERR {figi[-6:]}: {type(error).__name__}: {str(error)[:120]}")
+            return None
+        covered = 0
+        seen = set()
+        for intent in rows:
+            observed = intent.observed_units or 0
+            if observed <= 0:
+                continue
+            if type(observed) is not int or observed <= 0:
+                return None
+            if intent.accounted_units != observed:
+                return None
+            snapshot = intent.position_snapshot or {}
+            if not isinstance(snapshot, dict):
+                return None
+            if snapshot.get("local_position_id") != row_id:
+                return None
+            if snapshot.get("entry_client_order_id") != request_id:
+                return None
+            if intent.client_order_id in seen:
+                return None
+            seen.add(intent.client_order_id)
+            covered += observed
+            if covered > original_units:
+                return None
+        return covered
+
+    async def _submit_close_reconciled(self, figi: str, ticker: str, qty: int, price: float,
+                                       reason: str, *, paper_filled: bool = True, close_order=None, entry_proof=None) -> dict:
+        """Submit one close and classify the result by broker evidence.
+
+        Only a confirmed full fill reports ``closed``. An unknown or timed-out result, an
+        identity or quantity mismatch and a partial fill keep the position, its protection
+        and a pending order, so an unresolved submission is never retried blindly.
+        """
+        inflight = self._close_inflight()
+        if figi in inflight:
+            return {"status": "blocked_inflight", "trade": None, "order": None, "residual": int(qty)}
+        existing = self._close_pending_block(figi)
+        if existing is not None:
+            if isinstance(self.broker, LiveBroker) and existing.action == 'open' and (existing.meta or {}).get('durable_open'):
+                from app.services.open_close_request import CloseAfterOpen, request_close_after_open
+                from app.services.open_order_intent import OpenIntent
+                from app.services.broker_order_journal import BrokerOrderJournal
+
+                broker = self.broker
+                scope = (broker.mode, broker._account)
+                try:
+                    if tuple(existing.meta.get('broker_scope', ())) != scope or self.broker_mode != scope[0]:
+                        raise ValueError('close_after_open_scope_mismatch')
+                    rows = await BrokerOrderJournal(broker.sessions).unresolved(
+                        mode=scope[0], broker_account_id=scope[1], action='open')
+                    row = next((row for row in rows if row.client_order_id == existing.id and row.figi == figi), None)
+                    if row is None:
+                        raise ValueError('close_after_open_reservation_missing')
+                    saved = await request_close_after_open(broker.sessions, OpenIntent.from_record(row),
+                        CloseAfterOpen(reason, self._bot_now()))
+                    if (self.broker is not broker or (broker.mode, broker._account) != scope
+                            or self.broker_mode != scope[0]):
+                        raise ValueError('close_after_open_scope_changed')
+                    existing.meta['close_after_open'] = saved.to_payload()
+                    self._entry_pause().set_blocker('close_after_open', True, *scope, existing.id)
+                    if figi not in inflight:
+                        inflight.add(figi)
+                        try:
+                            try:
+                                await broker.request_cancel_order(existing.id, expected_scope=scope)
+                            except Exception as error:
+                                self.events.log('ORDER_RECONCILIATION_REQUIRED', figi=figi, action='close',
+                                                reason='opening_cancel_outcome_unknown', error_type=type(error).__name__)
+                            if (self.broker is not broker or (broker.mode, broker._account) != scope
+                                    or self.broker_mode != scope[0]):
+                                raise ValueError('close_after_open_scope_changed')
+                            await self._reconcile_pending_orders(only_figi=figi)
+                        finally:
+                            inflight.discard(figi)
+                except Exception as error:
+                    self.events.log('ORDER_RECONCILIATION_REQUIRED', figi=figi, action='close',
+                                    reason='close_after_open_not_confirmed', error_type=type(error).__name__)
+            return {"status": "blocked_existing", "trade": None, "order": existing, "residual": int(qty)}
+        inflight.add(figi)
+        try:
+            broker = self.broker
+            broker_scope = (getattr(broker, "mode", None), getattr(broker, "_account", None))
+            close_side = "SELL"
+            quantity_meta = {"quantity_unit": "shares", "requested_units": int(qty)}
+            if isinstance(broker, LiveBroker):
+                try:
+                    position = await broker.get_position(figi)
+                    lot = await broker._get_lot(figi)
+                except Exception as error:
+                    self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                    action="close", reason="close_preflight_unavailable",
+                                    error_type=type(error).__name__)
+                    return {"status": "blocked_preflight", "trade": None, "order": None, "residual": int(qty)}
+                if (self.broker is not broker
+                        or (getattr(broker, "mode", None), getattr(broker, "_account", None)) != broker_scope
+                        or type(qty) is not int or qty <= 0
+                        or position is None or getattr(position, "qty", None) != qty
+                        or getattr(position, "side", None) not in ("LONG", "SHORT")
+                        or type(lot) is not int or lot <= 0 or qty % lot):
+                    self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                    action="close", reason="close_preflight_inconsistent")
+                    return {"status": "blocked_preflight", "trade": None, "order": None, "residual": int(qty)}
+                close_side = "SELL" if position.side == "LONG" else "BUY"
+                quantity_meta.update(lot_size=lot, requested_lots=qty // lot)
+            order = close_order or BotOrder(
+                created_at=self._bot_now(),
+                id=_new_order_id(), figi=figi, ticker=ticker, action="close",
+                side=close_side, qty=int(qty), status="PENDING_RECONCILIATION",
+                meta={**quantity_meta, "exit_reason": reason, "broker_scope": broker_scope},
+            )
+            order.side = close_side
+            order.status = "PENDING_RECONCILIATION"
+            order.meta = {**(order.meta or {}), **quantity_meta,
+                          "exit_reason": reason, "broker_scope": broker_scope}
+            if not hasattr(self, "pending_orders") or self.pending_orders is None:
+                self.pending_orders = {}
+            self.pending_orders[figi] = order
+            if isinstance(self.broker, LiveBroker):
+                kwargs = {"client_order_id": order.id, "expected_units": int(qty)}
+                # ARCH374/375: only proven entry provenance may accompany a close; the broker
+                # position itself carries snapshot time, so anything unproven stays unknown.
+                if entry_proof is not None:
+                    from app.services.open_close_request import CloseAfterOpenHandoff
+                    if (not isinstance(entry_proof, CloseAfterOpenHandoff)
+                            or (entry_proof.pending.intent.mode, entry_proof.pending.intent.broker_account_id) != broker_scope
+                            or entry_proof.pending.intent.figi != figi or entry_proof.units != qty
+                            or entry_proof.close_client_order_id != order.id
+                            or position.side != ('LONG' if entry_proof.pending.intent.side == 'BUY' else 'SHORT')
+                            or abs(float(position.entry_price) - float(entry_proof.entry_price)) > 0.000001):
+                        raise ValueError('close_after_open_submission_proof_mismatch')
+                    kwargs.update(entry_time=entry_proof.entry_time, entry_time_source=entry_proof.entry_time_source,
+                                  local_position_id=entry_proof.local_position_id,
+                                  entry_client_order_id=entry_proof.pending.intent.client_order_id)
+                _entry_src = getattr(position, "entry_time_source", "unknown")
+                _entry_ts = getattr(position, "entry_time_confirmed", None)
+                _entry_row_id = None
+                _entry_request = None
+                if _entry_ts is None and entry_proof is None:
+                    (_entry_ts, _entry_src,
+                     _entry_row_id, _entry_request) = await self._entry_provenance(
+                        figi, broker_scope, side=position.side, units=int(qty),
+                        entry_price=position.entry_price, lot=lot)
+                    # Re-check scope after the storage await before trusting what was read.
+                    if (getattr(broker, "mode", None), getattr(broker, "_account", None)) != broker_scope:
+                        _entry_ts, _entry_src = None, "unknown"
+                        _entry_row_id, _entry_request = None, None
+                if entry_proof is None and _entry_ts is not None and _entry_src in ("broker_history", "execution_ledger", "sandbox_order_timestamp"):
+                    kwargs["entry_time"] = _entry_ts
+                    kwargs["entry_time_source"] = _entry_src
+                    if _entry_row_id is not None and _entry_request:
+                        kwargs["local_position_id"] = _entry_row_id
+                        kwargs["entry_client_order_id"] = _entry_request
+            elif paper_filled and isinstance(self.broker, PaperBroker):
+                kwargs = {"price_is_filled": True}
+            else:
+                kwargs = {}
+            try:
+                trade = await broker.close_position(figi, price, reason, **kwargs)
+            except Exception as error:
+                order.meta["error_type"] = type(error).__name__
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi, order_id=order.id,
+                                action="close", reason="unknown_broker_result")
+                return {"status": "pending_unknown", "trade": None, "order": order, "residual": int(qty)}
+            if (self.broker is not broker
+                    or (getattr(broker, "mode", None), getattr(broker, "_account", None)) != broker_scope
+                    or self.pending_orders.get(figi) is not order):
+                order.meta["error_type"] = "broker_scope_or_pending_changed"
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi,
+                                order_id=order.id, action="close", reason="broker_scope_or_pending_changed")
+                return {"status": "pending_unknown", "trade": None, "order": order, "residual": int(qty)}
+            from app.bot.close_submission import CloseSubmission
+            if isinstance(trade, CloseSubmission):
+                if ((trade.mode, trade.broker_account_id) != broker_scope
+                        or trade.client_order_id != order.id or trade.figi != figi
+                        or trade.side != close_side or trade.requested_units != qty
+                        or trade.lot_size != quantity_meta.get('lot_size')):
+                    self._pause_close(broker_scope, order.id)
+                    return {"status": "pending_unknown", "trade": None, "order": order, "residual": int(qty)}
+                order.meta.update(broker_order_id=trade.broker_order_id,
+                                  observed_executed_units=trade.observed_units)
+                await self._reconcile_pending_orders(only_figi=figi)
+                if (self.broker is not broker or (broker.mode, broker._account) != broker_scope):
+                    return {"status": "pending_unknown", "trade": None, "order": order, "residual": int(qty)}
+                if order.status == 'FILLED' and figi not in self.pending_orders:
+                    return {"status": "reconciled_closed", "trade": None, "order": order, "residual": 0}
+                if order.status in ('PARTIAL_FILLED', 'CANCELLED') and 0 < order.qty < qty:
+                    return {"status": "pending_partial", "trade": None, "order": order, "residual": order.qty}
+                return {"status": "pending_unknown", "trade": None, "order": order, "residual": int(qty)}
+            from app.bot.close_confirmation import classify_close_confirmation
+            confirmation = classify_close_confirmation(
+                trade, requested_units=int(qty),
+                client_order_id=order.id if isinstance(self.broker, LiveBroker) else None,
+            )
+            if confirmation.status == "PENDING_RECONCILIATION":
+                order.meta["error_type"] = confirmation.reason
+                if confirmation.executed_units is not None:
+                    order.meta.update(observed_executed_units=confirmation.executed_units,
+                                      observed_remaining_units=confirmation.remaining_units)
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi, order_id=order.id,
+                                action="close", reason=confirmation.reason)
+                return {"status": "pending_unknown", "trade": None, "order": order, "residual": int(qty)}
+            order.meta["broker_order_id"] = getattr(trade, "broker_order_id", None)
+            executed = confirmation.executed_units
+            order.meta.update(executed_units=executed, remaining_units=int(qty) - executed,
+                              trade_id=getattr(trade, "id", None))
+            order.price = confirmation.exit_price
+            if executed < int(qty):
+                order.status = "PARTIAL_FILLED"
+                order.qty = int(qty) - executed
+                self.events.log("ORDER_RECONCILIATION_REQUIRED", figi=figi, order_id=order.id,
+                                action="close", reason="partial_execution")
+                return {"status": "pending_partial", "trade": trade, "order": order,
+                        "residual": int(qty) - executed}
+            order.status = "FILLED"
+            if (getattr(self, "pending_orders", None) or {}).get(figi) is order:
+                self.pending_orders.pop(figi, None)
+            return {"status": "closed", "trade": trade, "order": order, "residual": 0}
+        finally:
+            inflight.discard(figi)
+
+    async def _step_exit(self, figi: str, c, pos) -> bool:
+        """Evaluate prior protection, then advance shared levels for the next bar."""
+        pending = (getattr(self, "pending_orders", None) or {}).get(figi)
+        if pending is not None and getattr(pending, "status", "") in ("PENDING_RECONCILIATION", "PARTIAL_FILLED"):
+            self._log(f"RECONCILIATION: protective exit {figi[-6:]} waits for existing order")
+            return False
         if not self._in_trading_session():
-            self._session_gate_log("сигнальный выход")
+            self._session_gate_log('сигнальный выход')
             return False
         from app.engine.exits import intrabar_exit as _ibe
+        from app.engine.protection import ProtectionState, evaluate_protection, advance_protection
         policy = self._exit_plans[figi]
-        _raw_side = self._exit_side.get(figi) or getattr(pos, "side", "LONG")
-        # pos.side у брокера = "BUY"/"SELL"; нормализуем к LONG/SHORT.
-        side_str = "LONG" if str(_raw_side).upper() in ("LONG", "BUY") else "SHORT"
-        state = PositionState.LONG if side_str == "LONG" else PositionState.SHORT
+        _raw_side = self._exit_side.get(figi) or getattr(pos, 'side', 'LONG')
+        side_str = 'LONG' if str(_raw_side).upper() in ('LONG', 'BUY') else 'SHORT'
+        state = PositionState.LONG if side_str == 'LONG' else PositionState.SHORT
         trail_side = Side.BUY if state == PositionState.LONG else Side.SELL
         entry_px = self._exit_entry_px.get(figi)
         if not entry_px or entry_px <= 0:
-            entry_px = float(getattr(pos, "entry_price", 0) or 0)
-        qty_sh = int(self._exit_qty.get(figi) or getattr(pos, "qty", 0) or 0)
+            entry_px = float(getattr(pos, 'entry_price', 0) or 0)
+        qty_sh = int(self._exit_qty.get(figi) or getattr(pos, 'qty', 0) or 0)
         comm = float(entry_px) * qty_sh * self.config.commission_rate
-        # ATR/активация/ratchet — на 1m-барах, как в движке EngineRunner (test=bot).
-        # Буфер уже содержит текущий бар (добавлен до вызова _step_exit).
         buf = self.buffers.get(figi)
         act_bars = list(buf) if buf else [c]
-
-        # --- Пик P&L сделки: лучший ход в нашу сторону (макс. цена при лонге /
-        # мин. при шорте) и макс. просадка против нас (MAE) — на каждом баре.
         try:
-            _pk = self._peak_pnl.setdefault(figi, {
-                "pnl": 0.0, "ts": c.ts, "price": float(entry_px),
-                "atr_abs": None, "atr_pct": None, "mae": 0.0})
+            _pk = self._peak_pnl.setdefault(figi, {'pnl': 0.0, 'ts': c.ts, 'price': float(entry_px), 'atr_abs': None, 'atr_pct': None, 'mae': 0.0})
             _sgn = 1.0 if state == PositionState.LONG else -1.0
-            # Экстремумы бара с точки зрения позиции: лучший ход — макс. цена
-            # при лонге / мин. при шорте; худший — наоборот (иначе у шорта
-            # «пик» считался бы от high, т.е. от хода ПРОТИВ нас).
             _best_px = float(c.high) if state == PositionState.LONG else float(c.low)
             _worst_px = float(c.low) if state == PositionState.LONG else float(c.high)
-            _pnl_best = (_best_px - float(entry_px)) * qty_sh * _sgn    # лучший ход внутри бара
-            _pnl_worst = (_worst_px - float(entry_px)) * qty_sh * _sgn  # худший ход внутри бара
-            if _pnl_best > float(_pk.get("pnl") or 0.0):
+            _pnl_best = (_best_px - float(entry_px)) * qty_sh * _sgn
+            _pnl_worst = (_worst_px - float(entry_px)) * qty_sh * _sgn
+            if _pnl_best > float(_pk.get('pnl') or 0.0):
                 _atr = self.atr_now(figi)
-                _pk.update(pnl=_pnl_best, ts=c.ts, price=_best_px,
-                           atr_abs=(float(_atr) if _atr else None),
-                           atr_pct=((float(_atr) / float(c.close) * 100.0) if (_atr and c.close) else None))
+                _pk.update(pnl=_pnl_best, ts=c.ts, price=_best_px, atr_abs=float(_atr) if _atr else None, atr_pct=float(_atr) / float(c.close) * 100.0 if _atr and c.close else None)
             _mae_bar = max(0.0, -_pnl_worst)
-            if _mae_bar > float(_pk.get("mae") or 0.0):
-                _pk["mae"] = _mae_bar
+            if _mae_bar > float(_pk.get('mae') or 0.0):
+                _pk['mae'] = _mae_bar
         except Exception as _pk_e:
-            _audit_swallow('_step_exit@peak_pnl', _pk_e)  # audit silent-except
+            _audit_swallow('_step_exit@peak_pnl', _pk_e)
             pass
-
-        upd = getattr(policy, "update_stop", None)
-        act = getattr(policy, "trailing_activated", None)
         trail_active = bool(self._trail_active.get(figi, False))
-        # R-режим трейлинга (env TRAIL_R_ACT/TRAIL_R_DIST): активация внутри
-        # update_stop по ходу в R; вызываем его на каждом баре, а не только
-        # после комиссионной активации (trailing_activated в R-режиме = False).
-        _r_mode = (getattr(policy, "trail_activation_comm_mult", 1.0) is None
-                   and getattr(policy, "trail_activation_r", None) is not None)
-
-        # 1) Если трейлинг уже активен — подтягиваем стоп за ценой (ratchet).
-        new_stop = None
-        if (trail_active or _r_mode) and upd is not None:
-            try:
-                _pk_px = None
-                try:
-                    _pk_px = float((self._peak_pnl.get(figi) or {}).get("price")) or None
-                except Exception:
-                    _pk_px = None
-                new_stop = upd(trail_side, float(entry_px), self._trail_stop.get(figi),
-                               act_bars, qty=qty_sh, commission=comm, peak_price=_pk_px)
-            except Exception as _te:
-                self._log(f"update_stop error {figi[-6:]}: {_te}")
-            if new_stop is not None:
-                old_stop = self._trail_stop.get(figi)
-                if old_stop is None or abs(new_stop - old_stop) > 1e-9:
-                    direction = "вверх" if (trail_side == Side.BUY and new_stop > (old_stop or 0)) else ("вниз" if trail_side == Side.SELL and new_stop < (old_stop or float("inf")) else "=")
-                    _dist_pct = abs(float(c.close) - new_stop) / float(c.close) * 100 if c.close else 0
-                    self._log(f"ТРЕЙЛИНГ {figi[-6:]} стоп {old_stop if old_stop is not None else '-':.2f}→{new_stop:.2f} ({direction}) цена={c.close:.2f} дист={_dist_pct:.2f}%")
-                    self.events.log("TRAILING_STOP", figi=figi, ticker=pos.ticker,
-                                    stop=new_stop, prev_stop=old_stop)
-                    self._trail_stop[figi] = new_stop
-                    await self._st_update_sl(figi, new_stop, trail_active=True)
-                    if _r_mode and not trail_active:
-                        self._trail_active[figi] = True
-                        trail_active = True
-                        self._exit_target.pop(figi, None)
-                        self._log(f"ТРЕЙЛИНГ ВКЛ.(R) {figi[-6:]} стоп={new_stop:.2f}")
-                        self.events.log("TRAILING_ACTIVATED", figi=figi, ticker=pos.ticker,
-                                        reason=f"R-mode act trail={new_stop:.2f}")
-
-        # 2) Активация трейлинга при pnl >= комиссия_входа × 4.
-        if not trail_active and act is not None and not _r_mode:
-            try:
-                if act(trail_side, float(entry_px), qty_sh, comm, act_bars):
-                    self._trail_active[figi] = True
-                    trail_active = True
-                    self._exit_target.pop(figi, None)  # TP выключается
-                    self._log(f"ТРЕЙЛИНГ ВКЛ. {figi[-6:]} pnl>=комиссия*4 (0.05%*4=0.2%); сигнальные выходы и TP отключены")
-                    self.events.log("TRAILING_ACTIVATED", figi=figi, ticker=pos.ticker,
-                                    reason=f"pnl>=comm_x4 qty={qty_sh} comm={comm:.2f}")
-                    _cur_sl = self._trail_stop.get(figi)
-                    await self._st_update_sl(figi, _cur_sl if _cur_sl is not None else None, trail_active=True)
-            except Exception as _trail_e:
-                self._log(f"трейлинг-активация oshibka {figi[-6:]}: {_trail_e}")
-
-        # 3) Выход на этом баре. TP активен только до активации трейлинга.
-        tp = None if (trail_active or self._trail_active.get(figi, False)) else self._exit_target.get(figi)
+        tp = None if trail_active or self._trail_active.get(figi, False) else self._exit_target.get(figi)
         stop = self._trail_stop.get(figi)
         try:
             from app.config import get_settings as _get_settings
             _s = _get_settings()
-            _dbg = bool(getattr(_s, "log_debug_engine", False))
+            _dbg = bool(getattr(_s, 'log_debug_engine', False))
         except Exception as _sw_e:
-            _audit_swallow('_step_exit@L4928', _sw_e)  # audit silent-except
+            _audit_swallow('_step_exit@L4928', _sw_e)
             _dbg = False
         if _dbg:
-            self._log(f"DBG-EXIT {figi[-6:]} {state.value} entry={entry_px:.2f} qty={qty_sh} "
-                      f"bar_ts={c.ts.strftime('%H:%M:%S')} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} "
-                      f"stop={stop if stop is not None else '-'} tp={tp if tp is not None else '-'} "
-                      f"trail={trail_active} pnl_rub={(c.close - entry_px) * qty_sh if state == PositionState.LONG else (entry_px - c.close) * qty_sh:+.2f}")
-        # Пик PnL позиции: точка макс. прибыли на каждом баре (по экстремуму
-        # intrabar: high для LONG / low для SHORT, без комиссий) — для отчёта
-        # max PnL + время + ATR в карточке сделки.
+            self._log(f"DBG-EXIT {figi[-6:]} {state.value} entry={entry_px:.2f} qty={qty_sh} bar_ts={c.ts.strftime('%H:%M:%S')} o={c.open:.2f} h={c.high:.2f} l={c.low:.2f} c={c.close:.2f} stop={(stop if stop is not None else '-')} tp={(tp if tp is not None else '-')} trail={trail_active} pnl_rub={((c.close - entry_px) * qty_sh if state == PositionState.LONG else (entry_px - c.close) * qty_sh):+.2f}")
         try:
             _peak_px = c.high if state == PositionState.LONG else c.low
             _cur_pnl = (_peak_px - entry_px) * qty_sh if state == PositionState.LONG else (entry_px - _peak_px) * qty_sh
-            # MAE до пика: макс. просадка ниже входа (в ATR) на пути к пику прибыли.
-            # LONG — низ бара ниже входа, SHORT — верх бара выше входа.
-            # Копим с входа до момента пика; провалы ПОСЛЕ пика не учитываем.
             _atr_v = None
             try:
                 _atr_v = self.atr_now(figi)
@@ -6839,9 +8590,7 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
             _adv_px = 0.0
             try:
                 if entry_px:
-                    # Adverse = ход ПРОТИВ позиции: LONG — ниже входа, SHORT — выше.
-                    # (29.09: для LONG знак был перевёрнут — low-entry>0 — MAE молчал.)
-                    _adv_px = (float(entry_px) - float(c.low)) if state == PositionState.LONG else (float(c.high) - float(entry_px))
+                    _adv_px = float(entry_px) - float(c.low) if state == PositionState.LONG else float(c.high) - float(entry_px)
                     if _adv_px > 0 and _atr_v:
                         _mae_cur = _adv_px / float(_atr_v)
             except Exception:
@@ -6849,197 +8598,175 @@ class PaperBotRuntime(RuntimeTelemetryMixin, RuntimePersistenceMixin):
                 _adv_px = 0.0
             _peak = self._peak_pnl.get(figi)
             if _peak is None:
-                _peak = {"pnl": float("-inf"), "mae_cur": 0.0, "mae_atr": 0.0}
-            _peak["mae_cur"] = max(float(_peak.get("mae_cur", 0.0)), _mae_cur)
-            # MAE до пика ещё и в % от входа (для карточки: «MAE до пика … %»).
+                _peak = {'pnl': float('-inf'), 'mae_cur': 0.0, 'mae_atr': 0.0}
+            _peak['mae_cur'] = max(float(_peak.get('mae_cur', 0.0)), _mae_cur)
             try:
-                _mae_pct_cur = (float(_adv_px) / float(entry_px) * 100.0) if (entry_px and _adv_px > 0) else 0.0
+                _mae_pct_cur = float(_adv_px) / float(entry_px) * 100.0 if entry_px and _adv_px > 0 else 0.0
             except Exception:
                 _mae_pct_cur = 0.0
-            _peak["mae_cur_pct"] = max(float(_peak.get("mae_cur_pct", 0.0)), _mae_pct_cur)
-            # Макс. просадка в ЦЕНЕ за всю сделку (для калибровки SL): расстояние,
-            # цена и время самого глубокого ухода против позиции (29.09).
-            if _adv_px > float(_peak.get("mae_dist", 0.0)):
-                _peak["mae_dist"] = float(_adv_px)
-                _peak["mae_px"] = float(c.low) if state == PositionState.LONG else float(c.high)
-                _peak["mae_ts"] = c.ts.isoformat()
-            if _cur_pnl > float(_peak.get("pnl", -1e18)):
+            _peak['mae_cur_pct'] = max(float(_peak.get('mae_cur_pct', 0.0)), _mae_pct_cur)
+            if _adv_px > float(_peak.get('mae_dist', 0.0)):
+                _peak['mae_dist'] = float(_adv_px)
+                _peak['mae_px'] = float(c.low) if state == PositionState.LONG else float(c.high)
+                _peak['mae_ts'] = c.ts.isoformat()
+            if _cur_pnl > float(_peak.get('pnl', -1e+18)):
                 _atr_p = 0.0
                 try:
-                    _atr_p = float(_atr_v / entry_px * 100) if (_atr_v and entry_px) else 0.0
+                    _atr_p = float(_atr_v / entry_px * 100) if _atr_v and entry_px else 0.0
                 except Exception:
                     pass
-                # Новая вершина: фиксируем накопленную на этот момент просадку.
-                _peak.update({"pnl": round(_cur_pnl, 2), "ts": c.ts.isoformat(),
-                              "price": float(_peak_px), "atr_pct": round(_atr_p, 2),
-                              "atr_abs": (round(float(_atr_v), 4) if _atr_v else None),
-                              "mae_atr": round(float(_peak.get("mae_cur", 0.0)), 2),
-                              "mae_pct": round(float(_peak.get("mae_cur_pct", 0.0)), 2)})
+                _peak.update({'pnl': round(_cur_pnl, 2), 'ts': c.ts.isoformat(), 'price': float(_peak_px), 'atr_pct': round(_atr_p, 2), 'atr_abs': round(float(_atr_v), 4) if _atr_v else None, 'mae_atr': round(float(_peak.get('mae_cur', 0.0)), 2), 'mae_pct': round(float(_peak.get('mae_cur_pct', 0.0)), 2)})
             self._peak_pnl[figi] = _peak
         except Exception as _sw_e:
-            _audit_swallow('_step_exit@peak', _sw_e)  # audit silent-except
+            _audit_swallow('_step_exit@peak', _sw_e)
             pass
-        # --- Виртуальный (info) трейлинг: считаем, где бы сработал трейл, НЕ трогая
-        # реальный SL/TP (реальный трейлинг может быть выключен — trail_activation_comm_mult=None).
-        # Логика зеркалит реальную: активация при pnl >= комиссия_входа×4, стоп идёт за ценой
-        # (update_stop, ratchet), срабатывание — только по закрытию бара за уровнем (close_based).
         try:
             if not self._trail_active.get(figi, False):
                 _ti = self._trail_info.get(figi)
                 if _ti is None:
-                    # Ленивая инициализация: виртуальный трейл-стоп стартует от реального SL.
-                    _ti = {"active": False, "act_track": self._trail_stop.get(figi)}
+                    _ti = {'active': False, 'act_track': self._trail_stop.get(figi)}
                     self._trail_info[figi] = _ti
-                _ti_cfg = (getattr(self.config, "trail_info_activation_comm_mult", None)
-                            or getattr(self.config, "trail_activation_comm_mult", None))
+                _ti_cfg = getattr(self.config, 'trail_info_activation_comm_mult', None) or getattr(self.config, 'trail_activation_comm_mult', None)
                 if _ti_cfg is not None and _ti is not None:
                     _act_bars = list(buf) if buf else [c]
                     from dataclasses import replace as _dc_replace
-                    if getattr(policy, "trailing_activated", None) is None:
-                        # Реальная политика без трейлинга (fixed_sl_tp — «копия
-                        # OsEngine») — виртуальный трейл строим от ATR-конфига
-                        # НЕЗАВИСИМО. Раньше блок молчал: _dc_replace не добавляет
-                        # методы, и карточки не получали «трейл бы сработал» (29.09).
+                    if getattr(policy, 'trailing_activated', None) is None:
                         from app.engine.exits import AtrStopPolicy as _AtrInfoPolicy
-                        _tpol = _AtrInfoPolicy(
-                            period=int(getattr(self.config, "atr_period", 14) or 14),
-                            multiplier=float(getattr(self.config, "initial_sl_atr", 4.0) or 4.0),
-                            trail_activation_comm_mult=_ti_cfg,
-                            trail_distance_r=float(getattr(self.config, "trail_distance_atr", 2.5) or 2.5),
-                            trail_compress_r=float(getattr(self.config, "trail_compress_r", 0.0) or 0.0),
-                            trail_min_factor=float(getattr(self.config, "trail_min_factor", 0.3) or 0.3),
-                            trail_min_atr=float(getattr(self.config, "trail_min_atr", 0.0) or 0.0),
-                            trail_vol_boost=float(getattr(self.config, "trail_vol_boost", 0.0) or 0.0),
-                        )
+                        _tpol = _AtrInfoPolicy(period=int(getattr(self.config, 'atr_period', 14) or 14), multiplier=float(getattr(self.config, 'initial_sl_atr', 4.0) or 4.0), trail_activation_comm_mult=_ti_cfg, trail_distance_r=float(getattr(self.config, 'trail_distance_atr', 2.5) or 2.5), trail_compress_r=float(getattr(self.config, 'trail_compress_r', 0.0) or 0.0), trail_min_factor=float(getattr(self.config, 'trail_min_factor', 0.3) or 0.3), trail_min_atr=float(getattr(self.config, 'trail_min_atr', 0.0) or 0.0), trail_vol_boost=float(getattr(self.config, 'trail_vol_boost', 0.0) or 0.0))
                     else:
                         _tpol = _dc_replace(policy, trail_activation_comm_mult=_ti_cfg)
-                    _tact = getattr(_tpol, "trailing_activated", None)
-                    _tupd = getattr(_tpol, "update_stop", None)
+                    _tact = getattr(_tpol, 'trailing_activated', None)
+                    _tupd = getattr(_tpol, 'update_stop', None)
                     _born_this_bar = False
-                    if not _ti.get("active"):
-                        # Этап активации: как бы включился трейлинг (info).
+                    if not _ti.get('active'):
                         try:
                             _activated = False
                             if _tact is not None:
                                 _activated = _tact(trail_side, float(entry_px), qty_sh, comm, _act_bars)
                             if _activated:
-                                _ti["active"] = True
-                                _ti["act_track"] = self._trail_stop.get(figi)
+                                _ti['active'] = True
+                                _ti['act_track'] = self._trail_stop.get(figi)
                                 _born_this_bar = True
-                                self._log(f"ИНФО-ТРЕЙЛ ВКЛ. {figi[-6:]} pnl>=комиссия×{_ti_cfg}")
+                                self._log(f'ИНФО-ТРЕЙЛ ВКЛ. {figi[-6:]} pnl>=комиссия×{_ti_cfg}')
                         except Exception as _tie:
-                            self._log(f"инфо-трейл activate error {figi[-6:]}: {_tie}")
-                    # Этап движения стопа (что было бы) + проверка срабатывания.
-                    if _ti.get("active") and _tupd is not None:
+                            self._log(f'инфо-трейл activate error {figi[-6:]}: {_tie}')
+                    if _ti.get('active') and _tupd is not None:
                         try:
-                            _prev = _ti.get("act_track")
-                            # Срабатывание — по стопу, действовавшему НА НАЧАЛО бара
-                            # (и не проверяем на баре рождения стопа): стоп, созданный
-                            # в этом баре, не мог быть «пробит гэпом» его же открытия
-                            # (баг YDEX 11.09.2026: open 3806 ≥ стоп 3782.97 → −0₽).
-                            if (_prev is not None and not _born_this_bar
-                                    and not _ti.get("hit_ts")):
+                            _prev = _ti.get('act_track')
+                            if _prev is not None and (not _born_this_bar) and (not _ti.get('hit_ts')):
                                 _ti_price, _ti_reason = _ibe(c, state, float(_prev), None, close_based=True)
                                 if _ti_price is not None:
-                                    _ti["hit_ts"] = c.ts.isoformat()
-                                    _ti["hit_price"] = float(_ti_price)
-                                    _ti["hit_reason"] = _ti_reason or "TRAIL"
-                                    self._log(f"ИНФО-ТРЕЙЛ СРАБОТАЛ БЫ {figi[-6:]} цена={_ti_price:.2f} "
-                                              f"({_ti_reason}) стоп={_prev:.2f} текущий_стоп={stop if stop is not None else '-'}")
+                                    _ti['hit_ts'] = c.ts.isoformat()
+                                    _ti['hit_price'] = float(_ti_price)
+                                    _ti['hit_reason'] = _ti_reason or 'TRAIL'
+                                    self._log(f"ИНФО-ТРЕЙЛ СРАБОТАЛ БЫ {figi[-6:]} цена={_ti_price:.2f} ({_ti_reason}) стоп={_prev:.2f} текущий_стоп={(stop if stop is not None else '-')}")
                             _pk_i = None
                             try:
-                                _pk_i = float((self._peak_pnl.get(figi) or {}).get("price")) or None
+                                _pk_i = float((self._peak_pnl.get(figi) or {}).get('price')) or None
                             except Exception:
                                 _pk_i = None
-                            _new_stop = _tupd(trail_side, float(entry_px), _prev, _act_bars,
-                                              qty=qty_sh, commission=comm, peak_price=_pk_i)
+                            _new_stop = _tupd(trail_side, float(entry_px), _prev, _act_bars, qty=qty_sh, commission=comm, peak_price=_pk_i)
                             if _new_stop is not None:
-                                _ti["act_track"] = float(_new_stop)
-                                # Дистанция трейл-стопа в ATR и % для отчёта.
+                                _ti['act_track'] = float(_new_stop)
                                 _tpol2_dist = None
                                 try:
                                     _risk_now = float(_tpol._risk(float(entry_px), _act_bars))
-                                    _atr_now_val = (_risk_now / _tpol.multiplier) if _tpol.multiplier else None
+                                    _atr_now_val = _risk_now / _tpol.multiplier if _tpol.multiplier else None
                                     if _atr_now_val:
-                                        _ti["trail_dist_atr"] = round(
-                                            (abs(float(c.close) - float(_new_stop)) / float(_atr_now_val)), 2)
+                                        _ti['trail_dist_atr'] = round(abs(float(c.close) - float(_new_stop)) / float(_atr_now_val), 2)
                                 except Exception:
                                     pass
-                                # Сработал бы трейл? Только закрытие за стопом (close_based).
-                                # На баре РОЖДЕНИЯ стопа не проверяем: стоп, рождённый из
-                                # high/low этого же бара, лежит ВНУТРИ его диапазона, и
-                                # open ≤ stop срабатывал всегда (PLZL 04.09.2026: трейл
-                                # «вышел» в точке входа, +0.00₽). Проверка начинается со
-                                # СЛЕДУЮЩЕГО бара — как и для _prev выше.
                                 if not _born_this_bar:
                                     _ti_price, _ti_reason = _ibe(c, state, float(_new_stop), None, close_based=True)
-                                    if _ti_price is not None and not _ti.get("hit_ts"):
-                                        _ti["hit_ts"] = c.ts.isoformat()
-                                        _ti["hit_price"] = float(_ti_price)
-                                        _ti["hit_reason"] = _ti_reason or "TRAIL"
-                                        self._log(f"ИНФО-ТРЕЙЛ СРАБОТАЛ БЫ {figi[-6:]} цена={_ti_price:.2f} "
-                                                  f"({_ti_reason}) стоп={_new_stop:.2f} текущий_стоп={stop if stop is not None else '-'}")
+                                    if _ti_price is not None and (not _ti.get('hit_ts')):
+                                        _ti['hit_ts'] = c.ts.isoformat()
+                                        _ti['hit_price'] = float(_ti_price)
+                                        _ti['hit_reason'] = _ti_reason or 'TRAIL'
+                                        self._log(f"ИНФО-ТРЕЙЛ СРАБОТАЛ БЫ {figi[-6:]} цена={_ti_price:.2f} ({_ti_reason}) стоп={_new_stop:.2f} текущий_стоп={(stop if stop is not None else '-')}")
                         except Exception as _twe:
-                            self._log(f"инфо-трейл update error {figi[-6:]}: {_twe}")
+                            self._log(f'инфо-трейл update error {figi[-6:]}: {_twe}')
         except Exception as _tge:
-            self._log(f"инфо-трейл общий error {figi[-6:]}: {_tge}")
-
-        price, reason = _ibe(c, state, stop, tp, close_based=bool(trail_active))
+            self._log(f'инфо-трейл общий error {figi[-6:]}: {_tge}')
+        params = getattr(self.config, 'params', None) or {}
+        close_based = params.get('trailing_close_based', False)
+        if type(close_based) is not bool:
+            raise ValueError('trailing_close_based must be a boolean')
+        prior = ProtectionState(stop, tp, trail_active)
+        decision = evaluate_protection(c, prior, side=trail_side, entry_price=float(entry_px), entry_risk=None, bars_held=0, trailing_close_based=close_based)
+        price, reason = (decision.exit_price, decision.exit_reason)
         if price is None:
             price, reason = self._giveback_exit(figi, c, state, entry_px, qty_sh)
         if price is None:
+            next_protection = advance_protection(policy, prior, side=trail_side, entry_price=float(entry_px), qty=qty_sh, entry_commission=comm, closed_bars=act_bars, peak_price=(self._peak_pnl.get(figi) or {}).get('price'))
+            next_state = next_protection.state
+            if next_state.stop != stop or next_state.trailing_active != trail_active:
+                await self._st_update_sl(figi, next_state.stop, trail_active=next_state.trailing_active)
+            self._trail_stop[figi] = next_state.stop
+            self._trail_active[figi] = next_state.trailing_active
+            if next_state.target is None:
+                self._exit_target.pop(figi, None)
+            else:
+                self._exit_target[figi] = next_state.target
+            if next_state.stop != stop:
+                self.events.log('TRAILING_STOP', figi=figi, ticker=pos.ticker, stop=next_state.stop, prev_stop=stop)
+            if next_protection.trailing_activated:
+                self.events.log('TRAILING_ACTIVATED', figi=figi, ticker=pos.ticker, reason='shared protection policy')
             return False
-        # Выход — строго по цене intrabar_exit (стоп/гэп/close/target), БЕЗ подмены
-        # на «лучшую» цену бара. Прежнее правило («выход по лучшей») превращало
-        # реальные стоп-убытки в прибыли, если бар задевал и хороший экстремум:
-        # YDEX 11.09.2026 — SHORT-стоп 3843.29 дал бы −74.6₽, а был записан выход
-        # по low бара 3758.75 → +86.20₽ (владелец заметил «SL с плюсом»).
         _exit_best = False
-        # Захватываем флаг трейлинга ДО _clear_exit_state (иначе диагностика врёт).
         _was_trail = bool(trail_active or self._trail_active.get(figi, False))
-        # Проскальзывание на выходе (adverse), как в бэктесте (fill_price).
-        try:
-            _cm = CostModel(commission_rate=self.config.commission_rate,
-                            slippage_bps=self.config.slippage_bps)
-            _opp = Side.SELL if state == PositionState.LONG else Side.BUY
-            price = _cm.fill_price(float(price), _opp)
-        except Exception as _sw_e:
-            _audit_swallow('_step_exit@L4946', _sw_e)  # audit silent-except
-            pass
-
-        trade = await self.broker.close_position(figi, price, reason)
+        if isinstance(self.broker, PaperBroker):
+            try:
+                _cm = CostModel(commission_rate=self.config.commission_rate, slippage_bps=self.config.slippage_bps)
+                _opp = Side.SELL if state == PositionState.LONG else Side.BUY
+                price = _cm.fill_price(float(price), _opp)
+            except Exception as _sw_e:
+                _audit_swallow('_step_exit@L4946', _sw_e)
+                pass
+        outcome = await self._submit_close_reconciled(figi, pos.ticker, qty_sh, float(price), reason)
+        if outcome["status"] == "reconciled_closed":
+            await self._check_circuit_breaker()
+            return True
+        if outcome["status"] != "closed":
+            if outcome["status"] == "pending_partial":
+                self._exit_qty[figi] = int(outcome["residual"])
+                self._log(f"ЧАСТИЧНОЕ ЗАКРЫТИЕ {figi[-6:]}: остаток {outcome['residual']}, "
+                          "защита сохранена", level="warn")
+            elif outcome["status"] in ("blocked_existing", "blocked_inflight"):
+                self._log(f"RECONCILIATION: protective exit {figi[-6:]} waits for existing order")
+            return False
+        trade = outcome["trade"]
+        price = float(trade.exit_price)
         self._held.discard(figi)
-        # Пик P&L снимаем ДО очистки состояния (иначе потеряем экстремумы сделки).
         _peak_snap = dict(self._peak_pnl.pop(figi, None) or {})
         self._clear_exit_state(figi)
         _bh = self._bar_counter - self._entry_bar_index.pop(figi, self._bar_counter)
-        await self._st_close(figi, price, reason=reason,
-                              net=float(trade.net_pnl) if trade else None,
-                              meta={"exit_reason": reason, "exit_price": float(price),
-                                    "exit_best": _exit_best,
-                                    "sl": stop, "tp": tp,
-                                    "trailing": _was_trail,
-                                    "bars_held": _bh,
-                                    "peak": _peak_snap})
+        await self._st_close(figi, price, execution=trade, reason=reason, net=float(trade.net_pnl) if trade else None, meta={'exit_reason': reason, 'exit_price': float(price), 'exit_best': _exit_best, 'sl': stop, 'tp': tp, 'trailing': _was_trail, 'bars_held': _bh, 'peak': _peak_snap})
         pnl = float(trade.net_pnl) if trade else 0
-        tag = "ВЫХОД-ТРЕЙЛИНГ" if trail_active else "ВЫХОД"
-        self._log(f"{tag} {figi[-6:]} ({reason}) pnl={pnl:+.2f}")
+        tag = 'ВЫХОД-ТРЕЙЛИНГ' if trail_active else 'ВЫХОД'
+        self._log(f'{tag} {figi[-6:]} ({reason}) pnl={pnl:+.2f}')
         self._opposite_count.pop(figi, None)
         self._last_exit_bar[figi] = self._bar_counter
-        self.events.log("POSITION_CLOSED", figi=figi, ticker=pos.ticker,
-                        reason=reason, net_pnl=float(trade.net_pnl) if trade else None,
-                        trailing=bool(trail_active))
+        self.events.log('POSITION_CLOSED', figi=figi, ticker=pos.ticker, reason=reason, net_pnl=float(trade.net_pnl) if trade else None, trailing=bool(trail_active))
         await self._check_circuit_breaker()
         return True
 
     async def _check_circuit_breaker(self) -> None:
-        risk = RiskSnapshot(daily_pnl=await self.refresh_daily_pnl(),
-                            daily_loss_limit=self.config.daily_loss_limit,
-                            entries_paused=self.entries_paused)
-        if risk.state == "LOSS_LIMIT" and not self.entries_paused:
-            self.entries_paused = True
-            self.events.log("CIRCUIT_BREAKER_TRIGGERED",
-                            reason="LOSS_LIMIT", daily_pnl=risk.daily_pnl)
+        from math import isfinite
+        try:
+            limit = self.config.daily_loss_limit
+            if isinstance(limit, bool) or not isfinite(float(limit)) or float(limit) < 0:
+                raise ValueError('invalid_daily_loss_limit')
+            risk = RiskSnapshot(daily_pnl=await self.refresh_daily_pnl(),
+                                daily_loss_limit=float(limit), entries_paused=self.entries_paused)
+        except Exception:
+            self._entry_pause().set_blocker('risk_evidence_unavailable', True)
+            raise
+        self._entry_pause().set_blocker('risk_evidence_unavailable', False)
+        breached = risk.state == 'LOSS_LIMIT'
+        previous = 'daily_loss_limit' in self._entry_pause().reasons
+        self._entry_pause().set_blocker('daily_loss_limit', breached)
+        if breached and not previous:
+            self.events.log('CIRCUIT_BREAKER_TRIGGERED', reason='LOSS_LIMIT', daily_pnl=risk.daily_pnl)
 
 
 runtime = PaperBotRuntime()

@@ -16,27 +16,20 @@ class _DummyEvents:
 
 
 @pytest.mark.asyncio
-async def test_live_broker_open_position_unknown_fill_returns_none(monkeypatch):
-    from app.bot.live_broker import LiveBroker
-
-    broker = LiveBroker.__new__(LiveBroker)
-    broker.config = SimpleNamespace(commission_rate=0.003)
-    broker._account = "acc"
-    broker._api_post_order = lambda **_kwargs: SimpleNamespace(executed_order_price=None)
-
-    result = await LiveBroker.open_position(
-        broker,
-        figi="FIGI123",
-        ticker="TEST",
-        side="BUY",
-        qty=1,
-        price=100.0,
-        stop_loss=None,
-        take_profit=None,
-        strategy_id="s1",
-    )
-
-    assert result is None
+async def test_live_broker_open_position_without_fill_returns_observation_only(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    from tests.test_live_entry_submission_scope import broker, request, response
+    monkeypatch.setattr('app.services.broker_order_journal.BrokerOrderJournal.reserve', AsyncMock(return_value=True))
+    monkeypatch.setattr('app.services.broker_order_journal.BrokerOrderJournal.observe', AsyncMock(return_value=True))
+    value = broker()
+    report = response()
+    report.lots_executed = 0
+    report.execution_report_status = 4
+    report.executed_order_price = None
+    value._api_post_order = Mock(return_value=report)
+    receipt = await value.open_position(**request())
+    assert receipt.observed_units == 0 and receipt.broker_status == 'NEW'
+    assert value.last_execution is None
 
 
 @pytest.mark.asyncio
@@ -82,6 +75,10 @@ async def test_execute_pending_marks_unknown_open_for_reconciliation(monkeypatch
         return None
 
     rt.broker = SimpleNamespace(open_position=_open_stub)
+    from unittest.mock import AsyncMock
+    from app.bot.risk import RiskSnapshot
+    rt._ensure_risk_fresh = AsyncMock(return_value=True)
+    rt.risk_snapshot = lambda: RiskSnapshot(0, 1000, rt.entries_paused)
     rt.entries_paused = False
     rt.pending_orders = {}
     rt.events = _DummyEvents()
@@ -140,20 +137,21 @@ async def test_execute_pending_marks_unknown_open_for_reconciliation(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_submit_order_blocks_new_orders_while_reconciliation_pending():
+@pytest.mark.parametrize("status", ["PENDING_RECONCILIATION", "PARTIAL_FILLED"])
+async def test_submit_order_blocks_new_orders_while_reconciliation_pending(status):
     """RECHECK P0: unresolved-ордер нельзя вытеснить новым — guard в _submit_order."""
     from app.bot.runtime import PaperBotRuntime
 
     rt = PaperBotRuntime.__new__(PaperBotRuntime)
     rt._trace = None
-    rt.pending_orders = {"FIGI123": SimpleNamespace(id="o1", status="PENDING_RECONCILIATION")}
+    rt.pending_orders = {"FIGI123": SimpleNamespace(id="o1", status=status)}
     rt.events = _DummyEvents()
     rt._log = lambda *_a, **_k: None
 
     await rt._submit_order("FIGI123", "TEST", "open", "BUY")
 
     assert "FIGI123" in rt.pending_orders
-    assert rt.pending_orders["FIGI123"].status == "PENDING_RECONCILIATION"
+    assert rt.pending_orders["FIGI123"].status == status
     assert any(ev[0] == "ORDER_BLOCKED_RECONCILIATION" for ev in rt.events.items)
 
 

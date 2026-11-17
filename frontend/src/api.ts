@@ -298,10 +298,26 @@ export interface BotStatus {
   signals_seen: number;
   pending_orders?: number;
   universe: Array<{ figi: string; ticker: string; atr_pct: number }>;
+  universe_selection?: {
+    mode?: string;
+    observed_at?: string | null;
+    selected_figis?: string[];
+    decisions?: Array<{ figi?: string; ticker?: string; reasons?: string[] }>;
+  };
+  slots?: { occupied?: number; held?: number; pending_open?: number };
   portfolio: PortfolioDigest;
   session?: string;
+  entries_paused?: boolean;
+  entry_pause_reasons?: string[];
   data?: { health: string; source: string; last_candle_ts: string | null };
-  risk?: { state: string; daily_pnl: number; daily_loss_limit: number; entries_paused: boolean };
+  risk?: {
+    state: string;
+    // Дневной результат может быть неизвестен (нет фактов риска) — тогда null,
+    // а не ноль: ноль это утверждение о результате, которого у нас нет.
+    daily_pnl: number | null;
+    daily_loss_limit: number | null;
+    entries_paused: boolean;
+  };
   carousel?: CarouselStatus;
 }
 
@@ -471,7 +487,12 @@ export async function botEvents(limit = 100): Promise<BotEventRow[]> {
   return d.events;
 }
 
-export async function botPause(paused: boolean): Promise<{ entries_paused: boolean }> {
+export interface BotPauseResult {
+  entries_paused: boolean;
+  entry_pause_reasons?: string[];
+}
+
+export async function botPause(paused: boolean): Promise<BotPauseResult> {
   const res = await fetch(`${API}/api/v1/bot/pause`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

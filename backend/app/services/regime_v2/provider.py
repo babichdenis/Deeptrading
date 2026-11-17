@@ -1,8 +1,8 @@
 """Regime v2 — RegimeProvider (C.6): источник метки legacy|v2.
 
-Default — `legacy` (production-поведение не меняется). V2 подключается только
-для analytics/comparison/signal attribution/research, НЕ как trading-gate:
-в runtime/ensemble этот провайдер не вызывается.
+Default конструктора — `legacy`; активный выбор задаёт regime_v2.active.
+Ансамбль и runtime используют active-провайдер. Описательная метка режима
+сама по себе не доказывает прогностическую силу или прибыльность торгового фильтра.
 """
 from __future__ import annotations
 

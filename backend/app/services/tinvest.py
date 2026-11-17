@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
 
@@ -9,10 +10,13 @@ from t_tech.invest import CandleInterval, Client
 from t_tech.invest.utils import quotation_to_decimal
 
 from app.config import get_settings
+from app.engine import candlehub
 from app.models.candle import Candle
 from app.models.instrument import Instrument
 from app.services import candle_ingestion_contract as cic
 from app.services import candle_integrity
+
+logger = logging.getLogger(__name__)
 
 INTERVAL_NAMES: dict[str, CandleInterval] = {
     "1min": CandleInterval.CANDLE_INTERVAL_1_MIN,
@@ -96,6 +100,8 @@ def fetch_candles(
                 to=chunk_end,
             )
             for c in response.candles:
+                if not c.is_complete:
+                    continue
                 key = (figi, interval_value, c.time)
                 rows_by_key[key] = {
                     "figi": figi,
@@ -157,7 +163,28 @@ async def upsert_candles_detailed(db: AsyncSession, rows: list[dict], *,
     Ошибки invalidate НЕ подавляются — пробрасываются вызывающему.
     """
     try:
-        clean = cic.assert_valid_batch(list(rows), window=window)
+        # Нормализация OHLC — часть контракта приёма, а НЕ разовая правка БД.
+        # Политику задаёт вход хаба (candlehub.normalize_row_for_ingest): у акций и
+        # у индексов (MOEX ISS) она обязана быть одной. Источник может отдать бар,
+        # у которого тело вышло за high/low (так пришли ~4.5 млн строк 2024-2025
+        # с high == low); validate_row отверг бы его как bad_range, и в ряду
+        # осталась бы дыра. Расширяем огибающую и пишем бар.
+        rows = list(rows)
+        normalized = 0
+        for i, r in enumerate(rows):
+            try:
+                fixed, changed = candlehub.normalize_row_for_ingest(r)
+            except Exception:  # нормализация не должна ронять приём
+                continue
+            if changed:
+                rows[i] = fixed
+                normalized += 1
+        if normalized:
+            logger.warning(
+                "candles normalized at ingest (high/low expanded to body): %d/%d rows",
+                normalized, len(rows))
+
+        clean = cic.assert_valid_batch(rows, window=window)
         if not clean:
             return cic.UpsertResult()
 
@@ -166,6 +193,32 @@ async def upsert_candles_detailed(db: AsyncSession, rows: list[dict], *,
         groups: dict[tuple, list[dict]] = {}
         for r in clean:
             groups.setdefault((r["figi"], int(r["interval"])), []).append(r)
+
+        # Якорь ряда: последнее закрытие ДО пакета. Без него структурная проверка
+        # пропускает бар, корректный внутри себя, но взятый из чужого ряда.
+        anchors: dict[tuple, float] = {}
+        for (figi, ival), grp in groups.items():
+            lo = min(cic.utc_ts(r["ts"]) for r in grp)
+            prev = (await db.execute(
+                select(Candle.close).where(
+                    Candle.figi == figi, Candle.interval == ival,
+                    Candle.ts < lo).order_by(Candle.ts.desc()).limit(1)
+            )).scalar()
+            if prev is not None:
+                anchors[(figi, ival)] = float(prev)
+
+        clean, jump_rej = cic.validate_jumps(clean, anchors)
+        rejected = len(jump_rej)
+        if rejected:
+            logger.warning(
+                "candles rejected by jump gate: %d/%d rows, first=%s (thr=%.0f%%)",
+                rejected, rejected + len(clean), jump_rej[0].key, cic.jump_threshold() * 100)
+            groups = {}
+            for r in clean:
+                groups.setdefault((r["figi"], int(r["interval"])), []).append(r)
+            if not clean:
+                return cic.UpsertResult(rejected=rejected)
+
         emap = {}
         for (figi, ival), grp in groups.items():
             lo = min(cic.utc_ts(r["ts"]) for r in grp)
@@ -215,8 +268,9 @@ async def upsert_candles_detailed(db: AsyncSession, rows: list[dict], *,
 
         await db.commit()
         return cic.UpsertResult(
-            accepted=len(clean), inserted=inserted, unchanged=unchanged,
-            corrected=corrected, written=inserted + corrected, rejected=0,
+            accepted=len(clean), normalized=normalized, inserted=inserted,
+            unchanged=unchanged, corrected=corrected, written=inserted + corrected,
+            rejected=rejected,
         )
     except Exception:
         # Откатить незакоммиченные изменения, чтобы вызывающий не мог закоммитить
@@ -230,3 +284,20 @@ async def upsert_candles_detailed(db: AsyncSession, rows: list[dict], *,
 
 def decimal_default(value: Decimal) -> float:
     return float(value)
+
+
+def fetch_share_catalog(mode: str) -> tuple[dict[str, dict], datetime]:
+    from datetime import timezone
+    from t_tech.invest import InstrumentStatus
+
+    if mode not in ("live", "sandbox"):
+        raise ValueError("catalog mode must be live or sandbox")
+    settings = get_settings()
+    with Client(settings.get_token(mode), target=settings.get_target(mode)) as client:
+        shares = client.instruments.shares(
+            instrument_status=InstrumentStatus.INSTRUMENT_STATUS_ALL).instruments
+    fields = ("figi", "uid", "ticker", "class_code", "lot", "api_trade_available_flag",
+              "buy_available_flag", "sell_available_flag", "short_enabled_flag")
+    catalog = {share.figi: {key: getattr(share, key, None) for key in fields}
+               for share in shares if share.figi}
+    return catalog, datetime.now(timezone.utc)

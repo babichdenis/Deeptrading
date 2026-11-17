@@ -150,6 +150,28 @@ async def present_minutes(db: AsyncSession, figi: str, interval: int,
 
 
 # ---------------------------------------------------------------------- операции
+async def interval_overlap_audit(db: AsyncSession, figis: list[str], start: datetime, end: datetime):
+    if any(at.tzinfo is None or at.utcoffset() is None for at in (start, end)) or start >= end:
+        raise ValueError("Expected an increasing timezone-aware interval")
+    if not figis:
+        return {}
+    rows = await db.execute(text("""
+        SELECT a.figi, count(*) AS minute_rows, count(b.ts) AS shared_starts,
+               count(*) FILTER (WHERE (a.open,a.high,a.low,a.close,a.volume) =
+                                      (b.open,b.high,b.low,b.close,b.volume)) AS exact_ohlcv
+        FROM candles a
+        LEFT JOIN candles b ON b.figi=a.figi AND b.ts=a.ts AND b.interval=2
+        WHERE a.interval=1 AND a.figi=ANY(:figis) AND a.ts>=:start AND a.ts<:end
+          AND extract(epoch FROM a.ts)::bigint % 300=0
+        GROUP BY a.figi
+        ORDER BY a.figi
+    """), {"figis": figis, "start": start, "end": end})
+    counts = {row.figi: dict(minute_rows=row.minute_rows, shared_starts=row.shared_starts,
+                             exact_ohlcv=row.exact_ohlcv) for row in rows}
+    return {figi: counts.get(figi, dict(minute_rows=0, shared_starts=0, exact_ohlcv=0))
+            for figi in dict.fromkeys(figis)}
+
+
 async def baseline(db: AsyncSession, figis: list[str], interval: int,
                    dfrom: datetime, dto: datetime) -> int:
     written = 0

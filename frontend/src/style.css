@@ -523,6 +523,10 @@ body.embedded .sidebar-right { display: none; }
 
 .mini-hint { font-size: 10px; color: var(--text-faint); }
 
+/* Подписи состояния бота: пауза входа и дневной риск (ARCH399/ARCH400). */
+#bot-action-note, #bot-risk-note { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bot-action-note.warn, #bot-risk-note.warn { color: var(--gold); }
+
 /* ——— Склад: каталог блоков + конструктор ——— */
 .sklad-panel {
   margin-top: 12px;

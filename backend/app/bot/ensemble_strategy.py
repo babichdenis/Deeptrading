@@ -76,6 +76,7 @@ class EnsembleParams:
     rsi_filter: dict = field(default_factory=dict)
     # --- Per-regime вход: {"trend": "breakout"} — в тренде ансамбль off, вход по breakout ---
     regime_entry_policy: dict = field(default_factory=dict)
+    decision_only: bool = False
 
 
 class _No5mMarker(Exception):
@@ -104,6 +105,7 @@ class EnsembleV4Strategy:
         }
         self._funnel_last: dict = {}
         self._last_5m_key: str | None = None
+        self._ctx = None
 
     @property
     def _tag(self) -> str:
@@ -219,7 +221,14 @@ class EnsembleV4Strategy:
                 req["entry_macd_fast"] = self.p.entry_macd_fast
                 req["entry_macd_slow"] = self.p.entry_macd_slow
                 req["entry_macd_signal"] = self.p.entry_macd_signal
-            res = compute_ensemble(list(candles), req)
+            if self.p.decision_only:
+                if self._ctx is None:
+                    from app.services.ensemble_ctx import EnsembleContext
+                    self._ctx = EnsembleContext()
+                res = compute_ensemble(list(candles), req, ctx=self._ctx,
+                                       include_execution=False)
+            else:
+                res = compute_ensemble(list(candles), req)
         except Exception as e:
             import logging as _lg
             self._last_skip = f"compute_error: {type(e).__name__}: {str(e)[:120]}"

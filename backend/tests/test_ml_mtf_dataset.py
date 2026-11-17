@@ -246,7 +246,7 @@ def test_sparse_anchor_skipped_when_no_1m_close_minute(tmp_path):
     end = T0 + timedelta(minutes=5 * 40)
     man = m.main(["--snapshot", str(snap), "--start", T0.isoformat(),
                   "--end", end.isoformat(), "--out", str(out), "--tickers", "AAA"])
-    meta = json.loads((out / "meta" / "meta_AAA.json").read_text())
+    meta = json.loads((out / "meta" / "meta_AAA.json").read_text(encoding="utf-8"))
     assert meta["skipped_no_1m_anchor"] >= 1
     import pyarrow.parquet as pq
     tu = pq.read_table(out / "targets" / "targets_AAA.parquet").to_pydict()
@@ -551,7 +551,7 @@ def test_predictor_and_metadata_roles_in_manifest(tmp_path):
     assert man["eligibility_policy"]["weekdays"] == [0, 1, 2, 3, 4]
     assert man["eligibility_policy_hash"] == m.ELIGIBILITY_POLICY_HASH
     assert "future_bucket_incomplete" in man["label_status_reason_values"]
-    roles = json.loads((out / "feature_schema.json").read_text())["column_roles"]
+    roles = json.loads((out / "feature_schema.json").read_text(encoding="utf-8"))["column_roles"]
     assert roles["n_min_5m"] == "metadata" and roles["voice_status_rsi_reversal"] == "metadata"
     assert roles["rsi14_5m"] == "predictor" and roles["bias"] == "predictor"
     assert man["dataset_version"] == "ml_mtf_1_v3"

@@ -119,7 +119,7 @@ class _FakeBroker:
             raise RuntimeError("order rejected")
         if mode == "none":
             return None
-        return SimpleNamespace(exit_price=price, net_pnl=7.5)
+        return SimpleNamespace(exit_price=price, net_pnl=7.5, qty=next(p.qty for p in self._positions if p.figi==figi))
 
 
 def _pos(figi: str) -> SimpleNamespace:
@@ -142,6 +142,8 @@ def _rt_finalize(broker, *, held=()):
     rt._held = set(held)
     rt._exit_plans = {f: object() for f in held}
     rt.broker = broker
+    rt._exit_qty = {}
+    rt.events = SimpleNamespace(log=lambda *args, **kwargs: None)
     rt._trace = None
     logs: list[str] = []
 
@@ -230,3 +232,31 @@ def test_double_finalize_is_idempotent():
     assert broker.closed == ["F1"]                     # второй вызов не пере-закрывает
     assert dict(rt._replay_summary) == snapshot
     assert rt._replay_status == "COMPLETED"
+
+
+def test_missing_or_invalid_final_quote_never_uses_entry_price():
+    for price in (None, 0, float('nan'), float('inf')):
+        broker = _FakeBroker(positions=[_pos('F1')])
+        async def prices(figis):
+            return {'F1': price}
+        broker.last_prices = prices
+        rt = _rt_finalize(broker, held=('F1',))
+        asyncio.run(rt._finalize_replay('stream_exhausted'))
+        assert rt._replay_status == 'PARTIAL_CLOSE'
+        assert 'F1' in rt._held and 'F1' in rt._exit_plans
+        assert broker.closed == []
+
+
+def test_partial_final_fill_keeps_replay_incomplete():
+    position = _pos('F1')
+    position.qty = 2
+    broker = _FakeBroker(positions=[position])
+    async def close(figi, price, reason):
+        return SimpleNamespace(qty=1, exit_price=price, net_pnl=1.)
+    broker.close_position = close
+    rt = _rt_finalize(broker, held=('F1',))
+    asyncio.run(rt._finalize_replay('stream_exhausted'))
+    assert rt._replay_status == 'PARTIAL_CLOSE'
+    assert rt._replay_summary['closed'] == 0
+    assert rt._exit_qty['F1'] == 1
+    assert 'F1' in rt._held and 'F1' in rt._exit_plans

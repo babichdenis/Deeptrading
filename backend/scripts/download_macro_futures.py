@@ -1,7 +1,10 @@
 """DATA GAP: поиск и скачивание Brent/Gold/USD-RUB (MOEX фьючерсы BR/GOLD/Si) через T-Invest REST.
 
 Локальный запуск. Шаг 1: FindInstrument -> uid. Шаг 2: GetCandles 1m по дням за 2026.
-Сохранение: backend/data/{brent,gold,usdrub}_1m.csv (формат figi;ts;open;close;high;low;volume;)
+Сохранение: backend/data/raw_tinvest/{brent,gold,usdrub}_1m.csv
+Формат: ts;open;close;high;low;volume;
+Пишет только в свой каталог и атомарно (tmp + replace), поэтому не смешивается
+с выгрузкой MOEX ISS и не оставляет половину файла при сбое.
 """
 import json, os, ssl, sys, time
 import urllib.request
@@ -10,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.config import get_settings
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "raw_tinvest")
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
@@ -63,6 +66,17 @@ def get_candles(uid, day, token):
     return out
 
 
+def write_atomic(path, rows: dict):
+    """Пишет отсортированные строки через временный файл: половины файла не будет."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        for stamp in sorted(rows):
+            handle.write(rows[stamp] + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+
+
 def main():
     settings = get_settings()
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -82,22 +96,28 @@ def main():
         d1 = datetime(2026, 8, 29, tzinfo=timezone.utc)
         day = d0
         path = os.path.join(DATA_DIR, OUT[key])
-        total = 0
-        with open(path, "w") as f:
-            while day < d1:
-                try:
-                    candles = get_candles(uid_info["uid"], day, settings.tinkoff_token)
-                except Exception as e:  # noqa: BLE001
-                    print(f"  {day.date()}: ERR {str(e)[:60]}", flush=True)
-                    time.sleep(2); day += timedelta(days=1); continue
-                for c in candles:
-                    f.write(f"{uid_info['uid']};{c[0]};{c[1]};{c[2]};{c[3]};{c[4]};{c[5]};\n")
-                total += len(candles)
-                day += timedelta(days=1)
-                if day.day % 10 == 1:
-                    print(f"  ... до {day.date()}, баров {total}", flush=True)
-                time.sleep(0.3)
-        print(f"{label}: сохранено {total} баров -> {path}", flush=True)
+        rows: dict[str, str] = {}
+        dropped = 0
+        while day < d1:
+            day_start = day.isoformat().replace("+00:00", "Z")
+            day_end = (day + timedelta(days=1)).isoformat().replace("+00:00", "Z")
+            try:
+                candles = get_candles(uid_info["uid"], day, settings.tinkoff_token)
+            except Exception as e:  # noqa: BLE001
+                print(f"  {day.date()}: ERR {str(e)[:60]}", flush=True)
+                time.sleep(2); day += timedelta(days=1); continue
+            for c in candles:
+                stamp = c[0]
+                if not (day_start <= stamp < day_end):
+                    dropped += 1
+                    continue
+                rows[stamp] = f"{c[0]};{c[1]};{c[2]};{c[3]};{c[4]};{c[5]};"
+            day += timedelta(days=1)
+            if day.day % 10 == 1:
+                print(f"  ... до {day.date()}, баров {len(rows)}", flush=True)
+            time.sleep(0.3)
+        write_atomic(path, rows)
+        print(f"{label}: сохранено {len(rows)} баров (граничных отброшено {dropped}) -> {path}", flush=True)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ parity-блок в tests/test_universe_v2_volatility.py).
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Sequence
 
 from app.bot.universe.domain import InstrumentRef, VolatilityFeatures
@@ -66,6 +66,7 @@ def compute_volatility_features(
     as_of: datetime,
     window: int = FEATURE_WINDOW,
     period: int = ATR_PERIOD,
+    interval: timedelta = timedelta(minutes=5),
 ) -> VolatilityFeatures:
     """VolatilityFeatures на as_of. Чистая детерминированная функция.
 
@@ -74,7 +75,7 @@ def compute_volatility_features(
     каноническим атрибутом indicatorhub. Единственное место принятия решения
     о valid: хватило истории и цены не нулевые/отрицательные.
     """
-    visible = _visible(bars, as_of)
+    visible = _visible(bars, as_of, interval=interval)
     if not visible:
         return VolatilityFeatures(instrument, as_of, valid=False, reason="no_data")
 
@@ -118,6 +119,7 @@ def compute_volatility_features_many(
     as_of: datetime,
     window: int = FEATURE_WINDOW,
     period: int = ATR_PERIOD,
+    interval: timedelta = timedelta(minutes=5),
     key=lambda ref: ref.figi,
 ) -> tuple[VolatilityFeatures, ...]:
     """VolatilityFeatures для набора инструментов одним проходом.
@@ -132,6 +134,7 @@ def compute_volatility_features_many(
             as_of=as_of,
             window=window,
             period=period,
+            interval=interval,
         )
         for ref in instruments
     )

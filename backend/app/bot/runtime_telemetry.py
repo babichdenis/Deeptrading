@@ -7,6 +7,68 @@ from app.bot.runtime_diagnostics import audit_swallow as _audit_swallow
 
 
 class RuntimeTelemetryMixin:
+    # ── часовой контекст ─────────────────────────────────────────────────────
+    # Расчёт живёт в app.engine.hourly_context (архитектор), проводка и журнал —
+    # в app.bot.hourly_runtime. Здесь только вход из рабочего цикла.
+
+    HOURLY_MARKET_ID = "BBG00KDWPPW2"
+
+    def _hourly_service(self):
+        service = getattr(self, "_hourly_service_obj", None)
+        if service is None:
+            from app.bot.hourly_runtime import HourlyContextService, HourlyJournal
+
+            service = HourlyContextService(
+                market_id=str(getattr(self.config, "hourly_market_id", "") or self.HOURLY_MARKET_ID),
+                journal=HourlyJournal(getattr(self.config, "hourly_journal_path", None)),
+                clock=self._hourly_clock,
+            )
+            self._hourly_service_obj = service
+        return service
+
+    def _hourly_clock(self) -> datetime:
+        """Часы цикла: в replay — время ленты, в live — системное."""
+        now = self._bot_now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return now
+
+    async def _hourly_universe(self, db) -> tuple[str, ...]:
+        """Бумаги текущей вселенной бота, а не весь каталог инструментов.
+
+        Часовой срез считается ровно по тем бумагам, которыми бот работает:
+        подстановка всей таблицы instruments раздувала срез чужими бумагами
+        и прятала факт пустой вселенной.
+        """
+        figis = tuple(
+            str(u["figi"]) for u in (getattr(self, "universe", None) or [])
+            if isinstance(u, dict) and u.get("figi")
+        )
+        return figis
+
+    async def hourly_context_refresh(self) -> dict:
+        """Собрать снимок часа один раз и вернуть его статус. Заявок не делает."""
+        service = self._hourly_service()
+        now = self._hourly_clock()
+        async with self._database_session() as db:
+            figis = await self._hourly_universe(db)
+            try:
+                await service.ensure(db=db, now=now, figis=figis)
+            except Exception as exc:
+                _audit_swallow("hourly_context_refresh@L35", exc)  # audit silent-except
+                return {"state": "ERROR", "reason": str(exc)}
+        return service.status(now=now)
+
+    def hourly_context_status(self) -> dict:
+        """Статус часового контекста без сборки: что реально доступно сейчас."""
+        return self._hourly_service().status(now=self._hourly_clock())
+
+    def hourly_context_restore(self) -> bool:
+        """После перезапуска поднять только неистёкший снимок из журнала."""
+        service = self._hourly_service()
+        restored = service.restore(now=self._hourly_clock())
+        return restored is not None
+
     async def sector_meta(self) -> dict:
         """{ticker: {sector, beta}} из instruments (кэш 10 мин)."""
         import time as _t
@@ -39,7 +101,7 @@ class RuntimeTelemetryMixin:
         """Сводка портфеля: экспозиции/сектора/маржа/стресс (кэш ttl сек)."""
         import time as _t
         from app.bot.portfolio import snapshot as _snap
-        if self._pf_cache and (_t.monotonic() - self._pf_cache[0]) < ttl:
+        if getattr(self.config, "feed", "live") != "replay" and self._pf_cache and (_t.monotonic() - self._pf_cache[0]) < ttl:
             return self._pf_cache[1]
         equity = 0.0
         positions: list[dict] = []
@@ -48,7 +110,7 @@ class RuntimeTelemetryMixin:
             equity = float(await self.broker.equity() or 0.0)
         except Exception as _sw_e:
             _audit_swallow('portfolio_snapshot@L678', _sw_e)  # audit silent-except
-            pass
+            raise
         try:
             for p in (await self.broker.positions()):
                 bb = self.tcs_to_bbg.get(getattr(p, "figi", ""), getattr(p, "figi", ""))
@@ -64,7 +126,7 @@ class RuntimeTelemetryMixin:
                 })
         except Exception as _sw_e:
             _audit_swallow('portfolio_snapshot@L693', _sw_e)  # audit silent-except
-            pass
+            raise
         _ma_fn = getattr(self.broker, "margin_attributes", None)
         if _ma_fn is not None:
             try:
@@ -129,7 +191,7 @@ class RuntimeTelemetryMixin:
     async def market_regime(self, ttl: float = 30.0) -> dict:
         """Режим рынка: bear/bull/neutral/reversal по IMOEX (20м/60м/день) + breadth."""
         import time as _t
-        if self._regime_cache and (_t.monotonic() - self._regime_cache[0]) < ttl:
+        if getattr(self.config, "feed", "live") != "replay" and self._regime_cache and (_t.monotonic() - self._regime_cache[0]) < ttl:
             return self._regime_cache[1]
         now = self._bot_now()
         last_v = self._imoex_buf[-1][1] if self._imoex_buf else None
@@ -179,57 +241,82 @@ class RuntimeTelemetryMixin:
 
 
     async def trade_history(self) -> dict:
-        """История сделок по тикерам: {ticker: {n, wr, wr5, net}} + ликвидность (кэш 10 мин)."""
         import time as _t
-        if self._hist_cache and (_t.monotonic() - self._hist_ts) < 600:
-            return self._hist_cache
+        from sqlalchemy import select, text
+        from app.models.sandbox_trade import SandboxTrade
+        from app.bot.runtime import _account_scope_or_raise
+
+        mode = getattr(self, "broker_mode", None)
+        if mode not in ("live", "sandbox", "paper"):
+            raise ValueError("trade history requires a known broker mode")
+        replay = str(getattr(self.config, "feed", "")) == "replay"
+        as_of = self._bot_now()
+        if as_of.utcoffset() is None:
+            raise ValueError("trade history requires an aware decision time")
         try:
-            from sqlalchemy import text as _text
+            account = _account_scope_or_raise(self)
+        except ValueError:
+            self._hist_cache = {}
+            self._hist_scope = None
+            self._hist_ts = 0.0
+            raise
+        test_name = (getattr(self.config, "test_name", "") or None) if mode == "paper" else None
+        scope = (mode, account, test_name, as_of if replay else None)
+        if (getattr(self, "_hist_scope", None) == scope
+                and (_t.monotonic() - self._hist_ts) < 600):
+            return self._hist_cache
+        query = select(SandboxTrade.ticker, SandboxTrade.net_pnl).where(
+            SandboxTrade.mode == mode,
+            SandboxTrade.broker_account_id == account,
+            SandboxTrade.net_pnl.is_not(None),
+            SandboxTrade.exit_time.is_not(None),
+            SandboxTrade.exit_time <= as_of,
+        ).order_by(SandboxTrade.exit_time.desc(), SandboxTrade.id.desc())
+        if mode == "paper":
+            query = query.where(SandboxTrade.test_name == test_name)
+        try:
             async with self._database_session() as db:
-                rows = (await db.execute(_text(
-                    "SELECT ticker, net_pnl FROM sandbox_trades "
-                    "WHERE net_pnl IS NOT NULL AND exit_time IS NOT NULL "
-                    "ORDER BY exit_time DESC"
+                rows = (await db.execute(query)).all()
+                uni = [] if replay else (await db.execute(text(
+                    "SELECT ticker, avg_daily_turnover FROM universe"
                 ))).all()
-                uni = (await db.execute(_text(
-                    "SELECT ticker, coalesce(avg_daily_turnover, 0) FROM universe"
-                ))).all()
-            out: dict[str, dict] = {}
-            for r in rows:
-                tk = str(r[0] or "").upper()
+            out = {}
+            for ticker, pnl in rows:
+                tk = str(ticker or "").upper()
                 if not tk:
                     continue
-                pnl = float(r[1] or 0.0)
-                d = out.setdefault(tk, {"n": 0, "wins": 0, "net": 0.0, "last5": []})
-                d["n"] += 1
-                d["net"] += pnl
-                if pnl > 0:
-                    d["wins"] += 1
-                if len(d["last5"]) < 5:
-                    d["last5"].append(1 if pnl > 0 else 0)
-            for d in out.values():
-                d["wr"] = d["wins"] / d["n"] if d["n"] else 0.0
-                d["wr5"] = (sum(d["last5"]) / len(d["last5"])) if d["last5"] else d["wr"]
-                d.pop("last5", None)
+                value = float(pnl)
+                record = out.setdefault(tk, {"n": 0, "wins": 0, "net": 0.0, "last5": []})
+                record["n"] += 1
+                record["net"] += value
+                if value > 0:
+                    record["wins"] += 1
+                if len(record["last5"]) < 5:
+                    record["last5"].append(1 if value > 0 else 0)
+            for record in out.values():
+                record["wr"] = record["wins"] / record["n"]
+                record["wr5"] = sum(record["last5"]) / len(record["last5"])
+                record.pop("last5")
+            if not replay:
+                self._turnover_cache = {str(row[0] or "").upper(): float(row[1] or 0) for row in uni}
+                try:
+                    from app.api.routes.screener import fetch_tqbr_market
+                    quotes = await asyncio.to_thread(fetch_tqbr_market)
+                    for ticker, row in (quotes or {}).items():
+                        value = float(row.get("turnover") or 0)
+                        if value > 0:
+                            self._turnover_cache[str(ticker).upper()] = value
+                except Exception as error:
+                    _audit_swallow("trade_history:turnover", error)
             self._hist_cache = out
-            self._turnover_cache = {str(r[0] or "").upper(): float(r[1] or 0.0) for r in uni}
-            # Реальный дневной оборот — с MOEX ISS (скринер), колонка universe часто устарела.
-            try:
-                from app.api.routes.screener import fetch_tqbr_market
-                q = await asyncio.to_thread(fetch_tqbr_market)
-                for tk, row in (q or {}).items():
-                    val = float(row.get("turnover") or 0.0)
-                    if val > 0:
-                        self._turnover_cache[str(tk).upper()] = val
-            except Exception as _sw_e:
-                _audit_swallow('trade_history@L841', _sw_e)  # audit silent-except
-                pass
+            self._hist_scope = scope
             self._hist_ts = _t.monotonic()
-        except Exception as _sw_e:
-            _audit_swallow('trade_history@L844', _sw_e)  # audit silent-except
-            pass
-        return self._hist_cache
-
+            return out
+        except Exception:
+            self._hist_cache = {}
+            self._hist_scope = None
+            self._hist_ts = 0.0
+            raise
 
     async def daily_bias_map(self, ttl: float = 900.0) -> dict[str, dict]:
         """Дневной MACD-bias по тикерам (кэш 15 мин): {ticker: {bias, hist, bars}}.

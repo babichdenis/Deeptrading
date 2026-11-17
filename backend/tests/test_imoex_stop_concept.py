@@ -14,7 +14,10 @@ REPORTS = os.path.join(BACKEND, "reports")
 
 @pytest.fixture(scope="module")
 def report() -> dict:
-    with open(os.path.join(REPORTS, "imoex_stop_concept.json")) as f:
+    path = os.path.join(REPORTS, "imoex_stop_concept.json")
+    if not os.path.exists(path):
+        pytest.skip(f"нет research-артефакта {path}")
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -49,7 +52,7 @@ def test_engine_not_changed() -> None:
             for fn in files:
                 if not fn.endswith(".py"):
                     continue
-                with open(_os.path.join(dp, fn)) as f:
+                with open(_os.path.join(dp, fn), encoding="utf-8") as f:
                     if "imoex_stop_concept" in f.read():
                         hits.append(_os.path.join(dp, fn))
     assert not hits
