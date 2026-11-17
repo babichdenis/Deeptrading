@@ -260,3 +260,7 @@ backend/_tmp_*.py
 
 *.bak-*
 *.bak_*
+
+# рабочий журнал вне git
+chat.md
+chat.md.bak*
