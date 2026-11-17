@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -34,6 +35,9 @@ SYSTEM = """Ты — риск-менеджер торгового бота (MOEX
 Отвечай СТРОГО JSON:
 {"decision": "approve"|"reject"|"skip", "reason": "коротко по-русски",
  "advice": "1 короткая рекомендация по ситуации (что сделать боту/человеку)", "confidence": 0.0-1.0}
+
+Для approve можно указать approved_lots: целое число от 1 до order.qty.
+Без approved_lots одобряется полный объём. Для полного отказа используй reject.
 
 Правила (по приоритету):
 0. IMOEX (индекс) рассчитывается ТОЛЬКО в основную сессию 09:50–19:00 МСК (пн-пт).
@@ -442,7 +446,6 @@ def _ask_deepseek(order: dict, ctx: dict, model: str, base: str, key: str,
         "temperature": 0.1,
         "max_tokens": 300,
         "response_format": {"type": "json_object"},
-        "reasoning": os.environ.get("AI_THINKING", "0").lower() in ("1", "true", "yes", "on"),
     }
     _prs = parser or _parse_decision
 
@@ -471,20 +474,26 @@ def _ask_deepseek(order: dict, ctx: dict, model: str, base: str, key: str,
             "connection reset" in str(e).lower()
 
     msgs = list(payload["messages"])
-    _last_e: Exception | None = None
-    txt: str = "{}"
-    for _attempt in range(3):
-        if _attempt:
-            time.sleep(2.0 * _attempt)  # backoff: 2с, 4с
-        try:
-            txt = _call(msgs)
+    _models = [m.strip() for m in str(payload.get("model") or "").split(",") if m.strip()]
+    if not _models:
+        _models = [str(payload.get("model") or "")]
+    _ok = False
+    for _model in _models:
+        payload["model"] = _model
+        for _attempt in range(2):
+            if _attempt:
+                time.sleep(1.5 * _attempt)
+            try:
+                txt = _call(msgs)
+                _ok = True
+                break
+            except Exception as e:
+                _last_e = e
+                if not _retryable(e):
+                    break
+        if _ok:
             break
-        except Exception as e:
-            _last_e = e
-            if _retryable(e):
-                continue
-            raise
-    else:
+    if not _ok:
         raise _last_e
     out = _prs(txt)
     try:
@@ -593,6 +602,47 @@ def _parse_watch(txt: str) -> dict:
     d["reason"] = _r[:1200]
     d["advice"] = str(d.get("advice") or "")[:1200]
     return d
+
+
+def _submitted_candidates(events, *, now, after, seen):
+    recent = max(after, now - timedelta(seconds=90))
+    finished = {
+        (event.get("payload") or {}).get("order_id")
+        for event in events
+        if event.get("type") in ("ORDER_FILLED", "ORDER_REJECTED", "ORDER_CANCELLED")
+    }
+    for event in reversed(events):
+        if event.get("type") != "ORDER_SUBMITTED":
+            continue
+        payload = event.get("payload") or {}
+        oid = payload.get("order_id")
+        if (not oid or oid in seen or oid in finished or payload.get("action") != "open"
+                or payload.get("broker_mode") != "sandbox" or payload.get("order_status") != "SUBMITTED"
+                or not isinstance(payload.get("candidate_context"), dict)):
+            continue
+        try:
+            submitted = datetime.fromisoformat(event["ts"])
+            if not recent <= submitted <= now:
+                continue
+            price = float(payload["reference_price"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        qty, lot, side = payload.get("qty"), payload.get("lot_size"), payload.get("side")
+        if (not event.get("figi") or not event.get("ticker") or side not in ("BUY", "SELL")
+                or type(qty) is not int or qty <= 0 or type(lot) is not int or lot <= 0
+                or not math.isfinite(price) or price <= 0):
+            continue
+        seen[oid] = submitted
+        yield dict(id=oid, figi=event["figi"], ticker=event["ticker"], side=side,
+                   qty=qty, lot_size=lot, price=price, candidate_at=submitted.isoformat(),
+                   shadow_source="sandbox_order_submitted", candidate_context=payload["candidate_context"])
+
+
+def _approval_payload(provider: str, decision: dict) -> dict:
+    payload = {"reason": f"AI[{provider}]: {decision.get('reason', '')[:200]}"}
+    if decision["decision"] == "approve" and "approved_lots" in decision:
+        payload["approved_lots"] = decision["approved_lots"]
+    return payload
 
 
 def _parse_decision(txt: str) -> dict:
@@ -1062,6 +1112,7 @@ def run_watch(args, provs: list[str], models: dict) -> None:
 
 
 def main() -> None:
+    _load_env()
     ap = argparse.ArgumentParser()
     ap.add_argument("--api", default=os.environ.get("BOT_API_URL", "http://127.0.0.1:8000"))
     ap.add_argument("--interval", type=float, default=5.0)
@@ -1093,9 +1144,12 @@ def main() -> None:
     ap.add_argument("--ai-sl-max-step-atr", type=float, default=5.0)
     ap.add_argument("--ai-sl-buffer-atr", type=float, default=0.3)
     ap.add_argument("--watch-max", type=int, default=8, help="макс. позиций в одном батч-запросе вахтёра")
+    ap.add_argument("--observe-submitted", action="store_true",
+                    help="смотреть заявки Sandbox без включения AI-гейта (требуется --dry-run)")
     args = ap.parse_args()
+    if args.observe_submitted and (not args.dry_run or args.watch_positions or args.selftest):
+        ap.error("--observe-submitted requires --dry-run and entry monitoring")
 
-    _load_env()
     _provs = [p.strip() for p in (args.providers or args.provider).split(",") if p.strip()]
     if not _provs:
         _provs = ["opencode"]
@@ -1155,19 +1209,30 @@ def main() -> None:
             print(f"[ai-gate] prompt post failed: {type(e).__name__}: {str(e)[:80]}", flush=True)
             return False
 
-    _prompt_sent = post_prompt()
-
     if args.selftest:
+        failed = False
         sample = {"id": "selftest-1", "ticker": "SMLT", "side": "SELL", "qty": 10,
                   "price": 339.2, "waiting_sec": 1.0}
         with ThreadPoolExecutor(max_workers=max(1, len(_provs))) as ex:
             futs = {p: ex.submit(decide, p, sample, {"note": "synthetic"}) for p in _provs}
             for p, f in futs.items():
                 try:
-                    print(f"SELFTEST[{p}]:", json.dumps(f.result(), ensure_ascii=False), flush=True)
+                    verdict = f.result()
+                    if verdict.get("decision") not in ("approve", "reject"):
+                        raise ValueError("provider returned no actionable verdict")
+                    if verdict["decision"] == "approve":
+                        lots = verdict.get("approved_lots", sample["qty"])
+                        if type(lots) is not int or not 1 <= lots <= sample["qty"]:
+                            raise ValueError("provider returned invalid approved_lots")
+                    print(f"SELFTEST[{p}]:", json.dumps(verdict, ensure_ascii=False), flush=True)
                 except Exception as e:
+                    failed = True
                     print(f"SELFTEST[{p}]: ERROR {type(e).__name__}: {e}", flush=True)
+        if failed:
+            raise SystemExit(1)
         return
+
+    _prompt_sent = post_prompt()
 
     if args.watch_positions:
         run_watch(args, _provs, _models)
@@ -1177,6 +1242,8 @@ def main() -> None:
     # иначе каждый цикл (5с) бежит к модели заново → пачки skip/error в журнале
     # и лишняя нагрузка на LLM-прокси, пока тот недоступен/в WAF-блоке.
     _order_tried: dict[str, float] = {}
+    observed = {}
+    observer_start = datetime.now(timezone.utc)
     _retry_cd = max(30.0, float(getattr(args, "retry_cooldown", 60.0) or 60.0))
 
     def _process_order(order: dict, tmo: float, default: str) -> None:
@@ -1184,7 +1251,10 @@ def main() -> None:
         oid = order.get("id")
         _sys = _eff_system(args.api, "gate", SYSTEM)
         try:
-            ctx = _ctx(args.api) if args.full_context else _ctx_compact(args.api, order)
+            if order.get("shadow_source") == "sandbox_order_submitted":
+                ctx = order["candidate_context"]
+            else:
+                ctx = _ctx(args.api) if args.full_context else _ctx_compact(args.api, order)
 
             def _timed(p: str):
                 _t = time.monotonic()
@@ -1205,7 +1275,7 @@ def main() -> None:
             _llm_error = bool(
                 all(str(decs[p].get("decision")) == "skip" for p in _provs)
                 and any("error" in str(decs[p].get("reason") or "") for p in _provs))
-            if _llm_error:
+            if _llm_error and not args.dry_run:
                 _order_tried[oid] = time.monotonic()
                 # Модель не ответила (503/сеть/таймаут). Заявку снимаем default'ом
                 # СРАЗУ (очередь не копится), но результат ВСЕГДА пишем в журнал —
@@ -1222,14 +1292,15 @@ def main() -> None:
                 _d0 = decs.get(_apply) or {}
                 rec = {"ts": datetime.now(timezone.utc).isoformat(), "order_id": oid,
                        "ticker": order.get("ticker"), "side": order.get("side"),
-                       "qty": order.get("qty"), "figi": order.get("figi"),
+                       "qty": order.get("qty"), "figi": order.get("figi"), "price": order.get("price"),
                        "news_ticker": ctx.get("news_ticker") or [], "usage": {},
                        "provider": _apply, "model": _models.get(_apply, ""),
                        "decision": default,  # честный исход: reject по недоступности LLM
                        "reason": f"{default} [LLM недоступен: {str(_d0.get('reason') or '')[:120]}]",
                        "advice": "", "confidence": 0.0, "latency_ms": 0,
-                       "agreement": False, "applied": bool(_res and not args.dry_run),
-                       "dry_run": args.dry_run, "shadow": args.dry_run}
+                       "agreement": False, "applied": bool(not args.dry_run and _res and _res.get("ok") is True),
+                       "dry_run": args.dry_run, "shadow": args.dry_run,
+                       "candidate_at": order.get("candidate_at"), "shadow_source": order.get("shadow_source")}
                 if _res is not None:
                     rec["apply_result"] = _res
                 try:
@@ -1247,7 +1318,7 @@ def main() -> None:
                 try:
                     applied_res = _http(
                         "POST", f"{args.api}/api/v1/bot/approvals/{oid}/{applied_dec['decision']}",
-                        {"reason": f"AI[{_apply}]: {applied_dec.get('reason', '')[:200]}"})
+                        _approval_payload(_apply, applied_dec))
                 except Exception as e:
                     applied_res = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
             for p in _provs:
@@ -1261,15 +1332,18 @@ def main() -> None:
                 _u_out["total"] = _u_out["prompt"] + _u_out["completion"]
                 rec = {"ts": datetime.now(timezone.utc).isoformat(), "order_id": oid,
                        "ticker": order.get("ticker"), "side": order.get("side"),
-                       "qty": order.get("qty"), "figi": order.get("figi"),
+                       "qty": order.get("qty"), "figi": order.get("figi"), "price": order.get("price"),
                        "news_ticker": ctx.get("news_ticker") or [],
                        "usage": _u_out,
                        "provider": p, "model": _models.get(p, ""),
                        "decision": d.get("decision"), "reason": d.get("reason", ""),
                        "advice": d.get("advice", ""), "confidence": d.get("confidence"),
                        "latency_ms": out[p][1], "agreement": agree,
-                       "applied": bool(p == _apply and applied_res is not None),
-                       "dry_run": args.dry_run, "shadow": args.dry_run}
+                       "applied": bool(p == _apply and applied_res and applied_res.get("ok") is True),
+                       "dry_run": args.dry_run, "shadow": args.dry_run,
+                       "candidate_at": order.get("candidate_at"), "shadow_source": order.get("shadow_source")}
+                if d.get("decision") == "approve" and "approved_lots" in d:
+                    rec["approved_lots"] = d["approved_lots"]
                 if p == _apply and applied_res is not None:
                     rec["apply_result"] = applied_res
                 try:
@@ -1288,8 +1362,15 @@ def main() -> None:
             if not _prompt_sent or _cycle % 100 == 0:
                 _prompt_sent = post_prompt()
             d = _http("GET", f"{args.api}/api/v1/bot/approvals")
+            if args.observe_submitted and d.get("broker_mode") == "sandbox":
+                events = _http("GET", f"{args.api}/api/v1/bot/events?limit=200").get("events") or []
+                now = datetime.now(timezone.utc)
+                observed = {oid: at for oid, at in observed.items() if now - at <= timedelta(seconds=90)}
+                for order in _submitted_candidates(events, now=now, after=observer_start, seen=observed):
+                    _process_order(order, 90.0, "reject")
+                    _order_tried.pop(order["id"], None)
             pending = d.get("pending") or []
-            if not d.get("enabled"):
+            if args.observe_submitted or not d.get("enabled"):
                 time.sleep(args.interval)
                 continue
             todo = []
